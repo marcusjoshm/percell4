@@ -69,9 +69,21 @@ def _tile_positions(
         'left_down'  — start top-right, scan left then down
         'left_up'    — start bottom-right, scan left then up
     """
-    # Determine starting corner
-    start_bottom = "up" in order
-    start_right = "left" in order
+    # Normalize order to start_bottom / start_right flags
+    # Accepts both old (right_down) and new (top_left) naming
+    order_map = {
+        "top_left": (False, False),
+        "top_right": (False, True),
+        "bottom_left": (True, False),
+        "bottom_right": (True, True),
+        "right_down": (False, False),
+        "right_up": (True, False),
+        "left_down": (False, True),
+        "left_up": (True, True),
+    }
+    if order not in order_map:
+        raise ValueError(f"Unknown order: {order!r}")
+    start_bottom, start_right = order_map[order]
 
     # Build row and column sequences based on starting corner
     if start_bottom:

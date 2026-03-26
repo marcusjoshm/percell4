@@ -60,7 +60,10 @@ class TileConfig:
             raise ValueError(
                 f"Unknown grid_type {self.grid_type!r}, must be one of {valid_types}"
             )
-        valid_orders = {"right_down", "right_up", "left_down", "left_up"}
+        valid_orders = {
+            "right_down", "right_up", "left_down", "left_up",
+            "top_left", "top_right", "bottom_left", "bottom_right",
+        }
         if self.order not in valid_orders:
             raise ValueError(
                 f"Unknown order {self.order!r}, must be one of {valid_orders}"
