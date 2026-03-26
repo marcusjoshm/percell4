@@ -310,10 +310,12 @@ class LauncherWindow(QMainWindow):
         model_row.addWidget(self._seg_model)
         seg_layout.addLayout(model_row)
 
-        gpu_row = QHBoxLayout()
-        self._seg_gpu = QCheckBox("Use GPU")
-        gpu_row.addWidget(self._seg_gpu)
-        seg_layout.addLayout(gpu_row)
+        chan_row = QHBoxLayout()
+        chan_row.addWidget(QLabel("Channel:"))
+        self._seg_channel = QComboBox()
+        self._seg_channel.setPlaceholderText("Load a dataset first")
+        chan_row.addWidget(self._seg_channel)
+        seg_layout.addLayout(chan_row)
 
         diam_row = QHBoxLayout()
         diam_row.addWidget(QLabel("Diameter:"))
@@ -323,6 +325,12 @@ class LauncherWindow(QMainWindow):
         self._seg_diameter.setSpecialValueText("Auto")
         diam_row.addWidget(self._seg_diameter)
         seg_layout.addLayout(diam_row)
+
+        gpu_row = QHBoxLayout()
+        self._seg_gpu = QCheckBox("Use GPU")
+        self._seg_gpu.setStyleSheet("QCheckBox { color: #e0e0e0; }")
+        gpu_row.addWidget(self._seg_gpu)
+        seg_layout.addLayout(gpu_row)
 
         btn_segment = QPushButton("Run Segmentation")
         btn_segment.clicked.connect(self._on_run_segmentation)
@@ -702,6 +710,15 @@ class LauncherWindow(QMainWindow):
                 f"Labels: {n_labels}  |  Masks: {n_masks}"
             )
 
+        # Populate channel dropdown for segmentation
+        if hasattr(self, "_seg_channel"):
+            self._seg_channel.clear()
+            viewer_win_check = self._windows.get("viewer")
+            if viewer_win_check is not None and viewer_win_check.viewer is not None:
+                for layer in viewer_win_check.viewer.layers:
+                    if layer.__class__.__name__ == "Image":
+                        self._seg_channel.addItem(layer.name)
+
         self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
 
     def _on_close_dataset(self) -> None:
@@ -713,6 +730,8 @@ class LauncherWindow(QMainWindow):
         self._current_h5_path = None
         if hasattr(self, "_info_label"):
             self._info_label.setText("No dataset loaded")
+        if hasattr(self, "_seg_channel"):
+            self._seg_channel.clear()
         self.statusBar().showMessage("Dataset closed")
 
     def _on_run_segmentation(self) -> None:
@@ -735,16 +754,17 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Open a dataset in the viewer first")
             return
 
-        # Get the current image from the first image layer
-        image_layers = [
-            layer for layer in viewer_win.viewer.layers
-            if layer.__class__.__name__ == "Image"
-        ]
-        if not image_layers:
-            self.statusBar().showMessage("No image loaded in viewer")
+        # Get the selected channel image
+        selected_channel = self._seg_channel.currentText()
+        if not selected_channel:
+            self.statusBar().showMessage("No channel selected for segmentation")
             return
 
-        image = image_layers[0].data
+        try:
+            image = viewer_win.viewer.layers[selected_channel].data
+        except KeyError:
+            self.statusBar().showMessage(f"Channel '{selected_channel}' not found in viewer")
+            return
         model_type = self._seg_model.currentText()
         diameter = self._seg_diameter.value() if self._seg_diameter.value() > 0 else None
         gpu = self._seg_gpu.isChecked()
