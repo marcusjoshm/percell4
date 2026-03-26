@@ -621,6 +621,17 @@ class LauncherWindow(QMainWindow):
         window = self._get_or_create_window(key)
         if window is None:
             return
+
+        # If opening the viewer and it's empty but we have a dataset, reload it
+        if key == "viewer":
+            viewer_empty = True
+            try:
+                viewer_empty = len(window.viewer.layers) == 0
+            except Exception:
+                viewer_empty = True
+            if viewer_empty and getattr(self, "_current_h5_path", None):
+                self._populate_viewer_from_store()
+
         if window.isMinimized():
             window.showNormal()
         window.show()
@@ -703,7 +714,7 @@ class LauncherWindow(QMainWindow):
             self._load_h5_into_viewer(path)
 
     def _load_h5_into_viewer(self, h5_path: str) -> None:
-        """Load an .h5 dataset into the napari viewer."""
+        """Set the current dataset and load it into the viewer."""
         from percell4.store import DatasetStore
 
         store = DatasetStore(h5_path)
@@ -711,18 +722,38 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage(f"File not found: {h5_path}")
             return
 
+        # Set as current dataset for the entire app
         self._current_store = store
         self._current_h5_path = h5_path
 
-        # Ensure viewer is open
+        # Clear previous model state
+        self.data_model.clear()
+
+        # Update Data tab info + dropdowns
+        self._update_data_tab_from_store()
+
+        # Show viewer and populate with data
         self._show_window("viewer")
+        self._populate_viewer_from_store()
+
+        self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
+
+    def _populate_viewer_from_store(self) -> None:
+        """Populate the napari viewer from the current dataset store.
+
+        Called when loading a dataset and when re-opening the viewer.
+        """
+        store = getattr(self, "_current_store", None)
+        h5_path = getattr(self, "_current_h5_path", None)
+        if store is None or h5_path is None:
+            return
+
         viewer_win = self._windows.get("viewer")
         if viewer_win is None:
             return
 
-        # Clear previous data
+        # Clear viewer layers
         viewer_win.clear()
-        self.data_model.clear()
 
         # Read and display intensity data
         try:
@@ -732,11 +763,9 @@ class LauncherWindow(QMainWindow):
                 channel_names = meta.get("channel_names", [])
 
                 if intensity.ndim == 2:
-                    # Single channel
                     name = channel_names[0] if channel_names else "Intensity"
                     viewer_win.add_image(intensity, name=name)
                 elif intensity.ndim == 3 and intensity.shape[0] <= 20:
-                    # Multi-channel (C, H, W) — add each channel separately
                     for i in range(intensity.shape[0]):
                         name = (
                             channel_names[i]
@@ -745,7 +774,6 @@ class LauncherWindow(QMainWindow):
                         )
                         viewer_win.add_image(intensity[i], name=name)
                 else:
-                    # Unknown layout — add as single image
                     viewer_win.add_image(intensity, name="Intensity")
 
                 # Load existing labels
@@ -764,13 +792,34 @@ class LauncherWindow(QMainWindow):
             )
             return
 
-        # Update info label
+        # Wire napari layer selection events
+        self._wire_viewer_layer_selection()
+        self._update_active_channel_label()
+
+    def _update_data_tab_from_store(self) -> None:
+        """Update the Data tab info label and dropdowns from the current store."""
+        store = getattr(self, "_current_store", None)
+        h5_path = getattr(self, "_current_h5_path", None)
+
+        if store is None or h5_path is None:
+            if hasattr(self, "_info_label"):
+                self._info_label.setText("No dataset loaded")
+            return
+
+        # Read shape for info display
+        try:
+            with store.open_read() as s:
+                intensity = s.read_array("intensity")
+                shape = intensity.shape
+        except Exception:
+            shape = "unknown"
+
         if hasattr(self, "_info_label"):
             n_labels = len(store.list_labels())
             n_masks = len(store.list_masks())
             self._info_label.setText(
                 f"File: {Path(h5_path).name}\n"
-                f"Shape: {intensity.shape}\n"
+                f"Shape: {shape}\n"
                 f"Labels: {n_labels}  |  Masks: {n_masks}"
             )
 
@@ -787,13 +836,6 @@ class LauncherWindow(QMainWindow):
 
         # Populate management combos
         self._refresh_management_combos()
-
-        # Wire napari layer selection → channel label (once)
-        self._wire_viewer_layer_selection()
-        # Update channel label from viewer's active layer
-        self._update_active_channel_label()
-
-        self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
 
     def _on_close_dataset(self) -> None:
         viewer = self._windows.get("viewer")
