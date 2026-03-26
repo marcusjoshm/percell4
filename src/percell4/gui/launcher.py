@@ -1047,9 +1047,18 @@ class LauncherWindow(QMainWindow):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
 
-        # Add preview mask layer
+        # Add preview mask layer (yellow)
+        from napari.utils.colormaps import DirectLabelColormap
+
+        yellow_cmap = DirectLabelColormap(
+            color_dict={0: "transparent", 1: "yellow", None: "transparent"},
+        )
         viewer_win.viewer.add_labels(
-            mask, name="_threshold_preview", opacity=0.4, blending="translucent",
+            mask,
+            name="_threshold_preview",
+            opacity=0.5,
+            blending="translucent",
+            colormap=yellow_cmap,
         )
 
         # Add shapes layer for ROI drawing
