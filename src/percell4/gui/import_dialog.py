@@ -350,14 +350,14 @@ class ImportDialog(QDialog):
                 left: 10px;
                 padding: 0 4px;
             }
-            QLineEdit, QComboBox, QSpinBox {
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
                 background-color: #2a2a2a;
                 color: #ffffff;
                 border: 1px solid #444444;
                 border-radius: 4px;
                 padding: 4px 8px;
             }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                 border-color: #4ea8de;
             }
             QPushButton {
