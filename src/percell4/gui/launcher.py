@@ -323,15 +323,18 @@ class LauncherWindow(QMainWindow):
         method_row.addWidget(self._thresh_method)
         thresh_layout.addLayout(method_row)
 
-        # Manual value (shown for all methods as reference/override)
-        manual_row = QHBoxLayout()
-        manual_row.addWidget(QLabel("Manual value:"))
-        self._thresh_manual_value = QDoubleSpinBox()
-        self._thresh_manual_value.setRange(0.0, 100000.0)
-        self._thresh_manual_value.setValue(0.0)
-        self._thresh_manual_value.setDecimals(1)
-        manual_row.addWidget(self._thresh_manual_value)
-        thresh_layout.addLayout(manual_row)
+        # Threshold value display (auto-computed or manual)
+        val_row = QHBoxLayout()
+        val_row.addWidget(QLabel("Threshold:"))
+        self._thresh_value_spin = QDoubleSpinBox()
+        self._thresh_value_spin.setRange(0.0, 100000.0)
+        self._thresh_value_spin.setValue(0.0)
+        self._thresh_value_spin.setDecimals(1)
+        self._thresh_value_spin.setToolTip(
+            "Auto-computed threshold value. Edit to override manually."
+        )
+        val_row.addWidget(self._thresh_value_spin)
+        thresh_layout.addLayout(val_row)
 
         sigma_row = QHBoxLayout()
         sigma_row.addWidget(QLabel("Gaussian σ:"))
@@ -343,38 +346,28 @@ class LauncherWindow(QMainWindow):
         sigma_row.addWidget(self._thresh_sigma)
         thresh_layout.addLayout(sigma_row)
 
-        # ROI-based threshold option
-        from qtpy.QtWidgets import QCheckBox
-        self._thresh_use_roi = QCheckBox("Use ROI for threshold calculation")
-        self._thresh_use_roi.setStyleSheet("QCheckBox { color: #e0e0e0; }")
-        self._thresh_use_roi.setToolTip(
-            "Draw a rectangle ROI on the image in napari first.\n"
-            "The auto-threshold will be computed from pixels\n"
-            "within the ROI only (useful for selecting a\n"
-            "representative region)."
-        )
-        thresh_layout.addWidget(self._thresh_use_roi)
+        thresh_layout.addWidget(QLabel(
+            "1. Preview computes threshold and shows mask.\n"
+            "2. Draw ROI in viewer to recalculate from a region.\n"
+            "3. Accept to save the mask."
+        ))
 
-        btn_draw_roi = QPushButton("Draw Threshold ROI in Viewer")
-        btn_draw_roi.setToolTip(
-            "Adds a rectangle shape to the viewer.\n"
-            "Position it over the region to calculate threshold from."
+        btn_preview = QPushButton("Preview Threshold")
+        btn_preview.setToolTip(
+            "Compute threshold and show preview mask in viewer.\n"
+            "Draw/move an ROI to recalculate from that region."
         )
-        btn_draw_roi.clicked.connect(self._on_draw_threshold_roi)
-        thresh_layout.addWidget(btn_draw_roi)
+        btn_preview.clicked.connect(self._on_threshold_preview)
+        thresh_layout.addWidget(btn_preview)
 
-        btn_thresh = QPushButton("Apply Threshold")
-        btn_thresh.clicked.connect(self._on_apply_threshold)
-        thresh_layout.addWidget(btn_thresh)
+        btn_accept = QPushButton("Accept && Save Mask to HDF5")
+        btn_accept.clicked.connect(self._on_threshold_accept)
+        thresh_layout.addWidget(btn_accept)
 
         # Threshold result display
         self._thresh_result_label = QLabel("")
         self._thresh_result_label.setWordWrap(True)
         thresh_layout.addWidget(self._thresh_result_label)
-
-        btn_save_mask = QPushButton("Save Mask to HDF5")
-        btn_save_mask.clicked.connect(self._on_save_mask)
-        thresh_layout.addWidget(btn_save_mask)
 
         layout.addWidget(thresh_group)
 
@@ -985,94 +978,16 @@ class LauncherWindow(QMainWindow):
         # Not in store — default to treating it as a segmentation
         self.data_model.set_active_segmentation(name)
 
-    def _on_save_mask(self) -> None:
-        """Save a mask layer from viewer to HDF5."""
-        store = getattr(self, "_current_store", None)
-        if store is None:
-            self.statusBar().showMessage("No dataset loaded")
-            return
+    def _on_threshold_preview(self) -> None:
+        """Compute threshold and show a live preview mask in the viewer.
 
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self.statusBar().showMessage("Viewer not open")
-            return
-
-        # Find mask-like labels layers (names containing 'mask' or from threshold)
-        mask_layer = None
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Labels" and "mask" in layer.name.lower():
-                mask_layer = layer
-                break
-
-        if mask_layer is None:
-            # Fall back to active layer if it's a labels layer
-            active = viewer_win.viewer.layers.selection.active
-            if active is not None and active.__class__.__name__ == "Labels":
-                mask_layer = active
-
-        if mask_layer is None:
-            self.statusBar().showMessage("No mask layer to save")
-            return
-
-        import numpy as np
-        data = np.asarray(mask_layer.data, dtype=np.uint8)
-        count = store.write_mask(mask_layer.name, data)
-
-        # Add to active mask dropdown
-        if hasattr(self, "_active_mask_combo"):
-            if self._active_mask_combo.findText(mask_layer.name) == -1:
-                self._active_mask_combo.addItem(mask_layer.name)
-            self._active_mask_combo.setCurrentText(mask_layer.name)
-
-        self.statusBar().showMessage(f"Saved mask '{mask_layer.name}' ({count} pixels)")
-
-    def _on_draw_threshold_roi(self) -> None:
-        """Add a rectangle shape layer to napari for threshold ROI selection."""
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self.statusBar().showMessage("Open the viewer first")
-            return
-
-        import numpy as np
-
-        # Remove old ROI shape if it exists
-        for layer in list(viewer_win.viewer.layers):
-            if layer.name == "_threshold_roi":
-                viewer_win.viewer.layers.remove(layer)
-                break
-
-        # Get image dimensions for default ROI size
-        image_shape = None
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Image":
-                image_shape = layer.data.shape[-2:]
-                break
-
-        if image_shape is None:
-            self.statusBar().showMessage("No image loaded")
-            return
-
-        h, w = image_shape
-        # Default ROI: center quarter of the image
-        y0, x0 = h // 4, w // 4
-        y1, x1 = 3 * h // 4, 3 * w // 4
-
-        rect = np.array([[y0, x0], [y0, x1], [y1, x1], [y1, x0]])
-        viewer_win.viewer.add_shapes(
-            [rect],
-            shape_type="rectangle",
-            name="_threshold_roi",
-            edge_color="yellow",
-            edge_width=2,
-            face_color=[1, 1, 0, 0.1],
-        )
-        viewer_win.show()
-        self.statusBar().showMessage(
-            "Drag the yellow rectangle to the region for threshold calculation"
-        )
-
-    def _on_apply_threshold(self) -> None:
-        """Apply the selected threshold method to the active channel."""
+        Workflow (matching PerCell3):
+        1. Compute auto-threshold from the full image (or ROI if drawn)
+        2. Create a preview mask layer showing what's above threshold
+        3. Add a shapes layer for ROI drawing
+        4. When the user draws/moves a ROI, recalculate threshold from
+           that region and update the preview mask on the entire image
+        """
         import numpy as np
 
         viewer_win = self._windows.get("viewer")
@@ -1080,10 +995,9 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Open the viewer first")
             return
 
-        # Get the active image layer
+        # Get the active image
         active = viewer_win.viewer.layers.selection.active
         if active is None or active.__class__.__name__ != "Image":
-            # Fall back to first image layer
             for layer in viewer_win.viewer.layers:
                 if layer.__class__.__name__ == "Image":
                     active = layer
@@ -1092,96 +1006,192 @@ class LauncherWindow(QMainWindow):
                 self.statusBar().showMessage("No image loaded")
                 return
 
-        image = active.data.astype(np.float32)
-        channel_name = active.name
-        method = self._thresh_method.currentText().lower()
-
         from percell4.measure.thresholding import (
             THRESHOLD_METHODS,
             apply_gaussian_smoothing,
         )
 
-        # Apply Gaussian smoothing
+        image = active.data.astype(np.float32)
+        channel_name = active.name
+
+        # Apply smoothing
         sigma = self._thresh_sigma.value()
         if sigma > 0:
             image = apply_gaussian_smoothing(image, sigma)
 
-        # Get the image region for threshold calculation
-        calc_image = image
-        if self._thresh_use_roi.isChecked():
-            calc_image = self._extract_roi_region(image, viewer_win)
-            if calc_image is None:
-                self.statusBar().showMessage(
-                    "Draw a threshold ROI first (or uncheck 'Use ROI')"
-                )
-                return
+        # Store the working image for ROI updates
+        self._thresh_working_image = image
+        self._thresh_channel_name = channel_name
 
-        # Compute threshold
+        # Compute initial threshold from full image
+        method = self._thresh_method.currentText().lower()
         if method == "manual":
-            manual_val = self._thresh_manual_value.value()
-            if manual_val <= 0:
-                self.statusBar().showMessage("Set a manual threshold value > 0")
+            value = self._thresh_value_spin.value()
+            if value <= 0:
+                self.statusBar().showMessage("Set a threshold value > 0")
                 return
-            from percell4.measure.thresholding import threshold_manual
-            # Apply manual threshold to the FULL image (not ROI)
-            mask, value = threshold_manual(image, manual_val)
         elif method in THRESHOLD_METHODS:
-            # Calculate threshold from the calc_image (ROI or full)
-            _, value = THRESHOLD_METHODS[method](calc_image)
-            # Apply that threshold to the FULL image
-            mask = (image > value).astype(np.uint8)
+            _, value = THRESHOLD_METHODS[method](image)
         else:
             self.statusBar().showMessage(f"Unknown method: {method}")
             return
 
-        # Update manual value display with computed threshold
-        self._thresh_manual_value.setValue(value)
+        self._thresh_value_spin.setValue(value)
 
+        # Create preview mask (applied to ENTIRE image)
+        mask = (image > value).astype(np.uint8)
+
+        # Remove old preview and ROI layers
+        for name in ("_threshold_preview", "_threshold_roi"):
+            for layer in list(viewer_win.viewer.layers):
+                if layer.name == name:
+                    viewer_win.viewer.layers.remove(layer)
+
+        # Add preview mask layer
+        viewer_win.viewer.add_labels(
+            mask, name="_threshold_preview", opacity=0.4, blending="translucent",
+        )
+
+        # Add shapes layer for ROI drawing
+        viewer_win.viewer.add_shapes(
+            [],
+            shape_type="rectangle",
+            name="_threshold_roi",
+            edge_color="yellow",
+            edge_width=2,
+            face_color=[1, 1, 0, 0.1],
+        )
+
+        # Wire ROI changes to recalculate threshold
+        for layer in viewer_win.viewer.layers:
+            if layer.name == "_threshold_roi":
+                layer.events.data.connect(self._on_threshold_roi_changed)
+                break
+
+        self._update_thresh_stats(mask, value)
+        viewer_win.show()
+        self.statusBar().showMessage(
+            f"Preview: {method} threshold = {value:.1f}. "
+            "Draw a rectangle ROI to recalculate from a region."
+        )
+
+    def _on_threshold_roi_changed(self, event=None) -> None:
+        """ROI changed in viewer — recalculate threshold from ROI region,
+        then update the preview mask on the entire image."""
+        import numpy as np
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            return
+
+        image = getattr(self, "_thresh_working_image", None)
+        if image is None:
+            return
+
+        # Extract ROI region
+        roi_image = None
+        for layer in viewer_win.viewer.layers:
+            if layer.name == "_threshold_roi" and hasattr(layer, "data"):
+                if len(layer.data) > 0:
+                    coords = np.array(layer.data[0])
+                    y_min = max(0, int(coords[:, 0].min()))
+                    y_max = min(image.shape[0], int(coords[:, 0].max()))
+                    x_min = max(0, int(coords[:, 1].min()))
+                    x_max = min(image.shape[1], int(coords[:, 1].max()))
+                    if y_max > y_min and x_max > x_min:
+                        roi_image = image[y_min:y_max, x_min:x_max]
+                break
+
+        if roi_image is None or roi_image.size == 0:
+            return
+
+        from percell4.measure.thresholding import THRESHOLD_METHODS
+
+        # Recalculate threshold from ROI only
+        method = self._thresh_method.currentText().lower()
+        if method == "manual":
+            return  # manual doesn't recalculate from ROI
+        if method not in THRESHOLD_METHODS:
+            return
+
+        _, value = THRESHOLD_METHODS[method](roi_image)
+        self._thresh_value_spin.setValue(value)
+
+        # Apply new threshold to ENTIRE image (not just ROI)
+        mask = (image > value).astype(np.uint8)
+
+        # Update preview layer
+        for layer in viewer_win.viewer.layers:
+            if layer.name == "_threshold_preview":
+                layer.data = mask
+                layer.refresh()
+                break
+
+        self._update_thresh_stats(mask, value, from_roi=True)
+
+    def _update_thresh_stats(
+        self, mask, value: float, from_roi: bool = False
+    ) -> None:
+        """Update the threshold result label with stats."""
+        n_pos = int(mask.sum())
+        n_total = mask.size
+        pct = 100.0 * n_pos / n_total if n_total > 0 else 0
+        roi_note = " (from ROI)" if from_roi else ""
+        self._thresh_result_label.setText(
+            f"Threshold: {value:.1f}{roi_note}\n"
+            f"Positive: {n_pos:,} / {n_total:,} px ({pct:.1f}%)"
+        )
+        self._thresh_result_label.setStyleSheet("color: #ffaa44;")
+
+    def _on_threshold_accept(self) -> None:
+        """Accept the current preview threshold and save the mask to HDF5."""
+        import numpy as np
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self.statusBar().showMessage("No preview to accept")
+            return
+
+        image = getattr(self, "_thresh_working_image", None)
+        channel_name = getattr(self, "_thresh_channel_name", "unknown")
+        if image is None:
+            self.statusBar().showMessage("Run Preview first")
+            return
+
+        value = self._thresh_value_spin.value()
+        method = self._thresh_method.currentText().lower()
+        mask = (image > value).astype(np.uint8)
         mask_name = f"{method}_{channel_name}"
 
-        # Add to viewer
+        # Remove preview and ROI layers
+        for name in ("_threshold_preview", "_threshold_roi"):
+            for layer in list(viewer_win.viewer.layers):
+                if layer.name == name:
+                    viewer_win.viewer.layers.remove(layer)
+
+        # Add final mask layer
         viewer_win.add_mask(mask, name=mask_name)
 
-        # Write to store
+        # Save to HDF5
         store = getattr(self, "_current_store", None)
         if store is not None:
             store.write_mask(mask_name, mask)
 
-        # Update active mask
         self.data_model.set_active_mask(mask_name)
 
-        n_positive = int(mask.sum())
+        n_pos = int(mask.sum())
         n_total = mask.size
-        pct = 100.0 * n_positive / n_total if n_total > 0 else 0
-        roi_note = " (from ROI)" if self._thresh_use_roi.isChecked() else ""
+        pct = 100.0 * n_pos / n_total if n_total > 0 else 0
         self._thresh_result_label.setText(
-            f"Threshold: {value:.1f}{roi_note}\n"
-            f"Positive: {n_positive:,} / {n_total:,} pixels ({pct:.1f}%)"
+            f"Saved: {mask_name}\n"
+            f"Threshold: {value:.1f} | {n_pos:,} / {n_total:,} px ({pct:.1f}%)"
         )
         self._thresh_result_label.setStyleSheet("color: #66cc66;")
-        self.statusBar().showMessage(
-            f"Applied {method} threshold ({value:.1f}) to {channel_name}"
-        )
+        self.statusBar().showMessage(f"Saved mask '{mask_name}' (threshold {value:.1f})")
 
-    def _extract_roi_region(self, image, viewer_win):
-        """Extract the image region inside the _threshold_roi shape."""
-        import numpy as np
-
-        for layer in viewer_win.viewer.layers:
-            if layer.name == "_threshold_roi" and hasattr(layer, "data"):
-                shapes_data = layer.data
-                if len(shapes_data) == 0:
-                    return None
-                # Get bounding box of first shape
-                coords = np.array(shapes_data[0])
-                y_min = max(0, int(coords[:, 0].min()))
-                y_max = min(image.shape[0], int(coords[:, 0].max()))
-                x_min = max(0, int(coords[:, 1].min()))
-                x_max = min(image.shape[1], int(coords[:, 1].max()))
-                if y_max <= y_min or x_max <= x_min:
-                    return None
-                return image[y_min:y_max, x_min:x_max]
-        return None
+        # Clean up working state
+        self._thresh_working_image = None
+        self._thresh_channel_name = None
 
     def _on_measure_cells(self) -> None:
         self.statusBar().showMessage("Measure cells — not yet implemented")
