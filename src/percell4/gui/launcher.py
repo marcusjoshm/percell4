@@ -778,8 +778,7 @@ class LauncherWindow(QMainWindow):
         if d_has_flim:
             flim_params = {
                 "frequency_mhz": dialog.flim_frequency_mhz,
-                "calibration_phase": dialog.flim_calibration_phase,
-                "calibration_modulation": dialog.flim_calibration_modulation,
+                "channel_calibrations": dialog.flim_channel_calibrations,
                 "bin_dimensions": dialog.bin_dimensions,
             }
 
@@ -1487,10 +1486,10 @@ class LauncherWindow(QMainWindow):
 
         g_map, s_map = compute_phasor(decay, harmonic=harmonic)
 
-        # Apply calibration if available
+        # Apply per-channel calibration if available
         meta = store.metadata
-        cal_phase = meta.get("flim_calibration_phase", 0.0)
-        cal_mod = meta.get("flim_calibration_modulation", 1.0)
+        cal_phase = meta.get(f"flim_cal_phase_{active_channel}", 0.0)
+        cal_mod = meta.get(f"flim_cal_mod_{active_channel}", 1.0)
 
         if cal_phase != 0.0 or cal_mod != 1.0:
             # Apply calibration: rotation + scaling in polar coordinates

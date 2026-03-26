@@ -294,12 +294,11 @@ def import_dataset(
     if flim_params:
         all_metadata["has_flim"] = True
         all_metadata["flim_frequency_mhz"] = flim_params.get("frequency_mhz", 80.0)
-        all_metadata["flim_calibration_phase"] = flim_params.get(
-            "calibration_phase", 0.0
-        )
-        all_metadata["flim_calibration_modulation"] = flim_params.get(
-            "calibration_modulation", 1.0
-        )
+        # Store per-channel calibration as separate metadata entries
+        ch_cals = flim_params.get("channel_calibrations", {})
+        for ch_name, cal in ch_cals.items():
+            all_metadata[f"flim_cal_phase_{ch_name}"] = cal.get("phase", 0.0)
+            all_metadata[f"flim_cal_mod_{ch_name}"] = cal.get("modulation", 1.0)
 
     store.create(metadata=all_metadata)
 

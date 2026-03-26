@@ -9,6 +9,7 @@ from qtpy.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -143,34 +144,34 @@ class ImportDialog(QDialog):
         layout.addWidget(z_group)
 
         # ── FLIM / TCSPC ──────────────────────────────────────
-        from qtpy.QtWidgets import QDoubleSpinBox
-
         self._flim_enabled = QCheckBox("Dataset contains TCSPC FLIM data")
         self._flim_enabled.setStyleSheet("QCheckBox { color: #e0e0e0; }")
         layout.addWidget(self._flim_enabled)
 
         self._flim_group = QGroupBox("FLIM Parameters")
-        flim_layout = QFormLayout(self._flim_group)
+        flim_layout = QVBoxLayout(self._flim_group)
 
+        freq_form = QFormLayout()
         self._flim_freq = QDoubleSpinBox()
         self._flim_freq.setRange(0.1, 1000.0)
         self._flim_freq.setValue(80.0)
         self._flim_freq.setDecimals(1)
         self._flim_freq.setSuffix(" MHz")
-        flim_layout.addRow("Laser frequency:", self._flim_freq)
+        freq_form.addRow("Laser frequency:", self._flim_freq)
+        flim_layout.addLayout(freq_form)
 
-        self._flim_phase = QDoubleSpinBox()
-        self._flim_phase.setRange(-6.283, 6.283)
-        self._flim_phase.setValue(0.0)
-        self._flim_phase.setDecimals(4)
-        self._flim_phase.setSuffix(" rad")
-        flim_layout.addRow("Calibration phase:", self._flim_phase)
+        # Per-channel calibration
+        btn_discover = QPushButton("Discover Channels")
+        btn_discover.setToolTip(
+            "Scan the source directory for .bin files and\n"
+            "detect channels. Enter calibration per channel."
+        )
+        btn_discover.clicked.connect(self._discover_channels)
+        flim_layout.addWidget(btn_discover)
 
-        self._flim_modulation = QDoubleSpinBox()
-        self._flim_modulation.setRange(0.0, 10.0)
-        self._flim_modulation.setValue(1.0)
-        self._flim_modulation.setDecimals(4)
-        flim_layout.addRow("Calibration modulation:", self._flim_modulation)
+        self._channel_cal_container = QVBoxLayout()
+        flim_layout.addLayout(self._channel_cal_container)
+        self._channel_calibrations: dict[str, dict] = {}  # ch_name -> {phase_spin, mod_spin}
 
         # .bin file parameters (only for raw binary TCSPC)
         self._bin_group = QGroupBox(".bin File Dimensions (raw binary only)")
@@ -249,6 +250,71 @@ class ImportDialog(QDialog):
                     out = str(Path(path).parent / f"{name}.h5")
                 self._output_path.setText(out)
 
+    def _discover_channels(self) -> None:
+        """Scan source directory for .bin files and create per-channel calibration."""
+        import re
+
+        source = self._source_dir.text()
+        if not source:
+            return
+
+        source_path = Path(source)
+        if not source_path.is_dir():
+            return
+
+        # Find .bin files and extract channel tokens
+        channel_pattern = self._tok_channel.text()
+        channels: set[str] = set()
+        for f in sorted(source_path.glob("*.bin")):
+            if channel_pattern:
+                m = re.search(channel_pattern, f.stem)
+                if m:
+                    channels.add(m.group(1))
+
+        if not channels:
+            # Also check TIFF files with TCSPC token
+            for f in sorted(source_path.glob("*.tif")) + sorted(source_path.glob("*.tiff")):
+                if "TCSPC" in f.stem.upper() and channel_pattern:
+                    m = re.search(channel_pattern, f.stem)
+                    if m:
+                        channels.add(m.group(1))
+
+        if not channels:
+            return
+
+        # Clear old channel calibration widgets
+        while self._channel_cal_container.count():
+            item = self._channel_cal_container.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self._channel_calibrations.clear()
+
+        # Create calibration fields per channel
+        for ch in sorted(channels):
+            ch_name = f"ch{ch}"
+            group = QGroupBox(f"Channel {ch_name}")
+            form = QFormLayout(group)
+
+            phase_spin = QDoubleSpinBox()
+            phase_spin.setRange(-6.283, 6.283)
+            phase_spin.setValue(0.0)
+            phase_spin.setDecimals(4)
+            phase_spin.setSuffix(" rad")
+            form.addRow("Phase:", phase_spin)
+
+            mod_spin = QDoubleSpinBox()
+            mod_spin.setRange(0.0, 10.0)
+            mod_spin.setValue(1.0)
+            mod_spin.setDecimals(4)
+            form.addRow("Modulation:", mod_spin)
+
+            self._channel_cal_container.addWidget(group)
+            self._channel_calibrations[ch_name] = {
+                "phase_spin": phase_spin,
+                "mod_spin": mod_spin,
+            }
+
     def _browse_output(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Dataset As", "", "HDF5 Files (*.h5)"
@@ -315,12 +381,15 @@ class ImportDialog(QDialog):
         return self._flim_freq.value()
 
     @property
-    def flim_calibration_phase(self) -> float:
-        return self._flim_phase.value()
-
-    @property
-    def flim_calibration_modulation(self) -> float:
-        return self._flim_modulation.value()
+    def flim_channel_calibrations(self) -> dict[str, dict[str, float]]:
+        """Per-channel calibration: {ch_name: {phase: float, modulation: float}}."""
+        result = {}
+        for ch_name, widgets in self._channel_calibrations.items():
+            result[ch_name] = {
+                "phase": widgets["phase_spin"].value(),
+                "modulation": widgets["mod_spin"].value(),
+            }
+        return result
 
     @property
     def bin_dimensions(self) -> dict:
