@@ -94,3 +94,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Qt overrides use camelCase (closeEvent, showEvent, etc.)
+"src/percell4/gui/*.py" = ["N802"]
