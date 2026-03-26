@@ -1492,13 +1492,14 @@ class LauncherWindow(QMainWindow):
         cal_mod = meta.get(f"flim_cal_mod_{active_channel}", 1.0)
 
         if cal_phase != 0.0 or cal_mod != 1.0:
-            # Apply calibration: rotation + scaling in polar coordinates
-            mod = np.sqrt(g_map**2 + s_map**2)
-            phase = np.arctan2(s_map, g_map)
-            phase_cal = phase + cal_phase
-            mod_cal = mod * cal_mod
-            g_map = (mod_cal * np.cos(phase_cal)).astype(np.float32)
-            s_map = (mod_cal * np.sin(phase_cal)).astype(np.float32)
+            # Apply calibration: Cartesian 2D rotation + scaling
+            # Matches flimfret/preprocessing.py formulation exactly
+            cos_phi = np.cos(cal_phase)
+            sin_phi = np.sin(cal_phase)
+            g_cal = (g_map * cal_mod * cos_phi - s_map * cal_mod * sin_phi)
+            s_cal = (g_map * cal_mod * sin_phi + s_map * cal_mod * cos_phi)
+            g_map = g_cal.astype(np.float32)
+            s_map = s_cal.astype(np.float32)
 
         # Write phasor maps to store
         store.write_array(
