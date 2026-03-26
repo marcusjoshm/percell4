@@ -213,7 +213,7 @@ class ImportDialog(QDialog):
         self._bin_header.setSpecialValueText("Auto-detect")
         bin_layout.addRow("Header bytes:", self._bin_header)
 
-        flim_layout.addRow(self._bin_group)
+        flim_layout.addWidget(self._bin_group)
 
         self._flim_group.setVisible(False)
         self._flim_enabled.toggled.connect(self._flim_group.setVisible)
