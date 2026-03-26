@@ -714,7 +714,9 @@ class LauncherWindow(QMainWindow):
                 "notes": dialog.notes,
             },
             project_csv=project_csv,
-            progress_callback=self._on_import_progress,
+        )
+        self._import_worker.progress.connect(
+            lambda msg: self.statusBar().showMessage(f"Import: {msg}")
         )
         self._import_worker.finished.connect(
             lambda n_ch: self._on_import_finished(output_path, n_ch)
@@ -723,9 +725,6 @@ class LauncherWindow(QMainWindow):
             lambda msg: self.statusBar().showMessage(f"Import error: {msg}")
         )
         self._import_worker.start()
-
-    def _on_import_progress(self, current: int, total: int, msg: str) -> None:
-        self.statusBar().showMessage(f"Import: {msg} ({current}/{total})")
 
     def _on_import_finished(self, h5_path: str, n_channels: int) -> None:
         self.statusBar().showMessage(
@@ -874,8 +873,6 @@ class LauncherWindow(QMainWindow):
         self._current_h5_path = None
         if hasattr(self, "_info_label"):
             self._info_label.setText("No dataset loaded")
-        if hasattr(self, "_seg_channel_label"):
-            self._seg_channel_label.setText("None selected")
         if hasattr(self, "_active_seg_combo"):
             self._active_seg_combo.clear()
         if hasattr(self, "_active_mask_combo"):

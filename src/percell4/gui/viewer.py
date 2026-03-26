@@ -35,20 +35,20 @@ CHANNEL_COLORMAPS = {
 
 # Color cycle for channels without a recognized name
 _COLOR_CYCLE = ["green", "magenta", "cyan", "yellow", "red", "blue"]
-_color_index = 0
 
 
-def _colormap_for_channel(name: str) -> str:
-    """Auto-detect colormap from channel name, or cycle through distinct colors."""
-    global _color_index
+def _colormap_for_channel(name: str, color_index: int = 0) -> tuple[str, int]:
+    """Auto-detect colormap from channel name, or cycle through distinct colors.
+
+    Returns (colormap_name, updated_color_index).
+    """
     key = name.lower().replace(" ", "").replace("-", "").replace("_", "")
     for pattern, cmap in CHANNEL_COLORMAPS.items():
         if pattern in key:
-            return cmap
+            return cmap, color_index
     # No match — assign next color from cycle
-    color = _COLOR_CYCLE[_color_index % len(_COLOR_CYCLE)]
-    _color_index += 1
-    return color
+    color = _COLOR_CYCLE[color_index % len(_COLOR_CYCLE)]
+    return color, color_index + 1
 
 
 class ViewerWindow:
@@ -66,6 +66,7 @@ class ViewerWindow:
         self.data_model = data_model
         self._viewer = None
         self._qt_window = None
+        self._color_index = 0
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -140,7 +141,8 @@ class ViewerWindow:
 
     def add_image(self, data, name: str, **kwargs) -> None:
         """Add an image layer with auto-detected colormap and additive blending."""
-        cmap = kwargs.pop("colormap", _colormap_for_channel(name))
+        cmap, self._color_index = _colormap_for_channel(name, self._color_index)
+        cmap = kwargs.pop("colormap", cmap)
         blending = kwargs.pop("blending", "additive")
         self.viewer.add_image(
             data, name=name, colormap=cmap, blending=blending, **kwargs
@@ -157,8 +159,7 @@ class ViewerWindow:
 
     def clear(self) -> None:
         """Remove all layers."""
-        global _color_index
-        _color_index = 0
+        self._color_index = 0
         if self._viewer is not None and self._is_alive():
             self._viewer.layers.clear()
 
