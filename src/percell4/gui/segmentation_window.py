@@ -41,16 +41,24 @@ class SegmentationWindow(QMainWindow):
         self.data_model = data_model
         self._launcher = launcher  # reference to access viewer, store, etc.
         self.setWindowTitle("PerCell4 — Segmentation")
-        self.resize(450, 600)
+        self.resize(420, 500)
 
         self._build_ui()
         self._apply_style()
         self._restore_geometry()
 
     def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        from qtpy.QtWidgets import QScrollArea
+
+        # Scroll area wrapping all content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        self.setCentralWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         layout.setAlignment(Qt.AlignTop)

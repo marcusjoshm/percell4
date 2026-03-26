@@ -206,7 +206,7 @@ class LauncherWindow(QMainWindow):
             self._sidebar_buttons.append(btn)
 
             panel = panel_factory()
-            self._content_stack.addWidget(panel)
+            self._content_stack.addWidget(self._wrap_in_scroll(panel))
 
         sidebar_layout.addStretch()
         layout.addWidget(sidebar)
@@ -560,6 +560,18 @@ class LauncherWindow(QMainWindow):
         return panel
 
     # ── Helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _wrap_in_scroll(widget: QWidget) -> QWidget:
+        """Wrap a widget in a QScrollArea for panels that may exceed window height."""
+        from qtpy.QtWidgets import QScrollArea
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(widget)
+        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+        return scroll
 
     @staticmethod
     def _section_label(text: str) -> QLabel:
