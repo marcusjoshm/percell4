@@ -47,6 +47,10 @@ class DataPlotWindow(QMainWindow):
         self._connect_signals()
         self._restore_geometry()
 
+        # Load any existing data from the model
+        if not self.data_model.df.empty:
+            self._on_data_updated()
+
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
