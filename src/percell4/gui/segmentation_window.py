@@ -436,10 +436,10 @@ class SegmentationWindow(QMainWindow):
 
         next_id = int(labels_layer.data.max()) + 1
         labels_layer.selected_label = next_id
-        labels_layer.mode = "paint"
+        labels_layer.mode = "polygon"
 
         self.statusBar().showMessage(
-            f"Paint label set to {next_id} — draw the new cell boundary"
+            f"Label {next_id} — draw cell boundary with polygon tool"
         )
 
     def _on_relabel_sequential(self) -> None:
