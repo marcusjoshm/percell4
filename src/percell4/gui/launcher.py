@@ -1488,8 +1488,8 @@ class LauncherWindow(QMainWindow):
 
         # Apply per-channel calibration if available
         meta = store.metadata
-        cal_phase = meta.get(f"flim_cal_phase_{active_channel}", 0.0)
-        cal_mod = meta.get(f"flim_cal_mod_{active_channel}", 1.0)
+        cal_phase = float(meta.get(f"flim_cal_phase_{active_channel}", 0.0))
+        cal_mod = float(meta.get(f"flim_cal_mod_{active_channel}", 1.0))
 
         if cal_phase != 0.0 or cal_mod != 1.0:
             # Apply calibration: Cartesian 2D rotation + scaling

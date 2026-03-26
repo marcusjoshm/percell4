@@ -187,7 +187,14 @@ class PhasorPlotWindow(QMainWindow):
         # Log scale for dynamic range
         hist_log = np.log1p(hist).T  # transpose: histogram2d returns (x,y)
 
-        # Apply colormap
+        # Remove old image and create fresh one to force visual update
+        if self._hist_item is not None:
+            self._plot.removeItem(self._hist_item)
+
+        self._hist_item = pg.ImageItem()
+        self._plot.addItem(self._hist_item)
+
+        # Apply colormap and set image
         cmap = pg.colormap.get("viridis")
         self._hist_item.setImage(hist_log)
         self._hist_item.setColorMap(cmap)
@@ -200,6 +207,9 @@ class PhasorPlotWindow(QMainWindow):
             .translate(g_range[0], s_range[0])
             .scale(scale_x, scale_y)
         )
+
+        # Force auto-range update
+        self._plot.autoRange()
 
         n_pixels = len(g_flat)
         self._status.showMessage(f"Phasor: {n_pixels:,} valid pixels")
