@@ -178,30 +178,69 @@ def import_dataset(
                     tile_idx = int(m.group(1))
             bin_by_channel[ch][tile_idx] = bin_path
 
+        # We need the store created early for streaming decay writes
+        # (decay tiles are too large to stitch in memory)
+        _bin_needs_early_store = True
+
         for ch_key in sorted(bin_by_channel.keys()):
             ch_name = f"ch{ch_key}" if ch_key else "ch0"
             tile_bins = bin_by_channel[ch_key]
 
-            # Read each .bin tile
-            decay_tiles: dict[int, np.ndarray] = {}
+            # Read first tile to get dimensions
+            first_path = next(iter(tile_bins.values()))
+            first_result = read_flim_bin(
+                first_path,
+                x_dim=bin_dims.get("x_dim", 512),
+                y_dim=bin_dims.get("y_dim", 512),
+                t_dim=bin_dims.get("t_dim", 132),
+                dtype=bin_dims.get("dtype", "float32"),
+                dim_order=bin_dims.get("dim_order", "YXT"),
+                header_bytes=bin_dims.get("header_bytes", 0),
+            )
+            tile_h, tile_w, n_bins = first_result["array"].shape
+
+            # Process tiles one at a time — stitch intensity in memory (small),
+            # stream decay tiles directly to HDF5 (avoids multi-GB allocation)
             intensity_tiles: dict[int, np.ndarray] = {}
+
+            if tile_config and tile_config.grid_rows * tile_config.grid_cols > 1:
+                use_tiling = True
+                out_h = tile_config.grid_rows * tile_h
+                out_w = tile_config.grid_cols * tile_w
+                positions = _tile_positions_from_config(tile_config)
+            else:
+                use_tiling = False
+                out_h, out_w = tile_h, tile_w
+                positions = {0: (0, 0)}
+
+            # Track whether we need to write decay to HDF5 via streaming
+            _bin_decay_path = f"decay/{ch_name}"
+            _bin_decay_written = False
+
             for tile_idx in sorted(tile_bins.keys()):
                 bin_path = tile_bins[tile_idx]
-                result_bin = read_flim_bin(
-                    bin_path,
-                    x_dim=bin_dims.get("x_dim", 512),
-                    y_dim=bin_dims.get("y_dim", 512),
-                    t_dim=bin_dims.get("t_dim", 132),
-                    dtype=bin_dims.get("dtype", "float32"),
-                    dim_order=bin_dims.get("dim_order", "YXT"),
-                    header_bytes=bin_dims.get("header_bytes", 0),
-                )
-                decay_tiles[tile_idx] = result_bin["array"]  # (H, W, T)
-                # Sum projection → intensity image for this tile
-                intensity_tiles[tile_idx] = result_bin["intensity"]  # (H, W)
+                if tile_idx == next(iter(tile_bins.keys())) and bin_path == first_path:
+                    result_bin = first_result  # reuse already-read first tile
+                else:
+                    result_bin = read_flim_bin(
+                        bin_path,
+                        x_dim=bin_dims.get("x_dim", 512),
+                        y_dim=bin_dims.get("y_dim", 512),
+                        t_dim=bin_dims.get("t_dim", 132),
+                        dtype=bin_dims.get("dtype", "float32"),
+                        dim_order=bin_dims.get("dim_order", "YXT"),
+                        header_bytes=bin_dims.get("header_bytes", 0),
+                    )
 
-            # Stitch intensity tiles
-            if tile_config and tile_config.grid_rows * tile_config.grid_cols > 1:
+                # Intensity tile (small — keep in memory for stitching)
+                intensity_tiles[tile_idx] = result_bin["intensity"]
+
+                # Don't keep decay in memory — it will be re-read tile-by-tile
+                # during the streaming HDF5 write phase
+                del result_bin
+
+            # Stitch intensity tiles (small, ~35 MB per channel for 6x6 grid)
+            if use_tiling:
                 stitched_intensity = assemble_tiles(
                     intensity_tiles,
                     grid_rows=tile_config.grid_rows,
@@ -209,40 +248,25 @@ def import_dataset(
                     grid_type=tile_config.grid_type,
                     order=tile_config.order,
                 )
-            elif len(intensity_tiles) == 1:
-                stitched_intensity = next(iter(intensity_tiles.values()))
             else:
                 stitched_intensity = next(iter(intensity_tiles.values()))
 
-            # Add intensity image as a viewable channel
             channel_images.append(stitched_intensity.astype(np.float32))
             channel_names.append(ch_name)
 
-            # Stitch decay tiles (3D stitching — stitch spatially, keep T)
-            if tile_config and tile_config.grid_rows * tile_config.grid_cols > 1:
-                # Get tile shape for 3D stitching
-                first_decay = next(iter(decay_tiles.values()))
-                tile_h, tile_w, n_bins = first_decay.shape
-                out_h = tile_config.grid_rows * tile_h
-                out_w = tile_config.grid_cols * tile_w
-
-                stitched_decay = np.zeros(
-                    (out_h, out_w, n_bins), dtype=first_decay.dtype
-                )
-                positions = _tile_positions_from_config(tile_config)
-                for t_idx, (row, col) in positions.items():
-                    if t_idx not in decay_tiles:
-                        continue
-                    y0 = row * tile_h
-                    x0 = col * tile_w
-                    stitched_decay[y0:y0 + tile_h, x0:x0 + tile_w, :] = (
-                        decay_tiles[t_idx]
-                    )
-                tcspc_data[ch_name] = stitched_decay
-            elif len(decay_tiles) == 1:
-                tcspc_data[ch_name] = next(iter(decay_tiles.values()))
-            else:
-                tcspc_data[ch_name] = next(iter(decay_tiles.values()))
+            # Store info for deferred decay write (tile-by-tile to HDF5)
+            tcspc_data[ch_name] = {
+                "_streaming": True,
+                "tile_bins": tile_bins,
+                "bin_dims": bin_dims,
+                "tile_h": tile_h,
+                "tile_w": tile_w,
+                "n_bins": n_bins,
+                "out_h": out_h,
+                "out_w": out_w,
+                "positions": positions,
+                "use_tiling": use_tiling,
+            }
 
     # 5. Write to HDF5 (before updating CSV!)
     _progress(4, 5, "Writing HDF5...")
@@ -280,14 +304,68 @@ def import_dataset(
             store.write_array("intensity", intensity, attrs={"dims": dims})
 
     # Write TCSPC decay data
-    for ch_name, decay in tcspc_data.items():
+    for ch_name, decay_info in tcspc_data.items():
         decay_path = f"decay/{ch_name}"
-        store.write_array(
-            decay_path,
-            decay,
-            attrs={"dims": ["H", "W", "T"], "channel": ch_name},
-            is_decay=True,
-        )
+
+        if isinstance(decay_info, dict) and decay_info.get("_streaming"):
+            # Streaming write: read one .bin tile at a time, write to HDF5
+            import h5py
+
+            from percell4.io.readers import read_flim_bin
+
+            info = decay_info
+            with h5py.File(store.path, "a") as f:
+                if decay_path in f:
+                    del f[decay_path]
+
+                # Create dataset with full stitched dimensions
+                dset = f.create_dataset(
+                    decay_path,
+                    shape=(info["out_h"], info["out_w"], info["n_bins"]),
+                    dtype=np.float32,
+                    chunks=(
+                        min(64, info["tile_h"]),
+                        min(64, info["tile_w"]),
+                        info["n_bins"],
+                    ),
+                    compression="lzf",
+                )
+                dset.attrs["dims"] = ["H", "W", "T"]
+                dset.attrs["channel"] = ch_name
+
+                # Write each tile directly to its region in the dataset
+                for tile_idx, bin_path in sorted(info["tile_bins"].items()):
+                    tile_data = read_flim_bin(
+                        bin_path,
+                        x_dim=info["bin_dims"].get("x_dim", 512),
+                        y_dim=info["bin_dims"].get("y_dim", 512),
+                        t_dim=info["bin_dims"].get("t_dim", 132),
+                        dtype=info["bin_dims"].get("dtype", "float32"),
+                        dim_order=info["bin_dims"].get("dim_order", "YXT"),
+                        header_bytes=info["bin_dims"].get("header_bytes", 0),
+                    )["array"].astype(np.float32)
+
+                    if info["use_tiling"] and tile_idx in info["positions"]:
+                        row, col = info["positions"][tile_idx]
+                        y0 = row * info["tile_h"]
+                        x0 = col * info["tile_w"]
+                        dset[
+                            y0:y0 + info["tile_h"],
+                            x0:x0 + info["tile_w"],
+                            :,
+                        ] = tile_data
+                    else:
+                        dset[:, :, :] = tile_data
+
+                    del tile_data  # free immediately
+        else:
+            # In-memory array (from TCSPC TIFFs or single .bin)
+            store.write_array(
+                decay_path,
+                decay_info,
+                attrs={"dims": ["H", "W", "T"], "channel": ch_name},
+                is_decay=True,
+            )
 
     # 6. Update project.csv
     if project_csv is not None:
