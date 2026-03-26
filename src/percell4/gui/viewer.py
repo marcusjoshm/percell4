@@ -33,14 +33,22 @@ CHANNEL_COLORMAPS = {
     "phase": "gray",
 }
 
+# Color cycle for channels without a recognized name
+_COLOR_CYCLE = ["green", "magenta", "cyan", "yellow", "red", "blue"]
+_color_index = 0
+
 
 def _colormap_for_channel(name: str) -> str:
-    """Auto-detect colormap from channel name."""
+    """Auto-detect colormap from channel name, or cycle through distinct colors."""
+    global _color_index
     key = name.lower().replace(" ", "").replace("-", "").replace("_", "")
     for pattern, cmap in CHANNEL_COLORMAPS.items():
         if pattern in key:
             return cmap
-    return "gray"
+    # No match — assign next color from cycle
+    color = _COLOR_CYCLE[_color_index % len(_COLOR_CYCLE)]
+    _color_index += 1
+    return color
 
 
 class ViewerWindow:
@@ -131,9 +139,12 @@ class ViewerWindow:
             self._qt_window.hide()
 
     def add_image(self, data, name: str, **kwargs) -> None:
-        """Add an image layer with auto-detected colormap."""
+        """Add an image layer with auto-detected colormap and additive blending."""
         cmap = kwargs.pop("colormap", _colormap_for_channel(name))
-        self.viewer.add_image(data, name=name, colormap=cmap, **kwargs)
+        blending = kwargs.pop("blending", "additive")
+        self.viewer.add_image(
+            data, name=name, colormap=cmap, blending=blending, **kwargs
+        )
 
     def add_labels(self, data, name: str, **kwargs) -> None:
         """Add a labels layer."""
@@ -145,6 +156,8 @@ class ViewerWindow:
 
     def clear(self) -> None:
         """Remove all layers."""
+        global _color_index
+        _color_index = 0
         if self._viewer is not None and self._is_alive():
             self._viewer.layers.clear()
 
