@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "percell4"
+version = "0.1.0"
+description = "Single-cell FLIM microscopy analysis platform"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+authors = [
+    {name = "Lee Lab"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    # GUI
+    "napari>=0.5,<0.8",
+    "PyQt5>=5.15",
+    "qtpy>=2.4",
+    "pyqtgraph>=0.13,<0.15",
+
+    # Data storage
+    "h5py>=3.10,<4",
+    "pandas>=2.0,<3",
+
+    # Image processing
+    "numpy>=1.26",
+    "scikit-image>=0.22",
+    "scipy>=1.12",
+    "tifffile>=2024.1",
+
+    # Segmentation
+    "cellpose>=3.0,<5.0",
+
+    # FLIM I/O
+    "sdtfile>=2024.1",
+
+    # CLI
+    "click>=8.1",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "cellpose[gpu]",
+]
+flim = [
+    "dtcwt>=0.14.0",
+]
+imagej = [
+    "roifile>=2024.1",
+]
+all = [
+    "percell4[gpu,flim,imagej]",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-qt>=4.2",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "percell4[all]",
+]
+
+[project.scripts]
+percell4 = "percell4.cli.main:cli"
+
+[project.gui-scripts]
+percell4-gui = "percell4.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (requires cellpose model download, deselect with '-m \"not slow\"')",
+    "gui: marks tests requiring Qt/napari (deselect with '-m \"not gui\"')",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
