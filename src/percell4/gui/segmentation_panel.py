@@ -486,16 +486,12 @@ class SegmentationPanel(QWidget):
 
     # ── Label Cleanup ─────────────────────────────────────────
 
-    def _on_cleanup_preview(self) -> None:
-        labels_layer = self._get_active_labels_layer()
-        if labels_layer is None:
-            self._cleanup_status.setText("No labels layer active.")
-            self._cleanup_status.setStyleSheet("color: #ff6666;")
-            return
-
+    def _run_cleanup_filters(
+        self, labels: np.ndarray,
+    ) -> tuple[np.ndarray, int, int, int]:
+        """Apply edge and area filters. Returns (filtered, edge_removed, small_removed, total)."""
         from percell4.segment.postprocess import filter_edge_cells, filter_small_cells
 
-        labels = np.asarray(labels_layer.data, dtype=np.int32)
         margin = self._cleanup_margin.value()
         min_area = self._cleanup_min_area.value()
 
@@ -507,7 +503,19 @@ class SegmentationPanel(QWidget):
         if min_area > 0:
             filtered, small_removed = filter_small_cells(filtered, min_area=min_area)
 
-        total_removed = edge_removed + small_removed
+        return filtered, edge_removed, small_removed, edge_removed + small_removed
+
+    def _on_cleanup_preview(self) -> None:
+        labels_layer = self._get_active_labels_layer()
+        if labels_layer is None:
+            self._cleanup_status.setText("No labels layer active.")
+            self._cleanup_status.setStyleSheet("color: #ff6666;")
+            return
+
+        labels = np.asarray(labels_layer.data, dtype=np.int32)
+        filtered, edge_removed, small_removed, total_removed = (
+            self._run_cleanup_filters(labels)
+        )
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is None or viewer_win.viewer is None:
@@ -548,25 +556,13 @@ class SegmentationPanel(QWidget):
             self._cleanup_status.setStyleSheet("color: #ff6666;")
             return
 
-        from percell4.segment.postprocess import (
-            filter_edge_cells,
-            filter_small_cells,
-            relabel_sequential,
-        )
+        from percell4.segment.postprocess import relabel_sequential
 
         labels = np.asarray(labels_layer.data, dtype=np.int32)
-        margin = self._cleanup_margin.value()
-        min_area = self._cleanup_min_area.value()
+        filtered, edge_removed, small_removed, total_removed = (
+            self._run_cleanup_filters(labels)
+        )
 
-        filtered = labels
-        edge_removed = 0
-        small_removed = 0
-        if margin >= 0:
-            filtered, edge_removed = filter_edge_cells(filtered, edge_margin=margin)
-        if min_area > 0:
-            filtered, small_removed = filter_small_cells(filtered, min_area=min_area)
-
-        total_removed = edge_removed + small_removed
         filtered = relabel_sequential(filtered)
         n_remaining = int(filtered.max())
 
