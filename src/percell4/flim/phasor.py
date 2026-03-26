@@ -17,6 +17,10 @@ def compute_phasor(
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Compute phasor G and S coordinates from TCSPC decay data.
 
+    Uses normalized DFT: omega = 2π * harmonic / n_bins. This assumes
+    the time bins span one full laser period, which is standard for
+    Becker & Hickl TCSPC exports.
+
     Parameters
     ----------
     decay_stack : (H, W, T) array of photon counts per time bin
@@ -29,6 +33,12 @@ def compute_phasor(
     """
     n_bins = decay_stack.shape[-1]
     k = np.arange(n_bins, dtype=np.float64)
+
+    # Normalized DFT omega: assumes n_bins spans one full laser period.
+    # This is correct when bin_width = laser_period / n_bins, which is the
+    # standard for Becker & Hickl TCSPC (e.g., 132 bins × 0.097 ns = 12.8 ns
+    # = 1/78MHz). The frequency_mhz and bin_width_ns parameters are stored
+    # for lifetime calculation but NOT needed for the phasor transform itself.
     omega = 2.0 * np.pi * harmonic / n_bins
 
     cos_vec = np.cos(omega * k)
