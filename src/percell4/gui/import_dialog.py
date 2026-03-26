@@ -17,6 +17,7 @@ from qtpy.QtWidgets import (
     QPushButton,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from percell4.io.models import TileConfig, TokenConfig
@@ -33,14 +34,28 @@ class ImportDialog(QDialog):
     def __init__(self, parent=None, project_dir: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Import Dataset")
-        self.setMinimumWidth(550)
+        self.setMinimumWidth(500)
+        self.resize(500, 500)
         self._project_dir = project_dir
 
         self._build_ui()
         self._apply_style()
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        from qtpy.QtWidgets import QScrollArea
+
+        outer_layout = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: #1e1e1e; border: none; }")
+        outer_layout.addWidget(scroll)
+
+        content = QWidget()
+        content.setStyleSheet("QWidget { background-color: #1e1e1e; }")
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
 
         # ── Source directory ──────────────────────────────────
         src_group = QGroupBox("Source")
@@ -203,13 +218,13 @@ class ImportDialog(QDialog):
 
         layout.addWidget(meta_group)
 
-        # ── Buttons ───────────────────────────────────────────
+        # ── Buttons (outside scroll area, always visible) ─────
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        outer_layout.addWidget(buttons)
 
     def _browse_source(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select TIFF Directory")

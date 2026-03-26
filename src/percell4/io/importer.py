@@ -71,6 +71,15 @@ def import_dataset(
     if not result.files and not bin_files:
         raise ValueError(f"No image files found in {source_dir}")
 
+    # Auto-enable FLIM if .bin files found and no flim_params provided
+    if bin_files and flim_params is None:
+        flim_params = {
+            "frequency_mhz": 80.0,
+            "calibration_phase": 0.0,
+            "calibration_modulation": 1.0,
+            "bin_dimensions": {"x_dim": 512, "y_dim": 512, "t_dim": 256, "dim_order": "YXT"},
+        }
+
     # 2. Separate TCSPC files from intensity files
     _progress(1, 5, "Organizing files...")
     tcspc_files = []
