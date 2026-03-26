@@ -1,31 +1,312 @@
 """Cell table window — tabular view of per-cell measurements.
 
-Full implementation in Phase 6. This is a placeholder stub.
+QTableView backed by a PandasTableModel with sorting via
+QSortFilterProxyModel. Row clicks sync to CellDataModel selection.
 """
 
 from __future__ import annotations
 
-from qtpy.QtCore import QSettings
-from qtpy.QtWidgets import QLabel, QMainWindow, QVBoxLayout, QWidget
+import numpy as np
+import pandas as pd
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel, Qt
+from qtpy.QtWidgets import (
+    QAbstractItemView,
+    QFileDialog,
+    QHBoxLayout,
+    QMainWindow,
+    QMenu,
+    QPushButton,
+    QStatusBar,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
+)
 
 from percell4.model import CellDataModel
 
 
+class PandasTableModel(QAbstractTableModel):
+    """QAbstractTableModel backed by a pandas DataFrame.
+
+    Uses df.iat for fast single-element access. Formats floats compactly.
+    Returns raw values via Qt.UserRole for correct sort ordering.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._df = pd.DataFrame()
+        self._columns: list[str] = []
+
+    def set_dataframe(self, df: pd.DataFrame) -> None:
+        self.beginResetModel()
+        self._df = df
+        self._columns = list(df.columns)
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._df)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._columns)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+
+        value = self._df.iat[index.row(), index.column()]
+
+        if role == Qt.DisplayRole:
+            if isinstance(value, float):
+                if np.isnan(value):
+                    return ""
+                return f"{value:.4g}"
+            return str(value)
+
+        if role == Qt.TextAlignmentRole:
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            return int(Qt.AlignLeft | Qt.AlignVCenter)
+
+        # Raw value for sorting
+        if role == Qt.UserRole:
+            if isinstance(value, float) and np.isnan(value):
+                return float("inf")  # NaN sorts to end
+            return value
+
+        return None
+
+    def headerData(self, section: int, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return self._columns[section] if section < len(self._columns) else None
+        return str(section + 1)
+
+    def get_label_for_row(self, row: int) -> int | None:
+        """Get the cell label ID for a given row index."""
+        if "label" not in self._columns or row >= len(self._df):
+            return None
+        return int(self._df.iat[row, self._columns.index("label")])
+
+    def find_row_for_label(self, label_id: int) -> int | None:
+        """Find the row index for a given cell label ID."""
+        if "label" not in self._columns:
+            return None
+        try:
+            idx = self._df.index[self._df["label"] == label_id].tolist()
+            return idx[0] if idx else None
+        except (KeyError, IndexError):
+            return None
+
+
 class CellTableWindow(QMainWindow):
-    """Table window showing per-cell measurements with sort/filter."""
+    """Table window showing per-cell measurements with sort and selection sync.
+
+    Features:
+    - QTableView backed by PandasTableModel
+    - Column header click → sort (via QSortFilterProxyModel)
+    - Row click → CellDataModel.set_selection
+    - selection_changed → highlight and scroll to row
+    - Right-click context menu: Export Selection, Export All
+    - Export CSV button in toolbar
+    """
 
     def __init__(self, data_model: CellDataModel) -> None:
         super().__init__()
         self.data_model = data_model
         self.setWindowTitle("PerCell4 — Cell Table")
-        self.resize(800, 400)
+        self.resize(850, 450)
 
+        self._build_ui()
+        self._connect_signals()
+        self._restore_geometry()
+
+    def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.addWidget(QLabel("Cell Table — coming in Phase 6"))
+        layout.setContentsMargins(4, 4, 4, 4)
 
-        self._restore_geometry()
+        # Toolbar
+        toolbar = QHBoxLayout()
+        btn_export = QPushButton("Export CSV...")
+        btn_export.clicked.connect(self._export_all)
+        toolbar.addWidget(btn_export)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        # Table model + proxy for sorting
+        self._model = PandasTableModel()
+        self._proxy = QSortFilterProxyModel()
+        self._proxy.setSourceModel(self._model)
+        self._proxy.setSortRole(Qt.UserRole)
+
+        # Table view
+        self._table = QTableView()
+        self._table.setModel(self._proxy)
+        self._table.setSortingEnabled(True)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_context_menu)
+        self._table.setStyleSheet("""
+            QTableView {
+                background-color: #1e1e1e;
+                alternate-background-color: #252525;
+                color: #e0e0e0;
+                gridline-color: #333333;
+                selection-background-color: #2a4a6a;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #2a2a2a;
+                color: #e0e0e0;
+                border: 1px solid #333333;
+                padding: 4px;
+            }
+        """)
+        layout.addWidget(self._table)
+
+        # Status bar
+        self._status = QStatusBar()
+        self.setStatusBar(self._status)
+        self._status.showMessage("No data")
+
+        # Suppress internal selection feedback during programmatic updates
+        self._updating_selection = False
+
+    def _connect_signals(self) -> None:
+        self.data_model.data_updated.connect(self._on_data_updated)
+        self.data_model.selection_changed.connect(self._on_selection_changed)
+        self._table.selectionModel().selectionChanged.connect(
+            self._on_table_selection_changed
+        )
+
+    # ── Data model reactions ──────────────────────────────────
+
+    def _on_data_updated(self) -> None:
+        """Reload the table from the current DataFrame."""
+        df = self.data_model.df
+        self._model.set_dataframe(df)
+
+        if df.empty:
+            self._status.showMessage("No data")
+        else:
+            self._status.showMessage(f"Showing {len(df)} cells")
+
+        # Resize columns to content
+        self._table.resizeColumnsToContents()
+
+    def _on_selection_changed(self, label_ids: list[int]) -> None:
+        """Highlight rows matching the selected cell IDs."""
+        self._updating_selection = True
+
+        selection_model = self._table.selectionModel()
+        selection_model.clearSelection()
+
+        if not label_ids:
+            self._updating_selection = False
+            count = self._model.rowCount()
+            self._status.showMessage(f"Showing {count} cells")
+            return
+
+        first_row = None
+        for label_id in label_ids:
+            source_row = self._model.find_row_for_label(label_id)
+            if source_row is None:
+                continue
+            proxy_index = self._proxy.mapFromSource(
+                self._model.index(source_row, 0)
+            )
+            if proxy_index.isValid():
+                self._table.selectRow(proxy_index.row())
+                if first_row is None:
+                    first_row = proxy_index.row()
+
+        # Scroll to the first selected row
+        if first_row is not None:
+            self._table.scrollTo(
+                self._proxy.index(first_row, 0),
+                QAbstractItemView.PositionAtCenter,
+            )
+
+        n_selected = len(label_ids)
+        n_total = self._model.rowCount()
+        self._status.showMessage(f"Selected: {n_selected} | Total: {n_total} cells")
+
+        self._updating_selection = False
+
+    # ── Table → model selection ───────────────────────────────
+
+    def _on_table_selection_changed(self, selected, deselected) -> None:
+        """Forward table row selection to CellDataModel."""
+        if self._updating_selection:
+            return  # Avoid feedback loop
+
+        rows = set()
+        for index in self._table.selectionModel().selectedRows():
+            source_index = self._proxy.mapToSource(index)
+            rows.add(source_index.row())
+
+        label_ids = []
+        for row in sorted(rows):
+            lid = self._model.get_label_for_row(row)
+            if lid is not None:
+                label_ids.append(lid)
+
+        if label_ids:
+            self.data_model.set_selection(label_ids)
+
+    # ── Context menu ──────────────────────────────────────────
+
+    def _show_context_menu(self, position) -> None:
+        menu = QMenu(self._table)
+
+        export_sel = menu.addAction("Export Selection to CSV...")
+        export_sel.triggered.connect(self._export_selection)
+
+        export_all = menu.addAction("Export All to CSV...")
+        export_all.triggered.connect(self._export_all)
+
+        menu.exec_(self._table.viewport().mapToGlobal(position))
+
+    def _export_all(self) -> None:
+        """Export full DataFrame to CSV."""
+        df = self.data_model.df
+        if df.empty:
+            self._status.showMessage("No data to export")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export All Measurements", "measurements.csv", "CSV (*.csv)"
+        )
+        if path:
+            df.to_csv(path, index=False)
+            self._status.showMessage(f"Exported {len(df)} rows to {path}")
+
+    def _export_selection(self) -> None:
+        """Export selected rows to CSV."""
+        df = self.data_model.df
+        selected_ids = self.data_model.selected_ids
+        if not selected_ids or df.empty:
+            self._status.showMessage("No selection to export")
+            return
+
+        selected_df = df[df["label"].isin(selected_ids)]
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Selection", "selection.csv", "CSV (*.csv)"
+        )
+        if path:
+            selected_df.to_csv(path, index=False)
+            self._status.showMessage(
+                f"Exported {len(selected_df)} rows to {path}"
+            )
+
+    # ── Lifecycle ─────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
         self._save_geometry()
