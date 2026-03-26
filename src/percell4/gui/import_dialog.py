@@ -127,7 +127,14 @@ class ImportDialog(QDialog):
         self._tile_order.addItems([
             "right_down", "right_up", "left_down", "left_up"
         ])
-        tile_layout.addRow("Order:", self._tile_order)
+        self._tile_order.setToolTip(
+            "Starting corner of the scan:\n"
+            "  right_down = start top-left, scan right then down\n"
+            "  right_up   = start bottom-left, scan right then up\n"
+            "  left_down  = start top-right, scan left then down\n"
+            "  left_up    = start bottom-right, scan left then up"
+        )
+        tile_layout.addRow("Start corner:", self._tile_order)
 
         self._tile_group.setVisible(False)
         self._tile_enabled.toggled.connect(self._tile_group.setVisible)

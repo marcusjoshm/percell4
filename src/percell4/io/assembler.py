@@ -57,42 +57,60 @@ def assemble_tiles(
 def _tile_positions(
     rows: int, cols: int, grid_type: str, order: str
 ) -> dict[int, tuple[int, int]]:
-    """Map tile index to (row, col) grid position."""
+    """Map tile index to (row, col) grid position.
+
+    Parameters
+    ----------
+    grid_type : scanning pattern
+        'row_by_row', 'column_by_column', 'snake_by_row', 'snake_by_column'
+    order : starting corner and initial direction
+        'right_down' — start top-left, scan right then down (default)
+        'right_up'   — start bottom-left, scan right then up
+        'left_down'  — start top-right, scan left then down
+        'left_up'    — start bottom-right, scan left then up
+    """
+    # Determine starting corner
+    start_bottom = "up" in order
+    start_right = "left" in order
+
+    # Build row and column sequences based on starting corner
+    if start_bottom:
+        row_seq = list(range(rows - 1, -1, -1))  # bottom to top
+    else:
+        row_seq = list(range(rows))  # top to bottom
+
+    if start_right:
+        col_seq = list(range(cols - 1, -1, -1))  # right to left
+    else:
+        col_seq = list(range(cols))  # left to right
+
     positions: dict[int, tuple[int, int]] = {}
     idx = 0
 
     if grid_type == "row_by_row":
-        for r in range(rows):
-            for c in range(cols):
+        for r in row_seq:
+            for c in col_seq:
                 positions[idx] = (r, c)
                 idx += 1
     elif grid_type == "column_by_column":
-        for c in range(cols):
-            for r in range(rows):
+        for c in col_seq:
+            for r in row_seq:
                 positions[idx] = (r, c)
                 idx += 1
     elif grid_type == "snake_by_row":
-        for r in range(rows):
-            col_range = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-            for c in col_range:
+        for i, r in enumerate(row_seq):
+            cs = col_seq if i % 2 == 0 else col_seq[::-1]
+            for c in cs:
                 positions[idx] = (r, c)
                 idx += 1
     elif grid_type == "snake_by_column":
-        for c in range(cols):
-            row_range = range(rows) if c % 2 == 0 else range(rows - 1, -1, -1)
-            for r in row_range:
+        for i, c in enumerate(col_seq):
+            rs = row_seq if i % 2 == 0 else row_seq[::-1]
+            for r in rs:
                 positions[idx] = (r, c)
                 idx += 1
     else:
         raise ValueError(f"Unknown grid_type: {grid_type!r}")
-
-    # Apply order transformations
-    if "left" in order:
-        max_col = cols - 1
-        positions = {k: (r, max_col - c) for k, (r, c) in positions.items()}
-    if "up" in order:
-        max_row = rows - 1
-        positions = {k: (max_row - r, c) for k, (r, c) in positions.items()}
 
     return positions
 
