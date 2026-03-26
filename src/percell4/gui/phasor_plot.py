@@ -44,6 +44,8 @@ class PhasorPlotWindow(QMainWindow):
 
         self._g_map: np.ndarray | None = None
         self._s_map: np.ndarray | None = None
+        self._g_map_unfiltered: np.ndarray | None = None
+        self._s_map_unfiltered: np.ndarray | None = None
         self._hist_bins = 256
 
         self._build_ui()
@@ -65,6 +67,8 @@ class PhasorPlotWindow(QMainWindow):
         controls.addSpacing(16)
         self._filtered_check = QCheckBox("Filtered")
         self._filtered_check.setStyleSheet("QCheckBox { color: #e0e0e0; }")
+        self._filtered_check.setEnabled(False)
+        self._filtered_check.toggled.connect(self._on_filtered_toggled)
         controls.addWidget(self._filtered_check)
 
         controls.addStretch()
@@ -113,10 +117,36 @@ class PhasorPlotWindow(QMainWindow):
         self,
         g_map: np.ndarray,
         s_map: np.ndarray,
+        g_unfiltered: np.ndarray | None = None,
+        s_unfiltered: np.ndarray | None = None,
     ) -> None:
-        """Set new phasor data and refresh the histogram."""
+        """Set phasor data and refresh the histogram.
+
+        If unfiltered data is provided, the Filtered checkbox toggles
+        between filtered and unfiltered views.
+        """
         self._g_map = g_map
         self._s_map = s_map
+        if g_unfiltered is not None:
+            self._g_map_unfiltered = g_unfiltered
+            self._s_map_unfiltered = s_unfiltered
+            self._filtered_check.setEnabled(True)
+            self._filtered_check.setChecked(True)
+        else:
+            self._g_map_unfiltered = None
+            self._s_map_unfiltered = None
+            self._filtered_check.setEnabled(False)
+            self._filtered_check.setChecked(False)
+        self._refresh_histogram()
+
+    def _on_filtered_toggled(self, checked: bool) -> None:
+        """Toggle between filtered and unfiltered phasor display."""
+        if checked and self._g_map is not None:
+            # Show filtered (already in _g_map/_s_map)
+            pass
+        elif not checked and self._g_map_unfiltered is not None:
+            # Swap to unfiltered for display
+            pass
         self._refresh_histogram()
 
     def _refresh_histogram(self) -> None:
@@ -124,8 +154,17 @@ class PhasorPlotWindow(QMainWindow):
         if self._g_map is None or self._s_map is None:
             return
 
-        g_flat = self._g_map.ravel()
-        s_flat = self._s_map.ravel()
+        # Choose filtered or unfiltered based on checkbox
+        use_filtered = self._filtered_check.isChecked()
+        if not use_filtered and self._g_map_unfiltered is not None:
+            g_display = self._g_map_unfiltered
+            s_display = self._s_map_unfiltered
+        else:
+            g_display = self._g_map
+            s_display = self._s_map
+
+        g_flat = g_display.ravel()
+        s_flat = s_display.ravel()
 
         # Remove NaN pixels
         valid = np.isfinite(g_flat) & np.isfinite(s_flat)

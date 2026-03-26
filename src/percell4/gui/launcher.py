@@ -1524,10 +1524,200 @@ class LauncherWindow(QMainWindow):
         )
 
     def _on_apply_wavelet(self) -> None:
-        self.statusBar().showMessage("Wavelet filter — not yet implemented")
+        """Apply DTCWT wavelet denoising to the active channel's phasor data."""
+        import numpy as np
+
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            self.statusBar().showMessage("No dataset loaded")
+            return
+
+        # Get active channel
+        viewer_win = self._windows.get("viewer")
+        active_channel = None
+        if viewer_win is not None and viewer_win.viewer is not None:
+            active = viewer_win.viewer.layers.selection.active
+            if active is not None and active.__class__.__name__ == "Image":
+                active_channel = active.name
+
+        if active_channel is None:
+            self.statusBar().showMessage("Select a channel in the viewer first")
+            return
+
+        # Read phasor G/S maps (must compute phasor first)
+        try:
+            g_map = store.read_array(f"phasor/{active_channel}/g")
+            s_map = store.read_array(f"phasor/{active_channel}/s")
+        except KeyError:
+            self.statusBar().showMessage(
+                f"No phasor data for '{active_channel}'. "
+                "Compute Phasor first."
+            )
+            return
+
+        # Read intensity for the filter (sum of decay or stored intensity)
+        try:
+            with store.open_read() as s:
+                intensity_data = s.read_array("intensity")
+        except KeyError:
+            self.statusBar().showMessage("No intensity data in dataset")
+            return
+
+        # If multi-channel, extract the right channel
+        if intensity_data.ndim == 3:
+            meta = store.metadata
+            channel_names = list(meta.get("channel_names", []))
+            if active_channel in channel_names:
+                ch_idx = channel_names.index(active_channel)
+                intensity = intensity_data[ch_idx]
+            else:
+                intensity = intensity_data[0]
+        else:
+            intensity = intensity_data
+
+        filter_level = self._wavelet_level.value()
+
+        # Get frequency for lifetime calculation
+        meta = store.metadata
+        freq = meta.get("flim_frequency_mhz", None)
+        omega = None
+        if freq and freq > 0:
+            omega = 2.0 * np.pi * freq  # rad/us
+
+        self.statusBar().showMessage(
+            f"Applying wavelet filter (level {filter_level}) to {active_channel}..."
+        )
+
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QApplication
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from percell4.flim.wavelet_filter import denoise_phasor
+
+            result = denoise_phasor(
+                g_map, s_map, intensity.astype(np.float64),
+                filter_level=filter_level,
+                omega=omega,
+            )
+        except ImportError:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().showMessage(
+                "dtcwt package required. Install: pip install 'percell4[flim]'"
+            )
+            return
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().showMessage(f"Wavelet filter error: {e}")
+            return
+
+        QApplication.restoreOverrideCursor()
+
+        # Store filtered results
+        g_filtered = result["G"]
+        s_filtered = result["S"]
+
+        store.write_array(
+            f"phasor/{active_channel}/g_filtered", g_filtered,
+            attrs={"dims": ["H", "W"], "channel": active_channel,
+                   "filter_level": filter_level},
+        )
+        store.write_array(
+            f"phasor/{active_channel}/s_filtered", s_filtered,
+            attrs={"dims": ["H", "W"], "channel": active_channel,
+                   "filter_level": filter_level},
+        )
+
+        if result["T"] is not None:
+            store.write_array(
+                f"phasor/{active_channel}/lifetime_filtered", result["T"],
+                attrs={"dims": ["H", "W"], "channel": active_channel},
+            )
+
+        # Update phasor plot with filtered data
+        phasor_win = self._windows.get("phasor_plot")
+        if phasor_win is not None:
+            phasor_win.set_phasor_data(
+                g_filtered, s_filtered,
+                g_unfiltered=g_map, s_unfiltered=s_map,
+            )
+
+        n_valid = int(np.isfinite(g_filtered).sum())
+        self.statusBar().showMessage(
+            f"Wavelet filter applied: level {filter_level} | "
+            f"{n_valid:,} valid pixels | channel: {active_channel}"
+        )
 
     def _on_compute_lifetime(self) -> None:
-        self.statusBar().showMessage("Compute lifetime — not yet implemented")
+        """Compute lifetime map from phasor data for the active channel."""
+        import numpy as np
+
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            self.statusBar().showMessage("No dataset loaded")
+            return
+
+        viewer_win = self._windows.get("viewer")
+        active_channel = None
+        if viewer_win is not None and viewer_win.viewer is not None:
+            active = viewer_win.viewer.layers.selection.active
+            if active is not None and active.__class__.__name__ == "Image":
+                active_channel = active.name
+
+        if active_channel is None:
+            self.statusBar().showMessage("Select a channel in the viewer first")
+            return
+
+        meta = store.metadata
+        freq = meta.get("flim_frequency_mhz", None)
+        if not freq or freq <= 0:
+            self.statusBar().showMessage("No laser frequency in metadata")
+            return
+
+        # Try filtered phasor first, fall back to unfiltered
+        try:
+            g = store.read_array(f"phasor/{active_channel}/g_filtered")
+            s = store.read_array(f"phasor/{active_channel}/s_filtered")
+            source = "filtered"
+        except KeyError:
+            try:
+                g = store.read_array(f"phasor/{active_channel}/g")
+                s = store.read_array(f"phasor/{active_channel}/s")
+                source = "unfiltered"
+            except KeyError:
+                self.statusBar().showMessage(
+                    f"No phasor data for '{active_channel}'. Compute Phasor first."
+                )
+                return
+
+        from percell4.flim.phasor import phasor_to_lifetime
+
+        lifetime = phasor_to_lifetime(g, s, frequency_mhz=freq)
+
+        # Store
+        store.write_array(
+            f"phasor/{active_channel}/lifetime", lifetime,
+            attrs={"dims": ["H", "W"], "channel": active_channel, "source": source},
+        )
+
+        # Add as a layer in the viewer
+        if viewer_win is not None:
+            viewer_win.viewer.add_image(
+                lifetime,
+                name=f"Lifetime ({active_channel})",
+                colormap="turbo",
+                blending="additive",
+            )
+
+        valid = np.isfinite(lifetime)
+        if valid.any():
+            mean_tau = float(np.nanmean(lifetime[valid]))
+            self.statusBar().showMessage(
+                f"Lifetime ({source}): mean={mean_tau:.2f} ns | "
+                f"channel: {active_channel} | freq: {freq} MHz"
+            )
+        else:
+            self.statusBar().showMessage("Lifetime: no valid pixels")
 
     def _on_run_script(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
