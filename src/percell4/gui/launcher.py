@@ -40,6 +40,30 @@ class LauncherWindow(QMainWindow):
         # Window registry — all managed windows
         self._windows: dict[str, QWidget] = {}
 
+        # Global dark theme for the launcher window
+        self.setStyleSheet("""
+            QMainWindow { background-color: #121212; }
+            QMenuBar {
+                background-color: #1e2a3a;
+                color: #e0e0e0;
+            }
+            QMenuBar::item:selected { background-color: #2a3d52; }
+            QMenu {
+                background-color: #1e2a3a;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+            }
+            QMenu::item:selected {
+                background-color: #4ea8de;
+                color: #ffffff;
+            }
+            QStatusBar {
+                background-color: #0d1b2a;
+                color: #a0a0a0;
+                border-top: 1px solid #2a2a2a;
+            }
+        """)
+
         # Build UI
         self._create_menu_bar()
         self._create_central_widget()
@@ -78,33 +102,89 @@ class LauncherWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Sidebar
+        # Sidebar — distinct dark blue-gray, white text
         sidebar = QWidget()
-        sidebar.setFixedWidth(140)
+        sidebar.setFixedWidth(150)
         sidebar.setStyleSheet("""
-            QWidget { background-color: #2b2b2b; }
+            QWidget { background-color: #1e2a3a; }
             QPushButton {
-                background-color: #2b2b2b;
-                color: #cccccc;
+                background-color: #1e2a3a;
+                color: #e0e0e0;
                 border: none;
-                padding: 12px 8px;
+                padding: 14px 12px;
                 text-align: left;
-                font-size: 13px;
+                font-size: 14px;
             }
-            QPushButton:hover { background-color: #3b3b3b; }
-            QPushButton:checked {
-                background-color: #1a1a2e;
+            QPushButton:hover {
+                background-color: #2a3d52;
                 color: #ffffff;
-                border-left: 3px solid #6366f1;
+            }
+            QPushButton:checked {
+                background-color: #0d1b2a;
+                color: #ffffff;
+                border-left: 3px solid #4ea8de;
             }
         """)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 8, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        # Content stack
+        # Content stack — dark background, white text
         self._content_stack = QStackedWidget()
-        self._content_stack.setStyleSheet("QStackedWidget { background-color: #1e1e1e; }")
+        self._content_stack.setStyleSheet("""
+            QStackedWidget {
+                background-color: #121212;
+                color: #ffffff;
+            }
+            QLabel { color: #e0e0e0; }
+            QGroupBox {
+                color: #ffffff;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 16px;
+            }
+            QGroupBox::title {
+                color: #4ea8de;
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }
+            QPushButton {
+                background-color: #2a2a2a;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #4ea8de;
+            }
+            QPushButton:pressed {
+                background-color: #1a1a1a;
+            }
+            QComboBox {
+                background-color: #2a2a2a;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QComboBox:hover { border-color: #4ea8de; }
+            QComboBox QAbstractItemView {
+                background-color: #2a2a2a;
+                color: #ffffff;
+                selection-background-color: #4ea8de;
+            }
+            QSpinBox, QDoubleSpinBox {
+                background-color: #2a2a2a;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 4px;
+            }
+        """)
 
         # Create sidebar buttons and content panels
         categories = [
@@ -398,14 +478,18 @@ class LauncherWindow(QMainWindow):
     def _section_label(text: str) -> QLabel:
         label = QLabel(text)
         label.setStyleSheet(
-            "font-size: 16px; font-weight: bold; color: #ffffff; margin-bottom: 8px;"
+            "font-size: 18px; font-weight: bold; color: #ffffff;"
+            " margin-bottom: 12px; padding-bottom: 4px;"
+            " border-bottom: 1px solid #3a3a3a;"
         )
         return label
 
     @staticmethod
     def _placeholder(text: str) -> QLabel:
         label = QLabel(f"  {text} — coming soon")
-        label.setStyleSheet("color: #666666; font-style: italic; padding: 4px;")
+        label.setStyleSheet(
+            "color: #555555; font-style: italic; padding: 4px 8px;"
+        )
         return label
 
     # ── Window management ─────────────────────────────────────
