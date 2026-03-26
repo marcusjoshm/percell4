@@ -12,6 +12,7 @@ from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -19,6 +20,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QStackedWidget,
@@ -304,9 +306,14 @@ class LauncherWindow(QMainWindow):
         model_row = QHBoxLayout()
         model_row.addWidget(QLabel("Model:"))
         self._seg_model = QComboBox()
-        self._seg_model.addItems(["cyto3", "cyto2", "cyto", "nuclei"])
+        self._seg_model.addItems(["cpsam", "cyto3", "cyto2", "cyto", "nuclei"])
         model_row.addWidget(self._seg_model)
         seg_layout.addLayout(model_row)
+
+        gpu_row = QHBoxLayout()
+        self._seg_gpu = QCheckBox("Use GPU")
+        gpu_row.addWidget(self._seg_gpu)
+        seg_layout.addLayout(gpu_row)
 
         diam_row = QHBoxLayout()
         diam_row.addWidget(QLabel("Diameter:"))
@@ -710,7 +717,135 @@ class LauncherWindow(QMainWindow):
 
     def _on_run_segmentation(self) -> None:
         method = self._seg_method.currentText()
-        self.statusBar().showMessage(f"Segmentation ({method}) — not yet implemented")
+
+        if method == "Import ROIs":
+            self._on_import_rois()
+            return
+
+        if method == "Manual Drawing":
+            self._show_window("viewer")
+            self.statusBar().showMessage(
+                "Manual drawing: use napari's paint/fill tools on the Labels layer"
+            )
+            return
+
+        # Cellpose segmentation
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self.statusBar().showMessage("Open a dataset in the viewer first")
+            return
+
+        # Get the current image from the first image layer
+        image_layers = [
+            layer for layer in viewer_win.viewer.layers
+            if layer.__class__.__name__ == "Image"
+        ]
+        if not image_layers:
+            self.statusBar().showMessage("No image loaded in viewer")
+            return
+
+        image = image_layers[0].data
+        model_type = self._seg_model.currentText()
+        diameter = self._seg_diameter.value() if self._seg_diameter.value() > 0 else None
+        gpu = self._seg_gpu.isChecked()
+
+        self.statusBar().showMessage(
+            f"Running Cellpose ({model_type})..."
+        )
+
+        from percell4.gui.workers import Worker
+        from percell4.segment.cellpose import run_cellpose
+
+        self._seg_worker = Worker(
+            run_cellpose,
+            image,
+            model_type=model_type,
+            diameter=diameter,
+            gpu=gpu,
+        )
+        self._seg_worker.finished.connect(self._on_segmentation_done)
+        self._seg_worker.error.connect(
+            lambda msg: self.statusBar().showMessage(f"Segmentation error: {msg}")
+        )
+        self._seg_worker.start()
+
+    def _on_segmentation_done(self, masks) -> None:
+        """Handle completed segmentation: postprocess, store, display."""
+        from percell4.segment.postprocess import (
+            filter_edge_cells,
+            filter_small_cells,
+            relabel_sequential,
+        )
+
+        # Postprocess
+        labels, edge_removed = filter_edge_cells(masks)
+        labels, small_removed = filter_small_cells(labels, min_area=15)
+        labels = relabel_sequential(labels)
+        n_cells = int(labels.max())
+
+        self.statusBar().showMessage(
+            f"Segmentation complete: {n_cells} cells "
+            f"({edge_removed} edge, {small_removed} small removed)"
+        )
+
+        # Write to HDF5 if a dataset is loaded
+        store = getattr(self, "_current_store", None)
+        if store is not None:
+            seg_name = f"cellpose_{n_cells}"
+            store.write_labels(seg_name, labels)
+
+        # Display in viewer
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None:
+            seg_name = f"cellpose_{n_cells}"
+            viewer_win.add_labels(labels, name=seg_name)
+
+    def _on_import_rois(self) -> None:
+        """Import ImageJ ROI .zip file as a label array."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import ImageJ ROIs", "",
+            "ROI Files (*.zip);;All Files (*)"
+        )
+        if not path:
+            return
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self.statusBar().showMessage("Open a dataset in the viewer first")
+            return
+
+        # Get image shape from first image layer
+        image_layers = [
+            layer for layer in viewer_win.viewer.layers
+            if layer.__class__.__name__ == "Image"
+        ]
+        if not image_layers:
+            self.statusBar().showMessage("No image loaded")
+            return
+
+        shape = image_layers[0].data.shape[-2:]  # (H, W)
+
+        try:
+            from percell4.segment.roi_import import import_imagej_rois
+
+            labels = import_imagej_rois(path, shape)
+            n_cells = int(labels.max())
+
+            # Write to HDF5
+            store = getattr(self, "_current_store", None)
+            if store is not None:
+                store.write_labels(f"roi_import_{n_cells}", labels)
+
+            viewer_win.add_labels(labels, name=f"roi_import_{n_cells}")
+            self.statusBar().showMessage(f"Imported {n_cells} ROIs from {Path(path).name}")
+        except ImportError:
+            QMessageBox.warning(
+                self, "Missing Dependency",
+                "roifile package required for ImageJ ROI import.\n"
+                "Install with: pip install roifile"
+            )
+        except Exception as e:
+            self.statusBar().showMessage(f"ROI import error: {e}")
 
     def _on_apply_threshold(self) -> None:
         method = self._thresh_method.currentText()
