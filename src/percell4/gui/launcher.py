@@ -472,6 +472,9 @@ class LauncherWindow(QMainWindow):
         seg_row.addWidget(QLabel("Active Segmentation:"))
         self._active_seg_combo = QComboBox()
         self._active_seg_combo.setPlaceholderText("None")
+        self._active_seg_combo.currentTextChanged.connect(
+            self._on_active_seg_combo_changed
+        )
         seg_row.addWidget(self._active_seg_combo)
         layers_layout.addLayout(seg_row)
 
@@ -479,8 +482,19 @@ class LauncherWindow(QMainWindow):
         mask_row.addWidget(QLabel("Active Mask:"))
         self._active_mask_combo = QComboBox()
         self._active_mask_combo.setPlaceholderText("None")
+        self._active_mask_combo.currentTextChanged.connect(
+            self._on_active_mask_combo_changed
+        )
         mask_row.addWidget(self._active_mask_combo)
         layers_layout.addLayout(mask_row)
+
+        # Listen to model for changes from other sources (e.g., napari click)
+        self.data_model.active_segmentation_changed.connect(
+            self._on_model_active_seg_changed
+        )
+        self.data_model.active_mask_changed.connect(
+            self._on_model_active_mask_changed
+        )
 
         layout.addWidget(layers_group)
 
@@ -610,6 +624,8 @@ class LauncherWindow(QMainWindow):
             seg_win = self._windows.get("segmentation")
             if seg_win is not None:
                 seg_win.update_channel_label()
+            # Update active segmentation/mask from napari layer selection
+            self._sync_active_layers_from_viewer()
 
         viewer_win.viewer.layers.selection.events.active.connect(
             _on_layer_selection_changed
@@ -860,6 +876,37 @@ class LauncherWindow(QMainWindow):
         if seg_win is not None:
             seg_win.update_channel_label()
 
+    def _sync_active_layers_from_viewer(self) -> None:
+        """When user clicks a layer in napari, update the active seg/mask in the model."""
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            return
+
+        active = viewer_win.viewer.layers.selection.active
+        if active is None:
+            return
+
+        import napari
+        if not isinstance(active, napari.layers.Labels):
+            return
+
+        name = active.name
+        store = getattr(self, "_current_store", None)
+
+        # Determine if this is a segmentation or a mask
+        if store is not None:
+            label_names = store.list_labels()
+            mask_names = store.list_masks()
+            if name in mask_names:
+                self.data_model.set_active_mask(name)
+                return
+            if name in label_names:
+                self.data_model.set_active_segmentation(name)
+                return
+
+        # Not in store — default to treating it as a segmentation
+        self.data_model.set_active_segmentation(name)
+
     def _on_save_mask(self) -> None:
         """Save a mask layer from viewer to HDF5."""
         store = getattr(self, "_current_store", None)
@@ -1067,6 +1114,39 @@ class LauncherWindow(QMainWindow):
 
         self._refresh_management_combos()
         self.statusBar().showMessage(f"Deleted channel '{name}'")
+
+    # ── Active layer sync ───────────────────────────────────────
+
+    def _on_active_seg_combo_changed(self, name: str) -> None:
+        """User changed the active segmentation dropdown."""
+        if name:
+            self.data_model.set_active_segmentation(name)
+
+    def _on_active_mask_combo_changed(self, name: str) -> None:
+        """User changed the active mask dropdown."""
+        if name:
+            self.data_model.set_active_mask(name)
+
+    def _on_model_active_seg_changed(self, name: str) -> None:
+        """Model's active segmentation changed (e.g., from napari click)."""
+        if hasattr(self, "_active_seg_combo") and name:
+            self._active_seg_combo.blockSignals(True)
+            if self._active_seg_combo.findText(name) < 0:
+                self._active_seg_combo.addItem(name)
+            self._active_seg_combo.setCurrentText(name)
+            self._active_seg_combo.blockSignals(False)
+        # Also update management combo
+        self._refresh_management_combos()
+
+    def _on_model_active_mask_changed(self, name: str) -> None:
+        """Model's active mask changed (e.g., from napari click)."""
+        if hasattr(self, "_active_mask_combo") and name:
+            self._active_mask_combo.blockSignals(True)
+            if self._active_mask_combo.findText(name) < 0:
+                self._active_mask_combo.addItem(name)
+            self._active_mask_combo.setCurrentText(name)
+            self._active_mask_combo.blockSignals(False)
+        self._refresh_management_combos()
 
     def _refresh_active_combos(self) -> None:
         """Refresh the active segmentation/mask dropdowns."""

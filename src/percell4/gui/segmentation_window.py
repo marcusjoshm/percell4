@@ -319,11 +319,7 @@ class SegmentationWindow(QMainWindow):
             viewer_win.add_labels(labels, name=seg_name)
 
         # Update active segmentation dropdown
-        if hasattr(self._launcher, "_active_seg_combo"):
-            combo = self._launcher._active_seg_combo
-            if combo.findText(seg_name) == -1:
-                combo.addItem(seg_name)
-            combo.setCurrentText(seg_name)
+        self.data_model.set_active_segmentation(seg_name)
 
     # ── Load ROIs ─────────────────────────────────────────────
 
@@ -439,21 +435,45 @@ class SegmentationWindow(QMainWindow):
         )
 
     def _get_active_labels_layer(self):
-        """Get the active labels layer from the viewer, or None."""
+        """Get the active segmentation labels layer from the viewer.
+
+        Uses the model's active_segmentation name to find the correct layer.
+        Falls back to napari's selected layer or first labels layer.
+        """
         if self._launcher is None:
             return None
         viewer_win = self._launcher._windows.get("viewer")
         if viewer_win is None or viewer_win.viewer is None:
             return None
+
         import napari
+
+        # First: try to find the layer matching model's active segmentation
+        active_name = self.data_model.active_segmentation
+        if active_name:
+            for layer in viewer_win.viewer.layers:
+                if isinstance(layer, napari.layers.Labels) and layer.name == active_name:
+                    return layer
+
+        # Fallback: napari's currently selected layer
         active = viewer_win.viewer.layers.selection.active
         if active is not None and isinstance(active, napari.layers.Labels):
             return active
-        # Fall back to first labels layer
+
+        # Last resort: first labels layer
         for layer in viewer_win.viewer.layers:
             if isinstance(layer, napari.layers.Labels):
                 return layer
         return None
+
+    def _select_labels_layer_in_viewer(self, labels_layer) -> None:
+        """Ensure the given labels layer is the active selection in napari."""
+        if self._launcher is None:
+            return
+        viewer_win = self._launcher._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            return
+        viewer_win.viewer.layers.selection.active = labels_layer
 
     def _on_delete_selected_label(self) -> None:
         """Delete the currently selected label from the active labels layer."""
@@ -480,15 +500,27 @@ class SegmentationWindow(QMainWindow):
         )
 
     def _on_add_new_label(self) -> None:
-        """Set the paint label to the next available ID for drawing a new cell."""
+        """Set the active segmentation layer to polygon mode with next ID.
+
+        Automatically selects the active segmentation layer in napari
+        so the viewer is immediately ready to draw.
+        """
         labels_layer = self._get_active_labels_layer()
         if labels_layer is None:
-            self.statusBar().showMessage("No labels layer active")
+            self.statusBar().showMessage("No labels layer active — load or create one first")
             return
+
+        # Select this layer in napari so it receives the drawing
+        self._select_labels_layer_in_viewer(labels_layer)
 
         next_id = int(labels_layer.data.max()) + 1
         labels_layer.selected_label = next_id
         labels_layer.mode = "polygon"
+
+        # Bring the viewer to front
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        if viewer_win is not None:
+            viewer_win.show()
 
         self.statusBar().showMessage(
             f"Label {next_id} — draw cell boundary with polygon tool"

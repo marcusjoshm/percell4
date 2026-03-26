@@ -21,11 +21,15 @@ class CellDataModel(QObject):
 
     data_updated = Signal()
     selection_changed = Signal(list)  # list of selected label IDs (int)
+    active_segmentation_changed = Signal(str)  # name of active seg layer
+    active_mask_changed = Signal(str)  # name of active mask layer
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._df = pd.DataFrame()
         self._selected_ids: list[int] = []
+        self._active_segmentation: str = ""
+        self._active_mask: str = ""
 
     @property
     def df(self) -> pd.DataFrame:
@@ -47,9 +51,35 @@ class CellDataModel(QObject):
         """Currently selected cell label IDs."""
         return self._selected_ids
 
+    @property
+    def active_segmentation(self) -> str:
+        """Name of the currently active segmentation layer."""
+        return self._active_segmentation
+
+    def set_active_segmentation(self, name: str) -> None:
+        """Set the active segmentation layer and notify all listeners."""
+        if name != self._active_segmentation:
+            self._active_segmentation = name
+            self.active_segmentation_changed.emit(name)
+
+    @property
+    def active_mask(self) -> str:
+        """Name of the currently active mask layer."""
+        return self._active_mask
+
+    def set_active_mask(self, name: str) -> None:
+        """Set the active mask layer and notify all listeners."""
+        if name != self._active_mask:
+            self._active_mask = name
+            self.active_mask_changed.emit(name)
+
     def clear(self) -> None:
         """Reset all state. Called when closing a dataset."""
         self._df = pd.DataFrame()
         self._selected_ids = []
+        self._active_segmentation = ""
+        self._active_mask = ""
         self.data_updated.emit()
         self.selection_changed.emit([])
+        self.active_segmentation_changed.emit("")
+        self.active_mask_changed.emit("")
