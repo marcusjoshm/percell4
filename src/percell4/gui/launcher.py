@@ -764,8 +764,27 @@ class LauncherWindow(QMainWindow):
         if dialog.exec_() != ImportDialog.Accepted:
             return
 
+        # Capture ALL dialog values immediately (before dialog is destroyed)
         source_dir = dialog.source_dir
         output_path = dialog.output_path
+        d_token_config = dialog.token_config
+        d_tile_config = dialog.tile_config
+        d_z_method = dialog.z_project_method
+        d_condition = dialog.condition
+        d_replicate = dialog.replicate
+        d_notes = dialog.notes
+        d_has_flim = dialog.has_flim
+        flim_params = None
+        if d_has_flim:
+            flim_params = {
+                "frequency_mhz": dialog.flim_frequency_mhz,
+                "calibration_phase": dialog.flim_calibration_phase,
+                "calibration_modulation": dialog.flim_calibration_modulation,
+                "bin_dimensions": dialog.bin_dimensions,
+            }
+
+        # Done with dialog — let Qt clean it up
+        dialog.deleteLater()
 
         if not source_dir or not output_path:
             self.statusBar().showMessage("Import cancelled — missing paths")
@@ -776,38 +795,27 @@ class LauncherWindow(QMainWindow):
         if hasattr(self, "_project_dir") and self._project_dir:
             project_csv = str(Path(self._project_dir) / "project.csv")
 
-        # Run import in background thread
         self.statusBar().showMessage(f"Importing from {source_dir}...")
-
-        from percell4.io.importer import import_dataset
-
-        # Build FLIM params if enabled
-        flim_params = None
-        if dialog.has_flim:
-            flim_params = {
-                "frequency_mhz": dialog.flim_frequency_mhz,
-                "calibration_phase": dialog.flim_calibration_phase,
-                "calibration_modulation": dialog.flim_calibration_modulation,
-                "bin_dimensions": dialog.bin_dimensions,
-            }
 
         # Run import on the main thread (with wait cursor) to avoid
         # bus errors from QThread + external drive I/O combination
         from qtpy.QtCore import Qt
         from qtpy.QtWidgets import QApplication
 
+        from percell4.io.importer import import_dataset
+
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             n_channels = import_dataset(
                 source_dir,
                 output_path,
-                token_config=dialog.token_config,
-                tile_config=dialog.tile_config,
-                z_project_method=dialog.z_project_method,
+                token_config=d_token_config,
+                tile_config=d_tile_config,
+                z_project_method=d_z_method,
                 metadata={
-                    "condition": dialog.condition,
-                    "replicate": dialog.replicate,
-                    "notes": dialog.notes,
+                    "condition": d_condition,
+                    "replicate": d_replicate,
+                    "notes": d_notes,
                 },
                 project_csv=project_csv,
                 flim_params=flim_params,
