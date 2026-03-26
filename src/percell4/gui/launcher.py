@@ -6,6 +6,8 @@ for the selected category. Manages all other windows.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
@@ -523,30 +525,164 @@ class LauncherWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
 
-    # ── Action handlers (stubs — business logic added in later phases) ──
+    # ── Action handlers ──────────────────────────────────────────
 
     def _on_open_project(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Open Project Folder")
         if path:
+            self._project_dir = path
             self.statusBar().showMessage(f"Opened project: {path}")
 
     def _on_import_dataset(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select TIFF Directory to Import")
-        if path:
-            self.statusBar().showMessage(f"Import from: {path} — not yet implemented")
+        from percell4.gui.import_dialog import ImportDialog
+
+        dialog = ImportDialog(
+            self, project_dir=getattr(self, "_project_dir", None)
+        )
+        if dialog.exec_() != ImportDialog.Accepted:
+            return
+
+        source_dir = dialog.source_dir
+        output_path = dialog.output_path
+
+        if not source_dir or not output_path:
+            self.statusBar().showMessage("Import cancelled — missing paths")
+            return
+
+        # Build project.csv path if we have a project dir
+        project_csv = None
+        if hasattr(self, "_project_dir") and self._project_dir:
+            project_csv = str(Path(self._project_dir) / "project.csv")
+
+        # Run import in background thread
+        self.statusBar().showMessage(f"Importing from {source_dir}...")
+
+        from percell4.gui.workers import Worker
+        from percell4.io.importer import import_dataset
+
+        self._import_worker = Worker(
+            import_dataset,
+            source_dir,
+            output_path,
+            token_config=dialog.token_config,
+            tile_config=dialog.tile_config,
+            z_project_method=dialog.z_project_method,
+            metadata={
+                "condition": dialog.condition,
+                "replicate": dialog.replicate,
+                "notes": dialog.notes,
+            },
+            project_csv=project_csv,
+            progress_callback=self._on_import_progress,
+        )
+        self._import_worker.finished.connect(
+            lambda n_ch: self._on_import_finished(output_path, n_ch)
+        )
+        self._import_worker.error.connect(
+            lambda msg: self.statusBar().showMessage(f"Import error: {msg}")
+        )
+        self._import_worker.start()
+
+    def _on_import_progress(self, current: int, total: int, msg: str) -> None:
+        self.statusBar().showMessage(f"Import: {msg} ({current}/{total})")
+
+    def _on_import_finished(self, h5_path: str, n_channels: int) -> None:
+        self.statusBar().showMessage(
+            f"Import complete: {n_channels} channel(s) → {Path(h5_path).name}"
+        )
+        # Auto-load the new dataset into the viewer
+        self._load_h5_into_viewer(h5_path)
 
     def _on_load_dataset(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Dataset", "", "HDF5 Files (*.h5);;All Files (*)"
         )
         if path:
-            self.statusBar().showMessage(f"Loaded: {path} — viewer integration in Phase 2")
+            self._load_h5_into_viewer(path)
+
+    def _load_h5_into_viewer(self, h5_path: str) -> None:
+        """Load an .h5 dataset into the napari viewer."""
+        from percell4.store import DatasetStore
+
+        store = DatasetStore(h5_path)
+        if not store.exists():
+            self.statusBar().showMessage(f"File not found: {h5_path}")
+            return
+
+        self._current_store = store
+        self._current_h5_path = h5_path
+
+        # Ensure viewer is open
+        self._show_window("viewer")
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None:
+            return
+
+        # Clear previous data
+        viewer_win.clear()
+        self.data_model.clear()
+
+        # Read and display intensity data
+        try:
+            with store.open_read() as s:
+                intensity = s.read_array("intensity")
+                meta = s.metadata
+                channel_names = meta.get("channel_names", [])
+
+                if intensity.ndim == 2:
+                    # Single channel
+                    name = channel_names[0] if channel_names else "Intensity"
+                    viewer_win.add_image(intensity, name=name)
+                elif intensity.ndim == 3 and intensity.shape[0] <= 20:
+                    # Multi-channel (C, H, W) — add each channel separately
+                    for i in range(intensity.shape[0]):
+                        name = (
+                            channel_names[i]
+                            if i < len(channel_names)
+                            else f"ch{i}"
+                        )
+                        viewer_win.add_image(intensity[i], name=name)
+                else:
+                    # Unknown layout — add as single image
+                    viewer_win.add_image(intensity, name="Intensity")
+
+                # Load existing labels
+                for label_name in s.list_labels():
+                    labels = s.read_labels(label_name)
+                    viewer_win.add_labels(labels, name=label_name)
+
+                # Load existing masks
+                for mask_name in s.list_masks():
+                    mask = s.read_mask(mask_name)
+                    viewer_win.add_mask(mask, name=mask_name)
+
+        except KeyError:
+            self.statusBar().showMessage(
+                f"No intensity data in {Path(h5_path).name}"
+            )
+            return
+
+        # Update info label
+        if hasattr(self, "_info_label"):
+            n_labels = len(store.list_labels())
+            n_masks = len(store.list_masks())
+            self._info_label.setText(
+                f"File: {Path(h5_path).name}\n"
+                f"Shape: {intensity.shape}\n"
+                f"Labels: {n_labels}  |  Masks: {n_masks}"
+            )
+
+        self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
 
     def _on_close_dataset(self) -> None:
         viewer = self._windows.get("viewer")
         if viewer is not None:
             viewer.clear()
         self.data_model.clear()
+        self._current_store = None
+        self._current_h5_path = None
+        if hasattr(self, "_info_label"):
+            self._info_label.setText("No dataset loaded")
         self.statusBar().showMessage("Dataset closed")
 
     def _on_run_segmentation(self) -> None:
