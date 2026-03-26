@@ -155,6 +155,58 @@ class SegmentationWindow(QMainWindow):
 
         layout.addWidget(draw_group)
 
+        # ── Label Cleanup section ─────────────────────────────
+        cleanup_group = QGroupBox("Label Cleanup")
+        cleanup_layout = QVBoxLayout(cleanup_group)
+
+        cleanup_layout.addWidget(QLabel(
+            "Remove partial cells at image edges and\n"
+            "cells below a minimum area threshold."
+        ))
+
+        margin_row = QHBoxLayout()
+        margin_row.addWidget(QLabel("Edge margin (px):"))
+        self._cleanup_margin = QSpinBox()
+        self._cleanup_margin.setRange(0, 200)
+        self._cleanup_margin.setValue(0)
+        self._cleanup_margin.setToolTip(
+            "0 = remove cells touching the image border.\n"
+            ">0 = also remove cells within this many pixels of the border."
+        )
+        margin_row.addWidget(self._cleanup_margin)
+        cleanup_layout.addLayout(margin_row)
+
+        min_area_row = QHBoxLayout()
+        min_area_row.addWidget(QLabel("Min cell area (px):"))
+        self._cleanup_min_area = QSpinBox()
+        self._cleanup_min_area.setRange(0, 10000)
+        self._cleanup_min_area.setValue(0)
+        self._cleanup_min_area.setToolTip(
+            "Remove cells with fewer pixels than this threshold.\n"
+            "0 = no area filtering."
+        )
+        min_area_row.addWidget(self._cleanup_min_area)
+        cleanup_layout.addLayout(min_area_row)
+
+        btn_preview = QPushButton("Preview Removal")
+        btn_preview.setToolTip(
+            "Highlight cells that would be removed in red.\n"
+            "Does not modify the labels layer."
+        )
+        btn_preview.clicked.connect(self._on_cleanup_preview)
+        cleanup_layout.addWidget(btn_preview)
+
+        self._btn_apply_cleanup = QPushButton("Apply Removal")
+        self._btn_apply_cleanup.setEnabled(False)
+        self._btn_apply_cleanup.clicked.connect(self._on_cleanup_apply)
+        cleanup_layout.addWidget(self._btn_apply_cleanup)
+
+        self._cleanup_status = QLabel("")
+        self._cleanup_status.setWordWrap(True)
+        cleanup_layout.addWidget(self._cleanup_status)
+
+        layout.addWidget(cleanup_group)
+
         # ── Save ──────────────────────────────────────────────
         save_group = QGroupBox("Save")
         save_layout = QVBoxLayout(save_group)
@@ -459,6 +511,132 @@ class SegmentationWindow(QMainWindow):
 
         self.statusBar().showMessage(
             f"Relabeled to {n_cells} sequential cells"
+        )
+
+    # ── Label Cleanup ─────────────────────────────────────────
+
+    def _on_cleanup_preview(self) -> None:
+        """Highlight cells that would be removed by current settings."""
+        labels_layer = self._get_active_labels_layer()
+        if labels_layer is None:
+            self._cleanup_status.setText("No labels layer active.")
+            self._cleanup_status.setStyleSheet("color: #ff6666;")
+            return
+
+        from percell4.segment.postprocess import filter_edge_cells, filter_small_cells
+
+        labels = np.asarray(labels_layer.data, dtype=np.int32)
+        margin = self._cleanup_margin.value()
+        min_area = self._cleanup_min_area.value()
+
+        filtered = labels
+        edge_removed = 0
+        small_removed = 0
+
+        if margin >= 0:
+            filtered, edge_removed = filter_edge_cells(filtered, edge_margin=margin)
+        if min_area > 0:
+            filtered, small_removed = filter_small_cells(filtered, min_area=min_area)
+
+        total_removed = edge_removed + small_removed
+
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        if viewer_win is None or viewer_win.viewer is None:
+            return
+
+        # Remove old preview layer if it exists
+        for layer in list(viewer_win.viewer.layers):
+            if layer.name == "_cleanup_preview":
+                viewer_win.viewer.layers.remove(layer)
+                break
+
+        if total_removed == 0:
+            self._cleanup_status.setText("No cells to remove at these settings.")
+            self._cleanup_status.setStyleSheet("color: #888888;")
+            self._btn_apply_cleanup.setEnabled(False)
+            return
+
+        # Create highlight: cells that would be removed shown as label 1
+        removed_mask = (labels > 0) & (filtered == 0)
+        highlight = np.where(removed_mask, 1, 0).astype(np.int32)
+
+        viewer_win.viewer.add_labels(
+            highlight,
+            name="_cleanup_preview",
+            opacity=0.5,
+            blending="translucent",
+        )
+
+        parts = []
+        if edge_removed:
+            parts.append(f"{edge_removed} edge")
+        if small_removed:
+            parts.append(f"{small_removed} small")
+        self._cleanup_status.setText(
+            f"{total_removed} cells to remove ({', '.join(parts)})."
+        )
+        self._cleanup_status.setStyleSheet("color: #ffaa44;")
+        self._btn_apply_cleanup.setEnabled(True)
+
+    def _on_cleanup_apply(self) -> None:
+        """Remove highlighted cells from the label layer."""
+        labels_layer = self._get_active_labels_layer()
+        if labels_layer is None:
+            self._cleanup_status.setText("No labels layer active.")
+            self._cleanup_status.setStyleSheet("color: #ff6666;")
+            return
+
+        from percell4.segment.postprocess import (
+            filter_edge_cells,
+            filter_small_cells,
+            relabel_sequential,
+        )
+
+        labels = np.asarray(labels_layer.data, dtype=np.int32)
+        margin = self._cleanup_margin.value()
+        min_area = self._cleanup_min_area.value()
+
+        filtered = labels
+        edge_removed = 0
+        small_removed = 0
+
+        if margin >= 0:
+            filtered, edge_removed = filter_edge_cells(filtered, edge_margin=margin)
+        if min_area > 0:
+            filtered, small_removed = filter_small_cells(filtered, min_area=min_area)
+
+        total_removed = edge_removed + small_removed
+
+        # Relabel to sequential after removal
+        filtered = relabel_sequential(filtered)
+        n_remaining = int(filtered.max())
+
+        # Update the labels layer
+        labels_layer.data = filtered
+        labels_layer.refresh()
+
+        # Remove preview layer
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        if viewer_win is not None and viewer_win.viewer is not None:
+            for layer in list(viewer_win.viewer.layers):
+                if layer.name == "_cleanup_preview":
+                    viewer_win.viewer.layers.remove(layer)
+                    break
+
+        self._btn_apply_cleanup.setEnabled(False)
+        parts = []
+        if edge_removed:
+            parts.append(f"{edge_removed} edge")
+        if small_removed:
+            parts.append(f"{small_removed} small")
+        self._cleanup_status.setText(
+            f"Removed {total_removed} cells ({', '.join(parts)}). "
+            f"{n_remaining} cells remaining."
+        )
+        self._cleanup_status.setStyleSheet("color: #66cc66;")
+
+        self.statusBar().showMessage(
+            f"Cleanup: removed {total_removed}, {n_remaining} cells remaining"
         )
 
     # ── Save ──────────────────────────────────────────────────
