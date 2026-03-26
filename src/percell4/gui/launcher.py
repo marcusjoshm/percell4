@@ -375,6 +375,15 @@ class LauncherWindow(QMainWindow):
         meas_group = QGroupBox("Measurements")
         meas_layout = QVBoxLayout(meas_group)
 
+        meas_layout.addWidget(QLabel(
+            "Measures per-cell metrics using the active\n"
+            "channel, segmentation, and mask from Data tab."
+        ))
+
+        self._meas_result_label = QLabel("")
+        self._meas_result_label.setWordWrap(True)
+        meas_layout.addWidget(self._meas_result_label)
+
         btn_measure = QPushButton("Measure Cells")
         btn_measure.clicked.connect(self._on_measure_cells)
         meas_layout.addWidget(btn_measure)
@@ -394,9 +403,28 @@ class LauncherWindow(QMainWindow):
         # ── Particle Analysis ──
         particle_group = QGroupBox("Particle Analysis")
         particle_layout = QVBoxLayout(particle_group)
+
+        particle_layout.addWidget(QLabel(
+            "Counts particles within each cell using\n"
+            "the active mask as the particle source."
+        ))
+
+        min_area_row = QHBoxLayout()
+        min_area_row.addWidget(QLabel("Min particle area (px):"))
+        self._particle_min_area = QSpinBox()
+        self._particle_min_area.setRange(1, 10000)
+        self._particle_min_area.setValue(1)
+        min_area_row.addWidget(self._particle_min_area)
+        particle_layout.addLayout(min_area_row)
+
         btn_particle = QPushButton("Analyze Particles")
         btn_particle.clicked.connect(self._on_analyze_particles)
         particle_layout.addWidget(btn_particle)
+
+        self._particle_result_label = QLabel("")
+        self._particle_result_label.setWordWrap(True)
+        particle_layout.addWidget(self._particle_result_label)
+
         layout.addWidget(particle_group)
 
         # ── Placeholders ──
@@ -1203,10 +1231,173 @@ class LauncherWindow(QMainWindow):
         self._thresh_channel_name = None
 
     def _on_measure_cells(self) -> None:
-        self.statusBar().showMessage("Measure cells — not yet implemented")
+        """Measure per-cell metrics using active channel, segmentation, and mask."""
+        import numpy as np
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self.statusBar().showMessage("Open the viewer first")
+            return
+
+        # Get all image layers for multi-channel measurement
+        image_layers = {}
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == "Image":
+                image_layers[layer.name] = layer.data.astype(np.float32)
+
+        if not image_layers:
+            self.statusBar().showMessage("No image loaded")
+            return
+
+        # Get active segmentation labels
+        seg_name = self.data_model.active_segmentation
+        if not seg_name:
+            self.statusBar().showMessage("No active segmentation — select one in the Data tab")
+            return
+
+        labels = None
+        for layer in viewer_win.viewer.layers:
+            if layer.name == seg_name:
+                labels = np.asarray(layer.data, dtype=np.int32)
+                break
+
+        if labels is None:
+            self.statusBar().showMessage(f"Segmentation '{seg_name}' not found in viewer")
+            return
+
+        if labels.max() == 0:
+            self.statusBar().showMessage("Segmentation has no cells")
+            return
+
+        # Get active mask (optional)
+        mask = None
+        mask_name = self.data_model.active_mask
+        if mask_name:
+            for layer in viewer_win.viewer.layers:
+                if layer.name == mask_name:
+                    mask = np.asarray(layer.data, dtype=np.uint8)
+                    break
+
+        self.statusBar().showMessage("Measuring cells...")
+
+        from percell4.measure.measurer import measure_multichannel
+
+        try:
+            df = measure_multichannel(image_layers, labels, mask=mask)
+        except Exception as e:
+            self.statusBar().showMessage(f"Measurement error: {e}")
+            return
+
+        n_cells = len(df)
+        n_cols = len(df.columns)
+
+        # Populate the data model
+        self.data_model.set_measurements(df)
+
+        # Save to HDF5
+        store = getattr(self, "_current_store", None)
+        if store is not None:
+            store.write_dataframe("measurements", df)
+
+        mask_note = f" (mask: {mask_name})" if mask_name else ""
+        self._meas_result_label.setText(
+            f"Measured {n_cells} cells across {len(image_layers)} channel(s)\n"
+            f"{n_cols} columns | seg: {seg_name}{mask_note}"
+        )
+        self._meas_result_label.setStyleSheet("color: #66cc66;")
+        self.statusBar().showMessage(
+            f"Measured {n_cells} cells, {n_cols} columns"
+        )
 
     def _on_analyze_particles(self) -> None:
-        self.statusBar().showMessage("Particle analysis — not yet implemented")
+        """Analyze particles within each cell using the active mask."""
+        import numpy as np
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self.statusBar().showMessage("Open the viewer first")
+            return
+
+        # Get an image (first image layer for intensity)
+        image = None
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == "Image":
+                image = layer.data.astype(np.float32)
+                break
+
+        if image is None:
+            self.statusBar().showMessage("No image loaded")
+            return
+
+        # Get active segmentation labels
+        seg_name = self.data_model.active_segmentation
+        if not seg_name:
+            self.statusBar().showMessage("No active segmentation")
+            return
+
+        labels = None
+        for layer in viewer_win.viewer.layers:
+            if layer.name == seg_name:
+                labels = np.asarray(layer.data, dtype=np.int32)
+                break
+
+        if labels is None:
+            self.statusBar().showMessage(f"Segmentation '{seg_name}' not found")
+            return
+
+        # Get active mask (required for particle analysis)
+        mask_name = self.data_model.active_mask
+        if not mask_name:
+            self.statusBar().showMessage(
+                "No active mask — apply a threshold first"
+            )
+            return
+
+        mask = None
+        for layer in viewer_win.viewer.layers:
+            if layer.name == mask_name:
+                mask = np.asarray(layer.data, dtype=np.uint8)
+                break
+
+        if mask is None:
+            self.statusBar().showMessage(f"Mask '{mask_name}' not found")
+            return
+
+        min_area = self._particle_min_area.value()
+        self.statusBar().showMessage("Analyzing particles...")
+
+        from percell4.measure.particle import analyze_particles
+
+        try:
+            particle_df = analyze_particles(image, labels, mask, min_area=min_area)
+        except Exception as e:
+            self.statusBar().showMessage(f"Particle analysis error: {e}")
+            return
+
+        n_cells = len(particle_df)
+        total_particles = int(particle_df["particle_count"].sum()) if n_cells > 0 else 0
+
+        # Merge with existing measurements if available
+        current_df = self.data_model.df
+        if not current_df.empty and "label" in current_df.columns:
+            merged = current_df.merge(particle_df, on="label", how="left")
+            self.data_model.set_measurements(merged)
+        else:
+            self.data_model.set_measurements(particle_df)
+
+        # Save to HDF5
+        store = getattr(self, "_current_store", None)
+        if store is not None:
+            store.write_dataframe("measurements", self.data_model.df)
+
+        self._particle_result_label.setText(
+            f"{total_particles} particles in {n_cells} cells\n"
+            f"mask: {mask_name} | min area: {min_area} px"
+        )
+        self._particle_result_label.setStyleSheet("color: #66cc66;")
+        self.statusBar().showMessage(
+            f"Found {total_particles} particles across {n_cells} cells"
+        )
 
     def _on_compute_phasor(self) -> None:
         self.statusBar().showMessage("Compute phasor — not yet implemented")
