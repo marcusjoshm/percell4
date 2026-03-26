@@ -147,8 +147,9 @@ class ViewerWindow:
         )
 
     def add_labels(self, data, name: str, **kwargs) -> None:
-        """Add a labels layer."""
-        self.viewer.add_labels(data, name=name, **kwargs)
+        """Add a labels layer with additive blending."""
+        blending = kwargs.pop("blending", "additive")
+        self.viewer.add_labels(data, name=name, blending=blending, **kwargs)
 
     def add_mask(self, data, name: str, **kwargs) -> None:
         """Add a binary mask as a labels layer with low opacity."""
