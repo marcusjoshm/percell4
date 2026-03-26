@@ -77,7 +77,10 @@ def import_dataset(
             "frequency_mhz": 80.0,
             "calibration_phase": 0.0,
             "calibration_modulation": 1.0,
-            "bin_dimensions": {"x_dim": 512, "y_dim": 512, "t_dim": 256, "dim_order": "YXT"},
+            "bin_dimensions": {
+                "x_dim": 512, "y_dim": 512, "t_dim": 132,
+                "dtype": "float32", "dim_order": "YXT", "header_bytes": 0,
+            },
         }
 
     # 2. Separate TCSPC files from intensity files
@@ -188,8 +191,10 @@ def import_dataset(
                     bin_path,
                     x_dim=bin_dims.get("x_dim", 512),
                     y_dim=bin_dims.get("y_dim", 512),
-                    t_dim=bin_dims.get("t_dim", 256),
+                    t_dim=bin_dims.get("t_dim", 132),
+                    dtype=bin_dims.get("dtype", "float32"),
                     dim_order=bin_dims.get("dim_order", "YXT"),
+                    header_bytes=bin_dims.get("header_bytes", 0),
                 )
                 decay_tiles[tile_idx] = result_bin["array"]  # (H, W, T)
                 # Sum projection → intensity image for this tile

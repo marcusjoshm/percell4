@@ -188,12 +188,22 @@ class ImportDialog(QDialog):
 
         self._bin_t = QSpinBox()
         self._bin_t.setRange(1, 4096)
-        self._bin_t.setValue(256)
+        self._bin_t.setValue(132)
         bin_layout.addRow("Time bins:", self._bin_t)
+
+        self._bin_dtype = QComboBox()
+        self._bin_dtype.addItems(["float32", "uint16", "uint32", "uint8"])
+        bin_layout.addRow("Data type:", self._bin_dtype)
 
         self._bin_dim_order = QComboBox()
         self._bin_dim_order.addItems(["YXT", "XYT", "TYX"])
         bin_layout.addRow("Dimension order:", self._bin_dim_order)
+
+        self._bin_header = QSpinBox()
+        self._bin_header.setRange(0, 10000)
+        self._bin_header.setValue(0)
+        self._bin_header.setSpecialValueText("Auto-detect")
+        bin_layout.addRow("Header bytes:", self._bin_header)
 
         flim_layout.addRow(self._bin_group)
 
@@ -319,7 +329,9 @@ class ImportDialog(QDialog):
             "x_dim": self._bin_x.value(),
             "y_dim": self._bin_y.value(),
             "t_dim": self._bin_t.value(),
+            "dtype": self._bin_dtype.currentText(),
             "dim_order": self._bin_dim_order.currentText(),
+            "header_bytes": self._bin_header.value(),
         }
 
     def _apply_style(self) -> None:
