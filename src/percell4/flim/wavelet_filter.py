@@ -157,10 +157,11 @@ def _filter_channel(data: NDArray, n_levels: int, dtcwt_module) -> NDArray:
     finest = coeffs.highpasses[0]
     sigma = np.median(np.abs(finest)) / 0.6745
 
-    # Adaptive thresholding
+    # Adaptive thresholding — convert highpasses to list for mutation
+    hp_list = list(coeffs.highpasses)
     if sigma > 0:
-        for level_idx in range(len(coeffs.highpasses)):
-            hp = coeffs.highpasses[level_idx]
+        for level_idx in range(len(hp_list)):
+            hp = hp_list[level_idx]
             # Soft thresholding with level-dependent threshold
             threshold = sigma * np.sqrt(2.0 * np.log(hp.size))
             # Scale threshold by level (coarser levels get less aggressive)
@@ -169,10 +170,8 @@ def _filter_channel(data: NDArray, n_levels: int, dtcwt_module) -> NDArray:
             # Soft shrinkage
             magnitude = np.abs(hp)
             shrunk = np.maximum(magnitude - t, 0) * np.sign(hp)
-            # Where magnitude was below threshold, keep original phase
-            coeffs.highpasses[level_idx] = np.where(
-                magnitude > t, shrunk, hp * 0.0
-            )
+            hp_list[level_idx] = np.where(magnitude > t, shrunk, hp * 0.0)
+    coeffs.highpasses = tuple(hp_list)
 
     # Inverse DTCWT
     reconstructed = xfm.inverse(coeffs)
