@@ -439,27 +439,36 @@ class SegmentationPanel(QWidget):
 
     def _on_add_new_label(self) -> None:
         from qtpy.QtCore import QTimer
+        from qtpy.QtWidgets import QApplication
 
         labels_layer = self._get_active_labels_layer()
         if labels_layer is None:
             self._show_status("No labels layer active — load or create one first")
             return
 
-        next_id = int(labels_layer.data.max()) + 1
-        labels_layer.selected_label = next_id
+        # Step 1: Select the layer in napari FIRST
         self._select_labels_layer_in_viewer(labels_layer)
 
+        # Step 2: Show and raise the viewer
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is not None:
             viewer_win.show()
 
+        # Step 3: Let Qt process the layer selection before setting mode
+        QApplication.processEvents()
+
+        # Step 4: Set the label ID
+        next_id = int(labels_layer.data.max()) + 1
+        labels_layer.selected_label = next_id
+
+        # Step 5: Defer polygon mode activation to ensure napari is ready
         def _activate_polygon():
             try:
                 labels_layer.mode = "polygon"
             except Exception:
                 pass
 
-        QTimer.singleShot(50, _activate_polygon)
+        QTimer.singleShot(100, _activate_polygon)
         self._show_status(f"Label {next_id} — draw cell boundary with polygon tool")
 
     def _on_relabel_sequential(self) -> None:

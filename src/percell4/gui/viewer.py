@@ -172,7 +172,14 @@ class ViewerWindow:
 
     def _on_label_selected(self, event) -> None:
         """Forward label selection to CellDataModel."""
-        label_id = event.value
+        # Get the label from the source layer, not the event
+        # (napari event object doesn't always have .value)
+        try:
+            source = event.source
+            label_id = source.selected_label
+        except AttributeError:
+            return
+
         if label_id == 0:
             self.data_model.set_selection([])
         else:
