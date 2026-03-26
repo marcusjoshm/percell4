@@ -127,6 +127,65 @@ class ImportDialog(QDialog):
 
         layout.addWidget(z_group)
 
+        # ── FLIM / TCSPC ──────────────────────────────────────
+        from qtpy.QtWidgets import QDoubleSpinBox
+
+        self._flim_enabled = QCheckBox("Dataset contains TCSPC FLIM data")
+        self._flim_enabled.setStyleSheet("QCheckBox { color: #e0e0e0; }")
+        layout.addWidget(self._flim_enabled)
+
+        self._flim_group = QGroupBox("FLIM Parameters")
+        flim_layout = QFormLayout(self._flim_group)
+
+        self._flim_freq = QDoubleSpinBox()
+        self._flim_freq.setRange(0.1, 1000.0)
+        self._flim_freq.setValue(80.0)
+        self._flim_freq.setDecimals(1)
+        self._flim_freq.setSuffix(" MHz")
+        flim_layout.addRow("Laser frequency:", self._flim_freq)
+
+        self._flim_phase = QDoubleSpinBox()
+        self._flim_phase.setRange(-6.283, 6.283)
+        self._flim_phase.setValue(0.0)
+        self._flim_phase.setDecimals(4)
+        self._flim_phase.setSuffix(" rad")
+        flim_layout.addRow("Calibration phase:", self._flim_phase)
+
+        self._flim_modulation = QDoubleSpinBox()
+        self._flim_modulation.setRange(0.0, 10.0)
+        self._flim_modulation.setValue(1.0)
+        self._flim_modulation.setDecimals(4)
+        flim_layout.addRow("Calibration modulation:", self._flim_modulation)
+
+        # .bin file parameters (only for raw binary TCSPC)
+        self._bin_group = QGroupBox(".bin File Dimensions (raw binary only)")
+        bin_layout = QFormLayout(self._bin_group)
+
+        self._bin_x = QSpinBox()
+        self._bin_x.setRange(1, 10000)
+        self._bin_x.setValue(512)
+        bin_layout.addRow("X dimension:", self._bin_x)
+
+        self._bin_y = QSpinBox()
+        self._bin_y.setRange(1, 10000)
+        self._bin_y.setValue(512)
+        bin_layout.addRow("Y dimension:", self._bin_y)
+
+        self._bin_t = QSpinBox()
+        self._bin_t.setRange(1, 4096)
+        self._bin_t.setValue(256)
+        bin_layout.addRow("Time bins:", self._bin_t)
+
+        self._bin_dim_order = QComboBox()
+        self._bin_dim_order.addItems(["YXT", "XYT", "TYX"])
+        bin_layout.addRow("Dimension order:", self._bin_dim_order)
+
+        flim_layout.addRow(self._bin_group)
+
+        self._flim_group.setVisible(False)
+        self._flim_enabled.toggled.connect(self._flim_group.setVisible)
+        layout.addWidget(self._flim_group)
+
         # ── Metadata ──────────────────────────────────────────
         meta_group = QGroupBox("Dataset Metadata")
         meta_layout = QFormLayout(meta_group)
@@ -221,6 +280,32 @@ class ImportDialog(QDialog):
     @property
     def notes(self) -> str:
         return self._meta_notes.text()
+
+    @property
+    def has_flim(self) -> bool:
+        return self._flim_enabled.isChecked()
+
+    @property
+    def flim_frequency_mhz(self) -> float:
+        return self._flim_freq.value()
+
+    @property
+    def flim_calibration_phase(self) -> float:
+        return self._flim_phase.value()
+
+    @property
+    def flim_calibration_modulation(self) -> float:
+        return self._flim_modulation.value()
+
+    @property
+    def bin_dimensions(self) -> dict:
+        """Dimensions for .bin TCSPC files."""
+        return {
+            "x_dim": self._bin_x.value(),
+            "y_dim": self._bin_y.value(),
+            "t_dim": self._bin_t.value(),
+            "dim_order": self._bin_dim_order.currentText(),
+        }
 
     def _apply_style(self) -> None:
         self.setStyleSheet("""

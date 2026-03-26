@@ -782,6 +782,16 @@ class LauncherWindow(QMainWindow):
         from percell4.gui.workers import Worker
         from percell4.io.importer import import_dataset
 
+        # Build FLIM params if enabled
+        flim_params = None
+        if dialog.has_flim:
+            flim_params = {
+                "frequency_mhz": dialog.flim_frequency_mhz,
+                "calibration_phase": dialog.flim_calibration_phase,
+                "calibration_modulation": dialog.flim_calibration_modulation,
+                "bin_dimensions": dialog.bin_dimensions,
+            }
+
         self._import_worker = Worker(
             import_dataset,
             source_dir,
@@ -795,6 +805,7 @@ class LauncherWindow(QMainWindow):
                 "notes": dialog.notes,
             },
             project_csv=project_csv,
+            flim_params=flim_params,
         )
         self._import_worker.progress.connect(
             lambda msg: self.statusBar().showMessage(f"Import: {msg}")
@@ -1423,7 +1434,87 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage(f"Exported particle data to {path}")
 
     def _on_compute_phasor(self) -> None:
-        self.statusBar().showMessage("Compute phasor — not yet implemented")
+        """Compute phasor G/S from TCSPC decay data for the active channel."""
+        import numpy as np
+
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            self.statusBar().showMessage("No dataset loaded")
+            return
+
+        # Determine active channel for FLIM
+        viewer_win = self._windows.get("viewer")
+        active_channel = None
+        if viewer_win is not None and viewer_win.viewer is not None:
+            active = viewer_win.viewer.layers.selection.active
+            if active is not None and active.__class__.__name__ == "Image":
+                active_channel = active.name
+
+        if active_channel is None:
+            self.statusBar().showMessage("Select a channel in the viewer first")
+            return
+
+        # Look for decay data for this channel
+        decay_path = f"decay/{active_channel}"
+        try:
+            decay = store.read_array(decay_path)
+        except KeyError:
+            # Try without channel prefix
+            try:
+                decay = store.read_array("decay")
+            except KeyError:
+                self.statusBar().showMessage(
+                    f"No TCSPC data found for '{active_channel}'. "
+                    "Import with FLIM enabled."
+                )
+                return
+
+        self.statusBar().showMessage(
+            f"Computing phasor for {active_channel}..."
+        )
+
+        harmonic = int(self._phasor_harmonic.currentText())
+
+        from percell4.flim.phasor import compute_phasor
+
+        g_map, s_map = compute_phasor(decay, harmonic=harmonic)
+
+        # Apply calibration if available
+        meta = store.metadata
+        cal_phase = meta.get("flim_calibration_phase", 0.0)
+        cal_mod = meta.get("flim_calibration_modulation", 1.0)
+
+        if cal_phase != 0.0 or cal_mod != 1.0:
+            # Apply calibration: rotation + scaling in polar coordinates
+            mod = np.sqrt(g_map**2 + s_map**2)
+            phase = np.arctan2(s_map, g_map)
+            phase_cal = phase + cal_phase
+            mod_cal = mod * cal_mod
+            g_map = (mod_cal * np.cos(phase_cal)).astype(np.float32)
+            s_map = (mod_cal * np.sin(phase_cal)).astype(np.float32)
+
+        # Write phasor maps to store
+        store.write_array(
+            f"phasor/{active_channel}/g", g_map,
+            attrs={"dims": ["H", "W"], "channel": active_channel, "harmonic": harmonic},
+        )
+        store.write_array(
+            f"phasor/{active_channel}/s", s_map,
+            attrs={"dims": ["H", "W"], "channel": active_channel, "harmonic": harmonic},
+        )
+
+        # Open and populate phasor plot
+        self._show_window("phasor_plot")
+        phasor_win = self._windows.get("phasor_plot")
+        if phasor_win is not None:
+            phasor_win.set_phasor_data(g_map, s_map)
+
+        n_valid = int(np.isfinite(g_map).sum())
+        freq = meta.get("flim_frequency_mhz", "unknown")
+        self.statusBar().showMessage(
+            f"Phasor computed: {n_valid:,} valid pixels | "
+            f"channel: {active_channel} | harmonic: {harmonic} | freq: {freq} MHz"
+        )
 
     def _on_apply_wavelet(self) -> None:
         self.statusBar().showMessage("Wavelet filter — not yet implemented")

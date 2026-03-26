@@ -31,6 +31,7 @@ def import_dataset(
     z_project_method: str | None = "mip",
     metadata: dict[str, Any] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    flim_params: dict[str, Any] | None = None,
 ) -> int:
     """Import a directory of TIFFs into a single .h5 dataset.
 
@@ -44,6 +45,9 @@ def import_dataset(
     z_project_method : 'mip', 'mean', 'sum', or None to keep full z-stack
     metadata : additional metadata to store in .h5
     progress_callback : fn(current, total, message) for GUI progress
+    flim_params : FLIM parameters dict with keys:
+        'frequency_mhz', 'calibration_phase', 'calibration_modulation',
+        'bin_dimensions' (for .bin files: x_dim, y_dim, t_dim, dim_order)
 
     Returns
     -------
@@ -56,20 +60,42 @@ def import_dataset(
         if progress_callback is not None:
             progress_callback(current, total, msg)
 
-    # 1. Scan directory
-    _progress(0, 4, "Scanning files...")
+    # 1. Scan directory — find TIFFs and .bin files
+    _progress(0, 5, "Scanning files...")
     scanner = FileScanner(token_config)
     result = scanner.scan(path=source_dir)
 
-    if not result.files:
-        raise ValueError(f"No TIFF files found in {source_dir}")
+    # Also check for .bin TCSPC files
+    bin_files = sorted(source_dir.glob("*.bin"))
 
-    # 2. Group files by channel and z-slice
-    _progress(1, 4, "Organizing files...")
-    channel_groups = _group_by_channel(result)
+    if not result.files and not bin_files:
+        raise ValueError(f"No image files found in {source_dir}")
 
-    # 3. Assemble each channel
-    _progress(2, 4, "Assembling images...")
+    # 2. Separate TCSPC files from intensity files
+    _progress(1, 5, "Organizing files...")
+    tcspc_files = []
+    intensity_files = []
+    for f in result.files:
+        stem = f.path.stem.upper()
+        if "TCSPC" in stem:
+            tcspc_files.append(f)
+        else:
+            intensity_files.append(f)
+
+    # Build channel groups from intensity files
+    intensity_result = ScanResult(files=intensity_files)
+    for f in intensity_files:
+        if "channel" in f.tokens:
+            intensity_result.channels.add(f.tokens["channel"])
+        if "tile" in f.tokens:
+            intensity_result.tiles.add(f.tokens["tile"])
+        if "z_slice" in f.tokens:
+            intensity_result.z_slices.add(f.tokens["z_slice"])
+
+    channel_groups = _group_by_channel(intensity_result) if intensity_files else {}
+
+    # 3. Assemble intensity channels
+    _progress(2, 5, "Assembling images...")
     channel_images: list[np.ndarray] = []
     channel_names: list[str] = []
 
@@ -77,11 +103,9 @@ def import_dataset(
         files = channel_groups[ch_key]
         channel_names.append(f"ch{ch_key}" if ch_key else "ch0")
 
-        # Group by z-slice within this channel
         z_groups = _group_by_z(files)
 
         if len(z_groups) > 1 and z_project_method is not None:
-            # Multiple z-slices: load and project
             z_images = []
             for z_key in sorted(z_groups.keys()):
                 z_file = z_groups[z_key]
@@ -89,7 +113,6 @@ def import_dataset(
                 z_images.append(img)
             channel_img = project_z(z_images, method=z_project_method)
         else:
-            # Single z or keep full stack
             all_files = []
             for z_key in sorted(z_groups.keys()):
                 all_files.extend(z_groups[z_key])
@@ -97,8 +120,47 @@ def import_dataset(
 
         channel_images.append(channel_img.astype(np.float32))
 
-    # 4. Write to HDF5 (before updating CSV!)
-    _progress(3, 4, "Writing HDF5...")
+    # 4. Handle TCSPC data (FLIM)
+    _progress(3, 5, "Processing TCSPC data...")
+    tcspc_data: dict[str, np.ndarray] = {}  # channel -> (H, W, T) array
+
+    if flim_params and tcspc_files:
+        # TCSPC TIFFs with "TCSPC" token — stitch same as intensity
+        tcspc_result = ScanResult(files=tcspc_files)
+        for f in tcspc_files:
+            if "channel" in f.tokens:
+                tcspc_result.channels.add(f.tokens["channel"])
+        tcspc_channel_groups = _group_by_channel(tcspc_result)
+
+        for ch_key in sorted(tcspc_channel_groups.keys()):
+            ch_name = f"ch{ch_key}" if ch_key else "ch0"
+            files = tcspc_channel_groups[ch_key]
+            # Load and stitch TCSPC tiles
+            decay = _load_and_stitch(files, tile_config)
+            tcspc_data[ch_name] = decay
+
+    if flim_params and bin_files:
+        # .bin files — raw binary TCSPC
+        from percell4.io.readers import read_flim_bin
+
+        bin_dims = flim_params.get("bin_dimensions", {})
+        for bin_path in bin_files:
+            result_bin = read_flim_bin(
+                bin_path,
+                x_dim=bin_dims.get("x_dim", 512),
+                y_dim=bin_dims.get("y_dim", 512),
+                t_dim=bin_dims.get("t_dim", 256),
+                dim_order=bin_dims.get("dim_order", "YXT"),
+            )
+            ch_name = bin_path.stem
+            tcspc_data[ch_name] = result_bin["array"]
+            # Also add intensity from .bin if no TIFF intensity was found
+            if not channel_images:
+                channel_images.append(result_bin["intensity"])
+                channel_names.append(ch_name)
+
+    # 5. Write to HDF5 (before updating CSV!)
+    _progress(4, 5, "Writing HDF5...")
     store = DatasetStore(output_h5)
 
     all_metadata = {
@@ -109,24 +171,47 @@ def import_dataset(
     if metadata:
         all_metadata.update(metadata)
 
+    # Add FLIM calibration to metadata
+    if flim_params:
+        all_metadata["has_flim"] = True
+        all_metadata["flim_frequency_mhz"] = flim_params.get("frequency_mhz", 80.0)
+        all_metadata["flim_calibration_phase"] = flim_params.get(
+            "calibration_phase", 0.0
+        )
+        all_metadata["flim_calibration_modulation"] = flim_params.get(
+            "calibration_modulation", 1.0
+        )
+
     store.create(metadata=all_metadata)
 
-    if len(channel_images) == 1:
-        dims = ["H", "W"]
-        store.write_array("intensity", channel_images[0], attrs={"dims": dims})
-    else:
-        intensity = assemble_channels(channel_images)
-        dims = ["C", "H", "W"]
-        store.write_array("intensity", intensity, attrs={"dims": dims})
+    # Write intensity
+    if channel_images:
+        if len(channel_images) == 1:
+            dims = ["H", "W"]
+            store.write_array("intensity", channel_images[0], attrs={"dims": dims})
+        else:
+            intensity = assemble_channels(channel_images)
+            dims = ["C", "H", "W"]
+            store.write_array("intensity", intensity, attrs={"dims": dims})
 
-    # 5. Update project.csv
+    # Write TCSPC decay data
+    for ch_name, decay in tcspc_data.items():
+        decay_path = f"decay/{ch_name}"
+        store.write_array(
+            decay_path,
+            decay,
+            attrs={"dims": ["H", "W", "T"], "channel": ch_name},
+            is_decay=True,
+        )
+
+    # 6. Update project.csv
     if project_csv is not None:
         idx = ProjectIndex(project_csv)
         if not idx.exists():
             idx.create()
         idx.add_dataset(str(output_h5), status="complete")
 
-    _progress(4, 4, "Import complete")
+    _progress(5, 5, "Import complete")
     return len(channel_images)
 
 

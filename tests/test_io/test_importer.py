@@ -123,7 +123,7 @@ def test_import_empty_dir_raises(tmp_path):
     h5_path = tmp_path / "output.h5"
 
     import pytest
-    with pytest.raises(ValueError, match="No TIFF files"):
+    with pytest.raises(ValueError, match="No image files"):
         import_dataset(src, h5_path)
 
 
