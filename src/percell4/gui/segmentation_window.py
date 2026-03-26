@@ -54,9 +54,11 @@ class SegmentationWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: #1e1e1e; border: none; }")
         self.setCentralWidget(scroll)
 
         content = QWidget()
+        content.setStyleSheet("QWidget { background-color: #1e1e1e; }")
         scroll.setWidget(content)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)

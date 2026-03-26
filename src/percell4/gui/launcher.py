@@ -570,7 +570,10 @@ class LauncherWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(widget)
-        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+        scroll.setStyleSheet(
+            "QScrollArea { background-color: #121212; border: none; }"
+            " QScrollArea > QWidget > QWidget { background-color: #121212; }"
+        )
         return scroll
 
     @staticmethod
