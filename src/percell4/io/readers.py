@@ -141,11 +141,8 @@ def read_flim_bin(
         if excess < 1000:
             header_bytes = excess
 
-    # Read raw binary data
-    with open(filepath, "rb") as f:
-        if header_bytes > 0:
-            f.seek(header_bytes)
-        raw = np.frombuffer(f.read(), dtype=np_dtype)
+    # Read raw binary data — use fromfile for direct read (no double-buffer)
+    raw = np.fromfile(str(filepath), dtype=np_dtype, offset=header_bytes)
 
     if len(raw) != expected_elements:
         raise ValueError(
