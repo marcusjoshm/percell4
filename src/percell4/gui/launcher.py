@@ -312,9 +312,9 @@ class LauncherWindow(QMainWindow):
 
         chan_row = QHBoxLayout()
         chan_row.addWidget(QLabel("Channel:"))
-        self._seg_channel = QComboBox()
-        self._seg_channel.setPlaceholderText("Load a dataset first")
-        chan_row.addWidget(self._seg_channel)
+        self._seg_channel_label = QLabel("None selected")
+        self._seg_channel_label.setStyleSheet("color: #4ea8de; font-weight: bold;")
+        chan_row.addWidget(self._seg_channel_label)
         seg_layout.addLayout(chan_row)
 
         diam_row = QHBoxLayout()
@@ -335,6 +335,10 @@ class LauncherWindow(QMainWindow):
         btn_segment = QPushButton("Run Segmentation")
         btn_segment.clicked.connect(self._on_run_segmentation)
         seg_layout.addWidget(btn_segment)
+
+        btn_save_labels = QPushButton("Save Labels to HDF5")
+        btn_save_labels.clicked.connect(self._on_save_labels)
+        seg_layout.addWidget(btn_save_labels)
 
         layout.addWidget(seg_group)
 
@@ -362,6 +366,10 @@ class LauncherWindow(QMainWindow):
         btn_thresh = QPushButton("Apply Threshold")
         btn_thresh.clicked.connect(self._on_apply_threshold)
         thresh_layout.addWidget(btn_thresh)
+
+        btn_save_mask = QPushButton("Save Mask to HDF5")
+        btn_save_mask.clicked.connect(self._on_save_mask)
+        thresh_layout.addWidget(btn_save_mask)
 
         layout.addWidget(thresh_group)
 
@@ -498,6 +506,26 @@ class LauncherWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
 
         layout.addWidget(self._section_label("Data"))
+
+        # ── Active layers ──
+        layers_group = QGroupBox("Active Layers")
+        layers_layout = QVBoxLayout(layers_group)
+
+        seg_row = QHBoxLayout()
+        seg_row.addWidget(QLabel("Active Segmentation:"))
+        self._active_seg_combo = QComboBox()
+        self._active_seg_combo.setPlaceholderText("None")
+        seg_row.addWidget(self._active_seg_combo)
+        layers_layout.addLayout(seg_row)
+
+        mask_row = QHBoxLayout()
+        mask_row.addWidget(QLabel("Active Mask:"))
+        self._active_mask_combo = QComboBox()
+        self._active_mask_combo.setPlaceholderText("None")
+        mask_row.addWidget(self._active_mask_combo)
+        layers_layout.addLayout(mask_row)
+
+        layout.addWidget(layers_group)
 
         # ── Dataset Info ──
         info_group = QGroupBox("Dataset Info")
@@ -710,14 +738,19 @@ class LauncherWindow(QMainWindow):
                 f"Labels: {n_labels}  |  Masks: {n_masks}"
             )
 
-        # Populate channel dropdown for segmentation
-        if hasattr(self, "_seg_channel"):
-            self._seg_channel.clear()
-            viewer_win_check = self._windows.get("viewer")
-            if viewer_win_check is not None and viewer_win_check.viewer is not None:
-                for layer in viewer_win_check.viewer.layers:
-                    if layer.__class__.__name__ == "Image":
-                        self._seg_channel.addItem(layer.name)
+        # Populate active layers dropdowns
+        if hasattr(self, "_active_seg_combo"):
+            self._active_seg_combo.clear()
+            for label_name in store.list_labels():
+                self._active_seg_combo.addItem(label_name)
+
+        if hasattr(self, "_active_mask_combo"):
+            self._active_mask_combo.clear()
+            for mask_name in store.list_masks():
+                self._active_mask_combo.addItem(mask_name)
+
+        # Update channel label from viewer's active layer
+        self._update_active_channel_label()
 
         self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
 
@@ -730,8 +763,12 @@ class LauncherWindow(QMainWindow):
         self._current_h5_path = None
         if hasattr(self, "_info_label"):
             self._info_label.setText("No dataset loaded")
-        if hasattr(self, "_seg_channel"):
-            self._seg_channel.clear()
+        if hasattr(self, "_seg_channel_label"):
+            self._seg_channel_label.setText("None selected")
+        if hasattr(self, "_active_seg_combo"):
+            self._active_seg_combo.clear()
+        if hasattr(self, "_active_mask_combo"):
+            self._active_mask_combo.clear()
         self.statusBar().showMessage("Dataset closed")
 
     def _on_run_segmentation(self) -> None:
@@ -754,17 +791,21 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Open a dataset in the viewer first")
             return
 
-        # Get the selected channel image
-        selected_channel = self._seg_channel.currentText()
-        if not selected_channel:
-            self.statusBar().showMessage("No channel selected for segmentation")
-            return
+        # Get the currently selected/active image layer from napari
+        active_layer = viewer_win.viewer.layers.selection.active
+        if active_layer is None or active_layer.__class__.__name__ != "Image":
+            # Fall back to first image layer
+            image_layers = [
+                layer for layer in viewer_win.viewer.layers
+                if layer.__class__.__name__ == "Image"
+            ]
+            if not image_layers:
+                self.statusBar().showMessage("No image loaded in viewer")
+                return
+            active_layer = image_layers[0]
 
-        try:
-            image = viewer_win.viewer.layers[selected_channel].data
-        except KeyError:
-            self.statusBar().showMessage(f"Channel '{selected_channel}' not found in viewer")
-            return
+        image = active_layer.data
+        self._update_active_channel_label()
         model_type = self._seg_model.currentText()
         diameter = self._seg_diameter.value() if self._seg_diameter.value() > 0 else None
         gpu = self._seg_gpu.isChecked()
@@ -816,9 +857,15 @@ class LauncherWindow(QMainWindow):
 
         # Display in viewer
         viewer_win = self._windows.get("viewer")
+        seg_name = f"cellpose_{n_cells}"
         if viewer_win is not None:
-            seg_name = f"cellpose_{n_cells}"
             viewer_win.add_labels(labels, name=seg_name)
+
+        # Add to active segmentation dropdown
+        if hasattr(self, "_active_seg_combo"):
+            if self._active_seg_combo.findText(seg_name) == -1:
+                self._active_seg_combo.addItem(seg_name)
+            self._active_seg_combo.setCurrentText(seg_name)
 
     def _on_import_rois(self) -> None:
         """Import ImageJ ROI .zip file as a label array."""
@@ -866,6 +913,98 @@ class LauncherWindow(QMainWindow):
             )
         except Exception as e:
             self.statusBar().showMessage(f"ROI import error: {e}")
+
+    def _update_active_channel_label(self) -> None:
+        """Update the channel label from napari's currently active layer."""
+        if not hasattr(self, "_seg_channel_label"):
+            return
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self._seg_channel_label.setText("None selected")
+            return
+        active = viewer_win.viewer.layers.selection.active
+        if active is not None and active.__class__.__name__ == "Image":
+            self._seg_channel_label.setText(active.name)
+        else:
+            # Show first image layer name if no image is actively selected
+            for layer in viewer_win.viewer.layers:
+                if layer.__class__.__name__ == "Image":
+                    self._seg_channel_label.setText(layer.name)
+                    return
+            self._seg_channel_label.setText("No image loaded")
+
+    def _on_save_labels(self) -> None:
+        """Save the active segmentation labels from viewer to HDF5."""
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            self.statusBar().showMessage("No dataset loaded")
+            return
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self.statusBar().showMessage("Viewer not open")
+            return
+
+        # Find the active labels layer
+        active = viewer_win.viewer.layers.selection.active
+        if active is not None and active.__class__.__name__ == "Labels":
+            name = active.name
+            data = active.data
+        else:
+            # Fall back to first labels layer
+            for layer in viewer_win.viewer.layers:
+                if layer.__class__.__name__ == "Labels":
+                    name = layer.name
+                    data = layer.data
+                    break
+            else:
+                self.statusBar().showMessage("No labels layer to save")
+                return
+
+        import numpy as np
+        count = store.write_labels(name, np.asarray(data, dtype=np.int32))
+        self.statusBar().showMessage(f"Saved labels '{name}' ({count} pixels)")
+
+    def _on_save_mask(self) -> None:
+        """Save a mask layer from viewer to HDF5."""
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            self.statusBar().showMessage("No dataset loaded")
+            return
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            self.statusBar().showMessage("Viewer not open")
+            return
+
+        # Find mask-like labels layers (names containing 'mask' or from threshold)
+        mask_layer = None
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == "Labels" and "mask" in layer.name.lower():
+                mask_layer = layer
+                break
+
+        if mask_layer is None:
+            # Fall back to active layer if it's a labels layer
+            active = viewer_win.viewer.layers.selection.active
+            if active is not None and active.__class__.__name__ == "Labels":
+                mask_layer = active
+
+        if mask_layer is None:
+            self.statusBar().showMessage("No mask layer to save")
+            return
+
+        import numpy as np
+        data = np.asarray(mask_layer.data, dtype=np.uint8)
+        count = store.write_mask(mask_layer.name, data)
+
+        # Add to active mask dropdown
+        if hasattr(self, "_active_mask_combo"):
+            if self._active_mask_combo.findText(mask_layer.name) == -1:
+                self._active_mask_combo.addItem(mask_layer.name)
+            self._active_mask_combo.setCurrentText(mask_layer.name)
+
+        self.statusBar().showMessage(f"Saved mask '{mask_layer.name}' ({count} pixels)")
 
     def _on_apply_threshold(self) -> None:
         method = self._thresh_method.currentText()
