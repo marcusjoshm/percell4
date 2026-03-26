@@ -12,12 +12,12 @@ from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -292,55 +292,12 @@ class LauncherWindow(QMainWindow):
 
         layout.addWidget(self._section_label("Analysis"))
 
-        # ── Segmentation group ──
-        seg_group = QGroupBox("Segmentation")
-        seg_layout = QVBoxLayout(seg_group)
-
-        method_row = QHBoxLayout()
-        method_row.addWidget(QLabel("Method:"))
-        self._seg_method = QComboBox()
-        self._seg_method.addItems(["Cellpose", "Import ROIs", "Manual Drawing"])
-        method_row.addWidget(self._seg_method)
-        seg_layout.addLayout(method_row)
-
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Model:"))
-        self._seg_model = QComboBox()
-        self._seg_model.addItems(["cpsam", "cyto3", "cyto2", "cyto", "nuclei"])
-        model_row.addWidget(self._seg_model)
-        seg_layout.addLayout(model_row)
-
-        chan_row = QHBoxLayout()
-        chan_row.addWidget(QLabel("Channel:"))
-        self._seg_channel_label = QLabel("None selected")
-        self._seg_channel_label.setStyleSheet("color: #4ea8de; font-weight: bold;")
-        chan_row.addWidget(self._seg_channel_label)
-        seg_layout.addLayout(chan_row)
-
-        diam_row = QHBoxLayout()
-        diam_row.addWidget(QLabel("Diameter:"))
-        self._seg_diameter = QSpinBox()
-        self._seg_diameter.setRange(0, 500)
-        self._seg_diameter.setValue(30)
-        self._seg_diameter.setSpecialValueText("Auto")
-        diam_row.addWidget(self._seg_diameter)
-        seg_layout.addLayout(diam_row)
-
-        gpu_row = QHBoxLayout()
-        self._seg_gpu = QCheckBox("Use GPU")
-        self._seg_gpu.setStyleSheet("QCheckBox { color: #e0e0e0; }")
-        gpu_row.addWidget(self._seg_gpu)
-        seg_layout.addLayout(gpu_row)
-
-        btn_segment = QPushButton("Run Segmentation")
-        btn_segment.clicked.connect(self._on_run_segmentation)
-        seg_layout.addWidget(btn_segment)
-
-        btn_save_labels = QPushButton("Save Labels to HDF5")
-        btn_save_labels.clicked.connect(self._on_save_labels)
-        seg_layout.addWidget(btn_save_labels)
-
-        layout.addWidget(seg_group)
+        # ── Segmentation ──
+        btn_segmentation = QPushButton("Open Segmentation...")
+        btn_segmentation.clicked.connect(
+            lambda: self._show_window("segmentation")
+        )
+        layout.addWidget(btn_segmentation)
 
         # ── Thresholding group ──
         thresh_group = QGroupBox("Thresholding")
@@ -527,6 +484,54 @@ class LauncherWindow(QMainWindow):
 
         layout.addWidget(layers_group)
 
+        # ── Layer Management ──
+        mgmt_group = QGroupBox("Layer Management")
+        mgmt_layout = QVBoxLayout(mgmt_group)
+
+        # Segmentation management
+        mgmt_layout.addWidget(QLabel("Segmentations:"))
+        seg_mgmt_row = QHBoxLayout()
+        self._mgmt_seg_combo = QComboBox()
+        self._mgmt_seg_combo.setPlaceholderText("Select segmentation")
+        seg_mgmt_row.addWidget(self._mgmt_seg_combo)
+        btn_rename_seg = QPushButton("Rename")
+        btn_rename_seg.clicked.connect(lambda: self._on_rename_layer("labels"))
+        seg_mgmt_row.addWidget(btn_rename_seg)
+        btn_delete_seg = QPushButton("Delete")
+        btn_delete_seg.clicked.connect(lambda: self._on_delete_layer("labels"))
+        seg_mgmt_row.addWidget(btn_delete_seg)
+        mgmt_layout.addLayout(seg_mgmt_row)
+
+        # Mask management
+        mgmt_layout.addWidget(QLabel("Masks:"))
+        mask_mgmt_row = QHBoxLayout()
+        self._mgmt_mask_combo = QComboBox()
+        self._mgmt_mask_combo.setPlaceholderText("Select mask")
+        mask_mgmt_row.addWidget(self._mgmt_mask_combo)
+        btn_rename_mask = QPushButton("Rename")
+        btn_rename_mask.clicked.connect(lambda: self._on_rename_layer("masks"))
+        mask_mgmt_row.addWidget(btn_rename_mask)
+        btn_delete_mask = QPushButton("Delete")
+        btn_delete_mask.clicked.connect(lambda: self._on_delete_layer("masks"))
+        mask_mgmt_row.addWidget(btn_delete_mask)
+        mgmt_layout.addLayout(mask_mgmt_row)
+
+        # Channel management
+        mgmt_layout.addWidget(QLabel("Channels:"))
+        chan_mgmt_row = QHBoxLayout()
+        self._mgmt_chan_combo = QComboBox()
+        self._mgmt_chan_combo.setPlaceholderText("Select channel")
+        chan_mgmt_row.addWidget(self._mgmt_chan_combo)
+        btn_rename_chan = QPushButton("Rename")
+        btn_rename_chan.clicked.connect(self._on_rename_channel)
+        chan_mgmt_row.addWidget(btn_rename_chan)
+        btn_delete_chan = QPushButton("Delete")
+        btn_delete_chan.clicked.connect(self._on_delete_channel)
+        chan_mgmt_row.addWidget(btn_delete_chan)
+        mgmt_layout.addLayout(chan_mgmt_row)
+
+        layout.addWidget(mgmt_group)
+
         # ── Dataset Info ──
         info_group = QGroupBox("Dataset Info")
         info_layout = QVBoxLayout(info_group)
@@ -568,6 +573,7 @@ class LauncherWindow(QMainWindow):
             from percell4.gui.cell_table import CellTableWindow
             from percell4.gui.data_plot import DataPlotWindow
             from percell4.gui.phasor_plot import PhasorPlotWindow
+            from percell4.gui.segmentation_window import SegmentationWindow
             from percell4.gui.viewer import ViewerWindow
 
             factories = {
@@ -575,6 +581,9 @@ class LauncherWindow(QMainWindow):
                 "data_plot": lambda: DataPlotWindow(self.data_model),
                 "phasor_plot": lambda: PhasorPlotWindow(self.data_model),
                 "cell_table": lambda: CellTableWindow(self.data_model),
+                "segmentation": lambda: SegmentationWindow(
+                    self.data_model, launcher=self
+                ),
             }
             if key in factories:
                 self._windows[key] = factories[key]()
@@ -587,8 +596,15 @@ class LauncherWindow(QMainWindow):
         viewer_win = self._windows.get("viewer")
         if viewer_win is None or viewer_win.viewer is None:
             return
+        def _on_layer_selection_changed(event):
+            self._update_active_channel_label()
+            # Also update the segmentation window if open
+            seg_win = self._windows.get("segmentation")
+            if seg_win is not None:
+                seg_win.update_channel_label()
+
         viewer_win.viewer.layers.selection.events.active.connect(
-            lambda event: self._update_active_channel_label()
+            _on_layer_selection_changed
         )
         self._viewer_selection_wired = True
 
@@ -761,6 +777,9 @@ class LauncherWindow(QMainWindow):
             for mask_name in store.list_masks():
                 self._active_mask_combo.addItem(mask_name)
 
+        # Populate management combos
+        self._refresh_management_combos()
+
         # Wire napari layer selection → channel label (once)
         self._wire_viewer_layer_selection()
         # Update channel label from viewer's active layer
@@ -785,199 +804,11 @@ class LauncherWindow(QMainWindow):
             self._active_mask_combo.clear()
         self.statusBar().showMessage("Dataset closed")
 
-    def _on_run_segmentation(self) -> None:
-        method = self._seg_method.currentText()
-
-        if method == "Import ROIs":
-            self._on_import_rois()
-            return
-
-        if method == "Manual Drawing":
-            self._show_window("viewer")
-            self.statusBar().showMessage(
-                "Manual drawing: use napari's paint/fill tools on the Labels layer"
-            )
-            return
-
-        # Cellpose segmentation
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self.statusBar().showMessage("Open a dataset in the viewer first")
-            return
-
-        # Get the currently selected/active image layer from napari
-        active_layer = viewer_win.viewer.layers.selection.active
-        if active_layer is None or active_layer.__class__.__name__ != "Image":
-            # Fall back to first image layer
-            image_layers = [
-                layer for layer in viewer_win.viewer.layers
-                if layer.__class__.__name__ == "Image"
-            ]
-            if not image_layers:
-                self.statusBar().showMessage("No image loaded in viewer")
-                return
-            active_layer = image_layers[0]
-
-        image = active_layer.data
-        self._update_active_channel_label()
-        model_type = self._seg_model.currentText()
-        diameter = self._seg_diameter.value() if self._seg_diameter.value() > 0 else None
-        gpu = self._seg_gpu.isChecked()
-
-        self.statusBar().showMessage(
-            f"Running Cellpose ({model_type})..."
-        )
-
-        from percell4.gui.workers import Worker
-        from percell4.segment.cellpose import run_cellpose
-
-        self._seg_worker = Worker(
-            run_cellpose,
-            image,
-            model_type=model_type,
-            diameter=diameter,
-            gpu=gpu,
-        )
-        self._seg_worker.finished.connect(self._on_segmentation_done)
-        self._seg_worker.error.connect(
-            lambda msg: self.statusBar().showMessage(f"Segmentation error: {msg}")
-        )
-        self._seg_worker.start()
-
-    def _on_segmentation_done(self, masks) -> None:
-        """Handle completed segmentation: postprocess, store, display."""
-        from percell4.segment.postprocess import (
-            filter_edge_cells,
-            filter_small_cells,
-            relabel_sequential,
-        )
-
-        # Postprocess
-        labels, edge_removed = filter_edge_cells(masks)
-        labels, small_removed = filter_small_cells(labels, min_area=15)
-        labels = relabel_sequential(labels)
-        n_cells = int(labels.max())
-
-        self.statusBar().showMessage(
-            f"Segmentation complete: {n_cells} cells "
-            f"({edge_removed} edge, {small_removed} small removed)"
-        )
-
-        # Write to HDF5 if a dataset is loaded
-        store = getattr(self, "_current_store", None)
-        if store is not None:
-            seg_name = f"cellpose_{n_cells}"
-            store.write_labels(seg_name, labels)
-
-        # Display in viewer
-        viewer_win = self._windows.get("viewer")
-        seg_name = f"cellpose_{n_cells}"
-        if viewer_win is not None:
-            viewer_win.add_labels(labels, name=seg_name)
-
-        # Add to active segmentation dropdown
-        if hasattr(self, "_active_seg_combo"):
-            if self._active_seg_combo.findText(seg_name) == -1:
-                self._active_seg_combo.addItem(seg_name)
-            self._active_seg_combo.setCurrentText(seg_name)
-
-    def _on_import_rois(self) -> None:
-        """Import ImageJ ROI .zip file as a label array."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import ImageJ ROIs", "",
-            "ROI Files (*.zip);;All Files (*)"
-        )
-        if not path:
-            return
-
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self.statusBar().showMessage("Open a dataset in the viewer first")
-            return
-
-        # Get image shape from first image layer
-        image_layers = [
-            layer for layer in viewer_win.viewer.layers
-            if layer.__class__.__name__ == "Image"
-        ]
-        if not image_layers:
-            self.statusBar().showMessage("No image loaded")
-            return
-
-        shape = image_layers[0].data.shape[-2:]  # (H, W)
-
-        try:
-            from percell4.segment.roi_import import import_imagej_rois
-
-            labels = import_imagej_rois(path, shape)
-            n_cells = int(labels.max())
-
-            # Write to HDF5
-            store = getattr(self, "_current_store", None)
-            if store is not None:
-                store.write_labels(f"roi_import_{n_cells}", labels)
-
-            viewer_win.add_labels(labels, name=f"roi_import_{n_cells}")
-            self.statusBar().showMessage(f"Imported {n_cells} ROIs from {Path(path).name}")
-        except ImportError:
-            QMessageBox.warning(
-                self, "Missing Dependency",
-                "roifile package required for ImageJ ROI import.\n"
-                "Install with: pip install roifile"
-            )
-        except Exception as e:
-            self.statusBar().showMessage(f"ROI import error: {e}")
-
     def _update_active_channel_label(self) -> None:
-        """Update the channel label from napari's currently active layer."""
-        if not hasattr(self, "_seg_channel_label"):
-            return
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self._seg_channel_label.setText("None selected")
-            return
-        active = viewer_win.viewer.layers.selection.active
-        if active is not None and active.__class__.__name__ == "Image":
-            self._seg_channel_label.setText(active.name)
-        else:
-            # Show first image layer name if no image is actively selected
-            for layer in viewer_win.viewer.layers:
-                if layer.__class__.__name__ == "Image":
-                    self._seg_channel_label.setText(layer.name)
-                    return
-            self._seg_channel_label.setText("No image loaded")
-
-    def _on_save_labels(self) -> None:
-        """Save the active segmentation labels from viewer to HDF5."""
-        store = getattr(self, "_current_store", None)
-        if store is None:
-            self.statusBar().showMessage("No dataset loaded")
-            return
-
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self.statusBar().showMessage("Viewer not open")
-            return
-
-        # Find the active labels layer
-        active = viewer_win.viewer.layers.selection.active
-        if active is not None and active.__class__.__name__ == "Labels":
-            name = active.name
-            data = active.data
-        else:
-            # Fall back to first labels layer
-            for layer in viewer_win.viewer.layers:
-                if layer.__class__.__name__ == "Labels":
-                    name = layer.name
-                    data = layer.data
-                    break
-            else:
-                self.statusBar().showMessage("No labels layer to save")
-                return
-
-        import numpy as np
-        count = store.write_labels(name, np.asarray(data, dtype=np.int32))
-        self.statusBar().showMessage(f"Saved labels '{name}' ({count} pixels)")
+        """Update channel labels in any open windows that track the active layer."""
+        seg_win = self._windows.get("segmentation")
+        if seg_win is not None:
+            seg_win.update_channel_label()
 
     def _on_save_mask(self) -> None:
         """Save a mask layer from viewer to HDF5."""
@@ -1045,6 +876,168 @@ class LauncherWindow(QMainWindow):
         )
         if path:
             self.statusBar().showMessage(f"Run script: {path} — not yet implemented")
+
+    # ── Layer management ────────────────────────────────────────
+
+    def _refresh_management_combos(self) -> None:
+        """Refresh all management dropdowns from the current store."""
+        store = getattr(self, "_current_store", None)
+
+        if hasattr(self, "_mgmt_seg_combo"):
+            self._mgmt_seg_combo.clear()
+            if store is not None:
+                for name in store.list_labels():
+                    self._mgmt_seg_combo.addItem(name)
+
+        if hasattr(self, "_mgmt_mask_combo"):
+            self._mgmt_mask_combo.clear()
+            if store is not None:
+                for name in store.list_masks():
+                    self._mgmt_mask_combo.addItem(name)
+
+        if hasattr(self, "_mgmt_chan_combo"):
+            self._mgmt_chan_combo.clear()
+            viewer_win = self._windows.get("viewer")
+            if viewer_win is not None and viewer_win.viewer is not None:
+                for layer in viewer_win.viewer.layers:
+                    if layer.__class__.__name__ == "Image":
+                        self._mgmt_chan_combo.addItem(layer.name)
+
+    def _on_rename_layer(self, prefix: str) -> None:
+        """Rename a segmentation or mask in HDF5 and viewer."""
+        combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo
+        old_name = combo.currentText()
+        if not old_name:
+            self.statusBar().showMessage("Nothing selected to rename")
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self, "Rename", f"New name for '{old_name}':", text=old_name
+        )
+        if not ok or not new_name or new_name == old_name:
+            return
+
+        store = getattr(self, "_current_store", None)
+        if store is not None:
+            try:
+                store.rename_item(f"{prefix}/{old_name}", f"{prefix}/{new_name}")
+            except ValueError as e:
+                self.statusBar().showMessage(str(e))
+                return
+
+        # Rename in viewer
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None and viewer_win.viewer is not None:
+            for layer in viewer_win.viewer.layers:
+                if layer.name == old_name:
+                    layer.name = new_name
+                    break
+
+        # Refresh dropdowns
+        self._refresh_management_combos()
+        self._refresh_active_combos()
+        self.statusBar().showMessage(f"Renamed '{old_name}' → '{new_name}'")
+
+    def _on_delete_layer(self, prefix: str) -> None:
+        """Delete a segmentation or mask from HDF5 and viewer."""
+        combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo
+        name = combo.currentText()
+        if not name:
+            self.statusBar().showMessage("Nothing selected to delete")
+            return
+
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete '{name}'? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        store = getattr(self, "_current_store", None)
+        if store is not None:
+            store.delete_item(f"{prefix}/{name}")
+
+        # Remove from viewer
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None and viewer_win.viewer is not None:
+            for layer in list(viewer_win.viewer.layers):
+                if layer.name == name:
+                    viewer_win.viewer.layers.remove(layer)
+                    break
+
+        self._refresh_management_combos()
+        self._refresh_active_combos()
+        self.statusBar().showMessage(f"Deleted '{name}'")
+
+    def _on_rename_channel(self) -> None:
+        """Rename a channel (image layer) in the viewer."""
+        old_name = self._mgmt_chan_combo.currentText()
+        if not old_name:
+            self.statusBar().showMessage("Nothing selected to rename")
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Channel", f"New name for '{old_name}':", text=old_name
+        )
+        if not ok or not new_name or new_name == old_name:
+            return
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None and viewer_win.viewer is not None:
+            for layer in viewer_win.viewer.layers:
+                if layer.name == old_name:
+                    layer.name = new_name
+                    break
+
+        self._refresh_management_combos()
+        self.statusBar().showMessage(f"Renamed channel '{old_name}' → '{new_name}'")
+
+    def _on_delete_channel(self) -> None:
+        """Delete a channel (image layer) from the viewer."""
+        name = self._mgmt_chan_combo.currentText()
+        if not name:
+            self.statusBar().showMessage("Nothing selected to delete")
+            return
+
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete channel '{name}'? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None and viewer_win.viewer is not None:
+            for layer in list(viewer_win.viewer.layers):
+                if layer.name == name:
+                    viewer_win.viewer.layers.remove(layer)
+                    break
+
+        self._refresh_management_combos()
+        self.statusBar().showMessage(f"Deleted channel '{name}'")
+
+    def _refresh_active_combos(self) -> None:
+        """Refresh the active segmentation/mask dropdowns."""
+        store = getattr(self, "_current_store", None)
+        if hasattr(self, "_active_seg_combo"):
+            current = self._active_seg_combo.currentText()
+            self._active_seg_combo.clear()
+            if store is not None:
+                for name in store.list_labels():
+                    self._active_seg_combo.addItem(name)
+            if current and self._active_seg_combo.findText(current) >= 0:
+                self._active_seg_combo.setCurrentText(current)
+
+        if hasattr(self, "_active_mask_combo"):
+            current = self._active_mask_combo.currentText()
+            self._active_mask_combo.clear()
+            if store is not None:
+                for name in store.list_masks():
+                    self._active_mask_combo.addItem(name)
+            if current and self._active_mask_combo.findText(current) >= 0:
+                self._active_mask_combo.setCurrentText(current)
 
     def _on_export_csv(self) -> None:
         if self.data_model.df.empty:

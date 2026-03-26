@@ -256,6 +256,24 @@ class DatasetStore:
         """Check if the .h5 file exists."""
         return self.path.exists()
 
+    def delete_item(self, hdf5_path: str) -> bool:
+        """Delete a dataset or group at the given HDF5 path. Returns True if deleted."""
+        with h5py.File(self.path, "a") as f:
+            if hdf5_path in f:
+                del f[hdf5_path]
+                return True
+        return False
+
+    def rename_item(self, old_path: str, new_path: str) -> bool:
+        """Rename a dataset or group within the HDF5 file. Returns True if renamed."""
+        with h5py.File(self.path, "a") as f:
+            if old_path not in f:
+                return False
+            if new_path in f:
+                raise ValueError(f"Target path already exists: {new_path}")
+            f.move(old_path, new_path)
+            return True
+
     @staticmethod
     def create_atomic(
         path: str | Path,
