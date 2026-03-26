@@ -140,24 +140,95 @@ def import_dataset(
             tcspc_data[ch_name] = decay
 
     if flim_params and bin_files:
-        # .bin files — raw binary TCSPC
+        # .bin files — parse tokens from filenames, stitch tiles, create intensity
+        import re
+
         from percell4.io.readers import read_flim_bin
 
         bin_dims = flim_params.get("bin_dimensions", {})
+        config = token_config or TokenConfig()
+
+        # Parse tokens from .bin filenames (same patterns as TIFFs)
+        bin_by_channel: dict[str, dict[int, Path]] = defaultdict(dict)
         for bin_path in bin_files:
-            result_bin = read_flim_bin(
-                bin_path,
-                x_dim=bin_dims.get("x_dim", 512),
-                y_dim=bin_dims.get("y_dim", 512),
-                t_dim=bin_dims.get("t_dim", 256),
-                dim_order=bin_dims.get("dim_order", "YXT"),
-            )
-            ch_name = bin_path.stem
-            tcspc_data[ch_name] = result_bin["array"]
-            # Also add intensity from .bin if no TIFF intensity was found
-            if not channel_images:
-                channel_images.append(result_bin["intensity"])
-                channel_names.append(ch_name)
+            stem = bin_path.stem
+            # Extract channel token
+            ch = ""
+            if config.channel:
+                m = re.search(config.channel, stem)
+                if m:
+                    ch = m.group(1)
+            # Extract tile token
+            tile_idx = 0
+            if config.tile:
+                m = re.search(config.tile, stem)
+                if m:
+                    tile_idx = int(m.group(1))
+            bin_by_channel[ch][tile_idx] = bin_path
+
+        for ch_key in sorted(bin_by_channel.keys()):
+            ch_name = f"ch{ch_key}" if ch_key else "ch0"
+            tile_bins = bin_by_channel[ch_key]
+
+            # Read each .bin tile
+            decay_tiles: dict[int, np.ndarray] = {}
+            intensity_tiles: dict[int, np.ndarray] = {}
+            for tile_idx in sorted(tile_bins.keys()):
+                bin_path = tile_bins[tile_idx]
+                result_bin = read_flim_bin(
+                    bin_path,
+                    x_dim=bin_dims.get("x_dim", 512),
+                    y_dim=bin_dims.get("y_dim", 512),
+                    t_dim=bin_dims.get("t_dim", 256),
+                    dim_order=bin_dims.get("dim_order", "YXT"),
+                )
+                decay_tiles[tile_idx] = result_bin["array"]  # (H, W, T)
+                # Sum projection → intensity image for this tile
+                intensity_tiles[tile_idx] = result_bin["intensity"]  # (H, W)
+
+            # Stitch intensity tiles
+            if tile_config and tile_config.grid_rows * tile_config.grid_cols > 1:
+                stitched_intensity = assemble_tiles(
+                    intensity_tiles,
+                    grid_rows=tile_config.grid_rows,
+                    grid_cols=tile_config.grid_cols,
+                    grid_type=tile_config.grid_type,
+                    order=tile_config.order,
+                )
+            elif len(intensity_tiles) == 1:
+                stitched_intensity = next(iter(intensity_tiles.values()))
+            else:
+                stitched_intensity = next(iter(intensity_tiles.values()))
+
+            # Add intensity image as a viewable channel
+            channel_images.append(stitched_intensity.astype(np.float32))
+            channel_names.append(ch_name)
+
+            # Stitch decay tiles (3D stitching — stitch spatially, keep T)
+            if tile_config and tile_config.grid_rows * tile_config.grid_cols > 1:
+                # Get tile shape for 3D stitching
+                first_decay = next(iter(decay_tiles.values()))
+                tile_h, tile_w, n_bins = first_decay.shape
+                out_h = tile_config.grid_rows * tile_h
+                out_w = tile_config.grid_cols * tile_w
+
+                stitched_decay = np.zeros(
+                    (out_h, out_w, n_bins), dtype=first_decay.dtype
+                )
+                positions = _tile_positions_from_config(tile_config)
+                for t_idx, (row, col) in positions.items():
+                    if t_idx not in decay_tiles:
+                        continue
+                    y0 = row * tile_h
+                    x0 = col * tile_w
+                    stitched_decay[y0:y0 + tile_h, x0:x0 + tile_w, :] = (
+                        decay_tiles[t_idx]
+                    )
+                tcspc_data[ch_name] = stitched_decay
+            elif len(decay_tiles) == 1:
+                tcspc_data[ch_name] = next(iter(decay_tiles.values()))
+            else:
+                tcspc_data[ch_name] = next(iter(decay_tiles.values()))
 
     # 5. Write to HDF5 (before updating CSV!)
     _progress(4, 5, "Writing HDF5...")
@@ -259,3 +330,20 @@ def _load_and_stitch(files: list, tile_config: TileConfig | None) -> np.ndarray:
     # (could be multiple z-slices grouped together)
     data = read_tiff(str(files[0].path))
     return data["array"]
+
+
+def _tile_positions_from_config(
+    tile_config: TileConfig,
+) -> dict[int, tuple[int, int]]:
+    """Get tile index → (row, col) mapping from a TileConfig.
+
+    Reuses the assembler's position logic.
+    """
+    from percell4.io.assembler import _tile_positions
+
+    return _tile_positions(
+        tile_config.grid_rows,
+        tile_config.grid_cols,
+        tile_config.grid_type,
+        tile_config.order,
+    )
