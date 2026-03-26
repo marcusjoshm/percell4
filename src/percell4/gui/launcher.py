@@ -85,10 +85,6 @@ class LauncherWindow(QMainWindow):
         open_project.triggered.connect(self._on_open_project)
         file_menu.addAction(open_project)
 
-        import_data = QAction("&Import Dataset...", self)
-        import_data.triggered.connect(self._on_import_dataset)
-        file_menu.addAction(import_data)
-
         file_menu.addSeparator()
 
         quit_action = QAction("&Quit", self)
@@ -190,6 +186,7 @@ class LauncherWindow(QMainWindow):
 
         # Create sidebar buttons and content panels
         categories = [
+            ("I/O", self._create_io_panel),
             ("Viewer", self._create_viewer_panel),
             ("Analysis", self._create_analysis_panel),
             ("FLIM", self._create_flim_panel),
@@ -224,6 +221,50 @@ class LauncherWindow(QMainWindow):
 
     # ── Content panels ────────────────────────────────────────
 
+    def _create_io_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setAlignment(Qt.AlignTop)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        layout.addWidget(self._section_label("Import / Export"))
+
+        # ── Import ──
+        import_group = QGroupBox("Import")
+        import_layout = QVBoxLayout(import_group)
+
+        btn_import = QPushButton("Import TIFF Dataset...")
+        btn_import.clicked.connect(self._on_import_dataset)
+        import_layout.addWidget(btn_import)
+
+        btn_load = QPushButton("Load Existing .h5 Dataset...")
+        btn_load.clicked.connect(self._on_load_dataset)
+        import_layout.addWidget(btn_load)
+
+        btn_close = QPushButton("Close Dataset")
+        btn_close.clicked.connect(self._on_close_dataset)
+        import_layout.addWidget(btn_close)
+
+        layout.addWidget(import_group)
+
+        # ── Export ──
+        export_group = QGroupBox("Export")
+        export_layout = QVBoxLayout(export_group)
+
+        btn_export_csv = QPushButton("Export Measurements to CSV...")
+        btn_export_csv.clicked.connect(self._on_export_csv)
+        export_layout.addWidget(btn_export_csv)
+
+        layout.addWidget(export_group)
+
+        # ── Placeholders ──
+        layout.addWidget(self._placeholder("Prism Export"))
+        layout.addWidget(self._placeholder("Batch Import"))
+        layout.addWidget(self._placeholder("Batch Export"))
+        layout.addStretch()
+        return panel
+
     def _create_viewer_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -236,14 +277,6 @@ class LauncherWindow(QMainWindow):
         btn_open = QPushButton("Open Viewer")
         btn_open.clicked.connect(lambda: self._show_window("viewer"))
         layout.addWidget(btn_open)
-
-        btn_load = QPushButton("Load Dataset...")
-        btn_load.clicked.connect(self._on_load_dataset)
-        layout.addWidget(btn_load)
-
-        btn_close = QPushButton("Close Dataset")
-        btn_close.clicked.connect(self._on_close_dataset)
-        layout.addWidget(btn_close)
 
         layout.addStretch()
         return panel
@@ -451,14 +484,6 @@ class LauncherWindow(QMainWindow):
 
         layout.addWidget(self._section_label("Data"))
 
-        # ── Export ──
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout(export_group)
-        btn_export = QPushButton("Export Measurements to CSV...")
-        btn_export.clicked.connect(self._on_export_csv)
-        export_layout.addWidget(btn_export)
-        layout.addWidget(export_group)
-
         # ── Dataset Info ──
         info_group = QGroupBox("Dataset Info")
         info_layout = QVBoxLayout(info_group)
@@ -469,8 +494,6 @@ class LauncherWindow(QMainWindow):
 
         # ── Placeholders ──
         layout.addWidget(self._placeholder("Project Browser"))
-        layout.addWidget(self._placeholder("Prism Export"))
-        layout.addWidget(self._placeholder("Batch Export"))
         layout.addStretch()
         return panel
 
