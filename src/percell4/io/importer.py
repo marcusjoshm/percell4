@@ -178,6 +178,16 @@ def import_dataset(
                     tile_idx = int(m.group(1))
             bin_by_channel[ch][tile_idx] = bin_path
 
+        # Convert tile indices to 0-based (filenames may use 1-based: _s1, _s2, ...)
+        for ch_key in bin_by_channel:
+            tile_dict = bin_by_channel[ch_key]
+            if tile_dict:
+                min_idx = min(tile_dict.keys())
+                if min_idx > 0:
+                    bin_by_channel[ch_key] = {
+                        k - min_idx: v for k, v in tile_dict.items()
+                    }
+
         # We need the store created early for streaming decay writes
         # (decay tiles are too large to stitch in memory)
         _bin_needs_early_store = True
@@ -409,6 +419,12 @@ def _load_and_stitch(files: list, tile_config: TileConfig | None) -> np.ndarray:
             tile_idx = int(f.tokens.get("tile", "0"))
             data = read_tiff(str(f.path))
             tiles[tile_idx] = data["array"]
+
+        # Convert to 0-based tile indices if needed
+        if tiles:
+            min_idx = min(tiles.keys())
+            if min_idx > 0:
+                tiles = {k - min_idx: v for k, v in tiles.items()}
 
         return assemble_tiles(
             tiles,
