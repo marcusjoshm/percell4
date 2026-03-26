@@ -154,8 +154,16 @@ class ViewerWindow:
         self.viewer.add_labels(data, name=name, blending=blending, **kwargs)
 
     def add_mask(self, data, name: str, **kwargs) -> None:
-        """Add a binary mask as a labels layer with low opacity."""
-        self.viewer.add_labels(data, name=name, opacity=0.4, **kwargs)
+        """Add a binary mask as a labels layer with yellow colormap."""
+        from napari.utils.colormaps import DirectLabelColormap
+
+        if "colormap" not in kwargs:
+            kwargs["colormap"] = DirectLabelColormap(
+                color_dict={0: "transparent", 1: "yellow", None: "transparent"},
+            )
+        if "opacity" not in kwargs:
+            kwargs["opacity"] = 0.5
+        self.viewer.add_labels(data, name=name, **kwargs)
 
     def clear(self) -> None:
         """Remove all layers."""
