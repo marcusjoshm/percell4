@@ -421,6 +421,10 @@ class LauncherWindow(QMainWindow):
         btn_particle.clicked.connect(self._on_analyze_particles)
         particle_layout.addWidget(btn_particle)
 
+        btn_export_particle = QPushButton("Export Particle Data to CSV...")
+        btn_export_particle.clicked.connect(self._on_export_particle_csv)
+        particle_layout.addWidget(btn_export_particle)
+
         self._particle_result_label = QLabel("")
         self._particle_result_label.setWordWrap(True)
         particle_layout.addWidget(self._particle_result_label)
@@ -1390,6 +1394,9 @@ class LauncherWindow(QMainWindow):
         if store is not None:
             store.write_dataframe("measurements", self.data_model.df)
 
+        # Store the raw particle DataFrame for dedicated export
+        self._last_particle_df = particle_df
+
         self._particle_result_label.setText(
             f"{total_particles} particles in {n_cells} cells\n"
             f"mask: {mask_name} | min area: {min_area} px"
@@ -1398,6 +1405,22 @@ class LauncherWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Found {total_particles} particles across {n_cells} cells"
         )
+
+    def _on_export_particle_csv(self) -> None:
+        """Export particle analysis data to CSV."""
+        from qtpy.QtWidgets import QFileDialog
+
+        particle_df = getattr(self, "_last_particle_df", None)
+        if particle_df is None or particle_df.empty:
+            self.statusBar().showMessage("No particle data — run Analyze Particles first")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Particle Data", "particles.csv", "CSV (*.csv)"
+        )
+        if path:
+            particle_df.to_csv(path, index=False)
+            self.statusBar().showMessage(f"Exported particle data to {path}")
 
     def _on_compute_phasor(self) -> None:
         self.statusBar().showMessage("Compute phasor — not yet implemented")
