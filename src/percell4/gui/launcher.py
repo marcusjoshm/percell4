@@ -190,6 +190,7 @@ class LauncherWindow(QMainWindow):
         categories = [
             ("I/O", self._create_io_panel),
             ("Viewer", self._create_viewer_panel),
+            ("Segment", self._create_segment_panel),
             ("Analysis", self._create_analysis_panel),
             ("FLIM", self._create_flim_panel),
             ("Scripts", self._create_scripts_panel),
@@ -283,6 +284,14 @@ class LauncherWindow(QMainWindow):
         layout.addStretch()
         return panel
 
+    def _create_segment_panel(self) -> QWidget:
+        from percell4.gui.segmentation_panel import SegmentationPanel
+
+        self._seg_panel = SegmentationPanel(
+            self.data_model, launcher=self
+        )
+        return self._seg_panel
+
     def _create_analysis_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -291,13 +300,6 @@ class LauncherWindow(QMainWindow):
         layout.setSpacing(10)
 
         layout.addWidget(self._section_label("Analysis"))
-
-        # ── Segmentation ──
-        btn_segmentation = QPushButton("Open Segmentation...")
-        btn_segmentation.clicked.connect(
-            lambda: self._show_window("segmentation")
-        )
-        layout.addWidget(btn_segmentation)
 
         # ── Thresholding group ──
         thresh_group = QGroupBox("Thresholding")
@@ -602,7 +604,6 @@ class LauncherWindow(QMainWindow):
             from percell4.gui.cell_table import CellTableWindow
             from percell4.gui.data_plot import DataPlotWindow
             from percell4.gui.phasor_plot import PhasorPlotWindow
-            from percell4.gui.segmentation_window import SegmentationWindow
             from percell4.gui.viewer import ViewerWindow
 
             factories = {
@@ -610,9 +611,6 @@ class LauncherWindow(QMainWindow):
                 "data_plot": lambda: DataPlotWindow(self.data_model),
                 "phasor_plot": lambda: PhasorPlotWindow(self.data_model),
                 "cell_table": lambda: CellTableWindow(self.data_model),
-                "segmentation": lambda: SegmentationWindow(
-                    self.data_model, launcher=self
-                ),
             }
             if key in factories:
                 self._windows[key] = factories[key]()
@@ -636,9 +634,8 @@ class LauncherWindow(QMainWindow):
 
         def _on_layer_selection_changed(event):
             self._update_active_channel_label()
-            seg_win = self._windows.get("segmentation")
-            if seg_win is not None:
-                seg_win.update_channel_label()
+            if hasattr(self, "_seg_panel"):
+                self._seg_panel.update_channel_label()
             # Update active segmentation/mask from napari layer selection
             self._sync_active_layers_from_viewer()
 
@@ -886,10 +883,9 @@ class LauncherWindow(QMainWindow):
         self.statusBar().showMessage("Dataset closed")
 
     def _update_active_channel_label(self) -> None:
-        """Update channel labels in any open windows that track the active layer."""
-        seg_win = self._windows.get("segmentation")
-        if seg_win is not None:
-            seg_win.update_channel_label()
+        """Update channel labels in any panels that track the active layer."""
+        if hasattr(self, "_seg_panel"):
+            self._seg_panel.update_channel_label()
 
     def _sync_active_layers_from_viewer(self) -> None:
         """When user clicks a layer in napari, update the active seg/mask in the model."""
