@@ -590,15 +590,23 @@ class LauncherWindow(QMainWindow):
         return self._windows.get(key)
 
     def _wire_viewer_layer_selection(self) -> None:
-        """Connect napari's active layer change to the channel label. Call once."""
-        if getattr(self, "_viewer_selection_wired", False):
-            return
+        """Connect napari's active layer change to the channel label.
+
+        Re-wires if the viewer was recreated (old Qt window was deleted).
+        """
         viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None:
             return
+        try:
+            viewer_id = id(viewer_win.viewer)
+        except Exception:
+            return
+
+        if getattr(self, "_wired_viewer_id", None) == viewer_id:
+            return  # already wired to this viewer instance
+
         def _on_layer_selection_changed(event):
             self._update_active_channel_label()
-            # Also update the segmentation window if open
             seg_win = self._windows.get("segmentation")
             if seg_win is not None:
                 seg_win.update_channel_label()
@@ -606,7 +614,7 @@ class LauncherWindow(QMainWindow):
         viewer_win.viewer.layers.selection.events.active.connect(
             _on_layer_selection_changed
         )
-        self._viewer_selection_wired = True
+        self._wired_viewer_id = viewer_id
 
     def _show_window(self, key: str) -> None:
         """Show/raise a managed window, creating it if needed."""

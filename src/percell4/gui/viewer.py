@@ -1,15 +1,18 @@
 """Napari viewer window with full built-in layer controls.
 
 Uses napari's own QMainWindow which includes the layer list, layer controls,
-colormaps, opacity, blending, editing tools, and dims slider. No custom
-side panel — segmentation/mask management is in the launcher.
+colormaps, opacity, blending, editing tools, and dims slider.
 """
 
 from __future__ import annotations
 
+import logging
+
 from qtpy.QtCore import QSettings
 
 from percell4.model import CellDataModel
+
+logger = logging.getLogger(__name__)
 
 # Colormap mapping for common fluorophore names
 CHANNEL_COLORMAPS = {
@@ -47,6 +50,8 @@ class ViewerWindow:
     (colormap, opacity, blending, contrast limits), editing tools (paint,
     fill, erase for labels), and dims slider. Label selection syncs to
     CellDataModel.
+
+    If the user closes the napari window, it is recreated on the next show().
     """
 
     def __init__(self, data_model: CellDataModel) -> None:
@@ -54,10 +59,25 @@ class ViewerWindow:
         self._viewer = None
         self._qt_window = None
 
+    def _is_alive(self) -> bool:
+        """Check if the napari Qt window still exists (not deleted by Qt)."""
+        if self._qt_window is None:
+            return False
+        try:
+            # Accessing any property on a deleted Qt object raises RuntimeError
+            self._qt_window.isVisible()
+            return True
+        except RuntimeError:
+            return False
+
     def _ensure_viewer(self) -> None:
-        """Lazily create the napari viewer on first use."""
-        if self._viewer is not None:
+        """Create or recreate the napari viewer if needed."""
+        if self._viewer is not None and self._is_alive():
             return
+
+        # Clean up stale references
+        self._viewer = None
+        self._qt_window = None
 
         import napari
 
@@ -85,28 +105,28 @@ class ViewerWindow:
         self._qt_window.activateWindow()
 
     def hide(self) -> None:
-        if self._qt_window is not None:
+        if self._is_alive():
             self._qt_window.hide()
 
     def isMinimized(self) -> bool:
-        if self._qt_window is not None:
+        if self._is_alive():
             return self._qt_window.isMinimized()
         return False
 
     def showNormal(self) -> None:
-        if self._qt_window is not None:
+        if self._is_alive():
             self._qt_window.showNormal()
 
     def raise_(self) -> None:
-        if self._qt_window is not None:
+        if self._is_alive():
             self._qt_window.raise_()
 
     def activateWindow(self) -> None:
-        if self._qt_window is not None:
+        if self._is_alive():
             self._qt_window.activateWindow()
 
     def close(self) -> None:
-        if self._qt_window is not None:
+        if self._is_alive():
             self._save_geometry()
             self._qt_window.hide()
 
@@ -125,7 +145,7 @@ class ViewerWindow:
 
     def clear(self) -> None:
         """Remove all layers."""
-        if self._viewer is not None:
+        if self._viewer is not None and self._is_alive():
             self._viewer.layers.clear()
 
     def _on_layer_inserted(self, event) -> None:
@@ -145,12 +165,12 @@ class ViewerWindow:
             self.data_model.set_selection([label_id])
 
     def _save_geometry(self) -> None:
-        if self._qt_window is not None:
+        if self._is_alive():
             QSettings("LeeLabPerCell4", "PerCell4").setValue(
                 "viewer/geometry", self._qt_window.saveGeometry()
             )
 
     def _restore_geometry(self) -> None:
         geom = QSettings("LeeLabPerCell4", "PerCell4").value("viewer/geometry")
-        if geom and self._qt_window is not None:
+        if geom and self._is_alive():
             self._qt_window.restoreGeometry(geom)

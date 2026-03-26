@@ -116,19 +116,42 @@ class SegmentationWindow(QMainWindow):
 
         layout.addWidget(roi_group)
 
-        # ── Manual Drawing section ────────────────────────────
-        draw_group = QGroupBox("Manual Drawing")
+        # ── Manual Editing section ─────────────────────────────
+        draw_group = QGroupBox("Manual Editing")
         draw_layout = QVBoxLayout(draw_group)
 
         draw_layout.addWidget(QLabel(
-            "Create a new empty labels layer in napari,\n"
-            "then use the paint/fill/erase tools to\n"
-            "draw cell boundaries manually."
+            "Create, add, or remove labels using napari's\n"
+            "built-in paint/fill/erase tools."
         ))
 
         btn_new_labels = QPushButton("Create Empty Labels Layer")
         btn_new_labels.clicked.connect(self._on_create_empty_labels)
         draw_layout.addWidget(btn_new_labels)
+
+        btn_delete_label = QPushButton("Delete Selected Label")
+        btn_delete_label.setToolTip(
+            "Click a cell in the viewer, then click this button\n"
+            "to remove that label from the active labels layer."
+        )
+        btn_delete_label.clicked.connect(self._on_delete_selected_label)
+        draw_layout.addWidget(btn_delete_label)
+
+        btn_add_label = QPushButton("Add New Label (next ID)")
+        btn_add_label.setToolTip(
+            "Sets the active paint label to the next available ID\n"
+            "so you can draw a new cell with napari's paint tool."
+        )
+        btn_add_label.clicked.connect(self._on_add_new_label)
+        draw_layout.addWidget(btn_add_label)
+
+        btn_relabel = QPushButton("Clean Up Labels (relabel sequential)")
+        btn_relabel.setToolTip(
+            "Renumber all labels to be sequential [1, 2, 3, ...]\n"
+            "after adding or deleting cells."
+        )
+        btn_relabel.clicked.connect(self._on_relabel_sequential)
+        draw_layout.addWidget(btn_relabel)
 
         layout.addWidget(draw_group)
 
@@ -361,6 +384,81 @@ class SegmentationWindow(QMainWindow):
         viewer_win.add_labels(labels, name="manual")
         self.statusBar().showMessage(
             "Empty labels layer created — use napari paint tools to draw cells"
+        )
+
+    def _get_active_labels_layer(self):
+        """Get the active labels layer from the viewer, or None."""
+        if self._launcher is None:
+            return None
+        viewer_win = self._launcher._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            return None
+        import napari
+        active = viewer_win.viewer.layers.selection.active
+        if active is not None and isinstance(active, napari.layers.Labels):
+            return active
+        # Fall back to first labels layer
+        for layer in viewer_win.viewer.layers:
+            if isinstance(layer, napari.layers.Labels):
+                return layer
+        return None
+
+    def _on_delete_selected_label(self) -> None:
+        """Delete the currently selected label from the active labels layer."""
+        labels_layer = self._get_active_labels_layer()
+        if labels_layer is None:
+            self.statusBar().showMessage("No labels layer active")
+            return
+
+        selected_id = labels_layer.selected_label
+        if selected_id == 0:
+            self.statusBar().showMessage("No label selected (click a cell first)")
+            return
+
+        # Zero out all pixels with this label
+        data = labels_layer.data.copy()
+        count = int(np.sum(data == selected_id))
+        data[data == selected_id] = 0
+        labels_layer.data = data
+        labels_layer.selected_label = 0
+        labels_layer.refresh()
+
+        self.statusBar().showMessage(
+            f"Deleted label {selected_id} ({count} pixels removed)"
+        )
+
+    def _on_add_new_label(self) -> None:
+        """Set the paint label to the next available ID for drawing a new cell."""
+        labels_layer = self._get_active_labels_layer()
+        if labels_layer is None:
+            self.statusBar().showMessage("No labels layer active")
+            return
+
+        next_id = int(labels_layer.data.max()) + 1
+        labels_layer.selected_label = next_id
+        labels_layer.mode = "paint"
+
+        self.statusBar().showMessage(
+            f"Paint label set to {next_id} — draw the new cell boundary"
+        )
+
+    def _on_relabel_sequential(self) -> None:
+        """Relabel the active labels layer to sequential IDs [1..N]."""
+        labels_layer = self._get_active_labels_layer()
+        if labels_layer is None:
+            self.statusBar().showMessage("No labels layer active")
+            return
+
+        from percell4.segment.postprocess import relabel_sequential
+
+        old_data = labels_layer.data
+        new_data = relabel_sequential(np.asarray(old_data, dtype=np.int32))
+        n_cells = int(new_data.max())
+        labels_layer.data = new_data
+        labels_layer.refresh()
+
+        self.statusBar().showMessage(
+            f"Relabeled to {n_cells} sequential cells"
         )
 
     # ── Save ──────────────────────────────────────────────────
