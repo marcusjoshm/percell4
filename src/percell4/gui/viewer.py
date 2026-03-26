@@ -141,9 +141,20 @@ class ViewerWindow:
 
     def add_image(self, data, name: str, **kwargs) -> None:
         """Add an image layer with auto-detected colormap and additive blending."""
+        import numpy as np
+
         cmap, self._color_index = _colormap_for_channel(name, self._color_index)
         cmap = kwargs.pop("colormap", cmap)
         blending = kwargs.pop("blending", "additive")
+
+        # Set contrast limits from actual data range so sparse images aren't blank
+        if "contrast_limits" not in kwargs:
+            d = np.asarray(data)
+            dmin = float(np.nanmin(d)) if np.any(np.isfinite(d)) else 0.0
+            dmax = float(np.nanmax(d)) if np.any(np.isfinite(d)) else 1.0
+            if dmax > dmin:
+                kwargs["contrast_limits"] = (dmin, dmax)
+
         self.viewer.add_image(
             data, name=name, colormap=cmap, blending=blending, **kwargs
         )

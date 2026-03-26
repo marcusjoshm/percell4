@@ -779,7 +779,6 @@ class LauncherWindow(QMainWindow):
         # Run import in background thread
         self.statusBar().showMessage(f"Importing from {source_dir}...")
 
-        from percell4.gui.workers import Worker
         from percell4.io.importer import import_dataset
 
         # Build FLIM params if enabled
@@ -792,31 +791,32 @@ class LauncherWindow(QMainWindow):
                 "bin_dimensions": dialog.bin_dimensions,
             }
 
-        self._import_worker = Worker(
-            import_dataset,
-            source_dir,
-            output_path,
-            token_config=dialog.token_config,
-            tile_config=dialog.tile_config,
-            z_project_method=dialog.z_project_method,
-            metadata={
-                "condition": dialog.condition,
-                "replicate": dialog.replicate,
-                "notes": dialog.notes,
-            },
-            project_csv=project_csv,
-            flim_params=flim_params,
-        )
-        self._import_worker.progress.connect(
-            lambda msg: self.statusBar().showMessage(f"Import: {msg}")
-        )
-        self._import_worker.finished.connect(
-            lambda n_ch: self._on_import_finished(output_path, n_ch)
-        )
-        self._import_worker.error.connect(
-            lambda msg: self.statusBar().showMessage(f"Import error: {msg}")
-        )
-        self._import_worker.start()
+        # Run import on the main thread (with wait cursor) to avoid
+        # bus errors from QThread + external drive I/O combination
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QApplication
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            n_channels = import_dataset(
+                source_dir,
+                output_path,
+                token_config=dialog.token_config,
+                tile_config=dialog.tile_config,
+                z_project_method=dialog.z_project_method,
+                metadata={
+                    "condition": dialog.condition,
+                    "replicate": dialog.replicate,
+                    "notes": dialog.notes,
+                },
+                project_csv=project_csv,
+                flim_params=flim_params,
+            )
+            self._on_import_finished(output_path, n_channels)
+        except Exception as e:
+            self.statusBar().showMessage(f"Import error: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _on_import_finished(self, h5_path: str, n_channels: int) -> None:
         self.statusBar().showMessage(
