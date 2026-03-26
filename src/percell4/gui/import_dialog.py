@@ -192,7 +192,7 @@ class ImportDialog(QDialog):
         bin_layout.addRow("Time bins:", self._bin_t)
 
         self._bin_dtype = QComboBox()
-        self._bin_dtype.addItems(["float32", "uint16", "uint32", "uint8"])
+        self._bin_dtype.addItems(["uint32", "uint16", "float32", "uint8"])
         bin_layout.addRow("Data type:", self._bin_dtype)
 
         self._bin_dim_order = QComboBox()

@@ -161,7 +161,11 @@ def read_flim_bin(
     x_ax = dim_order.index("X")
     data = np.transpose(data, (y_ax, x_ax, t_ax))
 
-    intensity = data.sum(axis=-1, dtype=np.int64).astype(np.float32)
+    # Sum over time bins for intensity image
+    if np.issubdtype(data.dtype, np.integer):
+        intensity = data.sum(axis=-1, dtype=np.int64).astype(np.float32)
+    else:
+        intensity = data.sum(axis=-1).astype(np.float32)
 
     metadata: dict[str, Any] = {
         "shape": data.shape,

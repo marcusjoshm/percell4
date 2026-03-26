@@ -79,7 +79,7 @@ def import_dataset(
             "calibration_modulation": 1.0,
             "bin_dimensions": {
                 "x_dim": 512, "y_dim": 512, "t_dim": 132,
-                "dtype": "float32", "dim_order": "YXT", "header_bytes": 0,
+                "dtype": "uint32", "dim_order": "YXT", "header_bytes": 0,
             },
         }
 
