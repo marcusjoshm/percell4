@@ -580,6 +580,18 @@ class LauncherWindow(QMainWindow):
                 self._windows[key] = factories[key]()
         return self._windows.get(key)
 
+    def _wire_viewer_layer_selection(self) -> None:
+        """Connect napari's active layer change to the channel label. Call once."""
+        if getattr(self, "_viewer_selection_wired", False):
+            return
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            return
+        viewer_win.viewer.layers.selection.events.active.connect(
+            lambda event: self._update_active_channel_label()
+        )
+        self._viewer_selection_wired = True
+
     def _show_window(self, key: str) -> None:
         """Show/raise a managed window, creating it if needed."""
         window = self._get_or_create_window(key)
@@ -749,6 +761,8 @@ class LauncherWindow(QMainWindow):
             for mask_name in store.list_masks():
                 self._active_mask_combo.addItem(mask_name)
 
+        # Wire napari layer selection → channel label (once)
+        self._wire_viewer_layer_selection()
         # Update channel label from viewer's active layer
         self._update_active_channel_label()
 
