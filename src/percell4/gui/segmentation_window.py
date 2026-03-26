@@ -513,22 +513,33 @@ class SegmentationWindow(QMainWindow):
         Automatically selects the active segmentation layer in napari
         so the viewer is immediately ready to draw.
         """
+        from qtpy.QtCore import QTimer
+
         labels_layer = self._get_active_labels_layer()
         if labels_layer is None:
             self.statusBar().showMessage("No labels layer active — load or create one first")
             return
 
-        # Select this layer in napari so it receives the drawing
-        self._select_labels_layer_in_viewer(labels_layer)
-
         next_id = int(labels_layer.data.max()) + 1
         labels_layer.selected_label = next_id
-        labels_layer.mode = "polygon"
+
+        # Select this layer in napari so it receives the drawing
+        self._select_labels_layer_in_viewer(labels_layer)
 
         # Bring the viewer to front
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is not None:
             viewer_win.show()
+
+        # Defer mode switch — napari needs to process the layer selection
+        # through its event loop before polygon mode can activate
+        def _activate_polygon():
+            try:
+                labels_layer.mode = "polygon"
+            except Exception:
+                pass
+
+        QTimer.singleShot(50, _activate_polygon)
 
         self.statusBar().showMessage(
             f"Label {next_id} — draw cell boundary with polygon tool"
