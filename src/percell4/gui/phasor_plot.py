@@ -238,13 +238,43 @@ class PhasorPlotWindow(QMainWindow):
         self._status.showMessage(f"Phasor: {n_pixels:,} valid pixels")
 
     def _on_roi_changed(self) -> None:
+        """Update the live preview mask in napari when the ROI moves."""
         if self._g_map is None:
             return
         mask = self._get_roi_mask()
         if mask is None:
             return
-        n_inside = int(mask.sum())
+
+        mask_uint8 = mask.astype(np.uint8)
+        n_inside = int(mask_uint8.sum())
         n_total = int((np.isfinite(self._g_map) & (self._g_map != 0)).sum())
+
+        # Update live preview in napari
+        if self._launcher is not None:
+            viewer_win = self._launcher._windows.get("viewer")
+            if viewer_win is not None and viewer_win.viewer is not None:
+                # Update existing preview layer or create one
+                preview_name = "_phasor_roi_preview"
+                for layer in viewer_win.viewer.layers:
+                    if layer.name == preview_name:
+                        layer.data = mask_uint8
+                        layer.refresh()
+                        break
+                else:
+                    # First time — create the preview layer
+                    from napari.utils.colormaps import DirectLabelColormap
+
+                    cmap = DirectLabelColormap(
+                        color_dict={0: "transparent", 1: "cyan", None: "transparent"},
+                    )
+                    viewer_win.viewer.add_labels(
+                        mask_uint8,
+                        name=preview_name,
+                        opacity=0.4,
+                        blending="translucent",
+                        colormap=cmap,
+                    )
+
         if n_total > 0:
             pct = 100.0 * n_inside / n_total
             self._status.showMessage(
@@ -264,7 +294,7 @@ class PhasorPlotWindow(QMainWindow):
         return phasor_roi_to_mask(self._g_map, self._s_map, center, radii)
 
     def _on_apply_mask(self) -> None:
-        """Create a spatial mask from the phasor ROI and add to viewer + store."""
+        """Save the current phasor ROI mask to HDF5 and finalize."""
         mask = self._get_roi_mask()
         if mask is None:
             self._status.showMessage("No phasor data loaded")
@@ -274,9 +304,17 @@ class PhasorPlotWindow(QMainWindow):
         n_inside = int(mask_uint8.sum())
         mask_name = "phasor_roi"
 
-        # Add to viewer
         if self._launcher is not None:
             viewer_win = self._launcher._windows.get("viewer")
+
+            # Remove preview layer
+            if viewer_win is not None and viewer_win.viewer is not None:
+                for layer in list(viewer_win.viewer.layers):
+                    if layer.name == "_phasor_roi_preview":
+                        viewer_win.viewer.layers.remove(layer)
+                        break
+
+            # Add final mask layer
             if viewer_win is not None:
                 viewer_win.add_mask(mask_uint8, name=mask_name)
 
