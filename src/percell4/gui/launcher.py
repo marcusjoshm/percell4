@@ -1052,6 +1052,21 @@ class LauncherWindow(QMainWindow):
         # Not in store — default to treating it as a segmentation
         self.data_model.set_active_segmentation(name)
 
+    def _get_active_seg_labels(self) -> np.ndarray | None:
+        """Get the active segmentation labels array from the viewer."""
+        import numpy as np
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or not viewer_win._is_alive():
+            return None
+        seg_name = self.data_model.active_segmentation
+        if not seg_name:
+            return None
+        for layer in viewer_win._viewer.layers:
+            if layer.name == seg_name:
+                return np.asarray(layer.data, dtype=np.int32)
+        return None
+
     def _get_phasor_roi_names(self) -> dict[int, str]:
         """Get ROI label→name mapping from the phasor plot window."""
         phasor_win = self._windows.get("phasor_plot")
@@ -1640,11 +1655,14 @@ class LauncherWindow(QMainWindow):
         except KeyError:
             phasor_intensity = None
 
-        # Open and populate phasor plot
+        # Open and populate phasor plot (pass segmentation labels for cell filtering)
+        seg_labels = self._get_active_seg_labels()
         self._show_window("phasor_plot")
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is not None:
-            phasor_win.set_phasor_data(g_map, s_map, intensity=phasor_intensity)
+            phasor_win.set_phasor_data(
+                g_map, s_map, intensity=phasor_intensity, labels=seg_labels,
+            )
 
         n_valid = int(np.isfinite(g_map).sum())
         freq = meta.get("flim_frequency_mhz", "unknown")
@@ -1764,13 +1782,15 @@ class LauncherWindow(QMainWindow):
                 attrs={"dims": ["H", "W"], "channel": active_channel},
             )
 
-        # Update phasor plot with filtered data
+        # Update phasor plot with filtered data (pass labels for cell filtering)
+        seg_labels = self._get_active_seg_labels()
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is not None:
             phasor_win.set_phasor_data(
                 g_filtered, s_filtered,
                 intensity=intensity.astype(np.float32),
                 g_unfiltered=g_map, s_unfiltered=s_map,
+                labels=seg_labels,
             )
 
         n_valid = int(np.isfinite(g_filtered).sum())
