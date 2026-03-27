@@ -87,7 +87,8 @@ class PhasorPlotWindow(QMainWindow):
         self._plot.setXRange(-0.005, 1.005, padding=0)
         self._plot.setYRange(0, 0.7, padding=0)
 
-        # Disable SI prefix auto-scaling on axes (prevents "x0.001" labels)
+        # Disable auto-range and SI prefix to keep axes fixed
+        self._plot.disableAutoRange()
         self._plot.getAxis("bottom").enableAutoSIPrefix(False)
         self._plot.getAxis("left").enableAutoSIPrefix(False)
         layout.addWidget(self._plot)
