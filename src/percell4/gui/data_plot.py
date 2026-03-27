@@ -30,6 +30,7 @@ class DataPlotWindow(QMainWindow):
     - Two-layer scatter: base (all points, cyan) + highlight (selected, red)
     - X/Y column dropdown selectors (populated from DataFrame numeric columns)
     - Click point → select cell → syncs to viewer + table
+    - Ctrl-click → additive selection (toggle)
     - Listens to CellDataModel signals for updates and selection
     """
 
@@ -42,6 +43,7 @@ class DataPlotWindow(QMainWindow):
         self._labels_array: np.ndarray | None = None
         self._x_data: np.ndarray | None = None
         self._y_data: np.ndarray | None = None
+        self._updating_selection = False
 
         self._build_ui()
         self._connect_signals()
@@ -163,31 +165,36 @@ class DataPlotWindow(QMainWindow):
 
     def _on_selection_changed(self, label_ids: list[int]) -> None:
         """Update highlight scatter with selected cells only."""
-        if self._labels_array is None or self._x_data is None:
-            self._highlight_scatter.clear()
+        if self._updating_selection:
             return
+        self._updating_selection = True
+        try:
+            if self._labels_array is None or self._x_data is None:
+                self._highlight_scatter.clear()
+                return
 
-        if not label_ids:
-            self._highlight_scatter.clear()
-            self._status.showMessage(
-                f"Total: {len(self._labels_array)} cells"
+            if not label_ids:
+                self._highlight_scatter.clear()
+                self._status.showMessage(
+                    f"Total: {len(self._labels_array)} cells"
+                )
+                return
+
+            mask = np.isin(self._labels_array, label_ids)
+
+            if not np.any(mask):
+                self._highlight_scatter.clear()
+                return
+
+            self._highlight_scatter.setData(
+                x=self._x_data[mask],
+                y=self._y_data[mask],
             )
-            return
-
-        id_set = set(label_ids)
-        mask = np.array([lid in id_set for lid in self._labels_array])
-
-        if not np.any(mask):
-            self._highlight_scatter.clear()
-            return
-
-        self._highlight_scatter.setData(
-            x=self._x_data[mask],
-            y=self._y_data[mask],
-        )
-        self._status.showMessage(
-            f"Selected: {mask.sum()} | Total: {len(self._labels_array)} cells"
-        )
+            self._status.showMessage(
+                f"Selected: {mask.sum()} | Total: {len(self._labels_array)} cells"
+            )
+        finally:
+            self._updating_selection = False
 
     # ── Plot refresh ──────────────────────────────────────────
 
@@ -219,13 +226,8 @@ class DataPlotWindow(QMainWindow):
         self._y_data = y
         self._labels_array = labels
 
-        # Set data with label IDs attached to each point
-        spots = [
-            {"pos": (xi, yi), "data": int(lid)}
-            for xi, yi, lid in zip(x, y, labels)
-        ]
-        self._base_scatter.clear()
-        self._base_scatter.addPoints(spots)
+        # Array-based setData — 10-20x faster than dict-based addPoints
+        self._base_scatter.setData(x=x, y=y)
 
         self._plot.setLabel("bottom", x_col)
         self._plot.setLabel("left", y_col)
@@ -238,13 +240,26 @@ class DataPlotWindow(QMainWindow):
     # ── Click handling ────────────────────────────────────────
 
     def _on_point_clicked(self, scatter_item, points, ev) -> None:
-        """Handle click on scatter point → select cell."""
-        if not points:
+        """Handle click on scatter point → select cell. Ctrl-click toggles."""
+        if not points or self._labels_array is None:
             return
-        # Get the label ID from the first clicked point
-        label_id = points[0].data()
-        if label_id is not None:
-            self.data_model.set_selection([int(label_id)])
+        idx = points[0].index()
+        if idx is None or idx >= len(self._labels_array):
+            return
+        label_id = int(self._labels_array[idx])
+
+        from qtpy.QtCore import Qt as QtKeys
+
+        if ev.modifiers() & QtKeys.ControlModifier:
+            # Ctrl-click: toggle this label in/out of selection
+            current = set(self.data_model.selected_ids)
+            if label_id in current:
+                current.discard(label_id)
+            else:
+                current.add(label_id)
+            self.data_model.set_selection(list(current))
+        else:
+            self.data_model.set_selection([label_id])
 
     # ── Lifecycle ─────────────────────────────────────────────
 

@@ -36,11 +36,16 @@ class PandasTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._df = pd.DataFrame()
         self._columns: list[str] = []
+        self._label_to_row: dict[int, int] = {}
 
     def set_dataframe(self, df: pd.DataFrame) -> None:
         self.beginResetModel()
         self._df = df
         self._columns = list(df.columns)
+        self._label_to_row = (
+            {int(v): i for i, v in enumerate(df["label"])}
+            if "label" in df.columns else {}
+        )
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -71,10 +76,14 @@ class PandasTableModel(QAbstractTableModel):
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             return int(Qt.AlignLeft | Qt.AlignVCenter)
 
-        # Raw value for sorting
+        # Raw value for sorting — must be native Python types, not numpy scalars
         if role == Qt.UserRole:
+            if isinstance(value, np.floating):
+                return float("inf") if np.isnan(value) else float(value)
+            if isinstance(value, np.integer):
+                return int(value)
             if isinstance(value, float) and np.isnan(value):
-                return float("inf")  # NaN sorts to end
+                return float("inf")
             return value
 
         return None
@@ -93,14 +102,8 @@ class PandasTableModel(QAbstractTableModel):
         return int(self._df.iat[row, self._columns.index("label")])
 
     def find_row_for_label(self, label_id: int) -> int | None:
-        """Find the row index for a given cell label ID."""
-        if "label" not in self._columns:
-            return None
-        try:
-            idx = self._df.index[self._df["label"] == label_id].tolist()
-            return idx[0] if idx else None
-        except (KeyError, IndexError):
-            return None
+        """Find the row index for a given cell label ID. O(1) via dict index."""
+        return self._label_to_row.get(label_id)
 
 
 class CellTableWindow(QMainWindow):

@@ -67,6 +67,7 @@ class ViewerWindow:
         self._viewer = None
         self._qt_window = None
         self._color_index = 0
+        self._updating_selection = False
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -192,18 +193,22 @@ class ViewerWindow:
 
     def _on_label_selected(self, event) -> None:
         """Forward label selection to CellDataModel."""
-        # Get the label from the source layer, not the event
-        # (napari event object doesn't always have .value)
+        if self._updating_selection:
+            return
         try:
             source = event.source
             label_id = source.selected_label
         except AttributeError:
             return
 
-        if label_id == 0:
-            self.data_model.set_selection([])
-        else:
-            self.data_model.set_selection([label_id])
+        self._updating_selection = True
+        try:
+            if label_id == 0:
+                self.data_model.set_selection([])
+            else:
+                self.data_model.set_selection([label_id])
+        finally:
+            self._updating_selection = False
 
     def _save_geometry(self) -> None:
         if self._is_alive():
