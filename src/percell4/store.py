@@ -84,7 +84,8 @@ class DatasetStore:
         try:
             yield self
         finally:
-            self._session_file.close()
+            if self._session_file is not None:
+                self._session_file.close()
             self._session_file = None
 
     def _open_read(self) -> h5py.File:
