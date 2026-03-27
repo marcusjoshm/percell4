@@ -36,11 +36,16 @@ class PandasTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._df = pd.DataFrame()
         self._columns: list[str] = []
+        self._label_to_row: dict[int, int] = {}
 
     def set_dataframe(self, df: pd.DataFrame) -> None:
         self.beginResetModel()
         self._df = df
         self._columns = list(df.columns)
+        self._label_to_row = (
+            {int(v): i for i, v in enumerate(df["label"])}
+            if "label" in df.columns else {}
+        )
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -71,10 +76,14 @@ class PandasTableModel(QAbstractTableModel):
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             return int(Qt.AlignLeft | Qt.AlignVCenter)
 
-        # Raw value for sorting
+        # Raw value for sorting — must be native Python types, not numpy scalars
         if role == Qt.UserRole:
+            if isinstance(value, np.floating):
+                return float("inf") if np.isnan(value) else float(value)
+            if isinstance(value, np.integer):
+                return int(value)
             if isinstance(value, float) and np.isnan(value):
-                return float("inf")  # NaN sorts to end
+                return float("inf")
             return value
 
         return None
@@ -93,14 +102,28 @@ class PandasTableModel(QAbstractTableModel):
         return int(self._df.iat[row, self._columns.index("label")])
 
     def find_row_for_label(self, label_id: int) -> int | None:
-        """Find the row index for a given cell label ID."""
-        if "label" not in self._columns:
-            return None
-        try:
-            idx = self._df.index[self._df["label"] == label_id].tolist()
-            return idx[0] if idx else None
-        except (KeyError, IndexError):
-            return None
+        """Find the row index for a given cell label ID. O(1) via dict index."""
+        return self._label_to_row.get(label_id)
+
+
+class FilterableProxyModel(QSortFilterProxyModel):
+    """Proxy that filters rows by label ID set while preserving sort state."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._visible_labels: set[int] | None = None  # None = show all
+
+    def set_filter_labels(self, label_ids: set[int] | None) -> None:
+        """Set the filter. None = show all rows."""
+        self._visible_labels = label_ids
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
+        if self._visible_labels is None:
+            return True
+        source_model = self.sourceModel()
+        label = source_model.get_label_for_row(source_row)
+        return label in self._visible_labels if label is not None else False
 
 
 class CellTableWindow(QMainWindow):
@@ -108,9 +131,10 @@ class CellTableWindow(QMainWindow):
 
     Features:
     - QTableView backed by PandasTableModel
-    - Column header click → sort (via QSortFilterProxyModel)
+    - Column header click → sort (via FilterableProxyModel)
     - Row click → CellDataModel.set_selection
     - selection_changed → highlight and scroll to row
+    - filter_changed → show/hide rows via proxy filter
     - Right-click context menu: Export Selection, Export All
     - Export CSV button in toolbar
     """
@@ -143,9 +167,9 @@ class CellTableWindow(QMainWindow):
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
-        # Table model + proxy for sorting
+        # Table model + proxy for sorting + filtering
         self._model = PandasTableModel()
-        self._proxy = QSortFilterProxyModel()
+        self._proxy = FilterableProxyModel()
         self._proxy.setSourceModel(self._model)
         self._proxy.setSortRole(Qt.UserRole)
 
@@ -187,6 +211,7 @@ class CellTableWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.data_model.data_updated.connect(self._on_data_updated)
         self.data_model.selection_changed.connect(self._on_selection_changed)
+        self.data_model.filter_changed.connect(self._on_filter_changed)
         self._table.selectionModel().selectionChanged.connect(
             self._on_table_selection_changed
         )
@@ -209,41 +234,56 @@ class CellTableWindow(QMainWindow):
     def _on_selection_changed(self, label_ids: list[int]) -> None:
         """Highlight rows matching the selected cell IDs."""
         self._updating_selection = True
+        try:
+            selection_model = self._table.selectionModel()
+            selection_model.clearSelection()
 
-        selection_model = self._table.selectionModel()
-        selection_model.clearSelection()
+            if not label_ids:
+                count = self._model.rowCount()
+                self._status.showMessage(f"Showing {count} cells")
+                return
 
-        if not label_ids:
+            first_row = None
+            for label_id in label_ids:
+                source_row = self._model.find_row_for_label(label_id)
+                if source_row is None:
+                    continue
+                proxy_index = self._proxy.mapFromSource(
+                    self._model.index(source_row, 0)
+                )
+                if proxy_index.isValid():
+                    self._table.selectRow(proxy_index.row())
+                    if first_row is None:
+                        first_row = proxy_index.row()
+
+            # Scroll to the first selected row
+            if first_row is not None:
+                self._table.scrollTo(
+                    self._proxy.index(first_row, 0),
+                    QAbstractItemView.PositionAtCenter,
+                )
+
+            n_selected = len(label_ids)
+            n_total = self._model.rowCount()
+            self._status.showMessage(f"Selected: {n_selected} | Total: {n_total} cells")
+        finally:
             self._updating_selection = False
-            count = self._model.rowCount()
-            self._status.showMessage(f"Showing {count} cells")
-            return
 
-        first_row = None
-        for label_id in label_ids:
-            source_row = self._model.find_row_for_label(label_id)
-            if source_row is None:
-                continue
-            proxy_index = self._proxy.mapFromSource(
-                self._model.index(source_row, 0)
-            )
-            if proxy_index.isValid():
-                self._table.selectRow(proxy_index.row())
-                if first_row is None:
-                    first_row = proxy_index.row()
-
-        # Scroll to the first selected row
-        if first_row is not None:
-            self._table.scrollTo(
-                self._proxy.index(first_row, 0),
-                QAbstractItemView.PositionAtCenter,
-            )
-
-        n_selected = len(label_ids)
-        n_total = self._model.rowCount()
-        self._status.showMessage(f"Selected: {n_selected} | Total: {n_total} cells")
-
-        self._updating_selection = False
+    def _on_filter_changed(self) -> None:
+        """Update proxy filter when cell filter changes."""
+        self._updating_selection = True
+        try:
+            self._proxy.set_filter_labels(self.data_model.filtered_ids)
+            n_visible = self._proxy.rowCount()
+            n_total = self._model.rowCount()
+            if self.data_model.is_filtered:
+                self._status.showMessage(
+                    f"Showing {n_visible} of {n_total} cells (filtered)"
+                )
+            else:
+                self._status.showMessage(f"Showing {n_total} cells")
+        finally:
+            self._updating_selection = False
 
     # ── Table → model selection ───────────────────────────────
 

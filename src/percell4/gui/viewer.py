@@ -67,6 +67,9 @@ class ViewerWindow:
         self._viewer = None
         self._qt_window = None
         self._color_index = 0
+        self._updating_selection = False
+        self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
+        self._display_update_pending = False
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -98,6 +101,13 @@ class ViewerWindow:
 
         # Wire napari label selection → CellDataModel
         self._viewer.layers.events.inserted.connect(self._on_layer_inserted)
+
+        # Wire CellDataModel selection + filter → napari display (coalesced)
+        # Both signals schedule the same update; QTimer.singleShot(0) ensures
+        # rapid-fire signals (e.g. set_filter emits filter_changed then
+        # selection_changed) collapse into a single repaint.
+        self.data_model.selection_changed.connect(self._schedule_label_update)
+        self.data_model.filter_changed.connect(self._schedule_label_update)
 
         self._restore_geometry()
 
@@ -164,14 +174,22 @@ class ViewerWindow:
         blending = kwargs.pop("blending", "additive")
         self.viewer.add_labels(data, name=name, blending=blending, **kwargs)
 
-    def add_mask(self, data, name: str, **kwargs) -> None:
-        """Add a binary mask as a labels layer with yellow colormap."""
+    def add_mask(
+        self, data, name: str, color_dict: dict | None = None, **kwargs
+    ) -> None:
+        """Add a mask as a labels layer.
+
+        Args:
+            color_dict: optional {label_value: color} for multi-label masks.
+                        Defaults to {0: transparent, 1: yellow} for binary masks.
+                        Takes precedence over colormap in kwargs.
+        """
         from napari.utils.colormaps import DirectLabelColormap
 
-        if "colormap" not in kwargs:
-            kwargs["colormap"] = DirectLabelColormap(
-                color_dict={0: "transparent", 1: "yellow", None: "transparent"},
-            )
+        if color_dict is None:
+            color_dict = {0: "transparent", 1: "yellow", None: "transparent"}
+        kwargs.pop("colormap", None)  # color_dict takes precedence
+        kwargs["colormap"] = DirectLabelColormap(color_dict=color_dict)
         if "opacity" not in kwargs:
             kwargs["opacity"] = 0.5
         self.viewer.add_labels(data, name=name, **kwargs)
@@ -179,6 +197,7 @@ class ViewerWindow:
     def clear(self) -> None:
         """Remove all layers."""
         self._color_index = 0
+        self._original_colormaps.clear()
         if self._viewer is not None and self._is_alive():
             self._viewer.layers.clear()
 
@@ -192,18 +211,134 @@ class ViewerWindow:
 
     def _on_label_selected(self, event) -> None:
         """Forward label selection to CellDataModel."""
-        # Get the label from the source layer, not the event
-        # (napari event object doesn't always have .value)
+        if self._updating_selection:
+            return
         try:
             source = event.source
             label_id = source.selected_label
         except AttributeError:
             return
 
-        if label_id == 0:
-            self.data_model.set_selection([])
-        else:
-            self.data_model.set_selection([label_id])
+        self._updating_selection = True
+        try:
+            if label_id == 0:
+                self.data_model.set_selection([])
+            else:
+                self.data_model.set_selection([label_id])
+        finally:
+            self._updating_selection = False
+
+    def _schedule_label_update(self, *args) -> None:
+        """Coalesce rapid-fire signals into a single display update."""
+        if not self._display_update_pending:
+            self._display_update_pending = True
+            from qtpy.QtCore import QTimer
+
+            QTimer.singleShot(0, self._update_label_display)
+
+    def _update_label_display(self) -> None:
+        """Update labels layer display based on current selection and filter.
+
+        Uses DirectLabelColormap for GPU-side rendering — never modifies layer.data.
+        Single-cell uses napari's built-in show_selected_label.
+        Multi-cell dims unselected labels via colormap with None default key.
+        """
+        self._display_update_pending = False
+        if self._updating_selection:
+            return
+        if not self._is_alive():
+            return
+        labels_layer = self._get_active_labels_layer()
+        if labels_layer is None:
+            return
+
+        self._updating_selection = True
+        try:
+            from napari.utils.colormaps import DirectLabelColormap
+
+            selected_ids = self.data_model.selected_ids
+            filtered_ids = self.data_model.filtered_ids
+
+            if not selected_ids and not filtered_ids:
+                # No selection, no filter: restore original colormap
+                labels_layer.show_selected_label = False
+                self._restore_colormap(labels_layer)
+                return
+
+            if len(selected_ids) == 1 and not filtered_ids:
+                # Single cell, no filter: use napari's built-in
+                # Restore colormap first in case we were previously filtering
+                self._restore_colormap(labels_layer)
+                with labels_layer.events.selected_label.blocker():
+                    labels_layer.selected_label = selected_ids[0]
+                labels_layer.show_selected_label = True
+                return
+
+            # Multi-cell and/or filter active: use DirectLabelColormap
+            labels_layer.show_selected_label = False
+
+            # Save original colormap before first replacement
+            self._save_colormap(labels_layer)
+
+            visible_ids = filtered_ids if filtered_ids else None
+            highlight_ids = set(selected_ids) if selected_ids else None
+
+            color_dict = {0: "transparent"}
+
+            if visible_ids and highlight_ids:
+                # Both: hide non-filtered, dim filtered non-selected, highlight selected
+                color_dict[None] = [0.0, 0.0, 0.0, 0.0]
+                for lid in visible_ids:
+                    if lid in highlight_ids:
+                        color_dict[lid] = [1.0, 1.0, 0.0, 0.8]
+                    else:
+                        color_dict[lid] = [0.5, 0.5, 0.5, 0.15]
+            elif visible_ids:
+                # Filter only: show filtered, hide rest
+                color_dict[None] = [0.0, 0.0, 0.0, 0.0]
+                for lid in visible_ids:
+                    color_dict[lid] = [0.3, 0.8, 0.8, 0.5]
+            elif highlight_ids:
+                # Selection only: highlight selected, dim rest
+                color_dict[None] = [0.5, 0.5, 0.5, 0.15]
+                for lid in highlight_ids:
+                    color_dict[lid] = [1.0, 1.0, 0.0, 0.8]
+
+            with labels_layer.events.colormap.blocker():
+                labels_layer.colormap = DirectLabelColormap(
+                    color_dict=color_dict
+                )
+            labels_layer.refresh(extent=False)
+        finally:
+            self._updating_selection = False
+
+    def _save_colormap(self, layer) -> None:
+        """Save the layer's original colormap if not already cached."""
+        if layer.name not in self._original_colormaps:
+            self._original_colormaps[layer.name] = layer.colormap
+
+    def _restore_colormap(self, layer) -> None:
+        """Restore the layer's original colormap if we previously replaced it."""
+        if layer.name in self._original_colormaps:
+            with layer.events.colormap.blocker():
+                layer.colormap = self._original_colormaps.pop(layer.name)
+            layer.refresh(extent=False)
+
+    def _get_active_labels_layer(self):
+        """Find the labels layer matching the active segmentation."""
+        import napari
+
+        if self._viewer is None:
+            return None
+        seg_name = self.data_model.active_segmentation
+        for layer in self._viewer.layers:
+            if isinstance(layer, napari.layers.Labels) and layer.name == seg_name:
+                return layer
+        # Fallback: return the first labels layer if no name match
+        for layer in self._viewer.layers:
+            if isinstance(layer, napari.layers.Labels):
+                return layer
+        return None
 
     def _save_geometry(self) -> None:
         if self._is_alive():

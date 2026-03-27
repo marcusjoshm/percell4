@@ -301,6 +301,30 @@ class LauncherWindow(QMainWindow):
 
         layout.addWidget(self._section_label("Analysis"))
 
+        # ── Cell Filter group ──
+        filter_group = QGroupBox("Cell Filter")
+        filter_layout = QVBoxLayout(filter_group)
+
+        filter_btn_row = QHBoxLayout()
+        btn_filter = QPushButton("Filter to Selection")
+        btn_filter.setToolTip("Show only the currently selected cells in all windows")
+        btn_filter.clicked.connect(self._on_filter_to_selection)
+        filter_btn_row.addWidget(btn_filter)
+
+        self._clear_filter_btn = QPushButton("Clear Filter")
+        self._clear_filter_btn.setEnabled(False)
+        self._clear_filter_btn.clicked.connect(self._on_clear_filter)
+        filter_btn_row.addWidget(self._clear_filter_btn)
+        filter_layout.addLayout(filter_btn_row)
+
+        self._filter_status_label = QLabel("No filter active")
+        self._filter_status_label.setStyleSheet("color: #888888;")
+        filter_layout.addWidget(self._filter_status_label)
+
+        layout.addWidget(filter_group)
+
+        self.data_model.filter_changed.connect(self._on_filter_state_changed)
+
         # ── Thresholding group ──
         thresh_group = QGroupBox("Thresholding")
         thresh_layout = QVBoxLayout(thresh_group)
@@ -1028,6 +1052,72 @@ class LauncherWindow(QMainWindow):
         # Not in store — default to treating it as a segmentation
         self.data_model.set_active_segmentation(name)
 
+    def _apply_cell_filter(self, labels: np.ndarray) -> np.ndarray | None:
+        """Zero out non-filtered cells in the labels array.
+
+        Returns the (possibly copied) labels array, or None if no cells remain.
+        """
+        import numpy as np
+
+        filtered_ids = self.data_model.filtered_ids
+        if filtered_ids is not None:
+            cell_mask = np.isin(labels, filtered_ids)
+            labels = labels.copy()
+            labels[~cell_mask] = 0
+            if labels.max() == 0:
+                self.statusBar().showMessage("No filtered cells to process")
+                return None
+        return labels
+
+    def _get_active_seg_labels(self) -> np.ndarray | None:
+        """Get the active segmentation labels array from the viewer."""
+        import numpy as np
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or not viewer_win._is_alive():
+            return None
+        seg_name = self.data_model.active_segmentation
+        if not seg_name:
+            return None
+        for layer in viewer_win._viewer.layers:
+            if layer.name == seg_name:
+                return np.asarray(layer.data, dtype=np.int32)
+        return None
+
+    def _get_phasor_roi_names(self) -> dict[int, str]:
+        """Get ROI label→name mapping from the phasor plot window."""
+        phasor_win = self._windows.get("phasor_plot")
+        if phasor_win is None:
+            return {}
+        return phasor_win.get_visible_roi_names()
+
+    def _on_filter_to_selection(self) -> None:
+        """Filter all windows to show only the currently selected cells."""
+        selected = self.data_model.selected_ids
+        if not selected:
+            self.statusBar().showMessage("No cells selected to filter", 3000)
+            return
+        self.data_model.set_filter(list(selected))
+
+    def _on_clear_filter(self) -> None:
+        """Remove cell filter — restore all windows to full data."""
+        self.data_model.set_filter(None)
+
+    def _on_filter_state_changed(self) -> None:
+        """Update filter status display in the Analysis panel."""
+        if self.data_model.is_filtered:
+            n_filtered = len(self.data_model.filtered_df)
+            n_total = len(self.data_model.df)
+            self._filter_status_label.setText(
+                f"Showing {n_filtered} of {n_total} cells"
+            )
+            self._filter_status_label.setStyleSheet("color: #4ea8de; font-weight: bold;")
+            self._clear_filter_btn.setEnabled(True)
+        else:
+            self._filter_status_label.setText("No filter active")
+            self._filter_status_label.setStyleSheet("color: #888888;")
+            self._clear_filter_btn.setEnabled(False)
+
     def _on_threshold_preview(self) -> None:
         """Compute threshold and show a live preview mask in the viewer.
 
@@ -1291,6 +1381,10 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Segmentation has no cells")
             return
 
+        labels = self._apply_cell_filter(labels)
+        if labels is None:
+            return
+
         # Get active mask (optional)
         mask = None
         mask_name = self.data_model.active_mask
@@ -1302,10 +1396,23 @@ class LauncherWindow(QMainWindow):
 
         self.statusBar().showMessage("Measuring cells...")
 
-        from percell4.measure.measurer import measure_multichannel
-
         try:
-            df = measure_multichannel(image_layers, labels, mask=mask)
+            is_multi_roi = mask is not None and mask.max() > 1
+            if is_multi_roi:
+                roi_names = self._get_phasor_roi_names()
+                if not roi_names:
+                    unique_labels = np.unique(mask[mask > 0])
+                    roi_names = {int(v): f"roi_{v}" for v in unique_labels}
+
+                from percell4.measure.measurer import measure_multichannel_multi_roi
+
+                df = measure_multichannel_multi_roi(
+                    image_layers, labels, mask, roi_names
+                )
+            else:
+                from percell4.measure.measurer import measure_multichannel
+
+                df = measure_multichannel(image_layers, labels, mask=mask)
         except Exception as e:
             self.statusBar().showMessage(f"Measurement error: {e}")
             return
@@ -1365,6 +1472,10 @@ class LauncherWindow(QMainWindow):
 
         if labels is None:
             self.statusBar().showMessage(f"Segmentation '{seg_name}' not found")
+            return
+
+        labels = self._apply_cell_filter(labels)
+        if labels is None:
             return
 
         # Get active mask (required for particle analysis)
@@ -1541,11 +1652,14 @@ class LauncherWindow(QMainWindow):
         except KeyError:
             phasor_intensity = None
 
-        # Open and populate phasor plot
+        # Open and populate phasor plot (pass segmentation labels for cell filtering)
+        seg_labels = self._get_active_seg_labels()
         self._show_window("phasor_plot")
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is not None:
-            phasor_win.set_phasor_data(g_map, s_map, intensity=phasor_intensity)
+            phasor_win.set_phasor_data(
+                g_map, s_map, intensity=phasor_intensity, labels=seg_labels,
+            )
 
         n_valid = int(np.isfinite(g_map).sum())
         freq = meta.get("flim_frequency_mhz", "unknown")
@@ -1665,13 +1779,15 @@ class LauncherWindow(QMainWindow):
                 attrs={"dims": ["H", "W"], "channel": active_channel},
             )
 
-        # Update phasor plot with filtered data
+        # Update phasor plot with filtered data (pass labels for cell filtering)
+        seg_labels = self._get_active_seg_labels()
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is not None:
             phasor_win.set_phasor_data(
                 g_filtered, s_filtered,
                 intensity=intensity.astype(np.float32),
                 g_unfiltered=g_map, s_unfiltered=s_map,
+                labels=seg_labels,
             )
 
         n_valid = int(np.isfinite(g_filtered).sum())

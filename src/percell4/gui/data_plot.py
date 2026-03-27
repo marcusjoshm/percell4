@@ -9,18 +9,46 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import QEvent, QRectF, QSettings, Qt, Signal
 from qtpy.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from percell4.model import CellDataModel
+
+
+class SelectionViewBox(pg.ViewBox):
+    """ViewBox that supports Shift+drag for rectangle selection.
+
+    Normal drag = pan/zoom (default). Shift+drag = rubber-band rectangle
+    that emits sigSelectionComplete with a QRectF in data coordinates.
+    """
+
+    sigSelectionComplete = Signal(object)  # QRectF in data coordinates
+
+    def mouseDragEvent(self, ev, axis=None):
+        if ev.button() == Qt.LeftButton and ev.modifiers() & Qt.ShiftModifier:
+            ev.accept()
+            if ev.isStart():
+                self.updateScaleBox(ev.buttonDownPos(), ev.pos())
+            elif ev.isFinish():
+                self.rbScaleBox.hide()
+                p1 = ev.buttonDownPos()
+                p2 = ev.pos()
+                rect = QRectF(p1, p2).normalized()
+                data_rect = self.childGroup.mapRectFromParent(rect)
+                self.sigSelectionComplete.emit(data_rect)
+            else:
+                self.updateScaleBox(ev.buttonDownPos(), ev.pos())
+        else:
+            super().mouseDragEvent(ev, axis)
 
 
 class DataPlotWindow(QMainWindow):
@@ -30,6 +58,7 @@ class DataPlotWindow(QMainWindow):
     - Two-layer scatter: base (all points, cyan) + highlight (selected, red)
     - X/Y column dropdown selectors (populated from DataFrame numeric columns)
     - Click point → select cell → syncs to viewer + table
+    - Ctrl-click → additive selection (toggle)
     - Listens to CellDataModel signals for updates and selection
     """
 
@@ -42,6 +71,7 @@ class DataPlotWindow(QMainWindow):
         self._labels_array: np.ndarray | None = None
         self._x_data: np.ndarray | None = None
         self._y_data: np.ndarray | None = None
+        self._updating_selection = False
 
         self._build_ui()
         self._connect_signals()
@@ -68,13 +98,20 @@ class DataPlotWindow(QMainWindow):
         self._y_combo = QComboBox()
         self._y_combo.setMinimumWidth(120)
         controls.addWidget(self._y_combo)
+        # Reset view button
+        self._reset_btn = QPushButton("Reset View")
+        self._reset_btn.setMaximumWidth(80)
+        self._reset_btn.clicked.connect(self._on_reset_view)
+        controls.addWidget(self._reset_btn)
         controls.addStretch()
         layout.addLayout(controls)
 
-        # Plot widget
-        self._plot = pg.PlotWidget()
+        # Plot widget with custom ViewBox for Shift+drag selection
+        self._vb = SelectionViewBox()
+        self._plot = pg.PlotWidget(viewBox=self._vb)
         self._plot.setBackground("#1e1e1e")
         self._plot.showGrid(x=True, y=True, alpha=0.15)
+        self._plot.installEventFilter(self)  # for Escape key
         layout.addWidget(self._plot)
 
         # Base scatter — all points, uniform style, cached
@@ -106,9 +143,11 @@ class DataPlotWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.data_model.data_updated.connect(self._on_data_updated)
         self.data_model.selection_changed.connect(self._on_selection_changed)
+        self.data_model.filter_changed.connect(self._refresh_plot)
         self._x_combo.currentTextChanged.connect(self._refresh_plot)
         self._y_combo.currentTextChanged.connect(self._refresh_plot)
         self._base_scatter.sigClicked.connect(self._on_point_clicked)
+        self._vb.sigSelectionComplete.connect(self._on_rect_selected)
 
     # ── Data model reactions ──────────────────────────────────
 
@@ -163,37 +202,45 @@ class DataPlotWindow(QMainWindow):
 
     def _on_selection_changed(self, label_ids: list[int]) -> None:
         """Update highlight scatter with selected cells only."""
-        if self._labels_array is None or self._x_data is None:
-            self._highlight_scatter.clear()
+        if self._updating_selection:
             return
+        self._updating_selection = True
+        try:
+            if self._labels_array is None or self._x_data is None:
+                self._highlight_scatter.clear()
+                return
 
-        if not label_ids:
-            self._highlight_scatter.clear()
-            self._status.showMessage(
-                f"Total: {len(self._labels_array)} cells"
+            if not label_ids:
+                self._highlight_scatter.clear()
+                self._status.showMessage(
+                    f"Total: {len(self._labels_array)} cells"
+                )
+                return
+
+            mask = np.isin(self._labels_array, label_ids)
+
+            if not np.any(mask):
+                self._highlight_scatter.clear()
+                return
+
+            self._highlight_scatter.setData(
+                x=self._x_data[mask],
+                y=self._y_data[mask],
             )
-            return
-
-        id_set = set(label_ids)
-        mask = np.array([lid in id_set for lid in self._labels_array])
-
-        if not np.any(mask):
-            self._highlight_scatter.clear()
-            return
-
-        self._highlight_scatter.setData(
-            x=self._x_data[mask],
-            y=self._y_data[mask],
-        )
-        self._status.showMessage(
-            f"Selected: {mask.sum()} | Total: {len(self._labels_array)} cells"
-        )
+            self._status.showMessage(
+                f"Selected: {mask.sum()} | Total: {len(self._labels_array)} cells"
+            )
+        finally:
+            self._updating_selection = False
 
     # ── Plot refresh ──────────────────────────────────────────
 
     def _refresh_plot(self) -> None:
-        """Redraw the base scatter from current DataFrame and column selections."""
-        df = self.data_model.df
+        """Redraw the base scatter from current DataFrame and column selections.
+
+        Uses filtered_df for row data, df for column availability.
+        """
+        df = self.data_model.filtered_df
         x_col = self._x_combo.currentText()
         y_col = self._y_combo.currentText()
 
@@ -219,13 +266,8 @@ class DataPlotWindow(QMainWindow):
         self._y_data = y
         self._labels_array = labels
 
-        # Set data with label IDs attached to each point
-        spots = [
-            {"pos": (xi, yi), "data": int(lid)}
-            for xi, yi, lid in zip(x, y, labels)
-        ]
-        self._base_scatter.clear()
-        self._base_scatter.addPoints(spots)
+        # Array-based setData — 10-20x faster than dict-based addPoints
+        self._base_scatter.setData(x=x, y=y)
 
         self._plot.setLabel("bottom", x_col)
         self._plot.setLabel("left", y_col)
@@ -238,13 +280,49 @@ class DataPlotWindow(QMainWindow):
     # ── Click handling ────────────────────────────────────────
 
     def _on_point_clicked(self, scatter_item, points, ev) -> None:
-        """Handle click on scatter point → select cell."""
-        if not points:
+        """Handle click on scatter point → select cell. Ctrl-click toggles."""
+        if not points or self._labels_array is None:
             return
-        # Get the label ID from the first clicked point
-        label_id = points[0].data()
-        if label_id is not None:
-            self.data_model.set_selection([int(label_id)])
+        idx = points[0].index()
+        if idx is None or idx >= len(self._labels_array):
+            return
+        label_id = int(self._labels_array[idx])
+
+        if ev.modifiers() & Qt.ControlModifier:
+            # Ctrl-click: toggle this label in/out of selection
+            current = set(self.data_model.selected_ids)
+            if label_id in current:
+                current.discard(label_id)
+            else:
+                current.add(label_id)
+            self.data_model.set_selection(list(current))
+        else:
+            self.data_model.set_selection([label_id])
+
+    def _on_rect_selected(self, data_rect: QRectF) -> None:
+        """Select all points within the Shift+drag rectangle."""
+        if self._x_data is None or self._labels_array is None:
+            return
+        mask = (
+            (self._x_data >= data_rect.left())
+            & (self._x_data <= data_rect.right())
+            & (self._y_data >= data_rect.top())
+            & (self._y_data <= data_rect.bottom())
+        )
+        selected_labels = self._labels_array[mask].tolist()
+        if selected_labels:
+            self.data_model.set_selection([int(lid) for lid in selected_labels])
+
+    def _on_reset_view(self) -> None:
+        """Reset zoom/pan to auto-range."""
+        self._plot.autoRange()
+
+    def eventFilter(self, obj, event) -> bool:
+        """Escape key clears selection."""
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            self.data_model.set_selection([])
+            return True
+        return super().eventFilter(obj, event)
 
     # ── Lifecycle ─────────────────────────────────────────────
 
