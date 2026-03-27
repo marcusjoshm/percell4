@@ -234,9 +234,11 @@ class PhasorPlotWindow(QMainWindow):
         self._semicircle.setZValue(10)
         self._roi.setZValue(10)
 
-        # Set axis range
+        # Set axis range and disable SI prefix (must re-apply after data change)
         self._plot.setXRange(*g_range, padding=0)
         self._plot.setYRange(*s_range, padding=0)
+        self._plot.getAxis("bottom").enableAutoSIPrefix(False)
+        self._plot.getAxis("left").enableAutoSIPrefix(False)
 
         n_pixels = len(g_flat)
         self._status.showMessage(f"Phasor: {n_pixels:,} valid pixels")
