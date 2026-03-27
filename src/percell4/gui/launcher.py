@@ -1070,17 +1070,30 @@ class LauncherWindow(QMainWindow):
         return labels
 
     def _get_active_seg_labels(self) -> np.ndarray | None:
-        """Get the active segmentation labels array from the viewer."""
+        """Get the active segmentation labels array from the viewer.
+
+        Falls back to the first Labels layer whose name contains common
+        segmentation keywords if active_segmentation is not set.
+        """
+        import napari
         import numpy as np
 
         viewer_win = self._windows.get("viewer")
         if viewer_win is None or not viewer_win._is_alive():
             return None
+
         seg_name = self.data_model.active_segmentation
-        if not seg_name:
-            return None
+        if seg_name:
+            for layer in viewer_win._viewer.layers:
+                if layer.name == seg_name:
+                    return np.asarray(layer.data, dtype=np.int32)
+
+        # Fallback: find a segmentation labels layer (skip mask layers)
+        mask_names = {"phasor_roi", "_phasor_roi_preview"}
         for layer in viewer_win._viewer.layers:
-            if layer.name == seg_name:
+            if (isinstance(layer, napari.layers.Labels)
+                    and layer.name not in mask_names
+                    and not layer.name.startswith("_")):
                 return np.asarray(layer.data, dtype=np.int32)
         return None
 

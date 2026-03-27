@@ -325,20 +325,28 @@ class ViewerWindow:
             layer.refresh(extent=False)
 
     def _get_active_labels_layer(self):
-        """Find the labels layer matching the active segmentation.
+        """Find the segmentation labels layer for selection highlighting.
 
-        Only returns the explicitly named segmentation layer — never falls
-        back to mask layers (phasor_roi, etc.) which are also Labels layers.
+        Matches active_segmentation by name. Falls back to the first Labels
+        layer that isn't a mask/preview layer.
         """
         import napari
 
         if self._viewer is None:
             return None
+
         seg_name = self.data_model.active_segmentation
-        if not seg_name:
-            return None
+        if seg_name:
+            for layer in self._viewer.layers:
+                if isinstance(layer, napari.layers.Labels) and layer.name == seg_name:
+                    return layer
+
+        # Fallback: find a segmentation layer (skip masks/previews)
+        _skip = {"phasor_roi", "_phasor_roi_preview"}
         for layer in self._viewer.layers:
-            if isinstance(layer, napari.layers.Labels) and layer.name == seg_name:
+            if (isinstance(layer, napari.layers.Labels)
+                    and layer.name not in _skip
+                    and not layer.name.startswith("_")):
                 return layer
         return None
 
