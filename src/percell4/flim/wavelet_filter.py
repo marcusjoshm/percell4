@@ -1,8 +1,9 @@
 """DTCWT-based wavelet filtering for FLIM phasor data.
 
-Operates on post-computed G/S phasor maps (not raw decay). Reduces phasor
-scatter while preserving spatial structure. Adapted from
-leelab/flimfret/src/python/modules/wavelet_filter.py.
+Exact port of flimfret/src/python/modules/wavelet_filter.py logic.
+Uses inter-scale Wiener-like shrinkage with multi-scale coefficient
+interaction. Slower than simplified soft thresholding but produces
+the correct tight arc structure on the phasor plot.
 
 Requires the optional ``dtcwt`` package: ``pip install dtcwt>=0.14.0``
 """
@@ -12,24 +13,218 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-
-def anscombe_transform(data: NDArray) -> NDArray:
-    """Variance-stabilizing Anscombe transform for Poisson data."""
-    return 2.0 * np.sqrt(np.maximum(data + 3.0 / 8.0, 0.0))
+# ── Transforms (exact copy from flimfret) ─────────────────────
 
 
-def inverse_anscombe_transform(data: NDArray) -> NDArray:
-    """Inverse Anscombe transform (algebraic approximation).
+def anscombe_transform(data):
+    """Anscombe transform to stabilize Poisson noise variance."""
+    return 2 * np.sqrt(np.maximum(data + (3 / 8), 0))
 
-    Uses the exact unbiased inverse for large values and a sixth-order
-    rational approximation for accuracy at low values.
+
+def reverse_anscombe_transform(y):
+    """Inverse Anscombe transform (sixth-order rational approximation)."""
+    y = np.asarray(y, dtype=np.float64)
+    y = np.maximum(y, 1e-6)
+    inverse = (
+        (y**2 / 4)
+        + (np.sqrt(3 / 2) * (1 / y) / 4)
+        - (11 / (8 * y**2))
+        + (np.sqrt(5 / 2) * (1 / y**3) / 8)
+        - (1 / (8 * y**4))
+    )
+    return np.maximum(inverse, 0)
+
+
+# ── Noise estimation (exact copy from flimfret) ───────────────
+
+
+def calculate_median_values(transformed_data):
+    """Calculate median absolute values of wavelet coefficients."""
+    median_values = []
+    for level in range(len(transformed_data.highpasses)):
+        highpasses = transformed_data.highpasses[level]
+        for band in range(highpasses.shape[2]):
+            coeffs = highpasses[:, :, band]
+            median_absolute = np.median(np.abs(coeffs.flatten()))
+            median_values.append(median_absolute)
+    return np.mean(median_values)
+
+
+def calculate_local_noise_variance(transformed_data, n_levels):
+    """Calculate local noise variance for each coefficient.
+
+    Uses a sliding window (size=3) to estimate local variance
+    at each position in each level and band.
     """
-    y = data
-    # Algebraic inverse: (y/2)^2 - 3/8
-    result = (y / 2.0) ** 2 - 3.0 / 8.0
-    # Correction for small values
-    result = np.maximum(result, 0.0)
-    return result
+    sigma_n_squared_matrices = []
+    window_size = 3 if n_levels > 10 else n_levels
+
+    def _local_noise_variance(coeffs, ws):
+        sigma_n_squared = np.zeros_like(coeffs, dtype=float)
+        height, width = coeffs.shape
+        for x in range(width):
+            for y in range(height):
+                x_min = max(0, x - ws)
+                x_max = min(width, x + ws + 1)
+                y_min = max(0, y - ws)
+                y_max = min(height, y + ws + 1)
+                window = coeffs[y_min:y_max, x_min:x_max]
+                sigma_n_squared[y, x] = np.mean(np.abs(window) ** 2)
+        return sigma_n_squared
+
+    num_levels = len(transformed_data.highpasses)
+    for level in range(num_levels):
+        highpasses = transformed_data.highpasses[level]
+        for band in range(highpasses.shape[2]):
+            coeffs = highpasses[:, :, band]
+            snq = _local_noise_variance(coeffs, window_size)
+            sigma_n_squared_matrices.append((level, band, snq))
+
+    return sigma_n_squared_matrices
+
+
+# ── Inter-scale Wiener shrinkage (exact copy from flimfret) ────
+
+
+def compute_phi_prime(mandrill_t, sigma_g_squared, sigma_n_squared_matrices):
+    """Compute modified wavelet coefficients using inter-scale Wiener shrinkage.
+
+    For each coefficient, computes a shrinkage factor based on:
+    - The coefficient magnitude at the current level
+    - The corresponding coefficient at the next coarser level
+    - The local noise variance estimate
+    - The global signal variance estimate
+
+    This produces much tighter denoising than simple soft thresholding.
+    """
+    updated_coefficients = []
+    max_level = len(mandrill_t.highpasses) - 1
+    local_term = np.sqrt(3) * np.sqrt(sigma_g_squared)
+
+    for level in range(max_level):
+        highpasses_l = mandrill_t.highpasses[level]
+        highpasses_l_plus_1 = mandrill_t.highpasses[level + 1]
+        level_coefficients = []
+
+        for band in range(highpasses_l.shape[2]):
+            phi_l_b = highpasses_l[:, :, band]
+            phi_l_plus_1_b = highpasses_l_plus_1[:, :, band]
+
+            _, _, sigma_n_squared = sigma_n_squared_matrices[level * 6 + band]
+            phi_prime = np.zeros_like(phi_l_b, dtype=complex)
+
+            # Account for size mismatch due to downsampling
+            if sigma_n_squared.shape != phi_l_b.shape:
+                downsample_factor = max(
+                    1, phi_l_b.shape[0] // sigma_n_squared.shape[0]
+                )
+            else:
+                downsample_factor = 1
+
+            for x in range(phi_l_b.shape[1]):
+                for y in range(phi_l_b.shape[0]):
+                    x_half = x // 2
+                    y_half = y // 2
+
+                    x_ds = min(
+                        x // downsample_factor, sigma_n_squared.shape[1] - 1
+                    )
+                    y_ds = min(
+                        y // downsample_factor, sigma_n_squared.shape[0] - 1
+                    )
+
+                    if (
+                        y_half >= highpasses_l_plus_1.shape[0]
+                        or x_half >= highpasses_l_plus_1.shape[1]
+                    ):
+                        continue
+
+                    phi_squared_sum = np.abs(phi_l_b[y, x]) ** 2
+                    if (
+                        y_half < phi_l_plus_1_b.shape[0]
+                        and x_half < phi_l_plus_1_b.shape[1]
+                    ):
+                        phi_squared_sum += (
+                            np.abs(phi_l_plus_1_b[y_half, x_half]) ** 2
+                        )
+
+                    if (
+                        sigma_n_squared[y_ds, x_ds] > 0
+                        and phi_squared_sum > 0
+                    ):
+                        denominator = np.sqrt(phi_squared_sum + local_term)
+                        factor = 1 - local_term / denominator
+                    else:
+                        factor = 0
+
+                    factor = max(factor, 0)
+                    phi_prime[y, x] = factor * phi_l_b[y, x]
+
+            level_coefficients.append(phi_prime)
+        updated_coefficients.append(level_coefficients)
+
+    return updated_coefficients
+
+
+def update_coefficients(mandrill_t, phi_prime_matrices):
+    """Update wavelet coefficients with filtered values."""
+    for level, level_matrices in enumerate(phi_prime_matrices):
+        for band, phi_prime in enumerate(level_matrices):
+            if band < mandrill_t.highpasses[level].shape[2]:
+                mandrill_t.highpasses[level][:, :, band] = phi_prime
+
+
+# ── Main filter function ──────────────────────────────────────
+
+
+def _next_pow2(n: int) -> int:
+    """Return the smallest power of 2 >= n."""
+    p = 1
+    while p < n:
+        p *= 2
+    return p
+
+
+def _filter_channel(data: NDArray, n_levels: int) -> NDArray:
+    """Apply DTCWT denoising to a single 2D channel.
+
+    Uses exact flimfret algorithm: Anscombe → DTCWT → inter-scale
+    Wiener shrinkage → inverse DTCWT → inverse Anscombe.
+    """
+    import dtcwt
+
+    # Pad to power-of-2 dimensions for DTCWT
+    h, w = data.shape
+    pad_h = _next_pow2(h) - h
+    pad_w = _next_pow2(w) - w
+    padded = np.pad(data, ((0, pad_h), (0, pad_w)), mode="reflect")
+
+    # Anscombe transform
+    transformed = anscombe_transform(padded)
+
+    # Forward DTCWT
+    xfm = dtcwt.Transform2d(biort="near_sym_a", qshift="qshift_a")
+    coeffs = xfm.forward(transformed, nlevels=n_levels)
+
+    # Noise estimation
+    median_vals = calculate_median_values(coeffs)
+    sigma_g_squared = median_vals / 0.6745
+
+    # Local noise variance (pixel-by-pixel, slow but exact)
+    sigma_n_squared = calculate_local_noise_variance(coeffs, n_levels)
+
+    # Inter-scale Wiener shrinkage (pixel-by-pixel, slow but exact)
+    phi_prime = compute_phi_prime(coeffs, sigma_g_squared, sigma_n_squared)
+    update_coefficients(coeffs, phi_prime)
+
+    # Inverse DTCWT
+    reconstructed = xfm.inverse(coeffs)
+
+    # Inverse Anscombe
+    result = reverse_anscombe_transform(reconstructed)
+
+    # Remove padding
+    return result[:h, :w]
 
 
 def denoise_phasor(
@@ -41,9 +236,9 @@ def denoise_phasor(
 ) -> dict[str, NDArray]:
     """Apply DTCWT-based wavelet filtering to FLIM phasor data.
 
-    Uses flimfret's exact wavelet filter implementation if available
-    (inter-scale Wiener-like shrinkage), falling back to a simplified
-    soft-threshold approach otherwise.
+    Uses flimfret's exact inter-scale Wiener shrinkage algorithm.
+    This is slow (nested Python loops) but produces the correct
+    tight arc structure on the phasor plot.
 
     Parameters
     ----------
@@ -64,14 +259,6 @@ def denoise_phasor(
         'TU' : unfiltered lifetime map (if omega provided, else None)
         'filter_level' : decomposition level used
     """
-    try:
-        import dtcwt
-    except ImportError as e:
-        raise ImportError(
-            "dtcwt package required for wavelet filtering.\n"
-            "Install with: pip install 'percell4[flim]'"
-        ) from e
-
     g = g.astype(np.float64)
     s = s.astype(np.float64)
     intensity = intensity.astype(np.float64)
@@ -84,16 +271,13 @@ def denoise_phasor(
     f_real = g * intensity
     f_imag = s * intensity
 
-    # Try to use flimfret's exact wavelet filter (inter-scale Wiener shrinkage)
-    try:
-        f_real_filtered = _filter_channel_flimfret(f_real, filter_level, dtcwt)
-        f_imag_filtered = _filter_channel_flimfret(f_imag, filter_level, dtcwt)
-        intensity_filtered = _filter_channel_flimfret(intensity, filter_level, dtcwt)
-    except Exception:
-        # Fallback to simplified approach
-        f_real_filtered = _filter_channel(f_real, filter_level, dtcwt)
-        f_imag_filtered = _filter_channel(f_imag, filter_level, dtcwt)
-        intensity_filtered = _filter_channel(intensity, filter_level, dtcwt)
+    # Step 2-5: Filter each channel using flimfret's exact algorithm
+    print("  Filtering Freal...")
+    f_real_filtered = _filter_channel(f_real, filter_level)
+    print("  Filtering Fimag...")
+    f_imag_filtered = _filter_channel(f_imag, filter_level)
+    print("  Filtering intensity...")
+    intensity_filtered = _filter_channel(intensity, filter_level)
 
     # Step 6: Recover filtered phasor
     int_safe = np.where(intensity_filtered > 0, intensity_filtered, 1.0)
@@ -132,122 +316,3 @@ def denoise_phasor(
         "TU": t_unfiltered.astype(np.float32) if t_unfiltered is not None else None,
         "filter_level": filter_level,
     }
-
-
-def _filter_channel_flimfret(data: NDArray, n_levels: int, dtcwt_module) -> NDArray:
-    """Apply DTCWT denoising using flimfret's exact inter-scale Wiener shrinkage.
-
-    Imports and calls functions from flimfret's wavelet_filter module.
-    """
-    import sys
-
-    # Add flimfret to path if not already there
-    flimfret_path = "/Users/leelab/flimfret/src/python"
-    if flimfret_path not in sys.path:
-        sys.path.insert(0, flimfret_path)
-
-    from modules.wavelet_filter import (
-        anscombe_transform as ff_anscombe,
-    )
-    from modules.wavelet_filter import (
-        calculate_local_noise_variance,
-        calculate_median_values,
-        compute_phi_prime,
-        update_coefficients,
-    )
-    from modules.wavelet_filter import (
-        reverse_anscombe_transform as ff_reverse_anscombe,
-    )
-
-    # Pad to power-of-2
-    h, w = data.shape
-    pad_h = _next_pow2(h) - h
-    pad_w = _next_pow2(w) - w
-    padded = np.pad(data, ((0, pad_h), (0, pad_w)), mode="reflect")
-
-    # Anscombe
-    transformed = ff_anscombe(padded)
-
-    # Forward DTCWT
-    xfm = dtcwt_module.Transform2d(biort="near_sym_a", qshift="qshift_a")
-    coeffs = xfm.forward(transformed, nlevels=n_levels)
-
-    # Noise estimation (flimfret's method)
-    median_values = calculate_median_values(coeffs)
-    sigma_g_squared = median_values / 0.6745
-
-    # Local noise variance
-    sigma_n_squared = calculate_local_noise_variance(coeffs, n_levels)
-
-    # Inter-scale Wiener shrinkage (flimfret's exact algorithm)
-    phi_prime = compute_phi_prime(coeffs, sigma_g_squared, sigma_n_squared)
-    update_coefficients(coeffs, phi_prime)
-
-    # Inverse DTCWT
-    reconstructed = xfm.inverse(coeffs)
-
-    # Inverse Anscombe
-    result = ff_reverse_anscombe(reconstructed)
-
-    return result[:h, :w]
-
-
-def _filter_channel(data: NDArray, n_levels: int, dtcwt_module) -> NDArray:
-    """Apply DTCWT denoising to a single 2D channel.
-
-    1. Anscombe transform (variance stabilization)
-    2. Forward DTCWT
-    3. Estimate noise from MAD of finest-level coefficients
-    4. Adaptive thresholding of wavelet coefficients
-    5. Inverse DTCWT
-    6. Inverse Anscombe transform
-    """
-    # Pad to power-of-2 dimensions for DTCWT
-    h, w = data.shape
-    pad_h = _next_pow2(h) - h
-    pad_w = _next_pow2(w) - w
-    padded = np.pad(data, ((0, pad_h), (0, pad_w)), mode="reflect")
-
-    # Anscombe transform
-    transformed = anscombe_transform(padded)
-
-    # Forward DTCWT
-    xfm = dtcwt_module.Transform2d(biort="near_sym_a", qshift="qshift_a")
-    coeffs = xfm.forward(transformed, nlevels=n_levels)
-
-    # Noise estimation from finest level (MAD)
-    finest = coeffs.highpasses[0]
-    sigma = np.median(np.abs(finest)) / 0.6745
-
-    # Adaptive thresholding — convert highpasses to list for mutation
-    hp_list = list(coeffs.highpasses)
-    if sigma > 0:
-        for level_idx in range(len(hp_list)):
-            hp = hp_list[level_idx]
-            # Soft thresholding with level-dependent threshold
-            threshold = sigma * np.sqrt(2.0 * np.log(hp.size))
-            # Scale threshold by level (coarser levels get less aggressive)
-            level_scale = 1.0 / (1.0 + level_idx * 0.5)
-            t = threshold * level_scale
-            # Soft shrinkage
-            magnitude = np.abs(hp)
-            shrunk = np.maximum(magnitude - t, 0) * np.sign(hp)
-            hp_list[level_idx] = np.where(magnitude > t, shrunk, hp * 0.0)
-    coeffs.highpasses = tuple(hp_list)
-
-    # Inverse DTCWT
-    reconstructed = xfm.inverse(coeffs)
-
-    # Inverse Anscombe
-    result = inverse_anscombe_transform(reconstructed)
-
-    # Remove padding
-    return result[:h, :w]
-
-
-def _next_pow2(n: int) -> int:
-    """Return the smallest power of 2 >= n."""
-    p = 1
-    while p < n:
-        p *= 2
-    return p
