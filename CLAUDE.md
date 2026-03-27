@@ -14,7 +14,7 @@ Single-cell microscopy analysis software. The core value proposition is tracking
 - **Data model:** pandas DataFrames for per-cell measurements (no database)
 - **Segmentation:** Cellpose
 - **Plotting:** pyqtgraph (Qt-native, fast scatter/ROI)
-- **Image I/O:** tifffile, sdtfile (Becker&Hickl), ptufile (PicoQuant)
+- **Image I/O:** tifffile, sdtfile (Becker&Hickl)
 - **Image processing:** scikit-image, scipy, numpy
 
 ## Development Setup

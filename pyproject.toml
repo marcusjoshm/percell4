@@ -70,9 +70,6 @@ dev = [
     "percell4[all]",
 ]
 
-[project.scripts]
-percell4 = "percell4.cli.main:cli"
-
 [project.gui-scripts]
 percell4-gui = "percell4.app:main"
 
