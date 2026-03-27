@@ -100,8 +100,9 @@ class ViewerWindow:
         # Wire napari label selection → CellDataModel
         self._viewer.layers.events.inserted.connect(self._on_layer_inserted)
 
-        # Wire CellDataModel selection → napari display
+        # Wire CellDataModel selection + filter → napari display
         self.data_model.selection_changed.connect(self._update_label_display)
+        self.data_model.filter_changed.connect(self._update_label_display)
 
         self._restore_geometry()
 

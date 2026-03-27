@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QRectF, QSettings
+from qtpy.QtCore import QRectF, QSettings, QTimer
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -46,9 +46,18 @@ class PhasorPlotWindow(QMainWindow):
         self._intensity: np.ndarray | None = None
         self._g_map_unfiltered: np.ndarray | None = None
         self._s_map_unfiltered: np.ndarray | None = None
+        self._labels: np.ndarray | None = None
+        self._labels_flat: np.ndarray | None = None
 
         self._build_ui()
         self._restore_geometry()
+
+        # Debounced filter response for histogram recomputation
+        self._filter_timer = QTimer()
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(150)
+        self._filter_timer.timeout.connect(self._refresh_histogram)
+        self.data_model.filter_changed.connect(self._on_filter_changed)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -189,11 +198,19 @@ class PhasorPlotWindow(QMainWindow):
         intensity: np.ndarray | None = None,
         g_unfiltered: np.ndarray | None = None,
         s_unfiltered: np.ndarray | None = None,
+        labels: np.ndarray | None = None,
     ) -> None:
-        """Set phasor data and refresh the histogram."""
+        """Set phasor data and refresh the histogram.
+
+        Args:
+            labels: (H, W) int32 segmentation labels, same shape as g_map.
+                    Enables cell-level filtering in the phasor histogram.
+        """
         self._g_map = g_map
         self._s_map = s_map
         self._intensity = intensity
+        self._labels = labels
+        self._labels_flat = labels.ravel() if labels is not None else None
 
         if g_unfiltered is not None:
             self._g_map_unfiltered = g_unfiltered
@@ -210,6 +227,10 @@ class PhasorPlotWindow(QMainWindow):
 
     def _on_filtered_toggled(self, checked: bool) -> None:
         self._refresh_histogram()
+
+    def _on_filter_changed(self) -> None:
+        """Debounced response to cell filter changes."""
+        self._filter_timer.start()
 
     def _refresh_histogram(self) -> None:
         """Render intensity-weighted 2D histogram."""
@@ -228,6 +249,13 @@ class PhasorPlotWindow(QMainWindow):
         s_flat = s_display.ravel()
 
         valid = np.isfinite(g_flat) & np.isfinite(s_flat) & (g_flat != 0)
+
+        # Apply cell-level filter if active
+        filtered_ids = self.data_model.filtered_ids
+        if filtered_ids is not None and self._labels_flat is not None:
+            cell_mask = np.isin(self._labels_flat, list(filtered_ids))
+            valid = valid & cell_mask
+
         g_flat = g_flat[valid]
         s_flat = s_flat[valid]
 

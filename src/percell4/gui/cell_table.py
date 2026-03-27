@@ -106,14 +106,35 @@ class PandasTableModel(QAbstractTableModel):
         return self._label_to_row.get(label_id)
 
 
+class FilterableProxyModel(QSortFilterProxyModel):
+    """Proxy that filters rows by label ID set while preserving sort state."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._visible_labels: set[int] | None = None  # None = show all
+
+    def set_filter_labels(self, label_ids: set[int] | None) -> None:
+        """Set the filter. None = show all rows."""
+        self._visible_labels = label_ids
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
+        if self._visible_labels is None:
+            return True
+        source_model = self.sourceModel()
+        label = source_model.get_label_for_row(source_row)
+        return label in self._visible_labels if label is not None else False
+
+
 class CellTableWindow(QMainWindow):
     """Table window showing per-cell measurements with sort and selection sync.
 
     Features:
     - QTableView backed by PandasTableModel
-    - Column header click → sort (via QSortFilterProxyModel)
+    - Column header click → sort (via FilterableProxyModel)
     - Row click → CellDataModel.set_selection
     - selection_changed → highlight and scroll to row
+    - filter_changed → show/hide rows via proxy filter
     - Right-click context menu: Export Selection, Export All
     - Export CSV button in toolbar
     """
@@ -146,9 +167,9 @@ class CellTableWindow(QMainWindow):
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
-        # Table model + proxy for sorting
+        # Table model + proxy for sorting + filtering
         self._model = PandasTableModel()
-        self._proxy = QSortFilterProxyModel()
+        self._proxy = FilterableProxyModel()
         self._proxy.setSourceModel(self._model)
         self._proxy.setSortRole(Qt.UserRole)
 
@@ -190,6 +211,7 @@ class CellTableWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.data_model.data_updated.connect(self._on_data_updated)
         self.data_model.selection_changed.connect(self._on_selection_changed)
+        self.data_model.filter_changed.connect(self._on_filter_changed)
         self._table.selectionModel().selectionChanged.connect(
             self._on_table_selection_changed
         )
@@ -247,6 +269,22 @@ class CellTableWindow(QMainWindow):
         self._status.showMessage(f"Selected: {n_selected} | Total: {n_total} cells")
 
         self._updating_selection = False
+
+    def _on_filter_changed(self) -> None:
+        """Update proxy filter when cell filter changes."""
+        self._updating_selection = True
+        try:
+            self._proxy.set_filter_labels(self.data_model.filtered_ids)
+            n_visible = self._proxy.rowCount()
+            n_total = self._model.rowCount()
+            if self.data_model.is_filtered:
+                self._status.showMessage(
+                    f"Showing {n_visible} of {n_total} cells (filtered)"
+                )
+            else:
+                self._status.showMessage(f"Showing {n_total} cells")
+        finally:
+            self._updating_selection = False
 
     # ── Table → model selection ───────────────────────────────
 

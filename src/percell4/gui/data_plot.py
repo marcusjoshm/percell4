@@ -143,6 +143,7 @@ class DataPlotWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.data_model.data_updated.connect(self._on_data_updated)
         self.data_model.selection_changed.connect(self._on_selection_changed)
+        self.data_model.filter_changed.connect(self._refresh_plot)
         self._x_combo.currentTextChanged.connect(self._refresh_plot)
         self._y_combo.currentTextChanged.connect(self._refresh_plot)
         self._base_scatter.sigClicked.connect(self._on_point_clicked)
@@ -235,8 +236,11 @@ class DataPlotWindow(QMainWindow):
     # ── Plot refresh ──────────────────────────────────────────
 
     def _refresh_plot(self) -> None:
-        """Redraw the base scatter from current DataFrame and column selections."""
-        df = self.data_model.df
+        """Redraw the base scatter from current DataFrame and column selections.
+
+        Uses filtered_df for row data, df for column availability.
+        """
+        df = self.data_model.filtered_df
         x_col = self._x_combo.currentText()
         y_col = self._y_combo.currentText()
 

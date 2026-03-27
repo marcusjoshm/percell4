@@ -301,6 +301,30 @@ class LauncherWindow(QMainWindow):
 
         layout.addWidget(self._section_label("Analysis"))
 
+        # ── Cell Filter group ──
+        filter_group = QGroupBox("Cell Filter")
+        filter_layout = QVBoxLayout(filter_group)
+
+        filter_btn_row = QHBoxLayout()
+        btn_filter = QPushButton("Filter to Selection")
+        btn_filter.setToolTip("Show only the currently selected cells in all windows")
+        btn_filter.clicked.connect(self._on_filter_to_selection)
+        filter_btn_row.addWidget(btn_filter)
+
+        self._clear_filter_btn = QPushButton("Clear Filter")
+        self._clear_filter_btn.setEnabled(False)
+        self._clear_filter_btn.clicked.connect(self._on_clear_filter)
+        filter_btn_row.addWidget(self._clear_filter_btn)
+        filter_layout.addLayout(filter_btn_row)
+
+        self._filter_status_label = QLabel("No filter active")
+        self._filter_status_label.setStyleSheet("color: #888888;")
+        filter_layout.addWidget(self._filter_status_label)
+
+        layout.addWidget(filter_group)
+
+        self.data_model.filter_changed.connect(self._on_filter_state_changed)
+
         # ── Thresholding group ──
         thresh_group = QGroupBox("Thresholding")
         thresh_layout = QVBoxLayout(thresh_group)
@@ -1027,6 +1051,33 @@ class LauncherWindow(QMainWindow):
 
         # Not in store — default to treating it as a segmentation
         self.data_model.set_active_segmentation(name)
+
+    def _on_filter_to_selection(self) -> None:
+        """Filter all windows to show only the currently selected cells."""
+        selected = self.data_model.selected_ids
+        if not selected:
+            self.statusBar().showMessage("No cells selected to filter", 3000)
+            return
+        self.data_model.set_filter(list(selected))
+
+    def _on_clear_filter(self) -> None:
+        """Remove cell filter — restore all windows to full data."""
+        self.data_model.set_filter(None)
+
+    def _on_filter_state_changed(self) -> None:
+        """Update filter status display in the Analysis panel."""
+        if self.data_model.is_filtered:
+            n_filtered = len(self.data_model.filtered_df)
+            n_total = len(self.data_model.df)
+            self._filter_status_label.setText(
+                f"Showing {n_filtered} of {n_total} cells"
+            )
+            self._filter_status_label.setStyleSheet("color: #4ea8de; font-weight: bold;")
+            self._clear_filter_btn.setEnabled(True)
+        else:
+            self._filter_status_label.setText("No filter active")
+            self._filter_status_label.setStyleSheet("color: #888888;")
+            self._clear_filter_btn.setEnabled(False)
 
     def _on_threshold_preview(self) -> None:
         """Compute threshold and show a live preview mask in the viewer.
