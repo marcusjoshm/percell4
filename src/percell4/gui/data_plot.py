@@ -9,18 +9,46 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import QEvent, QRectF, QSettings, Qt, Signal
 from qtpy.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from percell4.model import CellDataModel
+
+
+class SelectionViewBox(pg.ViewBox):
+    """ViewBox that supports Shift+drag for rectangle selection.
+
+    Normal drag = pan/zoom (default). Shift+drag = rubber-band rectangle
+    that emits sigSelectionComplete with a QRectF in data coordinates.
+    """
+
+    sigSelectionComplete = Signal(object)  # QRectF in data coordinates
+
+    def mouseDragEvent(self, ev, axis=None):
+        if ev.button() == Qt.LeftButton and ev.modifiers() & Qt.ShiftModifier:
+            ev.accept()
+            if ev.isStart():
+                self.updateScaleBox(ev.buttonDownPos(), ev.pos())
+            elif ev.isFinish():
+                self.rbScaleBox.hide()
+                p1 = ev.buttonDownPos()
+                p2 = ev.pos()
+                rect = QRectF(p1, p2).normalized()
+                data_rect = self.childGroup.mapRectFromParent(rect)
+                self.sigSelectionComplete.emit(data_rect)
+            else:
+                self.updateScaleBox(ev.buttonDownPos(), ev.pos())
+        else:
+            super().mouseDragEvent(ev, axis)
 
 
 class DataPlotWindow(QMainWindow):
@@ -70,13 +98,20 @@ class DataPlotWindow(QMainWindow):
         self._y_combo = QComboBox()
         self._y_combo.setMinimumWidth(120)
         controls.addWidget(self._y_combo)
+        # Reset view button
+        self._reset_btn = QPushButton("Reset View")
+        self._reset_btn.setMaximumWidth(80)
+        self._reset_btn.clicked.connect(self._on_reset_view)
+        controls.addWidget(self._reset_btn)
         controls.addStretch()
         layout.addLayout(controls)
 
-        # Plot widget
-        self._plot = pg.PlotWidget()
+        # Plot widget with custom ViewBox for Shift+drag selection
+        self._vb = SelectionViewBox()
+        self._plot = pg.PlotWidget(viewBox=self._vb)
         self._plot.setBackground("#1e1e1e")
         self._plot.showGrid(x=True, y=True, alpha=0.15)
+        self._plot.installEventFilter(self)  # for Escape key
         layout.addWidget(self._plot)
 
         # Base scatter — all points, uniform style, cached
@@ -111,6 +146,7 @@ class DataPlotWindow(QMainWindow):
         self._x_combo.currentTextChanged.connect(self._refresh_plot)
         self._y_combo.currentTextChanged.connect(self._refresh_plot)
         self._base_scatter.sigClicked.connect(self._on_point_clicked)
+        self._vb.sigSelectionComplete.connect(self._on_rect_selected)
 
     # ── Data model reactions ──────────────────────────────────
 
@@ -260,6 +296,31 @@ class DataPlotWindow(QMainWindow):
             self.data_model.set_selection(list(current))
         else:
             self.data_model.set_selection([label_id])
+
+    def _on_rect_selected(self, data_rect: QRectF) -> None:
+        """Select all points within the Shift+drag rectangle."""
+        if self._x_data is None or self._labels_array is None:
+            return
+        mask = (
+            (self._x_data >= data_rect.left())
+            & (self._x_data <= data_rect.right())
+            & (self._y_data >= data_rect.top())
+            & (self._y_data <= data_rect.bottom())
+        )
+        selected_labels = self._labels_array[mask].tolist()
+        if selected_labels:
+            self.data_model.set_selection([int(lid) for lid in selected_labels])
+
+    def _on_reset_view(self) -> None:
+        """Reset zoom/pan to auto-range."""
+        self._plot.autoRange()
+
+    def eventFilter(self, obj, event) -> bool:
+        """Escape key clears selection."""
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            self.data_model.set_selection([])
+            return True
+        return super().eventFilter(obj, event)
 
     # ── Lifecycle ─────────────────────────────────────────────
 
