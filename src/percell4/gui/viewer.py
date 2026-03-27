@@ -68,6 +68,7 @@ class ViewerWindow:
         self._qt_window = None
         self._color_index = 0
         self._updating_selection = False
+        self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -192,6 +193,7 @@ class ViewerWindow:
     def clear(self) -> None:
         """Remove all layers."""
         self._color_index = 0
+        self._original_colormaps.clear()
         if self._viewer is not None and self._is_alive():
             self._viewer.layers.clear()
 
@@ -245,12 +247,15 @@ class ViewerWindow:
             filtered_ids = getattr(self.data_model, "filtered_ids", None)
 
             if not selected_ids and not filtered_ids:
-                # No selection, no filter: show all labels normally
+                # No selection, no filter: restore original colormap
                 labels_layer.show_selected_label = False
+                self._restore_colormap(labels_layer)
                 return
 
             if len(selected_ids) == 1 and not filtered_ids:
                 # Single cell, no filter: use napari's built-in
+                # Restore colormap first in case we were previously filtering
+                self._restore_colormap(labels_layer)
                 with labels_layer.events.selected_label.blocker():
                     labels_layer.selected_label = selected_ids[0]
                 labels_layer.show_selected_label = True
@@ -258,6 +263,9 @@ class ViewerWindow:
 
             # Multi-cell and/or filter active: use DirectLabelColormap
             labels_layer.show_selected_label = False
+
+            # Save original colormap before first replacement
+            self._save_colormap(labels_layer)
 
             visible_ids = filtered_ids if filtered_ids else None
             highlight_ids = set(selected_ids) if selected_ids else None
@@ -290,6 +298,18 @@ class ViewerWindow:
             labels_layer.refresh(extent=False)
         finally:
             self._updating_selection = False
+
+    def _save_colormap(self, layer) -> None:
+        """Save the layer's original colormap if not already cached."""
+        if layer.name not in self._original_colormaps:
+            self._original_colormaps[layer.name] = layer.colormap
+
+    def _restore_colormap(self, layer) -> None:
+        """Restore the layer's original colormap if we previously replaced it."""
+        if layer.name in self._original_colormaps:
+            with layer.events.colormap.blocker():
+                layer.colormap = self._original_colormaps.pop(layer.name)
+            layer.refresh(extent=False)
 
     def _get_active_labels_layer(self):
         """Find the labels layer matching the active segmentation."""
