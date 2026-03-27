@@ -196,33 +196,33 @@ class PhasorPlotWindow(QMainWindow):
             weights=weights,
         )
 
-        # SymLog-like scaling (matching flimfret's SymLogNorm)
-        # log1p handles zeros; the result looks similar to SymLogNorm
-        hist_display = np.log1p(hist).T  # transpose for (row=S, col=G)
+        # Log scaling for dynamic range
+        hist_display = np.log1p(hist)
 
         # Remove old histogram
         if self._hist_item is not None:
             self._plot.removeItem(self._hist_item)
 
-        # Create new ImageItem
+        # Create new ImageItem with explicit rect positioning
         self._hist_item = pg.ImageItem()
         self._plot.addItem(self._hist_item)
 
-        # Apply nipy_spectral-like colormap
-        # pyqtgraph doesn't have nipy_spectral, use a similar hot colormap
-        cmap = pg.colormap.get("CET-R4")  # rainbow-like, similar to nipy_spectral
+        # setImage: image[x, y] where x=col (G), y=row (S) in pyqtgraph
+        # histogram2d returns hist[g_bin, s_bin] — this maps directly to
+        # ImageItem's [x, y] convention (no transpose needed)
+        cmap = pg.colormap.get("CET-R4")
         if cmap is None:
-            cmap = pg.colormap.get("viridis")  # fallback
+            cmap = pg.colormap.get("viridis")
         self._hist_item.setImage(hist_display)
         self._hist_item.setColorMap(cmap)
 
-        # Position image to match axis coordinates
-        scale_x = (g_range[1] - g_range[0]) / hist_display.shape[1]
-        scale_y = (s_range[1] - s_range[0]) / hist_display.shape[0]
-        self._hist_item.setTransform(
-            pg.QtGui.QTransform()
-            .translate(g_range[0], s_range[0])
-            .scale(scale_x, scale_y)
+        # Position: map pixel grid to data coordinates using setRect
+        from qtpy.QtCore import QRectF
+
+        self._hist_item.setRect(
+            QRectF(g_range[0], s_range[0],
+                   g_range[1] - g_range[0],
+                   s_range[1] - s_range[0])
         )
 
         # Ensure overlays stay on top
