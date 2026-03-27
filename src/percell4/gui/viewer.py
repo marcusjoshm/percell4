@@ -325,18 +325,20 @@ class ViewerWindow:
             layer.refresh(extent=False)
 
     def _get_active_labels_layer(self):
-        """Find the labels layer matching the active segmentation."""
+        """Find the labels layer matching the active segmentation.
+
+        Only returns the explicitly named segmentation layer — never falls
+        back to mask layers (phasor_roi, etc.) which are also Labels layers.
+        """
         import napari
 
         if self._viewer is None:
             return None
         seg_name = self.data_model.active_segmentation
+        if not seg_name:
+            return None
         for layer in self._viewer.layers:
             if isinstance(layer, napari.layers.Labels) and layer.name == seg_name:
-                return layer
-        # Fallback: return the first labels layer if no name match
-        for layer in self._viewer.layers:
-            if isinstance(layer, napari.layers.Labels):
                 return layer
         return None
 
