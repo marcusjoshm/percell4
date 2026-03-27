@@ -1486,12 +1486,11 @@ class LauncherWindow(QMainWindow):
 
         g_map, s_map = compute_phasor(decay, harmonic=harmonic)
 
-        # Zero out noisy low-photon pixels (same as flimfret's threshold_min)
-        # Pixels with very few photons produce unreliable phasor values
-        intensity_sum = decay.sum(axis=-1)
-        low_signal = intensity_sum < 2  # less than 2 total photons
-        g_map[low_signal] = np.nan
-        s_map[low_signal] = np.nan
+        # Zero out low-photon pixels (flimfret threshold_min default = 0)
+        intensity_sum = decay.sum(axis=-1).astype(np.float32)
+        low_signal = intensity_sum <= 0
+        g_map[low_signal] = 0.0
+        s_map[low_signal] = 0.0
 
         # Apply per-channel calibration if available
         meta = store.metadata
@@ -1507,6 +1506,15 @@ class LauncherWindow(QMainWindow):
             s_cal = (g_map * cal_mod * sin_phi + s_map * cal_mod * cos_phi)
             g_map = g_cal.astype(np.float32)
             s_map = s_cal.astype(np.float32)
+
+        # Apply spatial median filter (1 pass, 3x3) — matches flimfret
+        # preprocessing.py Section 2.5. This smooths noisy single-photon
+        # pixels and produces a tighter phasor cloud.
+        from scipy.ndimage import median_filter
+
+        g_map = median_filter(g_map, size=3).astype(np.float32)
+        s_map = median_filter(s_map, size=3).astype(np.float32)
+        intensity_sum = median_filter(intensity_sum, size=3).astype(np.float32)
 
         # Write phasor maps to store
         store.write_array(
