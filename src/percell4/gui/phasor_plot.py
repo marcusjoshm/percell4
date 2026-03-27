@@ -1,8 +1,7 @@
 """Phasor plot window — 2D histogram density of FLIM phasor coordinates.
 
-Uses pyqtgraph ImageItem with histogram2d for rendering (handles millions
-of pixels). EllipseROI for selecting lifetime populations. Universal
-semicircle overlay.
+Adapted from flimfret/phasor_plot_utils.py plotting logic for pyqtgraph.
+Intensity-weighted histogram with universal circle contour.
 """
 
 from __future__ import annotations
@@ -26,14 +25,13 @@ from percell4.model import CellDataModel
 
 
 class PhasorPlotWindow(QMainWindow):
-    """Phasor plot window with 2D histogram density and ROI selection.
+    """Phasor plot window with intensity-weighted 2D histogram.
 
-    Features:
-    - 2D histogram rendered as ImageItem (handles millions of pixels)
-    - Universal semicircle overlay
-    - EllipseROI for selecting lifetime populations
-    - Harmonic selector
-    - Apply as Mask button
+    Matches flimfret's phasor_plot_utils.py visualization:
+    - Intensity-weighted histogram (not just pixel counts)
+    - Universal circle from X²+Y²-X=0 contour
+    - G=[0, 1], S=[0, 0.7] axis range
+    - EllipseROI for population selection
     """
 
     def __init__(self, data_model: CellDataModel) -> None:
@@ -44,9 +42,9 @@ class PhasorPlotWindow(QMainWindow):
 
         self._g_map: np.ndarray | None = None
         self._s_map: np.ndarray | None = None
+        self._intensity: np.ndarray | None = None
         self._g_map_unfiltered: np.ndarray | None = None
         self._s_map_unfiltered: np.ndarray | None = None
-        self._hist_bins = 256
 
         self._build_ui()
         self._restore_geometry()
@@ -81,31 +79,35 @@ class PhasorPlotWindow(QMainWindow):
 
         # Plot
         self._plot = pg.PlotWidget()
-        self._plot.setBackground("#1e1e1e")
+        self._plot.setBackground("w")
         self._plot.setAspectLocked(False)
         self._plot.setLabel("bottom", "G")
         self._plot.setLabel("left", "S")
+        self._plot.setXRange(-0.005, 1.005, padding=0)
+        self._plot.setYRange(0, 0.7, padding=0)
         layout.addWidget(self._plot)
 
-        # Histogram image item
-        self._hist_item = pg.ImageItem()
-        self._plot.addItem(self._hist_item)
+        # Histogram image item (will be recreated on each refresh)
+        self._hist_item = None
 
-        # Universal semicircle (stored for re-adding after histogram refresh)
+        # Universal circle: contour of X²+Y²-X=0
+        # Parametric form: center (0.5, 0), radius 0.5
         theta = np.linspace(0, np.pi, 200)
         semi_g = 0.5 + 0.5 * np.cos(theta)
         semi_s = 0.5 * np.sin(theta)
         self._semicircle = pg.PlotCurveItem(
             semi_g, semi_s,
-            pen=pg.mkPen("w", width=2, style=pg.QtCore.Qt.DashLine),
+            pen=pg.mkPen("k", width=2),
         )
+        self._semicircle.setZValue(10)
         self._plot.addItem(self._semicircle)
 
         # Ellipse ROI for phasor selection
         self._roi = pg.EllipseROI(
-            [0.2, 0.05], [0.2, 0.15],
-            pen=pg.mkPen("r", width=2),
+            [0.3, 0.15], [0.2, 0.15],
+            pen=pg.mkPen("b", width=2),
         )
+        self._roi.setZValue(10)
         self._plot.addItem(self._roi)
         self._roi.sigRegionChangeFinished.connect(self._on_roi_changed)
 
@@ -118,16 +120,22 @@ class PhasorPlotWindow(QMainWindow):
         self,
         g_map: np.ndarray,
         s_map: np.ndarray,
+        intensity: np.ndarray | None = None,
         g_unfiltered: np.ndarray | None = None,
         s_unfiltered: np.ndarray | None = None,
     ) -> None:
         """Set phasor data and refresh the histogram.
 
-        If unfiltered data is provided, the Filtered checkbox toggles
-        between filtered and unfiltered views.
+        Parameters
+        ----------
+        g_map, s_map : phasor coordinate maps (filtered if available)
+        intensity : photon count map for intensity-weighted histogram
+        g_unfiltered, s_unfiltered : unfiltered phasor for toggle
         """
         self._g_map = g_map
         self._s_map = s_map
+        self._intensity = intensity
+
         if g_unfiltered is not None:
             self._g_map_unfiltered = g_unfiltered
             self._s_map_unfiltered = s_unfiltered
@@ -138,24 +146,18 @@ class PhasorPlotWindow(QMainWindow):
             self._s_map_unfiltered = None
             self._filtered_check.setEnabled(False)
             self._filtered_check.setChecked(False)
+
         self._refresh_histogram()
 
     def _on_filtered_toggled(self, checked: bool) -> None:
-        """Toggle between filtered and unfiltered phasor display."""
-        if checked and self._g_map is not None:
-            # Show filtered (already in _g_map/_s_map)
-            pass
-        elif not checked and self._g_map_unfiltered is not None:
-            # Swap to unfiltered for display
-            pass
         self._refresh_histogram()
 
     def _refresh_histogram(self) -> None:
-        """Render the phasor data as a 2D histogram density image."""
+        """Render intensity-weighted 2D histogram (matching flimfret style)."""
         if self._g_map is None or self._s_map is None:
             return
 
-        # Choose filtered or unfiltered based on checkbox
+        # Choose filtered or unfiltered
         use_filtered = self._filtered_check.isChecked()
         if not use_filtered and self._g_map_unfiltered is not None:
             g_display = self._g_map_unfiltered
@@ -167,8 +169,8 @@ class PhasorPlotWindow(QMainWindow):
         g_flat = g_display.ravel()
         s_flat = s_display.ravel()
 
-        # Remove NaN pixels
-        valid = np.isfinite(g_flat) & np.isfinite(s_flat)
+        # Remove NaN and zero pixels
+        valid = np.isfinite(g_flat) & np.isfinite(s_flat) & (g_flat != 0)
         g_flat = g_flat[valid]
         s_flat = s_flat[valid]
 
@@ -176,60 +178,72 @@ class PhasorPlotWindow(QMainWindow):
             self._status.showMessage("No valid phasor data")
             return
 
-        # 2D histogram
-        g_range = (-0.1, 1.1)
-        s_range = (-0.1, 0.7)
+        # Intensity weights (matching flimfret: weights=intensity)
+        if self._intensity is not None:
+            weights = self._intensity.ravel()[valid]
+        else:
+            weights = np.ones(len(g_flat))
+
+        # Histogram with flimfret axis ranges
+        g_range = (-0.005, 1.005)
+        s_range = (0.0, 0.7)
+        n_bins = 300  # good resolution
+
         hist, g_edges, s_edges = np.histogram2d(
             g_flat, s_flat,
-            bins=self._hist_bins,
+            bins=n_bins,
             range=[g_range, s_range],
+            weights=weights,
         )
 
-        # Log scale for dynamic range
-        hist_log = np.log1p(hist).T  # transpose: histogram2d returns (x,y)
+        # SymLog-like scaling (matching flimfret's SymLogNorm)
+        # log1p handles zeros; the result looks similar to SymLogNorm
+        hist_display = np.log1p(hist).T  # transpose for (row=S, col=G)
 
-        # Remove old image and create fresh one to force visual update
+        # Remove old histogram
         if self._hist_item is not None:
             self._plot.removeItem(self._hist_item)
 
+        # Create new ImageItem
         self._hist_item = pg.ImageItem()
         self._plot.addItem(self._hist_item)
 
-        # Ensure semicircle and ROI stay on top of the histogram image
-        self._semicircle.setZValue(10)
-        self._roi.setZValue(10)
-
-        # Apply colormap and set image
-        cmap = pg.colormap.get("viridis")
-        self._hist_item.setImage(hist_log)
+        # Apply nipy_spectral-like colormap
+        # pyqtgraph doesn't have nipy_spectral, use a similar hot colormap
+        cmap = pg.colormap.get("CET-R4")  # rainbow-like, similar to nipy_spectral
+        if cmap is None:
+            cmap = pg.colormap.get("viridis")  # fallback
+        self._hist_item.setImage(hist_display)
         self._hist_item.setColorMap(cmap)
 
-        # Position the image to match phasor coordinates
-        scale_x = (g_range[1] - g_range[0]) / hist_log.shape[1]
-        scale_y = (s_range[1] - s_range[0]) / hist_log.shape[0]
+        # Position image to match axis coordinates
+        scale_x = (g_range[1] - g_range[0]) / hist_display.shape[1]
+        scale_y = (s_range[1] - s_range[0]) / hist_display.shape[0]
         self._hist_item.setTransform(
             pg.QtGui.QTransform()
             .translate(g_range[0], s_range[0])
             .scale(scale_x, scale_y)
         )
 
-        # Force auto-range update
-        self._plot.autoRange()
+        # Ensure overlays stay on top
+        self._semicircle.setZValue(10)
+        self._roi.setZValue(10)
+
+        # Set axis range
+        self._plot.setXRange(*g_range, padding=0)
+        self._plot.setYRange(*s_range, padding=0)
 
         n_pixels = len(g_flat)
         self._status.showMessage(f"Phasor: {n_pixels:,} valid pixels")
 
     def _on_roi_changed(self) -> None:
-        """Update ROI statistics when the ellipse is moved/resized."""
         if self._g_map is None:
             return
-
         mask = self._get_roi_mask()
         if mask is None:
             return
-
         n_inside = int(mask.sum())
-        n_total = int(np.isfinite(self._g_map).sum())
+        n_total = int((np.isfinite(self._g_map) & (self._g_map != 0)).sum())
         if n_total > 0:
             pct = 100.0 * n_inside / n_total
             self._status.showMessage(
@@ -237,10 +251,8 @@ class PhasorPlotWindow(QMainWindow):
             )
 
     def _get_roi_mask(self) -> np.ndarray | None:
-        """Get the spatial mask from the current ROI position."""
         if self._g_map is None:
             return None
-
         from percell4.flim.phasor import phasor_roi_to_mask
 
         state = self._roi.getState()
@@ -248,11 +260,9 @@ class PhasorPlotWindow(QMainWindow):
         size = state["size"]
         center = (pos[0] + size[0] / 2, pos[1] + size[1] / 2)
         radii = (size[0] / 2, size[1] / 2)
-
         return phasor_roi_to_mask(self._g_map, self._s_map, center, radii)
 
     def _on_apply_mask(self) -> None:
-        """Apply the ROI as a spatial mask (stub — needs launcher wiring)."""
         mask = self._get_roi_mask()
         if mask is None:
             self._status.showMessage("No phasor data loaded")

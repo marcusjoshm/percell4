@@ -1511,11 +1511,26 @@ class LauncherWindow(QMainWindow):
             attrs={"dims": ["H", "W"], "channel": active_channel, "harmonic": harmonic},
         )
 
+        # Get intensity for weighted histogram
+        try:
+            with store.open_read() as s:
+                intensity_data = s.read_array("intensity")
+            if intensity_data.ndim == 3:
+                ch_names = list(meta.get("channel_names", []))
+                if active_channel in ch_names:
+                    phasor_intensity = intensity_data[ch_names.index(active_channel)]
+                else:
+                    phasor_intensity = intensity_data[0]
+            else:
+                phasor_intensity = intensity_data
+        except KeyError:
+            phasor_intensity = None
+
         # Open and populate phasor plot
         self._show_window("phasor_plot")
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is not None:
-            phasor_win.set_phasor_data(g_map, s_map)
+            phasor_win.set_phasor_data(g_map, s_map, intensity=phasor_intensity)
 
         n_valid = int(np.isfinite(g_map).sum())
         freq = meta.get("flim_frequency_mhz", "unknown")
@@ -1640,6 +1655,7 @@ class LauncherWindow(QMainWindow):
         if phasor_win is not None:
             phasor_win.set_phasor_data(
                 g_filtered, s_filtered,
+                intensity=intensity.astype(np.float32),
                 g_unfiltered=g_map, s_unfiltered=s_map,
             )
 
