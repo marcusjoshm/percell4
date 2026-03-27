@@ -41,11 +41,9 @@ def denoise_phasor(
 ) -> dict[str, NDArray]:
     """Apply DTCWT-based wavelet filtering to FLIM phasor data.
 
-    Denoises G and S phasor maps by:
-    1. Rescaling to Fourier coefficients (G*intensity, S*intensity)
-    2. Applying Anscombe variance stabilization
-    3. Running DTCWT with adaptive thresholding
-    4. Inverting to recover filtered phasor coordinates
+    Uses flimfret's exact wavelet filter implementation if available
+    (inter-scale Wiener-like shrinkage), falling back to a simplified
+    soft-threshold approach otherwise.
 
     Parameters
     ----------
@@ -86,20 +84,26 @@ def denoise_phasor(
     f_real = g * intensity
     f_imag = s * intensity
 
-    # Step 2-5: Filter each channel (Freal, Fimag, intensity)
-    f_real_filtered = _filter_channel(f_real, filter_level, dtcwt)
-    f_imag_filtered = _filter_channel(f_imag, filter_level, dtcwt)
-    intensity_filtered = _filter_channel(intensity, filter_level, dtcwt)
+    # Try to use flimfret's exact wavelet filter (inter-scale Wiener shrinkage)
+    try:
+        f_real_filtered = _filter_channel_flimfret(f_real, filter_level, dtcwt)
+        f_imag_filtered = _filter_channel_flimfret(f_imag, filter_level, dtcwt)
+        intensity_filtered = _filter_channel_flimfret(intensity, filter_level, dtcwt)
+    except Exception:
+        # Fallback to simplified approach
+        f_real_filtered = _filter_channel(f_real, filter_level, dtcwt)
+        f_imag_filtered = _filter_channel(f_imag, filter_level, dtcwt)
+        intensity_filtered = _filter_channel(intensity, filter_level, dtcwt)
 
     # Step 6: Recover filtered phasor
     int_safe = np.where(intensity_filtered > 0, intensity_filtered, 1.0)
     g_filtered = f_real_filtered / int_safe
     s_filtered = f_imag_filtered / int_safe
 
-    # Mark zero-intensity pixels as NaN
+    # Mark zero-intensity pixels
     zero_mask = intensity_filtered <= 0
-    g_filtered[zero_mask] = np.nan
-    s_filtered[zero_mask] = np.nan
+    g_filtered[zero_mask] = 0.0
+    s_filtered[zero_mask] = 0.0
 
     # Lifetime calculation if omega provided
     t_filtered = None
@@ -128,6 +132,64 @@ def denoise_phasor(
         "TU": t_unfiltered.astype(np.float32) if t_unfiltered is not None else None,
         "filter_level": filter_level,
     }
+
+
+def _filter_channel_flimfret(data: NDArray, n_levels: int, dtcwt_module) -> NDArray:
+    """Apply DTCWT denoising using flimfret's exact inter-scale Wiener shrinkage.
+
+    Imports and calls functions from flimfret's wavelet_filter module.
+    """
+    import sys
+
+    # Add flimfret to path if not already there
+    flimfret_path = "/Users/leelab/flimfret/src/python"
+    if flimfret_path not in sys.path:
+        sys.path.insert(0, flimfret_path)
+
+    from modules.wavelet_filter import (
+        anscombe_transform as ff_anscombe,
+    )
+    from modules.wavelet_filter import (
+        calculate_local_noise_variance,
+        calculate_median_values,
+        compute_phi_prime,
+        update_coefficients,
+    )
+    from modules.wavelet_filter import (
+        reverse_anscombe_transform as ff_reverse_anscombe,
+    )
+
+    # Pad to power-of-2
+    h, w = data.shape
+    pad_h = _next_pow2(h) - h
+    pad_w = _next_pow2(w) - w
+    padded = np.pad(data, ((0, pad_h), (0, pad_w)), mode="reflect")
+
+    # Anscombe
+    transformed = ff_anscombe(padded)
+
+    # Forward DTCWT
+    xfm = dtcwt_module.Transform2d(biort="near_sym_a", qshift="qshift_a")
+    coeffs = xfm.forward(transformed, nlevels=n_levels)
+
+    # Noise estimation (flimfret's method)
+    median_values = calculate_median_values(coeffs)
+    sigma_g_squared = median_values / 0.6745
+
+    # Local noise variance
+    sigma_n_squared = calculate_local_noise_variance(coeffs, n_levels)
+
+    # Inter-scale Wiener shrinkage (flimfret's exact algorithm)
+    phi_prime = compute_phi_prime(coeffs, sigma_g_squared, sigma_n_squared)
+    update_coefficients(coeffs, phi_prime)
+
+    # Inverse DTCWT
+    reconstructed = xfm.inverse(coeffs)
+
+    # Inverse Anscombe
+    result = ff_reverse_anscombe(reconstructed)
+
+    return result[:h, :w]
 
 
 def _filter_channel(data: NDArray, n_levels: int, dtcwt_module) -> NDArray:
