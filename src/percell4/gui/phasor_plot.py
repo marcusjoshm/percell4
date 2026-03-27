@@ -319,9 +319,10 @@ class PhasorPlotWindow(QMainWindow):
         idx = len(self._roi_widgets)
         self._roi_widgets.append(widget)
 
-        # Connect ROI movement
+        # Connect ROI movement — sigRegionChangeFinished passes the ROI as
+        # first arg, so we accept and ignore it via _roi parameter
         roi.sigRegionChangeFinished.connect(
-            lambda _idx=idx: self._on_roi_moved(_idx)
+            lambda _roi, _idx=idx: self._on_roi_moved(_idx)
         )
         self._update_ellipse_curve_for(widget)
 
