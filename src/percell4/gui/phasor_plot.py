@@ -91,14 +91,15 @@ class PhasorPlotWindow(QMainWindow):
         self._hist_item = pg.ImageItem()
         self._plot.addItem(self._hist_item)
 
-        # Universal semicircle
+        # Universal semicircle (stored for re-adding after histogram refresh)
         theta = np.linspace(0, np.pi, 200)
         semi_g = 0.5 + 0.5 * np.cos(theta)
         semi_s = 0.5 * np.sin(theta)
-        self._plot.plot(
+        self._semicircle = pg.PlotCurveItem(
             semi_g, semi_s,
             pen=pg.mkPen("w", width=2, style=pg.QtCore.Qt.DashLine),
         )
+        self._plot.addItem(self._semicircle)
 
         # Ellipse ROI for phasor selection
         self._roi = pg.EllipseROI(
@@ -193,6 +194,10 @@ class PhasorPlotWindow(QMainWindow):
 
         self._hist_item = pg.ImageItem()
         self._plot.addItem(self._hist_item)
+
+        # Ensure semicircle and ROI stay on top of the histogram image
+        self._semicircle.setZValue(10)
+        self._roi.setZValue(10)
 
         # Apply colormap and set image
         cmap = pg.colormap.get("viridis")
