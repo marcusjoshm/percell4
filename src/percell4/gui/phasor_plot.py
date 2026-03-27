@@ -8,7 +8,7 @@ integer-labeled mask for downstream measurement.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -29,7 +29,6 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
-    QSplitter,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -316,13 +315,12 @@ class PhasorPlotWindow(QMainWindow):
         self._plot.addItem(curve)
 
         widget = _ROIWidget(roi=roi, curve=curve, phasor_roi=phasor_roi)
-        idx = len(self._roi_widgets)
         self._roi_widgets.append(widget)
 
-        # Connect ROI movement — sigRegionChangeFinished passes the ROI as
-        # first arg, so we accept and ignore it via _roi parameter
+        # Connect ROI movement — look up widget by identity, not index,
+        # so removal/renumbering doesn't break surviving ROIs
         roi.sigRegionChangeFinished.connect(
-            lambda _roi, _idx=idx: self._on_roi_moved(_idx)
+            lambda _roi, _w=widget: self._on_roi_moved_widget(_w)
         )
         self._update_ellipse_curve_for(widget)
 
@@ -387,11 +385,10 @@ class PhasorPlotWindow(QMainWindow):
         self._refresh_roi_list()
         self._preview_timer.start()
 
-    def _on_roi_moved(self, index: int) -> None:
+    def _on_roi_moved_widget(self, widget: _ROIWidget) -> None:
         """Recompute only the changed ROI's cached mask."""
-        if index >= len(self._roi_widgets):
-            return
-        widget = self._roi_widgets[index]
+        if widget not in self._roi_widgets:
+            return  # widget was removed
         pos = widget.roi.pos()
         size = widget.roi.size()
         widget.phasor_roi.center = (
@@ -461,7 +458,7 @@ class PhasorPlotWindow(QMainWindow):
         # Restrict mask to filtered cells when cell filter is active
         filtered_ids = self.data_model.filtered_ids
         if filtered_ids is not None and self._labels is not None:
-            cell_mask = np.isin(self._labels, list(filtered_ids))
+            cell_mask = np.isin(self._labels, filtered_ids)
             mask[~cell_mask] = 0
 
         return mask
@@ -576,7 +573,7 @@ class PhasorPlotWindow(QMainWindow):
         # Apply cell-level filter if active
         filtered_ids = self.data_model.filtered_ids
         if filtered_ids is not None and self._labels_flat is not None:
-            cell_mask = np.isin(self._labels_flat, list(filtered_ids))
+            cell_mask = np.isin(self._labels_flat, filtered_ids)
             valid = valid & cell_mask
 
         g_flat = g_flat[valid]

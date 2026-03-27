@@ -288,9 +288,7 @@ class DataPlotWindow(QMainWindow):
             return
         label_id = int(self._labels_array[idx])
 
-        from qtpy.QtCore import Qt as QtKeys
-
-        if ev.modifiers() & QtKeys.ControlModifier:
+        if ev.modifiers() & Qt.ControlModifier:
             # Ctrl-click: toggle this label in/out of selection
             current = set(self.data_model.selected_ids)
             if label_id in current:

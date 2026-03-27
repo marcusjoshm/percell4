@@ -69,6 +69,7 @@ class ViewerWindow:
         self._color_index = 0
         self._updating_selection = False
         self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
+        self._display_update_pending = False
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -101,9 +102,12 @@ class ViewerWindow:
         # Wire napari label selection → CellDataModel
         self._viewer.layers.events.inserted.connect(self._on_layer_inserted)
 
-        # Wire CellDataModel selection + filter → napari display
-        self.data_model.selection_changed.connect(self._update_label_display)
-        self.data_model.filter_changed.connect(self._update_label_display)
+        # Wire CellDataModel selection + filter → napari display (coalesced)
+        # Both signals schedule the same update; QTimer.singleShot(0) ensures
+        # rapid-fire signals (e.g. set_filter emits filter_changed then
+        # selection_changed) collapse into a single repaint.
+        self.data_model.selection_changed.connect(self._schedule_label_update)
+        self.data_model.filter_changed.connect(self._schedule_label_update)
 
         self._restore_geometry()
 
@@ -224,13 +228,22 @@ class ViewerWindow:
         finally:
             self._updating_selection = False
 
-    def _update_label_display(self, *args) -> None:
+    def _schedule_label_update(self, *args) -> None:
+        """Coalesce rapid-fire signals into a single display update."""
+        if not self._display_update_pending:
+            self._display_update_pending = True
+            from qtpy.QtCore import QTimer
+
+            QTimer.singleShot(0, self._update_label_display)
+
+    def _update_label_display(self) -> None:
         """Update labels layer display based on current selection and filter.
 
         Uses DirectLabelColormap for GPU-side rendering — never modifies layer.data.
         Single-cell uses napari's built-in show_selected_label.
         Multi-cell dims unselected labels via colormap with None default key.
         """
+        self._display_update_pending = False
         if self._updating_selection:
             return
         if not self._is_alive():
@@ -244,7 +257,7 @@ class ViewerWindow:
             from napari.utils.colormaps import DirectLabelColormap
 
             selected_ids = self.data_model.selected_ids
-            filtered_ids = getattr(self.data_model, "filtered_ids", None)
+            filtered_ids = self.data_model.filtered_ids
 
             if not selected_ids and not filtered_ids:
                 # No selection, no filter: restore original colormap

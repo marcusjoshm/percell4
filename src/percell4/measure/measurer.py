@@ -270,7 +270,7 @@ def measure_cells_multi_roi(
             else:
                 for name in metric_names:
                     if name != "area":
-                        row[f"{roi_name}_{name}"] = 0.0
+                        row[f"{roi_name}_{name}"] = float("nan")
 
         rows.append(row)
 

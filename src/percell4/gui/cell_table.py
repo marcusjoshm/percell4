@@ -234,41 +234,40 @@ class CellTableWindow(QMainWindow):
     def _on_selection_changed(self, label_ids: list[int]) -> None:
         """Highlight rows matching the selected cell IDs."""
         self._updating_selection = True
+        try:
+            selection_model = self._table.selectionModel()
+            selection_model.clearSelection()
 
-        selection_model = self._table.selectionModel()
-        selection_model.clearSelection()
+            if not label_ids:
+                count = self._model.rowCount()
+                self._status.showMessage(f"Showing {count} cells")
+                return
 
-        if not label_ids:
+            first_row = None
+            for label_id in label_ids:
+                source_row = self._model.find_row_for_label(label_id)
+                if source_row is None:
+                    continue
+                proxy_index = self._proxy.mapFromSource(
+                    self._model.index(source_row, 0)
+                )
+                if proxy_index.isValid():
+                    self._table.selectRow(proxy_index.row())
+                    if first_row is None:
+                        first_row = proxy_index.row()
+
+            # Scroll to the first selected row
+            if first_row is not None:
+                self._table.scrollTo(
+                    self._proxy.index(first_row, 0),
+                    QAbstractItemView.PositionAtCenter,
+                )
+
+            n_selected = len(label_ids)
+            n_total = self._model.rowCount()
+            self._status.showMessage(f"Selected: {n_selected} | Total: {n_total} cells")
+        finally:
             self._updating_selection = False
-            count = self._model.rowCount()
-            self._status.showMessage(f"Showing {count} cells")
-            return
-
-        first_row = None
-        for label_id in label_ids:
-            source_row = self._model.find_row_for_label(label_id)
-            if source_row is None:
-                continue
-            proxy_index = self._proxy.mapFromSource(
-                self._model.index(source_row, 0)
-            )
-            if proxy_index.isValid():
-                self._table.selectRow(proxy_index.row())
-                if first_row is None:
-                    first_row = proxy_index.row()
-
-        # Scroll to the first selected row
-        if first_row is not None:
-            self._table.scrollTo(
-                self._proxy.index(first_row, 0),
-                QAbstractItemView.PositionAtCenter,
-            )
-
-        n_selected = len(label_ids)
-        n_total = self._model.rowCount()
-        self._status.showMessage(f"Selected: {n_selected} | Total: {n_total} cells")
-
-        self._updating_selection = False
 
     def _on_filter_changed(self) -> None:
         """Update proxy filter when cell filter changes."""
