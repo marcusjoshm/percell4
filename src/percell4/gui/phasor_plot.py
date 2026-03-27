@@ -2,13 +2,15 @@
 
 Adapted from flimfret/phasor_plot_utils.py plotting logic for pyqtgraph.
 Intensity-weighted histogram with universal circle contour.
+Uses a rectangle ROI to define an ellipse in G/S data coordinates — the
+ellipse curve is drawn explicitly so it always matches the mask math.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import QRectF, QSettings
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -27,11 +29,9 @@ from percell4.model import CellDataModel
 class PhasorPlotWindow(QMainWindow):
     """Phasor plot window with intensity-weighted 2D histogram.
 
-    Matches flimfret's phasor_plot_utils.py visualization:
-    - Intensity-weighted histogram (not just pixel counts)
-    - Universal circle from X²+Y²-X=0 contour
-    - G=[0, 1], S=[0, 0.7] axis range
-    - EllipseROI for population selection
+    Uses a RectROI to define the bounding box of an ellipse in G/S
+    coordinates. The ellipse is drawn as a PlotCurveItem so the visual
+    always matches the mathematical mask exactly.
     """
 
     def __init__(self, data_model: CellDataModel, launcher=None) -> None:
@@ -87,40 +87,68 @@ class PhasorPlotWindow(QMainWindow):
         self._plot.setXRange(-0.005, 1.005, padding=0)
         self._plot.setYRange(0, 0.7, padding=0)
 
-        # Disable auto-range and SI prefix to keep axes fixed
+        # Disable auto-range and SI prefix
         self._plot.disableAutoRange()
         self._plot.getAxis("bottom").enableAutoSIPrefix(False)
         self._plot.getAxis("left").enableAutoSIPrefix(False)
         layout.addWidget(self._plot)
 
-        # Histogram image item (will be recreated on each refresh)
+        # Histogram image item (recreated on each refresh)
         self._hist_item = None
 
-        # Universal circle: contour of X²+Y²-X=0
-        # Parametric form: center (0.5, 0), radius 0.5
+        # Universal circle
         theta = np.linspace(0, np.pi, 200)
         semi_g = 0.5 + 0.5 * np.cos(theta)
         semi_s = 0.5 * np.sin(theta)
         self._semicircle = pg.PlotCurveItem(
-            semi_g, semi_s,
-            pen=pg.mkPen("k", width=2),
+            semi_g, semi_s, pen=pg.mkPen("k", width=2),
         )
         self._semicircle.setZValue(10)
         self._plot.addItem(self._semicircle)
 
-        # Ellipse ROI for phasor selection
-        self._roi = pg.EllipseROI(
-            [0.3, 0.15], [0.2, 0.15],
-            pen=pg.mkPen("b", width=2),
+        # Rectangle ROI — defines the bounding box of the selection ellipse
+        # The actual ellipse is drawn as a curve on top
+        self._roi = pg.RectROI(
+            [0.25, 0.30], [0.20, 0.15],
+            pen=pg.mkPen("b", width=1, style=pg.QtCore.Qt.DashLine),
         )
         self._roi.setZValue(10)
         self._plot.addItem(self._roi)
         self._roi.sigRegionChangeFinished.connect(self._on_roi_changed)
 
+        # Ellipse curve drawn from the ROI bounds — this IS the selection
+        self._ellipse_curve = pg.PlotCurveItem(
+            pen=pg.mkPen("b", width=2),
+        )
+        self._ellipse_curve.setZValue(10)
+        self._plot.addItem(self._ellipse_curve)
+        self._update_ellipse_curve()
+
         # Status bar
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("No phasor data loaded")
+
+    def _update_ellipse_curve(self) -> None:
+        """Redraw the ellipse curve from the current ROI bounds."""
+        state = self._roi.getState()
+        pos = state["pos"]
+        size = state["size"]
+        cx = pos[0] + size[0] / 2
+        cy = pos[1] + size[1] / 2
+        rx = abs(size[0]) / 2
+        ry = abs(size[1]) / 2
+
+        if rx < 1e-6 or ry < 1e-6:
+            self._ellipse_curve.setData([], [])
+            return
+
+        theta = np.linspace(0, 2 * np.pi, 200)
+        ex = cx + rx * np.cos(theta)
+        ey = cy + ry * np.sin(theta)
+        self._ellipse_curve.setData(ex, ey)
+
+    # ── Data ──────────────────────────────────────────────────
 
     def set_phasor_data(
         self,
@@ -130,14 +158,7 @@ class PhasorPlotWindow(QMainWindow):
         g_unfiltered: np.ndarray | None = None,
         s_unfiltered: np.ndarray | None = None,
     ) -> None:
-        """Set phasor data and refresh the histogram.
-
-        Parameters
-        ----------
-        g_map, s_map : phasor coordinate maps (filtered if available)
-        intensity : photon count map for intensity-weighted histogram
-        g_unfiltered, s_unfiltered : unfiltered phasor for toggle
-        """
+        """Set phasor data and refresh the histogram."""
         self._g_map = g_map
         self._s_map = s_map
         self._intensity = intensity
@@ -159,11 +180,10 @@ class PhasorPlotWindow(QMainWindow):
         self._refresh_histogram()
 
     def _refresh_histogram(self) -> None:
-        """Render intensity-weighted 2D histogram (matching flimfret style)."""
+        """Render intensity-weighted 2D histogram."""
         if self._g_map is None or self._s_map is None:
             return
 
-        # Choose filtered or unfiltered
         use_filtered = self._filtered_check.isChecked()
         if not use_filtered and self._g_map_unfiltered is not None:
             g_display = self._g_map_unfiltered
@@ -175,7 +195,6 @@ class PhasorPlotWindow(QMainWindow):
         g_flat = g_display.ravel()
         s_flat = s_display.ravel()
 
-        # Remove NaN and zero pixels
         valid = np.isfinite(g_flat) & np.isfinite(s_flat) & (g_flat != 0)
         g_flat = g_flat[valid]
         s_flat = s_flat[valid]
@@ -184,46 +203,34 @@ class PhasorPlotWindow(QMainWindow):
             self._status.showMessage("No valid phasor data")
             return
 
-        # Intensity weights (matching flimfret: weights=intensity)
         if self._intensity is not None:
             weights = self._intensity.ravel()[valid]
         else:
             weights = np.ones(len(g_flat))
 
-        # Histogram with flimfret axis ranges
         g_range = (-0.005, 1.005)
         s_range = (0.0, 0.7)
-        n_bins = 300  # good resolution
 
         hist, g_edges, s_edges = np.histogram2d(
             g_flat, s_flat,
-            bins=n_bins,
+            bins=300,
             range=[g_range, s_range],
             weights=weights,
         )
 
-        # Log scaling for dynamic range
         hist_display = np.log1p(hist)
 
-        # Remove old histogram
         if self._hist_item is not None:
             self._plot.removeItem(self._hist_item)
 
-        # Create new ImageItem with explicit rect positioning
         self._hist_item = pg.ImageItem()
         self._plot.addItem(self._hist_item)
 
-        # setImage: image[x, y] where x=col (G), y=row (S) in pyqtgraph
-        # histogram2d returns hist[g_bin, s_bin] — this maps directly to
-        # ImageItem's [x, y] convention (no transpose needed)
         cmap = pg.colormap.get("CET-R4")
         if cmap is None:
             cmap = pg.colormap.get("viridis")
         self._hist_item.setImage(hist_display)
         self._hist_item.setColorMap(cmap)
-
-        # Position: map pixel grid to data coordinates using setRect
-        from qtpy.QtCore import QRectF
 
         self._hist_item.setRect(
             QRectF(g_range[0], s_range[0],
@@ -231,11 +238,10 @@ class PhasorPlotWindow(QMainWindow):
                    s_range[1] - s_range[0])
         )
 
-        # Ensure overlays stay on top
         self._semicircle.setZValue(10)
         self._roi.setZValue(10)
+        self._ellipse_curve.setZValue(10)
 
-        # Set axis range and disable SI prefix (must re-apply after data change)
         self._plot.setXRange(*g_range, padding=0)
         self._plot.setYRange(*s_range, padding=0)
         self._plot.getAxis("bottom").enableAutoSIPrefix(False)
@@ -244,8 +250,12 @@ class PhasorPlotWindow(QMainWindow):
         n_pixels = len(g_flat)
         self._status.showMessage(f"Phasor: {n_pixels:,} valid pixels")
 
+    # ── ROI ───────────────────────────────────────────────────
+
     def _on_roi_changed(self) -> None:
-        """Update the live preview mask in napari when the ROI moves."""
+        """Update ellipse curve and live preview mask when ROI moves."""
+        self._update_ellipse_curve()
+
         if self._g_map is None:
             return
         mask = self._get_roi_mask()
@@ -260,7 +270,6 @@ class PhasorPlotWindow(QMainWindow):
         if self._launcher is not None:
             viewer_win = self._launcher._windows.get("viewer")
             if viewer_win is not None and viewer_win.viewer is not None:
-                # Update existing preview layer or create one
                 preview_name = "_phasor_roi_preview"
                 for layer in viewer_win.viewer.layers:
                     if layer.name == preview_name:
@@ -268,7 +277,6 @@ class PhasorPlotWindow(QMainWindow):
                         layer.refresh()
                         break
                 else:
-                    # First time — create the preview layer
                     from napari.utils.colormaps import DirectLabelColormap
 
                     cmap = DirectLabelColormap(
@@ -289,11 +297,16 @@ class PhasorPlotWindow(QMainWindow):
             )
 
     def _get_roi_mask(self) -> np.ndarray | None:
+        """Compute mask from the ROI's ellipse in G/S data coordinates.
+
+        The ellipse is defined by the RectROI bounding box — center and
+        radii are computed directly from the rect position and size.
+        This guarantees the mask matches the drawn ellipse curve exactly.
+        """
         if self._g_map is None:
             return None
         from percell4.flim.phasor import phasor_roi_to_mask
 
-        # Use the same data as the display (filtered or unfiltered)
         use_filtered = self._filtered_check.isChecked()
         if not use_filtered and self._g_map_unfiltered is not None:
             g = self._g_map_unfiltered
@@ -306,7 +319,7 @@ class PhasorPlotWindow(QMainWindow):
         pos = state["pos"]
         size = state["size"]
         center = (pos[0] + size[0] / 2, pos[1] + size[1] / 2)
-        radii = (size[0] / 2, size[1] / 2)
+        radii = (abs(size[0]) / 2, abs(size[1]) / 2)
         return phasor_roi_to_mask(g, s, center, radii)
 
     def _on_apply_mask(self) -> None:
