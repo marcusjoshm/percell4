@@ -286,12 +286,21 @@ class PhasorPlotWindow(QMainWindow):
             return None
         from percell4.flim.phasor import phasor_roi_to_mask
 
+        # Use the same data as the display (filtered or unfiltered)
+        use_filtered = self._filtered_check.isChecked()
+        if not use_filtered and self._g_map_unfiltered is not None:
+            g = self._g_map_unfiltered
+            s = self._s_map_unfiltered
+        else:
+            g = self._g_map
+            s = self._s_map
+
         state = self._roi.getState()
         pos = state["pos"]
         size = state["size"]
         center = (pos[0] + size[0] / 2, pos[1] + size[1] / 2)
         radii = (size[0] / 2, size[1] / 2)
-        return phasor_roi_to_mask(self._g_map, self._s_map, center, radii)
+        return phasor_roi_to_mask(g, s, center, radii)
 
     def _on_apply_mask(self) -> None:
         """Save the current phasor ROI mask to HDF5 and finalize."""
