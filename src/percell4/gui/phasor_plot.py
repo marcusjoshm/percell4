@@ -304,14 +304,7 @@ class PhasorPlotWindow(QMainWindow):
         size = state["size"]
         center = (pos[0] + size[0] / 2, pos[1] + size[1] / 2)
         radii = (size[0] / 2, size[1] / 2)
-        mask = phasor_roi_to_mask(g, s, center, radii)
-
-        # Exclude zero-signal pixels that the histogram doesn't display
-        # (wavelet filter may leave near-zero values that aren't truly valid)
-        if self._intensity is not None:
-            mask &= self._intensity > 0
-
-        return mask
+        return phasor_roi_to_mask(g, s, center, radii)
 
     def _on_apply_mask(self) -> None:
         """Save the current phasor ROI mask to HDF5 and finalize."""
