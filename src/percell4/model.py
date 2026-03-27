@@ -33,6 +33,7 @@ class CellDataModel(QObject):
         self._df = pd.DataFrame()
         self._selected_ids: list[int] = []
         self._filtered_ids: set[int] | None = None  # None = no filter
+        self._filtered_df_cache: pd.DataFrame | None = None
         self._active_segmentation: str = ""
         self._active_mask: str = ""
 
@@ -43,10 +44,17 @@ class CellDataModel(QObject):
 
     @property
     def filtered_df(self) -> pd.DataFrame:
-        """Return filtered DataFrame, or full DataFrame if no filter."""
+        """Return filtered DataFrame, or full DataFrame if no filter.
+
+        Cached — invalidated by set_filter() and set_measurements().
+        """
         if self._filtered_ids is None:
             return self._df
-        return self._df[self._df["label"].isin(self._filtered_ids)]
+        if self._filtered_df_cache is None:
+            self._filtered_df_cache = self._df[
+                self._df["label"].isin(self._filtered_ids)
+            ]
+        return self._filtered_df_cache
 
     @property
     def is_filtered(self) -> bool:
@@ -64,6 +72,7 @@ class CellDataModel(QObject):
         Emits filter_changed then selection_changed.
         """
         self._filtered_ids = set(label_ids) if label_ids is not None else None
+        self._filtered_df_cache = None
         self._selected_ids = []
         self.filter_changed.emit()
         self.selection_changed.emit([])
@@ -75,6 +84,7 @@ class CellDataModel(QObject):
         """
         self._df = df
         self._filtered_ids = None
+        self._filtered_df_cache = None
         self._selected_ids = []
         self.filter_changed.emit()
         self.data_updated.emit()
@@ -120,6 +130,7 @@ class CellDataModel(QObject):
         self._df = pd.DataFrame()
         self._selected_ids = []
         self._filtered_ids = None
+        self._filtered_df_cache = None
         self._active_segmentation = ""
         self._active_mask = ""
         self.filter_changed.emit()

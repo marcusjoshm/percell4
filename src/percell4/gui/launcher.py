@@ -1052,6 +1052,23 @@ class LauncherWindow(QMainWindow):
         # Not in store — default to treating it as a segmentation
         self.data_model.set_active_segmentation(name)
 
+    def _apply_cell_filter(self, labels: np.ndarray) -> np.ndarray | None:
+        """Zero out non-filtered cells in the labels array.
+
+        Returns the (possibly copied) labels array, or None if no cells remain.
+        """
+        import numpy as np
+
+        filtered_ids = self.data_model.filtered_ids
+        if filtered_ids is not None:
+            cell_mask = np.isin(labels, filtered_ids)
+            labels = labels.copy()
+            labels[~cell_mask] = 0
+            if labels.max() == 0:
+                self.statusBar().showMessage("No filtered cells to process")
+                return None
+        return labels
+
     def _get_active_seg_labels(self) -> np.ndarray | None:
         """Get the active segmentation labels array from the viewer."""
         import numpy as np
@@ -1072,11 +1089,7 @@ class LauncherWindow(QMainWindow):
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is None:
             return {}
-        return {
-            w.phasor_roi.label: w.phasor_roi.name
-            for w in phasor_win._roi_widgets
-            if w.phasor_roi.visible
-        }
+        return phasor_win.get_visible_roi_names()
 
     def _on_filter_to_selection(self) -> None:
         """Filter all windows to show only the currently selected cells."""
@@ -1368,15 +1381,9 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Segmentation has no cells")
             return
 
-        # Restrict to filtered cells when cell filter is active
-        filtered_ids = self.data_model.filtered_ids
-        if filtered_ids is not None:
-            cell_mask = np.isin(labels, filtered_ids)
-            labels = labels.copy()
-            labels[~cell_mask] = 0
-            if labels.max() == 0:
-                self.statusBar().showMessage("No filtered cells to measure")
-                return
+        labels = self._apply_cell_filter(labels)
+        if labels is None:
+            return
 
         # Get active mask (optional)
         mask = None
@@ -1389,50 +1396,26 @@ class LauncherWindow(QMainWindow):
 
         self.statusBar().showMessage("Measuring cells...")
 
-        # Detect multi-label mask and get ROI names
-        is_multi_roi = mask is not None and mask.max() > 1
-        roi_names = {}
-        if is_multi_roi:
-            roi_names = self._get_phasor_roi_names()
-            if not roi_names:
-                # Fallback: generic names from mask values
-                unique_labels = np.unique(mask[mask > 0])
-                roi_names = {int(v): f"roi_{v}" for v in unique_labels}
+        try:
+            is_multi_roi = mask is not None and mask.max() > 1
+            if is_multi_roi:
+                roi_names = self._get_phasor_roi_names()
+                if not roi_names:
+                    unique_labels = np.unique(mask[mask > 0])
+                    roi_names = {int(v): f"roi_{v}" for v in unique_labels}
 
-        from percell4.measure.measurer import measure_multichannel
+                from percell4.measure.measurer import measure_multichannel_multi_roi
 
-        if is_multi_roi:
-            # Multi-ROI: measure per channel with multi-label mask
-            from percell4.measure.measurer import measure_cells_multi_roi
-
-            result_df = None
-            core_cols = {"label", "centroid_y", "centroid_x",
-                         "bbox_y", "bbox_x", "bbox_h", "bbox_w", "area"}
-            for ch_name, image in image_layers.items():
-                ch_df = measure_cells_multi_roi(
-                    image, labels, mask, roi_names
+                df = measure_multichannel_multi_roi(
+                    image_layers, labels, mask, roi_names
                 )
-                if ch_df.empty:
-                    continue
-                if result_df is None:
-                    rename_map = {c: f"{ch_name}_{c}" for c in ch_df.columns
-                                  if c not in core_cols}
-                    result_df = ch_df.rename(columns=rename_map)
-                else:
-                    metric_cols = [c for c in ch_df.columns if c not in core_cols]
-                    rename_map = {c: f"{ch_name}_{c}" for c in metric_cols}
-                    ch_metrics = ch_df[["label"] + metric_cols].rename(
-                        columns=rename_map
-                    )
-                    result_df = result_df.merge(ch_metrics, on="label", how="outer")
-            import pandas as pd
-            df = result_df if result_df is not None else pd.DataFrame()
-        else:
-            try:
+            else:
+                from percell4.measure.measurer import measure_multichannel
+
                 df = measure_multichannel(image_layers, labels, mask=mask)
-            except Exception as e:
-                self.statusBar().showMessage(f"Measurement error: {e}")
-                return
+        except Exception as e:
+            self.statusBar().showMessage(f"Measurement error: {e}")
+            return
 
         n_cells = len(df)
         n_cols = len(df.columns)
@@ -1491,12 +1474,9 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage(f"Segmentation '{seg_name}' not found")
             return
 
-        # Restrict to filtered cells when cell filter is active
-        filtered_ids = self.data_model.filtered_ids
-        if filtered_ids is not None:
-            cell_mask = np.isin(labels, filtered_ids)
-            labels = labels.copy()
-            labels[~cell_mask] = 0
+        labels = self._apply_cell_filter(labels)
+        if labels is None:
+            return
 
         # Get active mask (required for particle analysis)
         mask_name = self.data_model.active_mask

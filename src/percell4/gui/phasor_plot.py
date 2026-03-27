@@ -264,6 +264,14 @@ class PhasorPlotWindow(QMainWindow):
 
     # ── ROI Management ────────────────────────────────────────
 
+    def get_visible_roi_names(self) -> dict[int, str]:
+        """Public API: return {mask_label: roi_name} for all visible ROIs."""
+        return {
+            w.phasor_roi.label: w.phasor_roi.name
+            for w in self._roi_widgets
+            if w.phasor_roi.visible
+        }
+
     def _on_add_roi(self) -> None:
         n = len(self._roi_widgets)
         if n >= 10:
