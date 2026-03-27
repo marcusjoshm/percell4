@@ -191,9 +191,12 @@ class DatasetStore:
     # ── Convenience: masks ────────────────────────────────────
 
     def write_mask(self, name: str, array: NDArray) -> int:
-        """Write a binary mask at /masks/<name>.
+        """Write a mask (binary or multi-label) at /masks/<name>.
 
-        Enforces uint8 dtype (0/1). Returns element count.
+        Enforces uint8 dtype. Values 0-255 supported:
+        - Binary: 0=outside, 1=inside
+        - Multi-label: 0=outside, 1..N=ROI labels
+        Returns element count.
         """
         if array.ndim != 2:
             raise ValueError(f"Mask must be 2D, got {array.ndim}D")
@@ -203,7 +206,7 @@ class DatasetStore:
         )
 
     def read_mask(self, name: str) -> NDArray[np.uint8]:
-        """Read a binary mask from /masks/<name>."""
+        """Read a mask from /masks/<name>."""
         return self.read_array(f"masks/{name}")
 
     def list_masks(self) -> list[str]:

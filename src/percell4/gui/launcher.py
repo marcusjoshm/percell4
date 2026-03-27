@@ -1052,6 +1052,17 @@ class LauncherWindow(QMainWindow):
         # Not in store — default to treating it as a segmentation
         self.data_model.set_active_segmentation(name)
 
+    def _get_phasor_roi_names(self) -> dict[int, str]:
+        """Get ROI label→name mapping from the phasor plot window."""
+        phasor_win = self._windows.get("phasor_plot")
+        if phasor_win is None:
+            return {}
+        return {
+            w.phasor_roi.label: w.phasor_roi.name
+            for w in phasor_win._roi_widgets
+            if w.phasor_roi.visible
+        }
+
     def _on_filter_to_selection(self) -> None:
         """Filter all windows to show only the currently selected cells."""
         selected = self.data_model.selected_ids
@@ -1353,13 +1364,50 @@ class LauncherWindow(QMainWindow):
 
         self.statusBar().showMessage("Measuring cells...")
 
+        # Detect multi-label mask and get ROI names
+        is_multi_roi = mask is not None and mask.max() > 1
+        roi_names = {}
+        if is_multi_roi:
+            roi_names = self._get_phasor_roi_names()
+            if not roi_names:
+                # Fallback: generic names from mask values
+                unique_labels = np.unique(mask[mask > 0])
+                roi_names = {int(v): f"roi_{v}" for v in unique_labels}
+
         from percell4.measure.measurer import measure_multichannel
 
-        try:
-            df = measure_multichannel(image_layers, labels, mask=mask)
-        except Exception as e:
-            self.statusBar().showMessage(f"Measurement error: {e}")
-            return
+        if is_multi_roi:
+            # Multi-ROI: measure per channel with multi-label mask
+            from percell4.measure.measurer import measure_cells_multi_roi
+
+            result_df = None
+            core_cols = {"label", "centroid_y", "centroid_x",
+                         "bbox_y", "bbox_x", "bbox_h", "bbox_w", "area"}
+            for ch_name, image in image_layers.items():
+                ch_df = measure_cells_multi_roi(
+                    image, labels, mask, roi_names
+                )
+                if ch_df.empty:
+                    continue
+                if result_df is None:
+                    rename_map = {c: f"{ch_name}_{c}" for c in ch_df.columns
+                                  if c not in core_cols}
+                    result_df = ch_df.rename(columns=rename_map)
+                else:
+                    metric_cols = [c for c in ch_df.columns if c not in core_cols]
+                    rename_map = {c: f"{ch_name}_{c}" for c in metric_cols}
+                    ch_metrics = ch_df[["label"] + metric_cols].rename(
+                        columns=rename_map
+                    )
+                    result_df = result_df.merge(ch_metrics, on="label", how="outer")
+            import pandas as pd
+            df = result_df if result_df is not None else pd.DataFrame()
+        else:
+            try:
+                df = measure_multichannel(image_layers, labels, mask=mask)
+            except Exception as e:
+                self.statusBar().showMessage(f"Measurement error: {e}")
+                return
 
         n_cells = len(df)
         n_cols = len(df.columns)

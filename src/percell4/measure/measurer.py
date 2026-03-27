@@ -186,6 +186,102 @@ def measure_multichannel(
     return result_df
 
 
+def measure_cells_multi_roi(
+    image: NDArray,
+    labels: NDArray[np.int32],
+    mask: NDArray[np.uint8],
+    roi_names: dict[int, str],
+    metrics: list[str] | None = None,
+) -> pd.DataFrame:
+    """Measure per-cell metrics for each ROI label in a multi-label mask.
+
+    Single-pass: calls find_objects() and regionprops() once, then computes
+    per-ROI metrics within each cell's bounding box crop.
+
+    Parameters
+    ----------
+    image : (H, W) single-channel intensity image
+    labels : (H, W) int32 label array
+    mask : (H, W) uint8 multi-label mask (0=outside, 1..N=ROI labels)
+    roi_names : mapping {mask_label_value: roi_name_string}
+    metrics : metric names (None = all builtins)
+
+    Returns
+    -------
+    DataFrame with whole-cell metrics plus {roi_name}_{metric} columns per ROI.
+    """
+    if metrics is None:
+        metric_names = list(BUILTIN_METRICS.keys())
+    else:
+        metric_names = metrics
+
+    if labels.max() == 0:
+        return pd.DataFrame()
+
+    slices = find_objects(labels)
+    props = regionprops(labels)
+    rows: list[dict] = []
+
+    for prop in props:
+        label_val = prop.label
+        sl = slices[label_val - 1]
+        if sl is None:
+            continue
+
+        label_crop = labels[sl]
+        image_crop = image[sl]
+        mask_crop = mask[sl]
+        cell_mask = label_crop == label_val
+
+        if not np.any(cell_mask):
+            continue
+
+        cy, cx = prop.centroid
+        min_row, min_col, max_row, max_col = prop.bbox
+        row: dict = {
+            "label": int(label_val),
+            "centroid_y": float(cy),
+            "centroid_x": float(cx),
+            "bbox_y": int(min_row),
+            "bbox_x": int(min_col),
+            "bbox_h": int(max_row - min_row),
+            "bbox_w": int(max_col - min_col),
+            "area": float(prop.area),
+        }
+
+        # Whole-cell metrics
+        for name in metric_names:
+            if name == "area":
+                row[name] = float(prop.area)
+            else:
+                row[name] = BUILTIN_METRICS[name](image_crop, cell_mask)
+
+        # Per-ROI metrics — computed on the small crop, fast
+        for label_v, roi_name in roi_names.items():
+            roi_cell = cell_mask & (mask_crop == label_v)
+            n_pixels = int(roi_cell.sum())
+            row[f"{roi_name}_area"] = float(n_pixels)
+            if n_pixels > 0:
+                for name in metric_names:
+                    if name != "area":
+                        row[f"{roi_name}_{name}"] = BUILTIN_METRICS[name](
+                            image_crop, roi_cell
+                        )
+            else:
+                for name in metric_names:
+                    if name != "area":
+                        row[f"{roi_name}_{name}"] = 0.0
+
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["label"] = df["label"].astype(np.int32)
+    return df
+
+
 def _build_column_list(metric_names: list[str], has_mask: bool) -> list[str]:
     """Build the expected column list for an empty DataFrame."""
     cols = ["label", "centroid_y", "centroid_x",
