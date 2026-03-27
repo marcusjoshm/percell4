@@ -34,9 +34,10 @@ class PhasorPlotWindow(QMainWindow):
     - EllipseROI for population selection
     """
 
-    def __init__(self, data_model: CellDataModel) -> None:
+    def __init__(self, data_model: CellDataModel, launcher=None) -> None:
         super().__init__()
         self.data_model = data_model
+        self._launcher = launcher
         self.setWindowTitle("PerCell4 — Phasor Plot")
         self.resize(650, 600)
 
@@ -263,14 +264,34 @@ class PhasorPlotWindow(QMainWindow):
         return phasor_roi_to_mask(self._g_map, self._s_map, center, radii)
 
     def _on_apply_mask(self) -> None:
+        """Create a spatial mask from the phasor ROI and add to viewer + store."""
         mask = self._get_roi_mask()
         if mask is None:
             self._status.showMessage("No phasor data loaded")
             return
-        n_inside = int(mask.sum())
+
+        mask_uint8 = mask.astype(np.uint8)
+        n_inside = int(mask_uint8.sum())
+        mask_name = "phasor_roi"
+
+        # Add to viewer
+        if self._launcher is not None:
+            viewer_win = self._launcher._windows.get("viewer")
+            if viewer_win is not None:
+                viewer_win.add_mask(mask_uint8, name=mask_name)
+
+            # Save to HDF5
+            store = getattr(self._launcher, "_current_store", None)
+            if store is not None:
+                store.write_mask(mask_name, mask_uint8)
+
+            # Set as active mask
+            self.data_model.set_active_mask(mask_name)
+
+        n_total = int((np.isfinite(self._g_map) & (self._g_map != 0)).sum())
+        pct = 100.0 * n_inside / n_total if n_total > 0 else 0
         self._status.showMessage(
-            f"Mask created: {n_inside:,} pixels. "
-            "Wire to launcher to save as HDF5 mask."
+            f"Mask saved: {n_inside:,} pixels ({pct:.1f}%) as '{mask_name}'"
         )
 
     # ── Lifecycle ─────────────────────────────────────────────
