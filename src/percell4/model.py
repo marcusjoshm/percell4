@@ -48,7 +48,7 @@ class CellDataModel(QObject):
 
         Cached — invalidated by set_filter() and set_measurements().
         """
-        if self._filtered_ids is None:
+        if self._filtered_ids is None or self._df.empty or "label" not in self._df.columns:
             return self._df
         if self._filtered_df_cache is None:
             self._filtered_df_cache = self._df[
