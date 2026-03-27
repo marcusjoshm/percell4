@@ -438,6 +438,8 @@ class PhasorPlotWindow(QMainWindow):
         """Combine all visible ROIs into a single labeled uint8 mask.
 
         Uses cached per-ROI boolean masks. Only uncached ROIs recomputed.
+        When a cell filter is active, the mask is restricted to pixels
+        belonging to filtered cells only.
         """
         from percell4.flim.phasor import phasor_roi_to_mask
 
@@ -455,6 +457,12 @@ class PhasorPlotWindow(QMainWindow):
                     angle_rad=angle_rad,
                 )
             mask[widget.cached_mask] = widget.phasor_roi.label
+
+        # Restrict mask to filtered cells when cell filter is active
+        filtered_ids = self.data_model.filtered_ids
+        if filtered_ids is not None and self._labels is not None:
+            cell_mask = np.isin(self._labels, list(filtered_ids))
+            mask[~cell_mask] = 0
 
         return mask
 

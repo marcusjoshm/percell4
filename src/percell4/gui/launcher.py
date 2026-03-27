@@ -1368,6 +1368,16 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Segmentation has no cells")
             return
 
+        # Restrict to filtered cells when cell filter is active
+        filtered_ids = self.data_model.filtered_ids
+        if filtered_ids is not None:
+            cell_mask = np.isin(labels, list(filtered_ids))
+            labels = labels.copy()
+            labels[~cell_mask] = 0
+            if labels.max() == 0:
+                self.statusBar().showMessage("No filtered cells to measure")
+                return
+
         # Get active mask (optional)
         mask = None
         mask_name = self.data_model.active_mask
@@ -1480,6 +1490,13 @@ class LauncherWindow(QMainWindow):
         if labels is None:
             self.statusBar().showMessage(f"Segmentation '{seg_name}' not found")
             return
+
+        # Restrict to filtered cells when cell filter is active
+        filtered_ids = self.data_model.filtered_ids
+        if filtered_ids is not None:
+            cell_mask = np.isin(labels, list(filtered_ids))
+            labels = labels.copy()
+            labels[~cell_mask] = 0
 
         # Get active mask (required for particle analysis)
         mask_name = self.data_model.active_mask
