@@ -1486,6 +1486,13 @@ class LauncherWindow(QMainWindow):
 
         g_map, s_map = compute_phasor(decay, harmonic=harmonic)
 
+        # Zero out noisy low-photon pixels (same as flimfret's threshold_min)
+        # Pixels with very few photons produce unreliable phasor values
+        intensity_sum = decay.sum(axis=-1)
+        low_signal = intensity_sum < 2  # less than 2 total photons
+        g_map[low_signal] = np.nan
+        s_map[low_signal] = np.nan
+
         # Apply per-channel calibration if available
         meta = store.metadata
         cal_phase = float(meta.get(f"flim_cal_phase_{active_channel}", 0.0))
