@@ -466,7 +466,7 @@ class PhasorPlotWindow(QMainWindow):
         # Restrict mask to filtered cells when cell filter is active
         filtered_ids = self.data_model.filtered_ids
         if filtered_ids is not None and self._labels is not None:
-            cell_mask = np.isin(self._labels, filtered_ids)
+            cell_mask = np.isin(self._labels, list(filtered_ids))
             mask[~cell_mask] = 0
 
         return mask
@@ -581,7 +581,7 @@ class PhasorPlotWindow(QMainWindow):
         # Apply cell-level filter if active
         filtered_ids = self.data_model.filtered_ids
         if filtered_ids is not None and self._labels_flat is not None:
-            cell_mask = np.isin(self._labels_flat, filtered_ids)
+            cell_mask = np.isin(self._labels_flat, list(filtered_ids))
             valid = valid & cell_mask
 
         g_flat = g_flat[valid]

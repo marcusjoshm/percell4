@@ -1061,7 +1061,7 @@ class LauncherWindow(QMainWindow):
 
         filtered_ids = self.data_model.filtered_ids
         if filtered_ids is not None:
-            cell_mask = np.isin(labels, filtered_ids)
+            cell_mask = np.isin(labels, list(filtered_ids))
             labels = labels.copy()
             labels[~cell_mask] = 0
             if labels.max() == 0:

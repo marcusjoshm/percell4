@@ -239,8 +239,14 @@ class CellTableWindow(QMainWindow):
             selection_model.clearSelection()
 
             if not label_ids:
-                count = self._model.rowCount()
-                self._status.showMessage(f"Showing {count} cells")
+                n_visible = self._proxy.rowCount()
+                n_total = self._model.rowCount()
+                if self.data_model.is_filtered:
+                    self._status.showMessage(
+                        f"Showing {n_visible} of {n_total} cells (filtered)"
+                    )
+                else:
+                    self._status.showMessage(f"Showing {n_total} cells")
                 return
 
             first_row = None
