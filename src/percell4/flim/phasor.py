@@ -145,14 +145,16 @@ def phasor_roi_to_mask(
     s_map: NDArray,
     center: tuple[float, float],
     radii: tuple[float, float],
+    angle_rad: float = 0.0,
 ) -> NDArray[np.bool_]:
-    """Convert an ellipse ROI in phasor space to a spatial pixel mask.
+    """Convert a rotated ellipse ROI in phasor space to a spatial pixel mask.
 
     Parameters
     ----------
     g_map, s_map : (H, W) phasor coordinate maps
     center : (center_g, center_s) ellipse center
     radii : (radius_g, radius_s) semi-axes
+    angle_rad : rotation angle in radians (counterclockwise)
 
     Returns
     -------
@@ -165,7 +167,21 @@ def phasor_roi_to_mask(
     if rx <= 0 or ry <= 0:
         return np.zeros(g_map.shape, dtype=bool)
 
-    inside = ((g_map - cx) / rx) ** 2 + ((s_map - cy) / ry) ** 2 <= 1.0
+    # Shift to ellipse center
+    dg = g_map - cx
+    ds = s_map - cy
+
+    if angle_rad != 0.0:
+        # Rotate coordinates into the ellipse's principal axes
+        cos_a = np.cos(-angle_rad)
+        sin_a = np.sin(-angle_rad)
+        dg_rot = dg * cos_a - ds * sin_a
+        ds_rot = dg * sin_a + ds * cos_a
+    else:
+        dg_rot = dg
+        ds_rot = ds
+
+    inside = (dg_rot / rx) ** 2 + (ds_rot / ry) ** 2 <= 1.0
     inside &= np.isfinite(g_map) & np.isfinite(s_map)
     return inside
 

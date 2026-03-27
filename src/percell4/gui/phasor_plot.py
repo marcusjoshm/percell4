@@ -70,6 +70,17 @@ class PhasorPlotWindow(QMainWindow):
         self._filtered_check.toggled.connect(self._on_filtered_toggled)
         controls.addWidget(self._filtered_check)
 
+        controls.addSpacing(16)
+        controls.addWidget(QLabel("Angle:"))
+        from qtpy.QtWidgets import QSpinBox
+
+        self._angle_spin = QSpinBox()
+        self._angle_spin.setRange(-90, 90)
+        self._angle_spin.setValue(0)
+        self._angle_spin.setSuffix("°")
+        self._angle_spin.valueChanged.connect(self._on_angle_changed)
+        controls.addWidget(self._angle_spin)
+
         controls.addStretch()
 
         btn_apply = QPushButton("Apply as Mask")
@@ -129,8 +140,16 @@ class PhasorPlotWindow(QMainWindow):
         self.setStatusBar(self._status)
         self._status.showMessage("No phasor data loaded")
 
-    def _update_ellipse_curve(self) -> None:
-        """Redraw the ellipse curve from the current ROI bounds."""
+    def _on_angle_changed(self, value: int) -> None:
+        """Rotation angle spinbox changed — redraw ellipse and update mask."""
+        self._update_ellipse_curve()
+        self._on_roi_changed()
+
+    def _get_ellipse_params(self) -> tuple[float, float, float, float, float]:
+        """Get ellipse parameters from ROI bounds + angle spinbox.
+
+        Returns (center_g, center_s, radius_g, radius_s, angle_rad).
+        """
         state = self._roi.getState()
         pos = state["pos"]
         size = state["size"]
@@ -138,15 +157,28 @@ class PhasorPlotWindow(QMainWindow):
         cy = pos[1] + size[1] / 2
         rx = abs(size[0]) / 2
         ry = abs(size[1]) / 2
+        angle_deg = self._angle_spin.value()
+        angle_rad = np.radians(angle_deg)
+        return cx, cy, rx, ry, angle_rad
+
+    def _update_ellipse_curve(self) -> None:
+        """Redraw the ellipse curve from the current ROI bounds + rotation."""
+        cx, cy, rx, ry, angle_rad = self._get_ellipse_params()
 
         if rx < 1e-6 or ry < 1e-6:
             self._ellipse_curve.setData([], [])
             return
 
         theta = np.linspace(0, 2 * np.pi, 200)
-        ex = cx + rx * np.cos(theta)
-        ey = cy + ry * np.sin(theta)
-        self._ellipse_curve.setData(ex, ey)
+        # Ellipse points before rotation
+        ex = rx * np.cos(theta)
+        ey = ry * np.sin(theta)
+        # Apply rotation
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        ex_rot = cx + ex * cos_a - ey * sin_a
+        ey_rot = cy + ex * sin_a + ey * cos_a
+        self._ellipse_curve.setData(ex_rot, ey_rot)
 
     # ── Data ──────────────────────────────────────────────────
 
@@ -297,11 +329,10 @@ class PhasorPlotWindow(QMainWindow):
             )
 
     def _get_roi_mask(self) -> np.ndarray | None:
-        """Compute mask from the ROI's ellipse in G/S data coordinates.
+        """Compute mask from the ROI's rotated ellipse in G/S data coordinates.
 
-        The ellipse is defined by the RectROI bounding box — center and
-        radii are computed directly from the rect position and size.
-        This guarantees the mask matches the drawn ellipse curve exactly.
+        Uses the exact same center, radii, and angle as the drawn ellipse
+        curve, so the mask always matches what's visible on the plot.
         """
         if self._g_map is None:
             return None
@@ -315,12 +346,10 @@ class PhasorPlotWindow(QMainWindow):
             g = self._g_map
             s = self._s_map
 
-        state = self._roi.getState()
-        pos = state["pos"]
-        size = state["size"]
-        center = (pos[0] + size[0] / 2, pos[1] + size[1] / 2)
-        radii = (abs(size[0]) / 2, abs(size[1]) / 2)
-        return phasor_roi_to_mask(g, s, center, radii)
+        cx, cy, rx, ry, angle_rad = self._get_ellipse_params()
+        return phasor_roi_to_mask(
+            g, s, center=(cx, cy), radii=(rx, ry), angle_rad=angle_rad
+        )
 
     def _on_apply_mask(self) -> None:
         """Save the current phasor ROI mask to HDF5 and finalize."""
