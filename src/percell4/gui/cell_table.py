@@ -133,8 +133,7 @@ class CellTableWindow(QMainWindow):
     - QTableView backed by PandasTableModel
     - Column header click → sort (via FilterableProxyModel)
     - Row click → CellDataModel.set_selection
-    - selection_changed → highlight and scroll to row
-    - filter_changed → show/hide rows via proxy filter
+    - state_changed → highlight and scroll to row, show/hide rows via proxy filter
     - Right-click context menu: Export Selection, Export All
     - Export CSV button in toolbar
     """

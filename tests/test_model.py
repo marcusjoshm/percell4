@@ -22,10 +22,10 @@ def test_initial_state(model):
 
 
 def test_set_measurements_emits_signal(model, qtbot):
-    """set_measurements replaces the DataFrame and emits data_updated."""
+    """set_measurements replaces the DataFrame and emits state_changed."""
     df = pd.DataFrame({"label": [1, 2, 3], "area": [100, 200, 300]})
 
-    with qtbot.waitSignal(model.data_updated, timeout=1000):
+    with qtbot.waitSignal(model.state_changed, timeout=1000):
         model.set_measurements(df)
 
     assert len(model.df) == 3
@@ -33,8 +33,8 @@ def test_set_measurements_emits_signal(model, qtbot):
 
 
 def test_set_selection_emits_signal(model, qtbot):
-    """set_selection updates selected_ids and emits selection_changed."""
-    with qtbot.waitSignal(model.selection_changed, timeout=1000):
+    """set_selection updates selected_ids and emits state_changed."""
+    with qtbot.waitSignal(model.state_changed, timeout=1000):
         model.set_selection([2, 5])
 
     assert model.selected_ids == [2, 5]
@@ -44,28 +44,28 @@ def test_set_selection_empty(model, qtbot):
     """Setting empty selection (deselect all) works."""
     model.set_selection([1, 2])
 
-    with qtbot.waitSignal(model.selection_changed, timeout=1000):
+    with qtbot.waitSignal(model.state_changed, timeout=1000):
         model.set_selection([])
 
     assert model.selected_ids == []
 
 
 def test_clear_resets_state(model, qtbot):
-    """clear() empties DataFrame, clears selection, emits both signals."""
+    """clear() empties DataFrame, clears selection, emits state_changed."""
     df = pd.DataFrame({"label": [1, 2], "area": [100, 200]})
     model.set_measurements(df)
     model.set_selection([1])
 
-    signals = []
-    model.data_updated.connect(lambda: signals.append("data"))
-    model.selection_changed.connect(lambda ids: signals.append("selection"))
+    changes = []
+    model.state_changed.connect(lambda sc: changes.append(sc))
 
     model.clear()
 
     assert model.df.empty
     assert model.selected_ids == []
-    assert "data" in signals
-    assert "selection" in signals
+    assert len(changes) == 1
+    assert changes[0].data is True
+    assert changes[0].selection is True
 
 
 def test_df_is_read_only_reference(model):
@@ -223,25 +223,20 @@ def test_clear_emits_state_changed(model):
     assert sc.mask is True
 
 
-def test_state_changed_emits_before_legacy_signals(model):
-    """state_changed fires BEFORE legacy signals (critical ordering invariant)."""
-    order = []
-    model.state_changed.connect(lambda sc: order.append("state_changed"))
-    model.selection_changed.connect(lambda ids: order.append("selection_changed"))
+def test_state_changed_emits_exactly_once_per_set_selection(model):
+    """set_selection emits exactly one state_changed signal."""
+    changes = _capture_state_changes(model)
     model.set_selection([1])
 
-    assert order == ["state_changed", "selection_changed"]
+    assert len(changes) == 1
 
 
-def test_state_changed_emits_before_legacy_on_set_filter(model):
-    """state_changed fires before filter_changed and selection_changed."""
-    order = []
-    model.state_changed.connect(lambda sc: order.append("state_changed"))
-    model.filter_changed.connect(lambda: order.append("filter_changed"))
-    model.selection_changed.connect(lambda ids: order.append("selection_changed"))
+def test_state_changed_emits_exactly_once_per_set_filter(model):
+    """set_filter emits exactly one state_changed signal."""
+    changes = _capture_state_changes(model)
     model.set_filter([1, 2])
 
-    assert order == ["state_changed", "filter_changed", "selection_changed"]
+    assert len(changes) == 1
 
 
 # ── filtered_df tests ────────────────────────────────────────

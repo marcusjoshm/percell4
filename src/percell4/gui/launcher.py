@@ -44,6 +44,9 @@ class LauncherWindow(QMainWindow):
         # Window registry — all managed windows
         self._windows: dict[str, QWidget] = {}
 
+        # Unified model state change handler
+        self.data_model.state_changed.connect(self._on_state_changed)
+
         # Global dark theme for the launcher window
         self.setStyleSheet("""
             QMainWindow { background-color: #121212; }
@@ -323,8 +326,6 @@ class LauncherWindow(QMainWindow):
 
         layout.addWidget(filter_group)
 
-        self.data_model.filter_changed.connect(self._on_filter_state_changed)
-
         # ── Thresholding group ──
         thresh_group = QGroupBox("Thresholding")
         thresh_layout = QVBoxLayout(thresh_group)
@@ -595,13 +596,7 @@ class LauncherWindow(QMainWindow):
         mask_row.addWidget(self._active_mask_combo)
         layers_layout.addLayout(mask_row)
 
-        # Listen to model for changes from other sources (e.g., napari click)
-        self.data_model.active_segmentation_changed.connect(
-            self._on_model_active_seg_changed
-        )
-        self.data_model.active_mask_changed.connect(
-            self._on_model_active_mask_changed
-        )
+        # Model state changes are handled by _on_state_changed (unified handler)
 
         layout.addWidget(layers_group)
 
@@ -1108,6 +1103,19 @@ class LauncherWindow(QMainWindow):
         if phasor_win is None:
             return {}
         return phasor_win.get_visible_roi_names()
+
+    # ── Model state change handler ─────────────────────────────
+
+    def _on_state_changed(self, change) -> None:
+        """Handle model state changes relevant to the launcher."""
+        if change.filter:
+            self._on_filter_state_changed()
+        if change.segmentation:
+            name = self.data_model.active_segmentation
+            self._on_model_active_seg_changed(name)
+        if change.mask:
+            name = self.data_model.active_mask
+            self._on_model_active_mask_changed(name)
 
     # ── Phasor plot signal handlers ─────────────────────────────
 
