@@ -67,9 +67,8 @@ class ViewerWindow:
         self._viewer = None
         self._qt_window = None
         self._color_index = 0
-        self._updating_selection = False
+        self._is_originator = False
         self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
-        self._display_update_pending = False
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -102,12 +101,9 @@ class ViewerWindow:
         # Wire napari label selection → CellDataModel
         self._viewer.layers.events.inserted.connect(self._on_layer_inserted)
 
-        # Wire CellDataModel selection + filter → napari display (coalesced)
-        # Both signals schedule the same update; QTimer.singleShot(0) ensures
-        # rapid-fire signals (e.g. set_filter emits filter_changed then
-        # selection_changed) collapse into a single repaint.
-        self.data_model.selection_changed.connect(self._schedule_label_update)
-        self.data_model.filter_changed.connect(self._schedule_label_update)
+        # Wire CellDataModel state changes → napari display.
+        # Single signal replaces the old coalescing timer — no rapid-fire to coalesce.
+        self.data_model.state_changed.connect(self._on_state_changed)
 
         self._restore_geometry()
 
@@ -211,7 +207,7 @@ class ViewerWindow:
 
     def _on_label_selected(self, event) -> None:
         """Forward label selection to CellDataModel."""
-        if self._updating_selection:
+        if self._is_originator:
             return
         try:
             source = event.source
@@ -219,22 +215,21 @@ class ViewerWindow:
         except AttributeError:
             return
 
-        self._updating_selection = True
+        self._is_originator = True
         try:
             if label_id == 0:
                 self.data_model.set_selection([])
             else:
                 self.data_model.set_selection([label_id])
         finally:
-            self._updating_selection = False
+            self._is_originator = False
 
-    def _schedule_label_update(self, *args) -> None:
-        """Coalesce rapid-fire signals into a single display update."""
-        if not self._display_update_pending:
-            self._display_update_pending = True
-            from qtpy.QtCore import QTimer
-
-            QTimer.singleShot(0, self._update_label_display)
+    def _on_state_changed(self, change) -> None:
+        """Handle model state changes."""
+        if self._is_originator:
+            return
+        if change.filter or change.selection:
+            self._update_label_display()
 
     def _update_label_display(self) -> None:
         """Update labels layer display based on current selection and filter.
@@ -243,8 +238,7 @@ class ViewerWindow:
         Single-cell uses napari's built-in show_selected_label.
         Multi-cell dims unselected labels via colormap with None default key.
         """
-        self._display_update_pending = False
-        if self._updating_selection:
+        if self._is_originator:
             return
         if not self._is_alive():
             return
@@ -252,7 +246,7 @@ class ViewerWindow:
         if labels_layer is None:
             return
 
-        self._updating_selection = True
+        self._is_originator = True
         try:
             from napari.utils.colormaps import DirectLabelColormap
 
@@ -310,7 +304,7 @@ class ViewerWindow:
                 )
             labels_layer.refresh(extent=False)
         finally:
-            self._updating_selection = False
+            self._is_originator = False
 
     def _save_colormap(self, layer) -> None:
         """Save the layer's original colormap if not already cached."""
