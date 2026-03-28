@@ -21,7 +21,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.model import CellDataModel
+from percell4.model import CellDataModel, StateChange
 
 
 class SelectionViewBox(pg.ViewBox):
@@ -71,15 +71,14 @@ class DataPlotWindow(QMainWindow):
         self._labels_array: np.ndarray | None = None
         self._x_data: np.ndarray | None = None
         self._y_data: np.ndarray | None = None
-        self._updating_selection = False
 
         self._build_ui()
         self._connect_signals()
         self._restore_geometry()
 
-        # Load any existing data from the model
+        # Bootstrap from existing model state (late-joining window)
         if not self.data_model.df.empty:
-            self._on_data_updated()
+            self._on_state_changed(StateChange(data=True, filter=True, selection=True))
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -141,18 +140,37 @@ class DataPlotWindow(QMainWindow):
         self._status.showMessage("No data")
 
     def _connect_signals(self) -> None:
-        self.data_model.data_updated.connect(self._on_data_updated)
-        self.data_model.selection_changed.connect(self._on_selection_changed)
-        self.data_model.filter_changed.connect(self._refresh_plot)
+        self.data_model.state_changed.connect(self._on_state_changed)
         self._x_combo.currentTextChanged.connect(self._refresh_plot)
         self._y_combo.currentTextChanged.connect(self._refresh_plot)
         self._base_scatter.sigClicked.connect(self._on_point_clicked)
         self._vb.sigSelectionComplete.connect(self._on_rect_selected)
 
-    # ── Data model reactions ──────────────────────────────────
+    # ── Unified state change handler ─────────────────────────
 
-    def _on_data_updated(self) -> None:
-        """Rebuild column dropdowns and refresh the scatter."""
+    def _on_state_changed(self, change) -> None:
+        """Handle all model state changes in one atomic pass.
+
+        Ordering matters: rebuild dropdowns before refreshing the plot,
+        and only update highlights if we didn't already do a full refresh.
+        """
+        if change.data:
+            self._rebuild_dropdowns()
+        if change.data or change.filter:
+            self._refresh_plot()
+        elif change.selection:
+            # Only update highlights if we didn't already refresh the full plot
+            # (which internally re-applies highlights anyway).
+            # Note: outbound clicks cause a redundant highlight redraw via the
+            # signal round-trip — accepted as cheap and harmless for simpler code.
+            self._update_selection_highlights()
+
+    def _rebuild_dropdowns(self) -> None:
+        """Populate X/Y column dropdowns from current DataFrame.
+
+        blockSignals prevents currentTextChanged from firing during population,
+        which would trigger redundant _refresh_plot calls.
+        """
         df = self.data_model.df
         if df.empty:
             self._x_combo.clear()
@@ -169,7 +187,6 @@ class DataPlotWindow(QMainWindow):
             if c not in skip
         ]
 
-        # Block signals to avoid triggering refresh during population
         self._x_combo.blockSignals(True)
         self._y_combo.blockSignals(True)
 
@@ -190,7 +207,6 @@ class DataPlotWindow(QMainWindow):
         if prev_y in numeric_cols:
             self._y_combo.setCurrentText(prev_y)
         elif len(numeric_cols) >= 2:
-            # Pick second column as default Y
             default_y = [c for c in numeric_cols if c != self._x_combo.currentText()]
             if default_y:
                 self._y_combo.setCurrentText(default_y[0])
@@ -198,40 +214,34 @@ class DataPlotWindow(QMainWindow):
         self._x_combo.blockSignals(False)
         self._y_combo.blockSignals(False)
 
-        self._refresh_plot()
+    def _update_selection_highlights(self) -> None:
+        """Update highlight scatter to reflect current model selection."""
+        label_ids = self.data_model.selected_ids
 
-    def _on_selection_changed(self, label_ids: list[int]) -> None:
-        """Update highlight scatter with selected cells only."""
-        if self._updating_selection:
+        if self._labels_array is None or self._x_data is None:
+            self._highlight_scatter.clear()
             return
-        self._updating_selection = True
-        try:
-            if self._labels_array is None or self._x_data is None:
-                self._highlight_scatter.clear()
-                return
 
-            if not label_ids:
-                self._highlight_scatter.clear()
-                self._status.showMessage(
-                    f"Total: {len(self._labels_array)} cells"
-                )
-                return
-
-            mask = np.isin(self._labels_array, label_ids)
-
-            if not np.any(mask):
-                self._highlight_scatter.clear()
-                return
-
-            self._highlight_scatter.setData(
-                x=self._x_data[mask],
-                y=self._y_data[mask],
-            )
+        if not label_ids:
+            self._highlight_scatter.clear()
             self._status.showMessage(
-                f"Selected: {mask.sum()} | Total: {len(self._labels_array)} cells"
+                f"Total: {len(self._labels_array)} cells"
             )
-        finally:
-            self._updating_selection = False
+            return
+
+        mask = np.isin(self._labels_array, label_ids)
+
+        if not np.any(mask):
+            self._highlight_scatter.clear()
+            return
+
+        self._highlight_scatter.setData(
+            x=self._x_data[mask],
+            y=self._y_data[mask],
+        )
+        self._status.showMessage(
+            f"Selected: {mask.sum()} | Total: {len(self._labels_array)} cells"
+        )
 
     # ── Plot refresh ──────────────────────────────────────────
 
@@ -272,8 +282,8 @@ class DataPlotWindow(QMainWindow):
         self._plot.setLabel("bottom", x_col)
         self._plot.setLabel("left", y_col)
 
-        # Re-apply current selection highlight
-        self._on_selection_changed(self.data_model.selected_ids)
+        # Re-apply current selection highlight after rebuilding scatter
+        self._update_selection_highlights()
 
         self._status.showMessage(f"Total: {len(labels)} cells")
 
