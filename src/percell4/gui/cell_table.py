@@ -22,7 +22,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.model import CellDataModel
+from percell4.model import CellDataModel, StateChange
 
 
 class PandasTableModel(QAbstractTableModel):
@@ -149,9 +149,9 @@ class CellTableWindow(QMainWindow):
         self._connect_signals()
         self._restore_geometry()
 
-        # Load any existing data from the model
+        # Bootstrap from existing model state (late-joining window)
         if not self.data_model.df.empty:
-            self._on_data_updated()
+            self._on_state_changed(StateChange(data=True, filter=True, selection=True))
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -205,21 +205,32 @@ class CellTableWindow(QMainWindow):
         self.setStatusBar(self._status)
         self._status.showMessage("No data")
 
-        # Suppress internal selection feedback during programmatic updates
-        self._updating_selection = False
+        # Guard flag: True when this window initiated a state change.
+        # Prevents feedback loops from Qt's internal selectionChanged signals
+        # (fired by invalidateFilter and programmatic row selection).
+        self._is_originator = False
 
     def _connect_signals(self) -> None:
-        self.data_model.data_updated.connect(self._on_data_updated)
-        self.data_model.selection_changed.connect(self._on_selection_changed)
-        self.data_model.filter_changed.connect(self._on_filter_changed)
+        self.data_model.state_changed.connect(self._on_state_changed)
         self._table.selectionModel().selectionChanged.connect(
             self._on_table_selection_changed
         )
 
-    # ── Data model reactions ──────────────────────────────────
+    # ── Unified state change handler ─────────────────────────
 
-    def _on_data_updated(self) -> None:
-        """Reload the table from the current DataFrame."""
+    def _on_state_changed(self, change) -> None:
+        """Handle all model state changes in one atomic pass."""
+        if self._is_originator:
+            return
+        if change.data:
+            self._reload_table_data()
+        if change.filter:
+            self._apply_filter()
+        if change.selection:
+            self._highlight_selected_rows()
+
+    def _reload_table_data(self) -> None:
+        """Replace the table's DataFrame and update status."""
         df = self.data_model.df
         self._model.set_dataframe(df)
 
@@ -228,13 +239,35 @@ class CellTableWindow(QMainWindow):
         else:
             self._status.showMessage(f"Showing {len(df)} cells")
 
-        # Resize columns to content
         self._table.resizeColumnsToContents()
 
-    def _on_selection_changed(self, label_ids: list[int]) -> None:
-        """Highlight rows matching the selected cell IDs."""
-        self._updating_selection = True
+    def _apply_filter(self) -> None:
+        """Update proxy filter. Guards against Qt's internal selectionChanged.
+
+        invalidateFilter() changes row visibility, which can trigger
+        QItemSelectionModel::selectionChanged. Without the guard,
+        _on_table_selection_changed would fire and call set_selection()
+        with potentially wrong IDs.
+        """
+        self._is_originator = True
         try:
+            self._proxy.set_filter_labels(self.data_model.filtered_ids)
+            n_visible = self._proxy.rowCount()
+            n_total = self._model.rowCount()
+            if self.data_model.is_filtered:
+                self._status.showMessage(
+                    f"Showing {n_visible} of {n_total} cells (filtered)"
+                )
+            else:
+                self._status.showMessage(f"Showing {n_total} cells")
+        finally:
+            self._is_originator = False
+
+    def _highlight_selected_rows(self) -> None:
+        """Highlight and scroll to rows matching the model's selected IDs."""
+        self._is_originator = True
+        try:
+            label_ids = self.data_model.selected_ids
             selection_model = self._table.selectionModel()
             selection_model.clearSelection()
 
@@ -262,7 +295,6 @@ class CellTableWindow(QMainWindow):
                     if first_row is None:
                         first_row = proxy_index.row()
 
-            # Scroll to the first selected row
             if first_row is not None:
                 self._table.scrollTo(
                     self._proxy.index(first_row, 0),
@@ -273,44 +305,32 @@ class CellTableWindow(QMainWindow):
             n_total = self._model.rowCount()
             self._status.showMessage(f"Selected: {n_selected} | Total: {n_total} cells")
         finally:
-            self._updating_selection = False
-
-    def _on_filter_changed(self) -> None:
-        """Update proxy filter when cell filter changes."""
-        self._updating_selection = True
-        try:
-            self._proxy.set_filter_labels(self.data_model.filtered_ids)
-            n_visible = self._proxy.rowCount()
-            n_total = self._model.rowCount()
-            if self.data_model.is_filtered:
-                self._status.showMessage(
-                    f"Showing {n_visible} of {n_total} cells (filtered)"
-                )
-            else:
-                self._status.showMessage(f"Showing {n_total} cells")
-        finally:
-            self._updating_selection = False
+            self._is_originator = False
 
     # ── Table → model selection ───────────────────────────────
 
     def _on_table_selection_changed(self, selected, deselected) -> None:
         """Forward table row selection to CellDataModel."""
-        if self._updating_selection:
+        if self._is_originator:
             return  # Avoid feedback loop
 
-        rows = set()
-        for index in self._table.selectionModel().selectedRows():
-            source_index = self._proxy.mapToSource(index)
-            rows.add(source_index.row())
+        self._is_originator = True
+        try:
+            rows = set()
+            for index in self._table.selectionModel().selectedRows():
+                source_index = self._proxy.mapToSource(index)
+                rows.add(source_index.row())
 
-        label_ids = []
-        for row in sorted(rows):
-            lid = self._model.get_label_for_row(row)
-            if lid is not None:
-                label_ids.append(lid)
+            label_ids = []
+            for row in sorted(rows):
+                lid = self._model.get_label_for_row(row)
+                if lid is not None:
+                    label_ids.append(lid)
 
-        if label_ids:
-            self.data_model.set_selection(label_ids)
+            if label_ids:
+                self.data_model.set_selection(label_ids)
+        finally:
+            self._is_originator = False
 
     # ── Context menu ──────────────────────────────────────────
 
