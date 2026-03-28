@@ -714,11 +714,16 @@ class LauncherWindow(QMainWindow):
             factories = {
                 "viewer": lambda: ViewerWindow(self.data_model),
                 "data_plot": lambda: DataPlotWindow(self.data_model),
-                "phasor_plot": lambda: PhasorPlotWindow(self.data_model, launcher=self),
+                "phasor_plot": lambda: PhasorPlotWindow(self.data_model),
                 "cell_table": lambda: CellTableWindow(self.data_model),
             }
             if key in factories:
-                self._windows[key] = factories[key]()
+                window = factories[key]()
+                self._windows[key] = window
+                # Wire phasor plot signals — launcher mediates viewer access
+                if key == "phasor_plot":
+                    window.preview_mask_ready.connect(self._on_phasor_preview)
+                    window.mask_applied.connect(self._on_phasor_mask_applied)
         return self._windows.get(key)
 
     def _wire_viewer_layer_selection(self) -> None:
@@ -1103,6 +1108,44 @@ class LauncherWindow(QMainWindow):
         if phasor_win is None:
             return {}
         return phasor_win.get_visible_roi_names()
+
+    # ── Phasor plot signal handlers ─────────────────────────────
+
+    def _on_phasor_preview(self, mask, colormap) -> None:
+        """Forward phasor ROI preview mask to the viewer."""
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or not viewer_win._is_alive():
+            return
+        preview_name = "_phasor_roi_preview"
+        try:
+            layer = viewer_win._viewer.layers[preview_name]
+            layer.data = mask
+            layer.colormap = colormap
+        except KeyError:
+            viewer_win._viewer.add_labels(
+                mask, name=preview_name,
+                colormap=colormap, opacity=0.4,
+                blending="translucent",
+            )
+
+    def _on_phasor_mask_applied(self, mask, color_dict, mask_name) -> None:
+        """Handle finalized phasor mask: remove preview, add mask, save to HDF5."""
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None and viewer_win._is_alive():
+            # Remove preview layer
+            try:
+                viewer_win._viewer.layers.remove("_phasor_roi_preview")
+            except ValueError:
+                pass
+            # Add final mask with ROI colors
+            viewer_win.add_mask(mask, name=mask_name, color_dict=color_dict)
+
+        # Save to HDF5
+        store = getattr(self, "_current_store", None)
+        if store is not None:
+            store.write_mask(mask_name, mask)
+
+        self.data_model.set_active_mask(mask_name)
 
     def _on_filter_to_selection(self) -> None:
         """Filter all windows to show only the currently selected cells."""

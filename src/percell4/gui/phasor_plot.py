@@ -14,7 +14,7 @@ from typing import Final
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QRectF, QSettings, QTimer, Qt
+from qtpy.QtCore import QRectF, QSettings, QTimer, Qt, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -99,12 +99,21 @@ class PhasorPlotWindow(QMainWindow):
 
     Multiple named, colored elliptical ROIs can be placed on the phasor
     histogram. All visible ROIs combine into a single labeled mask.
+
+    Communication with the viewer is decoupled via signals:
+    - preview_mask_ready: emitted when ROI preview mask needs display
+    - mask_applied: emitted when user clicks "Apply Visible as Mask"
+    The launcher connects these to mediate viewer + HDF5 access.
     """
 
-    def __init__(self, data_model: CellDataModel, launcher=None) -> None:
+    # (mask_ndarray, DirectLabelColormap) — for live ROI preview in viewer
+    preview_mask_ready = Signal(object, object)
+    # (mask_ndarray, color_dict, mask_name) — for final mask application
+    mask_applied = Signal(object, object, str)
+
+    def __init__(self, data_model: CellDataModel) -> None:
         super().__init__()
         self.data_model = data_model
-        self._launcher = launcher
         self.setWindowTitle("PerCell4 — Phasor Plot")
         self.resize(850, 600)
 
@@ -135,7 +144,7 @@ class PhasorPlotWindow(QMainWindow):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(150)
         self._filter_timer.timeout.connect(self._refresh_histogram)
-        self.data_model.filter_changed.connect(self._on_filter_changed)
+        self.data_model.state_changed.connect(self._on_state_changed)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -472,11 +481,8 @@ class PhasorPlotWindow(QMainWindow):
         return mask
 
     def _update_preview(self) -> None:
-        """Push combined multi-label preview to napari."""
+        """Compute combined mask and emit preview_mask_ready for the launcher."""
         if self._g_map is None or not self._roi_widgets:
-            return
-        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        if viewer_win is None or not viewer_win._is_alive():
             return
 
         mask = self._compute_combined_mask()
@@ -492,18 +498,8 @@ class PhasorPlotWindow(QMainWindow):
             self._preview_colormap = DirectLabelColormap(color_dict=color_dict)
             self._colormap_dirty = False
 
-        # Update or create preview layer
-        preview_name = "_phasor_roi_preview"
-        try:
-            layer = viewer_win._viewer.layers[preview_name]
-            layer.data = mask
-            layer.colormap = self._preview_colormap
-        except KeyError:
-            viewer_win._viewer.add_labels(
-                mask, name=preview_name,
-                colormap=self._preview_colormap, opacity=0.4,
-                blending="translucent",
-            )
+        # Emit signal — launcher mediates viewer access
+        self.preview_mask_ready.emit(mask, self._preview_colormap)
 
         # Status bar: pixel counts per ROI via bincount
         max_label = max((w.phasor_roi.label for w in self._roi_widgets
@@ -563,9 +559,10 @@ class PhasorPlotWindow(QMainWindow):
             w.cached_mask = None
         self._refresh_histogram()
 
-    def _on_filter_changed(self) -> None:
-        """Debounced response to cell filter changes."""
-        self._filter_timer.start()
+    def _on_state_changed(self, change) -> None:
+        """Handle model state changes — debounced filter refresh."""
+        if change.filter:
+            self._filter_timer.start()
 
     def _refresh_histogram(self) -> None:
         """Render intensity-weighted 2D histogram."""
@@ -642,7 +639,7 @@ class PhasorPlotWindow(QMainWindow):
     # ── Apply mask ────────────────────────────────────────────
 
     def _on_apply_mask(self) -> None:
-        """Save combined visible ROI mask to HDF5 and finalize."""
+        """Emit mask_applied signal — launcher handles viewer + HDF5."""
         if self._g_map is None or not self._roi_widgets:
             self._status.showMessage("No phasor data or ROIs", 3000)
             return
@@ -653,30 +650,13 @@ class PhasorPlotWindow(QMainWindow):
             return
 
         mask_name = "phasor_roi"
+        color_dict = {0: "transparent", None: "transparent"}
+        for w in self._roi_widgets:
+            if w.phasor_roi.visible:
+                color_dict[w.phasor_roi.label] = w.phasor_roi.color
 
-        if self._launcher is not None:
-            viewer_win = self._launcher._windows.get("viewer")
-
-            # Remove preview layer
-            if viewer_win is not None and viewer_win._is_alive():
-                try:
-                    viewer_win._viewer.layers.remove("_phasor_roi_preview")
-                except ValueError:
-                    pass
-
-                # Add final mask with ROI colors
-                color_dict = {0: "transparent", None: "transparent"}
-                for w in self._roi_widgets:
-                    if w.phasor_roi.visible:
-                        color_dict[w.phasor_roi.label] = w.phasor_roi.color
-                viewer_win.add_mask(mask, name=mask_name, color_dict=color_dict)
-
-            # Save to HDF5
-            store = getattr(self._launcher, "_current_store", None)
-            if store is not None:
-                store.write_mask(mask_name, mask)
-
-        self.data_model.set_active_mask(mask_name)
+        # Emit signal — launcher removes preview, adds mask, saves to HDF5
+        self.mask_applied.emit(mask, color_dict, mask_name)
         self._status.showMessage("Multi-ROI mask applied", 3000)
 
     # ── Save / Load ROIs ──────────────────────────────────────
