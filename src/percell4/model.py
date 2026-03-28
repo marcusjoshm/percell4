@@ -6,12 +6,32 @@ not persisted across datasets. Persistent measurements live in each .h5 file.
 
 Convention: model.df for schema discovery (columns, types).
             model.filtered_df for data display (rows to show).
+
+Thread safety: All mutations must occur on the main (GUI) thread. Worker threads
+emit results via Qt signals which are marshaled to the main thread by AutoConnection.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 from qtpy.QtCore import QObject, Signal
+
+
+@dataclass
+class StateChange:
+    """Descriptor for what changed in a CellDataModel state transition.
+
+    Carried by the ``state_changed`` signal so that each window can process
+    all relevant changes in a defined order within a single handler call.
+    """
+
+    data: bool = False          # DataFrame was replaced
+    selection: bool = False     # selected_ids changed
+    filter: bool = False        # filtered_ids changed
+    segmentation: bool = False  # active segmentation layer changed
+    mask: bool = False          # active mask layer changed
 
 
 class CellDataModel(QObject):
@@ -22,6 +42,12 @@ class CellDataModel(QObject):
     modify it.
     """
 
+    # Atomic state change signal — emitted BEFORE old signals during migration.
+    # Migrated windows connect to this; unmigrated windows use old signals below.
+    state_changed = Signal(object)  # emits StateChange
+
+    # Legacy signals — still emitted for backward compatibility during migration.
+    # Will be removed once all consumers are migrated to state_changed.
     data_updated = Signal()
     selection_changed = Signal(list)  # list of selected label IDs (int)
     filter_changed = Signal()  # emitted when filter state changes
@@ -69,11 +95,12 @@ class CellDataModel(QObject):
     def set_filter(self, label_ids: list[int] | None) -> None:
         """Set filter. None clears. Also clears selection.
 
-        Emits filter_changed then selection_changed.
+        Emits state_changed (atomic), then legacy filter_changed + selection_changed.
         """
         self._filtered_ids = set(label_ids) if label_ids is not None else None
         self._filtered_df_cache = None
         self._selected_ids = []
+        self.state_changed.emit(StateChange(filter=True, selection=True))
         self.filter_changed.emit()
         self.selection_changed.emit([])
 
@@ -81,11 +108,13 @@ class CellDataModel(QObject):
         """Replace the measurements DataFrame and notify all listeners.
 
         Auto-clears filter and selection to prevent stale IDs.
+        Emits state_changed (atomic), then legacy signals.
         """
         self._df = df
         self._filtered_ids = None
         self._filtered_df_cache = None
         self._selected_ids = []
+        self.state_changed.emit(StateChange(data=True, filter=True, selection=True))
         self.filter_changed.emit()
         self.data_updated.emit()
         self.selection_changed.emit([])
@@ -93,6 +122,7 @@ class CellDataModel(QObject):
     def set_selection(self, label_ids: list[int]) -> None:
         """Update the selected cell IDs and notify all listeners."""
         self._selected_ids = list(label_ids)
+        self.state_changed.emit(StateChange(selection=True))
         self.selection_changed.emit(self._selected_ids)
 
     @property
@@ -109,6 +139,7 @@ class CellDataModel(QObject):
         """Set the active segmentation layer and notify all listeners."""
         if name != self._active_segmentation:
             self._active_segmentation = name
+            self.state_changed.emit(StateChange(segmentation=True))
             self.active_segmentation_changed.emit(name)
 
     @property
@@ -120,12 +151,14 @@ class CellDataModel(QObject):
         """Set the active mask layer and notify all listeners."""
         if name != self._active_mask:
             self._active_mask = name
+            self.state_changed.emit(StateChange(mask=True))
             self.active_mask_changed.emit(name)
 
     def clear(self) -> None:
         """Reset all state. Called when closing a dataset.
 
-        Emits all signals AFTER state is fully consistent.
+        Emits state_changed (atomic) AFTER state is fully consistent,
+        then legacy signals for unmigrated consumers.
         """
         self._df = pd.DataFrame()
         self._selected_ids = []
@@ -133,6 +166,10 @@ class CellDataModel(QObject):
         self._filtered_df_cache = None
         self._active_segmentation = ""
         self._active_mask = ""
+        self.state_changed.emit(StateChange(
+            data=True, filter=True, selection=True,
+            segmentation=True, mask=True,
+        ))
         self.filter_changed.emit()
         self.data_updated.emit()
         self.selection_changed.emit([])
