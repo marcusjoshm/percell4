@@ -1049,12 +1049,16 @@ class LauncherWindow(QMainWindow):
         if store is not None:
             label_names = store.list_labels()
             mask_names = store.list_masks()
+            print(f"[DEBUG] _sync_active_layers: name={name!r} labels={label_names} masks={mask_names}")
             if name in mask_names:
+                print(f"[DEBUG]   → set_active_mask({name!r})")
                 self.data_model.set_active_mask(name)
                 return
             if name in label_names:
+                print(f"[DEBUG]   → set_active_segmentation({name!r})")
                 self.data_model.set_active_segmentation(name)
                 return
+            print(f"[DEBUG]   → FALLBACK set_active_segmentation({name!r})")
 
         # Not in store — default to treating it as a segmentation
         self.data_model.set_active_segmentation(name)
