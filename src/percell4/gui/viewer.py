@@ -261,17 +261,11 @@ class ViewerWindow:
                 self._restore_mask_layers()
                 return
 
-            if len(selected_ids) == 1 and not filtered_ids:
-                # Single cell, no filter: use napari's built-in
-                # Restore colormap first in case we were previously filtering
-                self._restore_colormap(labels_layer)
-                self._restore_mask_layers()
-                with labels_layer.events.selected_label.blocker():
-                    labels_layer.selected_label = selected_ids[0]
-                labels_layer.show_selected_label = True
-                return
-
-            # Multi-cell and/or filter active: use DirectLabelColormap
+            # Any selection or filter: use DirectLabelColormap exclusively.
+            # We avoid napari's show_selected_label because transitioning
+            # from that mode to DirectLabelColormap causes a rendering glitch
+            # where the first colormap application after show_selected_label
+            # doesn't take effect.
             labels_layer.show_selected_label = False
 
             # Save original colormap before first replacement
@@ -300,7 +294,7 @@ class ViewerWindow:
                     color_dict[lid] = [0.3, 0.8, 0.8, 0.5]
             elif highlight_ids:
                 # Selection only: highlight selected, dim rest
-                color_dict[None] = [0.5, 0.5, 0.5, 0.15]
+                color_dict[None] = [0.0, 0.0, 0.0, 0.0]
                 for lid in highlight_ids:
                     color_dict[lid] = [1.0, 1.0, 0.0, 0.8]
 
