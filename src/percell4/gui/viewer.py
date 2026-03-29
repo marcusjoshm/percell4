@@ -69,6 +69,7 @@ class ViewerWindow:
         self._color_index = 0
         self._is_originator = False
         self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
+        self._hidden_mask_layers: dict[str, float] = {}  # {layer_name: original_opacity}
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -257,12 +258,14 @@ class ViewerWindow:
                 # No selection, no filter: restore original colormap
                 labels_layer.show_selected_label = False
                 self._restore_colormap(labels_layer)
+                self._restore_mask_layers()
                 return
 
             if len(selected_ids) == 1 and not filtered_ids:
                 # Single cell, no filter: use napari's built-in
                 # Restore colormap first in case we were previously filtering
                 self._restore_colormap(labels_layer)
+                self._restore_mask_layers()
                 with labels_layer.events.selected_label.blocker():
                     labels_layer.selected_label = selected_ids[0]
                 labels_layer.show_selected_label = True
@@ -273,6 +276,9 @@ class ViewerWindow:
 
             # Save original colormap before first replacement
             self._save_colormap(labels_layer)
+
+            # Hide mask layers so their colors don't override selection colors
+            self._hide_mask_layers()
 
             visible_ids = filtered_ids if filtered_ids else None
             highlight_ids = set(selected_ids) if selected_ids else None
@@ -317,6 +323,40 @@ class ViewerWindow:
             with layer.events.colormap.blocker():
                 layer.colormap = self._original_colormaps.pop(layer.name)
             layer.refresh(extent=False)
+
+    def _hide_mask_layers(self) -> None:
+        """Hide mask layers during selection/filter highlighting.
+
+        Mask layers (e.g., phasor_roi) sit above the segmentation layer and
+        their colors override the selection colormap. Hide them temporarily
+        and restore when selection/filter is cleared.
+        """
+        import napari
+
+        if self._viewer is None:
+            return
+        seg_name = self.data_model.active_segmentation
+        _skip = {seg_name, "_phasor_roi_preview"}
+        for layer in self._viewer.layers:
+            if (isinstance(layer, napari.layers.Labels)
+                    and layer.name not in _skip
+                    and not layer.name.startswith("_")):
+                if layer.name not in self._hidden_mask_layers and layer.visible:
+                    self._hidden_mask_layers[layer.name] = layer.opacity
+                    layer.visible = False
+
+    def _restore_mask_layers(self) -> None:
+        """Restore mask layers hidden by _hide_mask_layers."""
+        if self._viewer is None or not self._hidden_mask_layers:
+            return
+        for name, opacity in list(self._hidden_mask_layers.items()):
+            try:
+                layer = self._viewer.layers[name]
+                layer.visible = True
+                layer.opacity = opacity
+            except KeyError:
+                pass
+        self._hidden_mask_layers.clear()
 
     def _get_active_labels_layer(self):
         """Find the segmentation labels layer for selection highlighting.
