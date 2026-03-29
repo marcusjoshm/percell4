@@ -308,6 +308,13 @@ class LauncherWindow(QMainWindow):
         filter_group = QGroupBox("Cell Filter")
         filter_layout = QVBoxLayout(filter_group)
 
+        sel_btn_row = QHBoxLayout()
+        btn_clear_sel = QPushButton("Clear Selection")
+        btn_clear_sel.setToolTip("Deselect all cells and restore viewer to normal")
+        btn_clear_sel.clicked.connect(self._on_clear_selection)
+        sel_btn_row.addWidget(btn_clear_sel)
+        filter_layout.addLayout(sel_btn_row)
+
         filter_btn_row = QHBoxLayout()
         btn_filter = QPushButton("Filter to Selection")
         btn_filter.setToolTip("Show only the currently selected cells in all windows")
@@ -1154,6 +1161,10 @@ class LauncherWindow(QMainWindow):
             store.write_mask(mask_name, mask)
 
         self.data_model.set_active_mask(mask_name)
+
+    def _on_clear_selection(self) -> None:
+        """Deselect all cells — restore viewer to normal display."""
+        self.data_model.set_selection([])
 
     def _on_filter_to_selection(self) -> None:
         """Filter all windows to show only the currently selected cells."""

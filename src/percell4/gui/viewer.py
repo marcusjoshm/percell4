@@ -298,11 +298,9 @@ class ViewerWindow:
                 for lid in highlight_ids:
                     color_dict[lid] = [1.0, 1.0, 0.0, 0.8]
 
-            with labels_layer.events.colormap.blocker():
-                labels_layer.colormap = DirectLabelColormap(
-                    color_dict=color_dict
-                )
-            labels_layer.refresh(extent=False)
+            labels_layer.colormap = DirectLabelColormap(
+                color_dict=color_dict
+            )
         finally:
             self._is_originator = False
 
@@ -314,9 +312,7 @@ class ViewerWindow:
     def _restore_colormap(self, layer) -> None:
         """Restore the layer's original colormap if we previously replaced it."""
         if layer.name in self._original_colormaps:
-            with layer.events.colormap.blocker():
-                layer.colormap = self._original_colormaps.pop(layer.name)
-            layer.refresh(extent=False)
+            layer.colormap = self._original_colormaps.pop(layer.name)
 
     def _hide_mask_layers(self) -> None:
         """Hide mask layers during selection/filter highlighting.
