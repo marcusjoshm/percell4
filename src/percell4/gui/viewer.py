@@ -14,6 +14,11 @@ from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
 
+# Layer metadata constants for classifying napari Labels layers
+PERCELL_TYPE_KEY = "percell_type"
+LAYER_TYPE_MASK = "mask"
+LAYER_TYPE_SEGMENTATION = "segmentation"
+
 # Colormap mapping for common fluorophore names
 CHANNEL_COLORMAPS = {
     "dapi": "blue",
@@ -169,12 +174,20 @@ class ViewerWindow:
     def add_labels(self, data, name: str, **kwargs) -> None:
         """Add a labels layer with additive blending."""
         blending = kwargs.pop("blending", "additive")
-        self.viewer.add_labels(data, name=name, blending=blending, **kwargs)
+        metadata = kwargs.pop("metadata", {})
+        metadata.setdefault(PERCELL_TYPE_KEY, LAYER_TYPE_SEGMENTATION)
+        self.viewer.add_labels(
+            data, name=name, blending=blending, metadata=metadata, **kwargs
+        )
 
     def add_mask(
         self, data, name: str, color_dict: dict | None = None, **kwargs
     ) -> None:
-        """Add a mask as a labels layer.
+        """Add a mask as a labels layer (idempotent).
+
+        If a layer with the same name already exists, updates its data and
+        colormap in-place instead of creating a duplicate (which would trigger
+        napari's auto-rename to ``name [1]``).
 
         Args:
             color_dict: optional {label_value: color} for multi-label masks.
@@ -186,10 +199,22 @@ class ViewerWindow:
         if color_dict is None:
             color_dict = {0: "transparent", 1: "yellow", None: "transparent"}
         kwargs.pop("colormap", None)  # color_dict takes precedence
-        kwargs["colormap"] = DirectLabelColormap(color_dict=color_dict)
-        if "opacity" not in kwargs:
-            kwargs["opacity"] = 0.5
-        self.viewer.add_labels(data, name=name, **kwargs)
+        cmap = DirectLabelColormap(color_dict=color_dict)
+
+        if name in self.viewer.layers:
+            layer = self.viewer.layers[name]
+            layer.data = data
+            layer.colormap = cmap
+        else:
+            if "opacity" not in kwargs:
+                kwargs["opacity"] = 0.5
+            self.viewer.add_labels(
+                data,
+                name=name,
+                colormap=cmap,
+                metadata={PERCELL_TYPE_KEY: LAYER_TYPE_MASK},
+                **kwargs,
+            )
 
     def clear(self) -> None:
         """Remove all layers."""
@@ -326,11 +351,12 @@ class ViewerWindow:
         if self._viewer is None:
             return
         seg_name = self.data_model.active_segmentation
-        _skip = {seg_name, "_phasor_roi_preview"}
         for layer in self._viewer.layers:
-            if (isinstance(layer, napari.layers.Labels)
-                    and layer.name not in _skip
-                    and not layer.name.startswith("_")):
+            if not isinstance(layer, napari.layers.Labels):
+                continue
+            if layer.name == seg_name or layer.name.startswith("_"):
+                continue
+            if layer.metadata.get(PERCELL_TYPE_KEY) == LAYER_TYPE_MASK:
                 if layer.name not in self._hidden_mask_layers and layer.visible:
                     self._hidden_mask_layers[layer.name] = layer.opacity
                     layer.visible = False
@@ -366,12 +392,14 @@ class ViewerWindow:
                     return layer
 
         # Fallback: find a segmentation layer (skip masks/previews)
-        _skip = {"phasor_roi", "_phasor_roi_preview"}
         for layer in self._viewer.layers:
-            if (isinstance(layer, napari.layers.Labels)
-                    and layer.name not in _skip
-                    and not layer.name.startswith("_")):
-                return layer
+            if not isinstance(layer, napari.layers.Labels):
+                continue
+            if layer.name.startswith("_"):
+                continue
+            if layer.metadata.get(PERCELL_TYPE_KEY) == LAYER_TYPE_MASK:
+                continue
+            return layer
         return None
 
     def _save_geometry(self) -> None:

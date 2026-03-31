@@ -6,7 +6,10 @@ for the selected category. Manages all other windows.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QAction
@@ -1043,25 +1046,35 @@ class LauncherWindow(QMainWindow):
             return
 
         name = active.name
-        store = getattr(self, "_current_store", None)
 
-        # Determine if this is a segmentation or a mask
+        # 1. Check layer metadata first (fastest, survives renames)
+        from percell4.gui.viewer import PERCELL_TYPE_KEY, LAYER_TYPE_MASK, LAYER_TYPE_SEGMENTATION
+        percell_type = active.metadata.get(PERCELL_TYPE_KEY)
+        if percell_type == LAYER_TYPE_MASK:
+            logger.debug("_sync_active_layers: metadata → set_active_mask(%r)", name)
+            self.data_model.set_active_mask(name)
+            return
+        if percell_type == LAYER_TYPE_SEGMENTATION:
+            logger.debug("_sync_active_layers: metadata → set_active_segmentation(%r)", name)
+            self.data_model.set_active_segmentation(name)
+            return
+
+        # 2. Fall back to store lookup for untagged layers
+        store = getattr(self, "_current_store", None)
         if store is not None:
-            label_names = store.list_labels()
             mask_names = store.list_masks()
-            print(f"[DEBUG] _sync_active_layers: name={name!r} labels={label_names} masks={mask_names}")
+            label_names = store.list_labels()
             if name in mask_names:
-                print(f"[DEBUG]   → set_active_mask({name!r})")
+                logger.debug("_sync_active_layers: store → set_active_mask(%r)", name)
                 self.data_model.set_active_mask(name)
                 return
             if name in label_names:
-                print(f"[DEBUG]   → set_active_segmentation({name!r})")
+                logger.debug("_sync_active_layers: store → set_active_segmentation(%r)", name)
                 self.data_model.set_active_segmentation(name)
                 return
-            print(f"[DEBUG]   → FALLBACK set_active_segmentation({name!r})")
 
-        # Not in store — default to treating it as a segmentation
-        self.data_model.set_active_segmentation(name)
+        # 3. Unknown layer — do nothing (safe default)
+        logger.debug("_sync_active_layers: unknown layer %r, ignoring", name)
 
     def _apply_cell_filter(self, labels: np.ndarray) -> np.ndarray | None:
         """Zero out non-filtered cells in the labels array.
@@ -1100,12 +1113,15 @@ class LauncherWindow(QMainWindow):
                     return np.asarray(layer.data, dtype=np.int32)
 
         # Fallback: find a segmentation labels layer (skip mask layers)
-        mask_names = {"phasor_roi", "_phasor_roi_preview"}
+        from percell4.gui.viewer import PERCELL_TYPE_KEY, LAYER_TYPE_MASK
         for layer in viewer_win._viewer.layers:
-            if (isinstance(layer, napari.layers.Labels)
-                    and layer.name not in mask_names
-                    and not layer.name.startswith("_")):
-                return np.asarray(layer.data, dtype=np.int32)
+            if not isinstance(layer, napari.layers.Labels):
+                continue
+            if layer.name.startswith("_"):
+                continue
+            if layer.metadata.get(PERCELL_TYPE_KEY) == LAYER_TYPE_MASK:
+                continue
+            return np.asarray(layer.data, dtype=np.int32)
         return None
 
     def _get_phasor_roi_names(self) -> dict[int, str]:
@@ -1151,18 +1167,23 @@ class LauncherWindow(QMainWindow):
         """Handle finalized phasor mask: remove preview, add mask, save to HDF5."""
         viewer_win = self._windows.get("viewer")
         if viewer_win is not None and viewer_win._is_alive():
-            # Remove preview layer
+            # Remove preview layer and stop preview timer to prevent stale
+            # preview from reappearing after apply
             try:
                 viewer_win._viewer.layers.remove("_phasor_roi_preview")
             except ValueError:
                 pass
-            # Add final mask with ROI colors
-            viewer_win.add_mask(mask, name=mask_name, color_dict=color_dict)
+            if hasattr(self, "_preview_timer"):
+                self._preview_timer.stop()
 
-        # Save to HDF5
+        # Write to store BEFORE adding layer — sync may fire during add_mask
+        # and needs to find the mask in the store
         store = getattr(self, "_current_store", None)
         if store is not None:
             store.write_mask(mask_name, mask)
+
+        if viewer_win is not None and viewer_win._is_alive():
+            viewer_win.add_mask(mask, name=mask_name, color_dict=color_dict)
 
         self.data_model.set_active_mask(mask_name)
 
@@ -1397,14 +1418,12 @@ class LauncherWindow(QMainWindow):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
 
-        # Add final mask layer
-        viewer_win.add_mask(mask, name=mask_name)
-
-        # Save to HDF5
+        # Write to store BEFORE adding layer — sync may fire during add_mask
         store = getattr(self, "_current_store", None)
         if store is not None:
             store.write_mask(mask_name, mask)
 
+        viewer_win.add_mask(mask, name=mask_name)
         self.data_model.set_active_mask(mask_name)
 
         n_pos = int(mask.sum())
@@ -2152,9 +2171,14 @@ class LauncherWindow(QMainWindow):
             pass
 
     def _refresh_active_combos(self) -> None:
-        """Refresh the active segmentation/mask dropdowns."""
+        """Refresh the active segmentation/mask dropdowns.
+
+        Block signals during repopulation to prevent spurious intermediate
+        state changes (e.g., first addItem becoming current on an empty combo).
+        """
         store = getattr(self, "_current_store", None)
         if hasattr(self, "_active_seg_combo"):
+            self._active_seg_combo.blockSignals(True)
             current = self._active_seg_combo.currentText()
             self._active_seg_combo.clear()
             if store is not None:
@@ -2162,8 +2186,10 @@ class LauncherWindow(QMainWindow):
                     self._active_seg_combo.addItem(name)
             if current and self._active_seg_combo.findText(current) >= 0:
                 self._active_seg_combo.setCurrentText(current)
+            self._active_seg_combo.blockSignals(False)
 
         if hasattr(self, "_active_mask_combo"):
+            self._active_mask_combo.blockSignals(True)
             current = self._active_mask_combo.currentText()
             self._active_mask_combo.clear()
             if store is not None:
@@ -2171,6 +2197,7 @@ class LauncherWindow(QMainWindow):
                     self._active_mask_combo.addItem(name)
             if current and self._active_mask_combo.findText(current) >= 0:
                 self._active_mask_combo.setCurrentText(current)
+            self._active_mask_combo.blockSignals(False)
 
     def _on_export_csv(self) -> None:
         if self.data_model.df.empty:
