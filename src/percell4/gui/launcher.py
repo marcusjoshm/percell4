@@ -47,6 +47,10 @@ class LauncherWindow(QMainWindow):
         # Window registry — all managed windows
         self._windows: dict[str, QWidget] = {}
 
+        # Particle analysis results for export
+        self._last_particle_df = None
+        self._last_particle_detail_df = None
+
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
 
@@ -1549,14 +1553,13 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Open the viewer first")
             return
 
-        # Get an image (first image layer for intensity)
-        image = None
+        # Collect ALL image layers (multi-channel, same pattern as _on_measure_cells)
+        image_layers: dict[str, np.ndarray] = {}
         for layer in viewer_win.viewer.layers:
             if layer.__class__.__name__ == "Image":
-                image = layer.data.astype(np.float32)
-                break
+                image_layers[layer.name] = layer.data.astype(np.float32)
 
-        if image is None:
+        if not image_layers:
             self.statusBar().showMessage("No image loaded")
             return
 
@@ -1601,10 +1604,15 @@ class LauncherWindow(QMainWindow):
         min_area = self._particle_min_area.value()
         self.statusBar().showMessage("Analyzing particles...")
 
-        from percell4.measure.particle import analyze_particles
+        from percell4.measure.particle import analyze_particles, analyze_particles_detail
 
         try:
-            particle_df = analyze_particles(image, labels, mask, min_area=min_area)
+            particle_df = analyze_particles(
+                image_layers, labels, mask, min_area=min_area
+            )
+            detail_df = analyze_particles_detail(
+                image_layers, labels, mask, min_area=min_area
+            )
         except Exception as e:
             self.statusBar().showMessage(f"Particle analysis error: {e}")
             return
@@ -1625,8 +1633,9 @@ class LauncherWindow(QMainWindow):
         if store is not None:
             store.write_dataframe("measurements", self.data_model.df)
 
-        # Store the raw particle DataFrame for dedicated export
+        # Store both summary and detail DataFrames for export
         self._last_particle_df = particle_df
+        self._last_particle_detail_df = detail_df
 
         self._particle_result_label.setText(
             f"{total_particles} particles in {n_cells} cells\n"
@@ -1638,11 +1647,11 @@ class LauncherWindow(QMainWindow):
         )
 
     def _on_export_particle_csv(self) -> None:
-        """Export particle analysis data to CSV."""
+        """Export per-particle detail data to CSV (one row per particle)."""
         from qtpy.QtWidgets import QFileDialog
 
-        particle_df = getattr(self, "_last_particle_df", None)
-        if particle_df is None or particle_df.empty:
+        detail_df = getattr(self, "_last_particle_detail_df", None)
+        if detail_df is None or detail_df.empty:
             self.statusBar().showMessage("No particle data — run Analyze Particles first")
             return
 
@@ -1650,7 +1659,7 @@ class LauncherWindow(QMainWindow):
             self, "Export Particle Data", "particles.csv", "CSV (*.csv)"
         )
         if path:
-            particle_df.to_csv(path, index=False)
+            detail_df.to_csv(path, index=False)
             self.statusBar().showMessage(f"Exported particle data to {path}")
 
     def _on_compute_phasor(self) -> None:
