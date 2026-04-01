@@ -15,7 +15,10 @@ from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -1448,9 +1451,64 @@ class LauncherWindow(QMainWindow):
         self._thresh_working_image = None
         self._thresh_channel_name = None
 
+    def _show_metric_config_dialog(self) -> list[str] | None:
+        """Show metric selection dialog. Returns selected metric names, or None if cancelled."""
+        from percell4.measure.metrics import BUILTIN_METRICS
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Metrics")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Choose which metrics to compute:"))
+
+        selected = self._load_selected_metrics()
+        checkboxes: dict[str, QCheckBox] = {}
+        for name in BUILTIN_METRICS:
+            cb = QCheckBox(name.replace("_", " ").title())
+            cb.setChecked(name in selected)
+            checkboxes[name] = cb
+            layout.addWidget(cb)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        result = [name for name, cb in checkboxes.items() if cb.isChecked()]
+        if not result:
+            self.statusBar().showMessage("No metrics selected")
+            return None
+        self._save_selected_metrics(result)
+        return result
+
+    @staticmethod
+    def _load_selected_metrics() -> list[str]:
+        """Load selected metrics from QSettings (type-safe)."""
+        from percell4.measure.metrics import BUILTIN_METRICS
+        settings = QSettings("LeeLabPerCell4", "PerCell4")
+        raw = settings.value("metrics/selected", defaultValue=None)
+        if raw is None:
+            return list(BUILTIN_METRICS.keys())
+        if isinstance(raw, str):
+            raw = [raw]  # QSettings quirk: single-item list → string
+        return [m for m in raw if m in BUILTIN_METRICS]
+
+    @staticmethod
+    def _save_selected_metrics(metrics: list[str]) -> None:
+        """Save selected metrics to QSettings."""
+        settings = QSettings("LeeLabPerCell4", "PerCell4")
+        settings.setValue("metrics/selected", metrics)
+
     def _on_measure_cells(self) -> None:
         """Measure per-cell metrics using active channel, segmentation, and mask."""
         import numpy as np
+
+        # Show metric selection dialog
+        selected_metrics = self._show_metric_config_dialog()
+        if selected_metrics is None:
+            return
 
         viewer_win = self._windows.get("viewer")
         if viewer_win is None or viewer_win.viewer is None:
@@ -1513,12 +1571,15 @@ class LauncherWindow(QMainWindow):
                 from percell4.measure.measurer import measure_multichannel_multi_roi
 
                 df = measure_multichannel_multi_roi(
-                    image_layers, labels, mask, roi_names
+                    image_layers, labels, mask, roi_names,
+                    metrics=selected_metrics,
                 )
             else:
                 from percell4.measure.measurer import measure_multichannel
 
-                df = measure_multichannel(image_layers, labels, mask=mask)
+                df = measure_multichannel(
+                    image_layers, labels, mask=mask, metrics=selected_metrics,
+                )
         except Exception as e:
             self.statusBar().showMessage(f"Measurement error: {e}")
             return
