@@ -936,10 +936,12 @@ class LauncherWindow(QMainWindow):
                 else:
                     viewer_win.add_image(intensity, name="Intensity")
 
-                # Load existing labels
+                # Load existing labels (skip names that are also masks)
+                mask_names = set(s.list_masks())
                 for label_name in s.list_labels():
-                    labels = s.read_labels(label_name)
-                    viewer_win.add_labels(labels, name=label_name)
+                    if label_name not in mask_names:
+                        labels = s.read_labels(label_name)
+                        viewer_win.add_labels(labels, name=label_name)
 
                 # Load existing masks
                 for mask_name in s.list_masks():
@@ -983,11 +985,13 @@ class LauncherWindow(QMainWindow):
                 f"Labels: {n_labels}  |  Masks: {n_masks}"
             )
 
-        # Populate active layers dropdowns
+        # Populate active layers dropdowns (exclude masks from segmentation list)
+        mask_set = set(store.list_masks())
         if hasattr(self, "_active_seg_combo"):
             self._active_seg_combo.clear()
             for label_name in store.list_labels():
-                self._active_seg_combo.addItem(label_name)
+                if label_name not in mask_set:
+                    self._active_seg_combo.addItem(label_name)
 
         if hasattr(self, "_active_mask_combo"):
             self._active_mask_combo.clear()
@@ -1977,12 +1981,14 @@ class LauncherWindow(QMainWindow):
     def _refresh_management_combos(self) -> None:
         """Refresh all management dropdowns from the current store."""
         store = getattr(self, "_current_store", None)
+        mask_set = set(store.list_masks()) if store is not None else set()
 
         if hasattr(self, "_mgmt_seg_combo"):
             self._mgmt_seg_combo.clear()
             if store is not None:
                 for name in store.list_labels():
-                    self._mgmt_seg_combo.addItem(name)
+                    if name not in mask_set:
+                        self._mgmt_seg_combo.addItem(name)
 
         if hasattr(self, "_mgmt_mask_combo"):
             self._mgmt_mask_combo.clear()
@@ -2177,13 +2183,16 @@ class LauncherWindow(QMainWindow):
         state changes (e.g., first addItem becoming current on an empty combo).
         """
         store = getattr(self, "_current_store", None)
+        mask_set = set(store.list_masks()) if store is not None else set()
+
         if hasattr(self, "_active_seg_combo"):
             self._active_seg_combo.blockSignals(True)
             current = self._active_seg_combo.currentText()
             self._active_seg_combo.clear()
             if store is not None:
                 for name in store.list_labels():
-                    self._active_seg_combo.addItem(name)
+                    if name not in mask_set:
+                        self._active_seg_combo.addItem(name)
             if current and self._active_seg_combo.findText(current) >= 0:
                 self._active_seg_combo.setCurrentText(current)
             self._active_seg_combo.blockSignals(False)

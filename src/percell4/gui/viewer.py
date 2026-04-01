@@ -205,6 +205,7 @@ class ViewerWindow:
             layer = self.viewer.layers[name]
             layer.data = data
             layer.colormap = cmap
+            layer.metadata[PERCELL_TYPE_KEY] = LAYER_TYPE_MASK
         else:
             if "opacity" not in kwargs:
                 kwargs["opacity"] = 0.5
