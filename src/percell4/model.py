@@ -92,13 +92,19 @@ class CellDataModel(QObject):
     def set_measurements(self, df: pd.DataFrame) -> None:
         """Replace the measurements DataFrame and notify all listeners.
 
-        Auto-clears filter and selection to prevent stale IDs.
+        Preserves filter and selection — cell IDs are stable (from segmentation
+        labels). Prunes any stale IDs that no longer exist in the new DataFrame.
         """
         self._df = df
-        self._filtered_ids = None
         self._filtered_df_cache = None
-        self._selected_ids = []
-        self.state_changed.emit(StateChange(data=True, filter=True, selection=True))
+        # Prune stale IDs but preserve the user's filter/selection intent
+        if self._filtered_ids is not None and "label" in df.columns:
+            valid = set(df["label"].tolist())
+            self._filtered_ids &= valid
+        if self._selected_ids and "label" in df.columns:
+            valid = set(df["label"].tolist())
+            self._selected_ids = [s for s in self._selected_ids if s in valid]
+        self.state_changed.emit(StateChange(data=True))
 
     def set_selection(self, label_ids: list[int]) -> None:
         """Update the selected cell IDs and notify all listeners."""

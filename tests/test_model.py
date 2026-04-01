@@ -149,7 +149,7 @@ def test_set_filter_none_clears_filter(model):
 
 
 def test_set_measurements_emits_state_changed(model):
-    """set_measurements emits exactly one state_changed with data+filter+selection."""
+    """set_measurements emits state_changed with data=True only (preserves filter/selection)."""
     changes = _capture_state_changes(model)
     df = pd.DataFrame({"label": [1, 2], "area": [100, 200]})
     model.set_measurements(df)
@@ -157,8 +157,8 @@ def test_set_measurements_emits_state_changed(model):
     assert len(changes) == 1
     sc = changes[0]
     assert sc.data is True
-    assert sc.filter is True
-    assert sc.selection is True
+    assert sc.filter is False
+    assert sc.selection is False
     assert sc.segmentation is False
     assert sc.mask is False
 
@@ -277,13 +277,15 @@ def test_filtered_df_cache_invalidated_by_set_filter(model):
 
 
 def test_filtered_df_cache_invalidated_by_set_measurements(model):
-    """set_measurements clears the filter and its cache."""
+    """set_measurements preserves filter but prunes stale IDs."""
     df1 = pd.DataFrame({"label": [1, 2, 3], "area": [10, 20, 30]})
     model.set_measurements(df1)
-    model.set_filter([1])
+    model.set_filter([1, 2])
 
-    df2 = pd.DataFrame({"label": [4, 5], "area": [40, 50]})
+    df2 = pd.DataFrame({"label": [2, 3], "area": [20, 30]})
     model.set_measurements(df2)
 
-    assert model.is_filtered is False
-    assert len(model.filtered_df) == 2
+    # Filter preserved but label 1 pruned (not in new df)
+    assert model.is_filtered is True
+    assert model.filtered_ids == {2}
+    assert len(model.filtered_df) == 1

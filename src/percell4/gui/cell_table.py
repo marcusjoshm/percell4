@@ -223,6 +223,12 @@ class CellTableWindow(QMainWindow):
             return
         if change.data:
             self._reload_table_data()
+            # Data changed under an active filter/selection — re-apply them
+            # (set_measurements no longer emits filter=True/selection=True)
+            if self.data_model.is_filtered:
+                self._apply_filter()
+            if self.data_model.selected_ids:
+                self._highlight_selected_rows()
         if change.filter:
             self._apply_filter()
         if change.selection:
