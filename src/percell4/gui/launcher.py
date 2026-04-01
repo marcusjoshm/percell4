@@ -1979,16 +1979,18 @@ class LauncherWindow(QMainWindow):
     # ── Layer management ────────────────────────────────────────
 
     def _refresh_management_combos(self) -> None:
-        """Refresh all management dropdowns from the current store."""
+        """Refresh all management dropdowns from the current store.
+
+        The management combos show ALL entries (including stale mask data
+        under /labels/) so users can delete legacy entries.
+        """
         store = getattr(self, "_current_store", None)
-        mask_set = set(store.list_masks()) if store is not None else set()
 
         if hasattr(self, "_mgmt_seg_combo"):
             self._mgmt_seg_combo.clear()
             if store is not None:
                 for name in store.list_labels():
-                    if name not in mask_set:
-                        self._mgmt_seg_combo.addItem(name)
+                    self._mgmt_seg_combo.addItem(name)
 
         if hasattr(self, "_mgmt_mask_combo"):
             self._mgmt_mask_combo.clear()
