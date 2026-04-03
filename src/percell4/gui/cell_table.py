@@ -351,13 +351,14 @@ class CellTableWindow(QMainWindow):
         menu.exec_(self._table.viewport().mapToGlobal(position))
 
     def _export_all(self) -> None:
-        """Export full DataFrame to CSV."""
-        df = self.data_model.df
+        """Export visible (filtered) DataFrame to CSV."""
+        df = self.data_model.filtered_df
         if df.empty:
             self._status.showMessage("No data to export")
             return
+        label = "Export Filtered Measurements" if self.data_model.is_filtered else "Export All Measurements"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export All Measurements", "measurements.csv", "CSV (*.csv)"
+            self, label, "measurements.csv", "CSV (*.csv)"
         )
         if path:
             df.to_csv(path, index=False)
