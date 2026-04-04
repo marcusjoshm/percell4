@@ -560,16 +560,12 @@ class LauncherWindow(QMainWindow):
         return panel
 
     def _create_workflows_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setAlignment(Qt.AlignTop)
-        layout.setContentsMargins(20, 20, 20, 20)
+        from percell4.gui.grouped_seg_panel import GroupedSegPanel
 
-        layout.addWidget(self._section_label("Workflows"))
-        layout.addWidget(self._placeholder("Standard Analysis Pipeline"))
-        layout.addWidget(self._placeholder("Custom Workflow Builder"))
-        layout.addStretch()
-        return panel
+        self._grouped_seg_panel = GroupedSegPanel(
+            self.data_model, launcher=self
+        )
+        return self._grouped_seg_panel
 
     def _create_data_panel(self) -> QWidget:
         panel = QWidget()
@@ -758,6 +754,8 @@ class LauncherWindow(QMainWindow):
             self._update_active_channel_label()
             if hasattr(self, "_seg_panel"):
                 self._seg_panel.update_channel_label()
+            if hasattr(self, "_grouped_seg_panel"):
+                self._grouped_seg_panel.update_channels()
             # Update active segmentation/mask from napari layer selection
             self._sync_active_layers_from_viewer()
 
@@ -964,6 +962,8 @@ class LauncherWindow(QMainWindow):
         # Wire napari layer selection events
         self._wire_viewer_layer_selection()
         self._update_active_channel_label()
+        if hasattr(self, "_grouped_seg_panel"):
+            self._grouped_seg_panel.update_channels()
 
     def _update_data_tab_from_store(self) -> None:
         """Update the Data tab info label and dropdowns from the current store."""
@@ -1501,6 +1501,37 @@ class LauncherWindow(QMainWindow):
         settings = QSettings("LeeLabPerCell4", "PerCell4")
         settings.setValue("metrics/selected", metrics)
 
+    @staticmethod
+    def _merge_group_columns(df, store) -> "pd.DataFrame":
+        """Merge stored group columns back into a measurements DataFrame.
+
+        Group columns (e.g., group_GFP_mean) are stored separately at
+        /groups/<mask_name> in HDF5 so they survive re-measurement.
+        """
+        if store is None or df is None or df.empty:
+            return df
+        try:
+            with store.open_read() as s:
+                # Check for /groups/ datasets
+                import h5py
+                if "groups" not in s._f:
+                    return df
+                for name in s._f["groups"]:
+                    group_df = s.read_dataframe(f"groups/{name}")
+                    if group_df is not None and not group_df.empty:
+                        # Merge on label column
+                        for col in group_df.columns:
+                            if col != "label" and col not in df.columns:
+                                label_to_group = dict(
+                                    zip(group_df["label"], group_df[col])
+                                )
+                                df = df.assign(
+                                    **{col: df["label"].map(label_to_group)}
+                                )
+        except Exception:
+            pass  # If groups don't exist yet, that's fine
+        return df
+
     def _on_measure_cells(self) -> None:
         """Measure per-cell metrics using active channel, segmentation, and mask."""
         import numpy as np
@@ -1587,11 +1618,15 @@ class LauncherWindow(QMainWindow):
         n_cells = len(df)
         n_cols = len(df.columns)
 
+        # Merge any stored group columns back into the DataFrame
+        # (group columns are stored separately and would be lost on re-measurement)
+        store = getattr(self, "_current_store", None)
+        df = self._merge_group_columns(df, store)
+
         # Populate the data model
         self.data_model.set_measurements(df)
 
         # Save to HDF5
-        store = getattr(self, "_current_store", None)
         if store is not None:
             store.write_dataframe("measurements", df)
 
