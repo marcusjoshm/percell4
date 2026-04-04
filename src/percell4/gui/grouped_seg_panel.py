@@ -1,4 +1,8 @@
-"""Grouped Segmentation panel — expression-level grouping + per-group thresholding.
+"""Grouped Thresholding panel — expression-level grouping + per-group thresholding.
+
+This is NOT cell segmentation (Cellpose/boundary drawing). Grouped thresholding
+creates binary masks by intensity thresholding, grouping cells by expression
+level to handle polyclonal data where a single global threshold fails.
 
 Embedded as a sidebar tab in the launcher's Workflows section.
 Communicates with the viewer and store via the launcher reference.
@@ -30,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class GroupedSegPanel(QWidget):
-    """Panel for grouped segmentation workflow.
+    """Panel for grouped thresholding workflow.
 
     Designed to be embedded in the launcher's Workflows tab.
     """
@@ -55,7 +59,7 @@ class GroupedSegPanel(QWidget):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
 
-        title = QLabel("Grouped Segmentation")
+        title = QLabel("Grouped Thresholding")
         title.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: #ffffff;"
             " margin-bottom: 12px; padding-bottom: 4px;"
@@ -140,7 +144,7 @@ class GroupedSegPanel(QWidget):
         layout.addWidget(thresh_group)
 
         # ── Run button ──
-        self._run_btn = QPushButton("Run Grouped Segmentation")
+        self._run_btn = QPushButton("Run Grouped Thresholding")
         self._run_btn.setStyleSheet(
             "QPushButton { background-color: #2d7d46; color: white;"
             " padding: 8px; font-weight: bold; border-radius: 4px; }"
@@ -234,7 +238,7 @@ class GroupedSegPanel(QWidget):
         if mask_name in existing_masks:
             reply = QMessageBox.question(
                 self,
-                "Grouped Segmentation",
+                "Grouped Thresholding",
                 f"Mask '{mask_name}' already exists.\n\nOverwrite it?",
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
             )

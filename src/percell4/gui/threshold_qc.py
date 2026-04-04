@@ -1,4 +1,7 @@
-"""Interactive threshold QC controller for grouped segmentation.
+"""Interactive threshold QC controller for grouped thresholding.
+
+NOT cell segmentation — this creates binary masks via intensity thresholding,
+with cells grouped by expression level for polyclonal data.
 
 Manages two phases:
 1. Group QC visualization (colored cells + histogram dock widget)
@@ -64,7 +67,7 @@ class GroupState:
 
 
 class ThresholdQCController(QObject):
-    """Controller for the grouped segmentation QC workflow.
+    """Controller for the grouped thresholding QC workflow.
 
     Orchestrates group preview visualization and per-group thresholding.
     """
@@ -208,7 +211,7 @@ class ThresholdQCController(QObject):
                             counts, edges = np.histogram(vals, bins=bins)
                             color = _GROUP_COLORS[i % len(_GROUP_COLORS)]
                             plot.plot(
-                                edges[:-1], counts,
+                                edges, counts,
                                 stepMode="center",
                                 fillLevel=0,
                                 fillOutline=True,
@@ -271,7 +274,7 @@ class ThresholdQCController(QObject):
     def _on_cancel(self) -> None:
         """Discard everything."""
         self._cleanup_all()
-        self._finish(False, "Grouped segmentation cancelled")
+        self._finish(False, "Grouped thresholding cancelled")
 
     # ── Phase 2: Per-Group Thresholding ──
 
@@ -630,7 +633,7 @@ class ThresholdQCController(QObject):
         n_accepted = sum(1 for gs in self._groups if gs.status == GroupStatus.ACCEPTED)
         n_skipped = sum(1 for gs in self._groups if gs.status == GroupStatus.SKIPPED)
         msg = (
-            f"Grouped segmentation complete: {n_accepted} accepted, "
+            f"Grouped thresholding complete: {n_accepted} accepted, "
             f"{n_skipped} skipped. Mask saved as '{self._mask_name}'."
         )
         self._finish(True, msg)

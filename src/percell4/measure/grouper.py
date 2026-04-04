@@ -99,7 +99,8 @@ def group_cells_gmm(
         return _single_group(values, cell_labels)
 
     X = values.reshape(-1, 1)
-    max_k = min(max_components, len(values) // 5)
+    n_unique = len(np.unique(values))
+    max_k = min(max_components, len(values) // 5, n_unique)
     max_k = max(max_k, 1)
 
     if criterion == "bic":
