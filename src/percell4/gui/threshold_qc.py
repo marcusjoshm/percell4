@@ -128,8 +128,8 @@ class ThresholdQCController(QObject):
         # Reusable buffer for group images
         self._group_image_buffer = np.zeros_like(channel_image, dtype=np.float32)
 
-        # Dock widgets (for cleanup)
-        self._preview_dock = None
+        # Windows and dock widgets (for cleanup)
+        self._preview_window = None
         self._qc_dock = None
         self._preview_pending = False
 
@@ -177,8 +177,13 @@ class ThresholdQCController(QObject):
         self._viewer_win.show()
 
     def _build_preview_dock(self) -> None:
-        """Build the group preview dock widget with histogram and buttons."""
-        viewer = self._viewer_win.viewer
+        """Build the group preview as a separate window with histogram and buttons."""
+        from qtpy.QtWidgets import QMainWindow
+
+        win = QMainWindow()
+        win.setWindowTitle("Group Preview")
+        win.setMinimumSize(500, 450)
+        win.setStyleSheet("background-color: #2b2b2b; color: white;")
 
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -218,7 +223,7 @@ class ThresholdQCController(QObject):
                                 pen=pg.mkPen(color, width=2),
                                 brush=pg.mkBrush(color + "40"),
                             )
-            plot.setMinimumHeight(200)
+            plot.setMinimumHeight(250)
             layout.addWidget(plot)
         except ImportError:
             layout.addWidget(QLabel("(pyqtgraph not available for histogram)"))
@@ -253,15 +258,14 @@ class ThresholdQCController(QObject):
         btn_row.addWidget(cancel_btn)
 
         layout.addLayout(btn_row)
-        layout.addStretch()
 
-        self._preview_dock = viewer.window.add_dock_widget(
-            widget, name="Group Preview", area="right",
-        )
+        win.setCentralWidget(widget)
+        win.show()
+        self._preview_window = win
 
     def _on_proceed(self) -> None:
         """Remove preview and start per-group thresholding."""
-        self._remove_preview_dock()
+        self._close_preview_window()
         self._remove_layer(_LAYER_GROUP_PREVIEW)
         self._current_index = 0
         self._show_group_qc()
@@ -344,12 +348,14 @@ class ThresholdQCController(QObject):
             edge_color="yellow",
             edge_width=2,
             face_color=[1, 1, 0, 0.1],
+            blending="additive",
         )
 
-        # Wire ROI changes
+        # Wire ROI changes — use set_data event which fires only AFTER
+        # drawing is complete (not during drag like the data event)
         for layer in viewer.layers:
             if layer.name == _LAYER_ROI:
-                layer.events.data.connect(self._on_roi_changed)
+                layer.events.set_data.connect(self._on_roi_changed)
                 break
 
         # Build/update QC dock widget
@@ -642,7 +648,7 @@ class ThresholdQCController(QObject):
 
     def _cleanup_all(self) -> None:
         """Remove all temporary layers and dock widgets."""
-        self._remove_preview_dock()
+        self._close_preview_window()
         self._remove_qc_dock()
         for name in (_LAYER_GROUP_PREVIEW, _LAYER_GROUP_IMAGE,
                      _LAYER_THRESHOLD_PREVIEW, _LAYER_ROI):
@@ -659,15 +665,13 @@ class ThresholdQCController(QObject):
                 except Exception:
                     pass
 
-    def _remove_preview_dock(self) -> None:
-        if self._preview_dock is not None:
+    def _close_preview_window(self) -> None:
+        if hasattr(self, "_preview_window") and self._preview_window is not None:
             try:
-                viewer = self._viewer_win.viewer
-                if viewer is not None:
-                    viewer.window.remove_dock_widget(self._preview_dock)
+                self._preview_window.close()
             except Exception:
                 pass
-            self._preview_dock = None
+            self._preview_window = None
 
     def _remove_qc_dock(self) -> None:
         if self._qc_dock is not None:
