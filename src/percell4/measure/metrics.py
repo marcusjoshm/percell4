@@ -17,6 +17,7 @@ from collections.abc import Callable
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.stats import mode as _scipy_mode
 
 MetricFunction = Callable[[NDArray, NDArray], float]
 
@@ -74,6 +75,40 @@ def area(image: NDArray, mask: NDArray) -> float:
     return float(np.sum(mask))
 
 
+def mode_intensity(image: NDArray, mask: NDArray) -> float:
+    """Most frequent pixel intensity within the cell mask.
+
+    Uses scipy.stats.mode for correctness on both integer and float images.
+    Ties are broken by returning the smallest value.
+    """
+    pixels = image[mask]
+    if len(pixels) == 0:
+        return 0.0
+    result = _scipy_mode(pixels, keepdims=False)
+    return float(result.mode)
+
+
+def sg_ratio(image: NDArray, mask: NDArray) -> float:
+    """Signal-to-ground contrast ratio (cell-size-invariant).
+
+    Computed as mean(pixels >= 95th percentile) / mean(pixels <= 50th
+    percentile).  Uses means (not sums) so the ratio is independent of
+    cell area.
+
+    Returns NaN when the ground mean is zero (common when the median
+    intensity is zero in fluorescence data).
+    """
+    pixels = image[mask]
+    if len(pixels) == 0:
+        return 0.0
+    p50, p95 = np.percentile(pixels, [50, 95])
+    signal = pixels[pixels >= p95]
+    ground = pixels[pixels <= p50]
+    if len(ground) == 0 or ground.mean() == 0:
+        return float("nan")
+    return float(signal.mean() / ground.mean())
+
+
 # Registry of all built-in metrics
 BUILTIN_METRICS: dict[str, MetricFunction] = {
     "mean_intensity": mean_intensity,
@@ -83,4 +118,6 @@ BUILTIN_METRICS: dict[str, MetricFunction] = {
     "std_intensity": std_intensity,
     "median_intensity": median_intensity,
     "area": area,
+    "mode_intensity": mode_intensity,
+    "sg_ratio": sg_ratio,
 }
