@@ -201,10 +201,13 @@ class ViewerWindow:
         kwargs.pop("colormap", None)  # color_dict takes precedence
         cmap = DirectLabelColormap(color_dict=color_dict)
 
+        blending = kwargs.pop("blending", "additive")
+
         if name in self.viewer.layers:
             layer = self.viewer.layers[name]
             layer.data = data
             layer.colormap = cmap
+            layer.blending = blending
             layer.metadata[PERCELL_TYPE_KEY] = LAYER_TYPE_MASK
         else:
             if "opacity" not in kwargs:
@@ -213,6 +216,7 @@ class ViewerWindow:
                 data,
                 name=name,
                 colormap=cmap,
+                blending=blending,
                 metadata={PERCELL_TYPE_KEY: LAYER_TYPE_MASK},
                 **kwargs,
             )
