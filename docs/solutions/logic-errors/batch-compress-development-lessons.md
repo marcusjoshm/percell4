@@ -3,14 +3,14 @@ title: "Batch Compress Development Lessons"
 category: logic-errors
 tags: [batch-import, discovery, masks, napari, tile-stitching, qt-dialog, hdf5]
 module: io, gui
-symptom: "Multiple bugs during batch compress feature: blank masks, API mismatch, unusable UX"
-root_cause: "Boundary mismatches between image libraries and napari/HDF5, wrong abstraction level for UI, function signature drift"
+symptom: "Multiple bugs during batch compress feature: blank masks, identical .h5 outputs, API mismatch, unusable UX"
+root_cause: "Boundary mismatches between image libraries and napari/HDF5, shared source_dir in flat discovery, wrong abstraction level for UI, function signature drift"
 date: 2026-04-04
 ---
 
 # Batch Compress Development Lessons
 
-Lessons from building the batch compress feature (branch `feat/batch-compress-tiff-datasets`, 14 commits). Covers five distinct bugs and three design pivots.
+Lessons from building the batch compress feature (branch `feat/batch-compress-tiff-datasets`). Covers six distinct bugs and three design pivots.
 
 ## Bug 1: Mask Layers Blank in Napari (0/255 vs 0/1)
 
@@ -50,7 +50,41 @@ array = assemble_tiles(
 
 **Prevention:** When a function takes N related parameters that have a corresponding dataclass, either: (a) update the function to accept the dataclass, or (b) always unpack explicitly at the call site. Never assume a function accepts a dataclass just because one exists for its parameters. Pin with tests.
 
-## Bug 3: Token Regex Discovery Unusable
+## Bug 3: Batch Compress Produces Identical .h5 Files for All Datasets
+
+**Symptom:** Compressing multiple datasets discovered from a flat directory produced N .h5 files with different names but identical content — all containing the same data from the first dataset.
+
+**Root cause:** In flat directory discovery (`discover_flat`), all `DatasetSpec` objects share the same `source_dir` (the flat directory root). The launcher passed `ds.source_dir` to `import_dataset()`, which called `FileScanner.scan(path=source_dir)` — scanning the entire directory every time. Every dataset got all files from all groups.
+
+**The critical data flow bug:**
+```
+discover_flat("/data/FLIM_mNG-mask")
+  → DatasetSpec(name="1hr_Ars_1A_...", source_dir="/data/FLIM_mNG-mask", files=(420 files for 1A))
+  → DatasetSpec(name="1hr_Ars_1B_...", source_dir="/data/FLIM_mNG-mask", files=(420 files for 1B))
+
+# Launcher passes source_dir, NOT files:
+import_dataset(source_dir="/data/FLIM_mNG-mask", ...)  # scans ALL 840 files
+import_dataset(source_dir="/data/FLIM_mNG-mask", ...)  # scans ALL 840 files again
+```
+
+**Fix:** Add a `files` parameter to `import_dataset()`. When provided, the scanner uses the pre-discovered file list instead of re-scanning the directory. The launcher now passes `ds.files` for each dataset.
+
+```python
+# importer.py — use file list when provided
+if files is not None:
+    result = scanner.scan(files=[str(f.path) if hasattr(f, "path") else str(f) for f in files])
+else:
+    result = scanner.scan(path=source_dir)
+
+# launcher.py — pass per-dataset files
+import_dataset(..., files=ds.files)
+```
+
+**Prevention:** When a discovery layer groups files and passes them to a processing layer, always pass the specific file list — never re-derive it from the shared parent directory. The `DatasetSpec.files` tuple exists precisely for this purpose. Any code that ignores it and re-scans `source_dir` will produce duplicates in flat directory mode.
+
+**General pattern:** Discovery produces scoped subsets. Processing must consume those subsets, not re-derive them from the original scope. This is a classic "function re-derives its input instead of using what was given" bug.
+
+## Bug 4: Token Regex Discovery Unusable
 
 **Symptom:** The "Group by Token" discovery mode required users to enter a regex with a capture group (e.g., `(sample\d+)`). Non-programmer users cannot write regex.
 
