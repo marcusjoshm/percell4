@@ -230,6 +230,10 @@ class LauncherWindow(QMainWindow):
         btn_export_csv.clicked.connect(self._on_export_csv)
         export_layout.addWidget(btn_export_csv)
 
+        btn_export_images = QPushButton("Export Images...")
+        btn_export_images.clicked.connect(self._on_export_images)
+        export_layout.addWidget(btn_export_images)
+
         layout.addWidget(export_group)
 
         # ── Placeholders ──
@@ -2359,6 +2363,71 @@ class LauncherWindow(QMainWindow):
         if path:
             self.data_model.df.to_csv(path, index=False)
             self.statusBar().showMessage(f"Exported to {path}")
+
+    def _on_export_images(self) -> None:
+        """Export selected layers from the loaded dataset as TIFF files."""
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            self.statusBar().showMessage("No dataset loaded")
+            return
+
+        from percell4.gui.export_images_dialog import ExportImagesDialog
+
+        dlg = ExportImagesDialog(self, store)
+        if dlg.exec_() != ExportImagesDialog.Accepted:
+            return
+
+        output_folder = dlg.output_folder
+        channels = dlg.selected_channels
+        labels = dlg.selected_labels
+        masks = dlg.selected_masks
+        dlg.deleteLater()
+
+        if output_folder is None:
+            self.statusBar().showMessage("No output folder selected")
+            return
+
+        output_folder.mkdir(parents=True, exist_ok=True)
+
+        # Dataset name for file prefix
+        h5_name = Path(getattr(self, "_current_h5_path", "dataset")).stem
+
+        import tifffile
+
+        exported = 0
+        try:
+            with store.open_read() as s:
+                # Export intensity channels
+                if channels:
+                    intensity = s.read_array("intensity")
+                    for name, idx in channels:
+                        if intensity.ndim == 3:
+                            data = intensity[idx]
+                        else:
+                            data = intensity
+                        out_path = output_folder / f"{h5_name}_{name}.tif"
+                        tifffile.imwrite(str(out_path), data)
+                        exported += 1
+
+                # Export segmentation labels
+                for name in labels:
+                    data = s.read_labels(name)
+                    out_path = output_folder / f"{h5_name}_{name}.tif"
+                    tifffile.imwrite(str(out_path), data)
+                    exported += 1
+
+                # Export masks
+                for name in masks:
+                    data = s.read_mask(name)
+                    out_path = output_folder / f"{h5_name}_{name}.tif"
+                    tifffile.imwrite(str(out_path), data)
+                    exported += 1
+
+            self.statusBar().showMessage(
+                f"Exported {exported} image(s) to {output_folder}"
+            )
+        except Exception as e:
+            self.statusBar().showMessage(f"Export error: {e}")
 
     # ── Lifecycle ─────────────────────────────────────────────
 
