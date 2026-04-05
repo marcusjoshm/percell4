@@ -207,9 +207,6 @@ class ThresholdQCController(QObject):
             col_name = f"{self._channel}_{self._metric}"
             df = self._data_model.df
 
-            # Build bin→labels mapping for click selection
-            self._hist_bin_labels: list[list[int]] = []
-            self._hist_bin_edges: np.ndarray | None = None
             n_bins = 50
 
             if df is not None and col_name in df.columns:
@@ -222,20 +219,13 @@ class ThresholdQCController(QObject):
 
                 if len(vals_all) > 0:
                     bin_edges = np.linspace(vals_all.min(), vals_all.max(), n_bins + 1)
-                    self._hist_bin_edges = bin_edges
                     bar_width = (bin_edges[1] - bin_edges[0]) * 0.95
 
-                    # Assign each cell to a bin
+                    # Assign each cell to a bin for histogram counts
                     bin_indices = np.digitize(vals_all.values, bin_edges) - 1
                     bin_indices = np.clip(bin_indices, 0, n_bins - 1)
                     grouped_df = grouped_df.loc[vals_all.index]
                     grouped_df["_bin"] = bin_indices
-
-                    # Pre-compute bin→labels mapping
-                    self._hist_bin_labels = [[] for _ in range(n_bins)]
-                    for _, row in grouped_df.iterrows():
-                        b = int(row["_bin"])
-                        self._hist_bin_labels[b].append(int(row["label"]))
 
                     # Plot stacked bars per group (bottom-up)
                     bar_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
@@ -258,16 +248,12 @@ class ThresholdQCController(QObject):
                         plot.addItem(bar)
                         cumulative += counts
 
-            # Wire mouse click on the plot to select histogram bins
-            plot.scene().sigMouseClicked.connect(self._on_hist_clicked)
-            self._hist_plot = plot
-
             plot.setMinimumHeight(250)
             layout.addWidget(plot)
         except ImportError:
             layout.addWidget(QLabel("(pyqtgraph not available for histogram)"))
 
-        # Group summary
+        # Group summary — each group is a clickable button that selects its cells
         summary = QLabel(f"Groups found: {len(self._groups)}")
         summary.setStyleSheet("color: white; font-weight: bold;")
         layout.addWidget(summary)
@@ -275,9 +261,18 @@ class ThresholdQCController(QObject):
         for i, gs in enumerate(self._groups):
             mean_val = self._result.group_means[i]
             color = _GROUP_COLORS[i % len(_GROUP_COLORS)]
-            lbl = QLabel(f"  Group {gs.group_id}: {len(gs.cell_labels)} cells (mean: {mean_val:.1f})")
-            lbl.setStyleSheet(f"color: {color};")
-            layout.addWidget(lbl)
+            btn = QPushButton(
+                f"Group {gs.group_id}: {len(gs.cell_labels)} cells (mean: {mean_val:.1f})"
+            )
+            btn.setStyleSheet(
+                f"QPushButton {{ color: {color}; background: transparent;"
+                f" border: 1px solid {color}; border-radius: 3px;"
+                f" padding: 4px; text-align: left; }}"
+                f" QPushButton:hover {{ background: {color}30; }}"
+            )
+            cell_labels = [int(cl) for cl in gs.cell_labels]
+            btn.clicked.connect(lambda _, labels=cell_labels: self._on_group_select(labels))
+            layout.addWidget(btn)
 
         # Buttons
         btn_row = QHBoxLayout()
@@ -315,42 +310,9 @@ class ThresholdQCController(QObject):
         self._cleanup_all()
         self._finish(False, "Re-group requested — adjust parameters and run again")
 
-    def _on_hist_clicked(self, event) -> None:
-        """Mouse clicked on histogram plot — map to bin and select cells."""
-        if not hasattr(self, "_hist_bin_edges") or self._hist_bin_edges is None:
-            return
-        if not hasattr(self, "_hist_bin_labels") or not self._hist_bin_labels:
-            return
-
-        # Only handle left-clicks
-        from qtpy.QtCore import Qt as _Qt
-        if event.button() != _Qt.LeftButton:
-            return
-
-        # Map screen position to data coordinates
-        plot = self._hist_plot
-        vb = plot.plotItem.vb
-        pos = event.scenePos()
-        if not vb.sceneBoundingRect().contains(pos):
-            return
-        mouse_point = vb.mapSceneToView(pos)
-        x_val = mouse_point.x()
-
-        # Find which bin this x value falls in
-        edges = self._hist_bin_edges
-        bin_idx = int(np.searchsorted(edges, x_val)) - 1
-        bin_idx = np.clip(bin_idx, 0, len(self._hist_bin_labels) - 1)
-
-        labels = self._hist_bin_labels[bin_idx]
-        if not labels:
-            return
-
-        if event.modifiers() & _Qt.ControlModifier:
-            current = set(self._data_model.selected_ids)
-            current.update(labels)
-            self._data_model.set_selection(list(current))
-        else:
-            self._data_model.set_selection(labels)
+    def _on_group_select(self, labels: list[int]) -> None:
+        """Group button clicked — select all cells in that group."""
+        self._data_model.set_selection(labels)
 
     def _on_cancel(self) -> None:
         """Discard everything."""
