@@ -1,9 +1,10 @@
-"""Dataclasses for the import pipeline."""
+"""Dataclasses for the import and batch compress pipelines."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 _MAX_PATTERN_LENGTH = 200
@@ -91,3 +92,111 @@ class ScanResult:
     z_slices: set[str] = field(default_factory=set)
     tiles: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Batch compress models
+# ---------------------------------------------------------------------------
+
+
+class LayerType(StrEnum):
+    """Layer type for manual import assignment."""
+
+    CHANNEL = "channel"
+    SEGMENTATION = "segmentation"
+    MASK = "mask"
+
+
+class DiscoveryMode(StrEnum):
+    """How datasets are discovered from a root directory."""
+
+    SUBDIRECTORY = "subdirectory"
+    TOKEN = "token"
+
+
+class CompressMode(StrEnum):
+    """Auto or manual layer assignment during compress."""
+
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
+@dataclass(frozen=True)
+class FlimConfig:
+    """FLIM calibration parameters for a dataset."""
+
+    frequency_mhz: float = 80.0
+    channel_calibrations: tuple[tuple[float, float], ...] = ()
+    bin_x: int = 0
+    bin_y: int = 0
+    bin_t: int = 0
+    bin_dtype: str = "uint16"
+    bin_dim_order: str = "XYTC"
+    bin_header_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class LayerAssignment:
+    """Per-file layer type and name override for manual mode."""
+
+    layer_type: LayerType = LayerType.CHANNEL
+    name: str = ""
+
+
+@dataclass(frozen=True)
+class DatasetSpec:
+    """Immutable discovery result — what was found on disk."""
+
+    name: str
+    source_dir: Path | None
+    files: tuple[DiscoveredFile, ...]
+    output_path: Path
+    scan_result: ScanResult | None = None
+    tile_config: TileConfig | None = None
+    flim_config: FlimConfig | None = None
+
+
+@dataclass
+class DatasetGuiState:
+    """Mutable GUI state for a dataset (lives in the dialog, not io/)."""
+
+    checked: bool = True
+    layer_assignments: dict[Path, LayerAssignment] | None = None
+    tile_config_override: TileConfig | None = None
+    flim_config_override: FlimConfig | None = None
+
+
+@dataclass
+class CompressConfig:
+    """Collected settings for a batch compress operation."""
+
+    z_project_method: str = "mip"
+    token_config: TokenConfig = field(default_factory=TokenConfig)
+    output_dir: Path | None = None
+    datasets: list[DatasetSpec] = field(default_factory=list)
+    gui_states: dict[str, DatasetGuiState] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DatasetResult:
+    """Successful compression result for one dataset."""
+
+    name: str
+    output_path: Path
+
+
+@dataclass(frozen=True)
+class DatasetError:
+    """Failed compression result for one dataset."""
+
+    name: str
+    error_message: str
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """Result of a batch compress operation."""
+
+    completed: tuple[DatasetResult, ...] = ()
+    failed: tuple[DatasetError, ...] = ()
+    cancelled: bool = False
