@@ -56,6 +56,35 @@ APP_STYLESHEET = f"""
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
         border-color: {ACCENT};
     }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        background-color: {BORDER};
+        border: none;
+        border-left: 1px solid {BORDER_INPUT};
+        border-bottom: 1px solid {BORDER_INPUT};
+        width: 16px;
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        background-color: {BORDER};
+        border: none;
+        border-left: 1px solid {BORDER_INPUT};
+        width: 16px;
+    }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        image: none;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-bottom: 5px solid {TEXT_LABEL};
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: none;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid {TEXT_LABEL};
+    }}
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+        background-color: {BORDER_INPUT};
+    }}
     QComboBox QAbstractItemView {{
         background-color: {SURFACE};
         color: {TEXT_BRIGHT};
@@ -64,7 +93,15 @@ APP_STYLESHEET = f"""
     }}
     QComboBox::drop-down {{
         border: none;
+        border-left: 1px solid {BORDER_INPUT};
         width: 20px;
+    }}
+    QComboBox::down-arrow {{
+        image: none;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 6px solid {TEXT_LABEL};
+        margin-right: 6px;
     }}
 
     /* ── Buttons ── */
@@ -80,6 +117,13 @@ APP_STYLESHEET = f"""
 
     /* ── Check / Radio ── */
     QCheckBox, QRadioButton {{ color: {TEXT}; }}
+    QCheckBox::indicator {{ width: 16px; height: 16px; }}
+    QCheckBox::indicator:unchecked {{
+        border: 1px solid #555555; border-radius: 3px; background-color: {SURFACE};
+    }}
+    QCheckBox::indicator:checked {{
+        border: 1px solid {ACCENT}; border-radius: 3px; background-color: {ACCENT};
+    }}
 
     /* ── Labels ── */
     QLabel {{ color: {TEXT_LABEL}; }}
@@ -160,6 +204,50 @@ APP_STYLESHEET = f"""
 
     /* ── Scroll areas ── */
     QScrollArea {{ background-color: {BACKGROUND}; border: none; }}
+
+    /* ── Scrollbars ── */
+    QScrollBar:vertical {{
+        background-color: {BACKGROUND};
+        width: 12px;
+        border: none;
+        margin: 0;
+    }}
+    QScrollBar::handle:vertical {{
+        background-color: {BORDER};
+        border-radius: 4px;
+        min-height: 20px;
+        margin: 2px;
+    }}
+    QScrollBar::handle:vertical:hover {{
+        background-color: {BORDER_INPUT};
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0px;
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+        background: none;
+    }}
+    QScrollBar:horizontal {{
+        background-color: {BACKGROUND};
+        height: 12px;
+        border: none;
+        margin: 0;
+    }}
+    QScrollBar::handle:horizontal {{
+        background-color: {BORDER};
+        border-radius: 4px;
+        min-width: 20px;
+        margin: 2px;
+    }}
+    QScrollBar::handle:horizontal:hover {{
+        background-color: {BORDER_INPUT};
+    }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        width: 0px;
+    }}
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+        background: none;
+    }}
 
     /* ── Dialog button boxes ── */
     QDialogButtonBox QPushButton {{ min-width: 80px; }}
