@@ -55,17 +55,9 @@ class GroupedSegPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
-
-        title = QLabel("Grouped Thresholding")
-        title.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: #ffffff;"
-            " margin-bottom: 12px; padding-bottom: 4px;"
-            " border-bottom: 1px solid #3a3a3a;"
-        )
-        layout.addWidget(title)
 
         # ── Channel selector ──
         chan_row = QHBoxLayout()

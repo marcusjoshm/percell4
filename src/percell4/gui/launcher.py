@@ -343,8 +343,8 @@ class LauncherWindow(QMainWindow):
 
         layout.addWidget(filter_group)
 
-        # ── Thresholding group ──
-        thresh_group = QGroupBox("Thresholding")
+        # ── Whole Field Thresholding group ──
+        thresh_group = QGroupBox("Whole Field Thresholding")
         thresh_layout = QVBoxLayout(thresh_group)
 
         # Channel display (from napari active layer)
@@ -412,6 +412,17 @@ class LauncherWindow(QMainWindow):
         thresh_layout.addWidget(self._thresh_result_label)
 
         layout.addWidget(thresh_group)
+
+        # ── Grouped Thresholding ──
+        from percell4.gui.grouped_seg_panel import GroupedSegPanel
+
+        self._grouped_seg_panel = GroupedSegPanel(
+            self.data_model, launcher=self
+        )
+        grouped_group = QGroupBox("Grouped Thresholding")
+        grouped_layout = QVBoxLayout(grouped_group)
+        grouped_layout.addWidget(self._grouped_seg_panel)
+        layout.addWidget(grouped_group)
 
         # ── Measurements group ──
         meas_group = QGroupBox("Measurements")
@@ -560,12 +571,16 @@ class LauncherWindow(QMainWindow):
         return panel
 
     def _create_workflows_panel(self) -> QWidget:
-        from percell4.gui.grouped_seg_panel import GroupedSegPanel
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setAlignment(Qt.AlignTop)
+        layout.setContentsMargins(20, 20, 20, 20)
 
-        self._grouped_seg_panel = GroupedSegPanel(
-            self.data_model, launcher=self
-        )
-        return self._grouped_seg_panel
+        layout.addWidget(self._section_label("Workflows"))
+        layout.addWidget(self._placeholder("Standard Analysis Pipeline"))
+        layout.addWidget(self._placeholder("Custom Workflow Builder"))
+        layout.addStretch()
+        return panel
 
     def _create_data_panel(self) -> QWidget:
         panel = QWidget()
