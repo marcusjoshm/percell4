@@ -4,6 +4,11 @@ All color constants and the global application stylesheet live here.
 Individual GUI files import constants for dynamic styling only.
 """
 
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
 # ── Color palette ──────────────────────────────────────────────────
 BACKGROUND_DEEP = "#121212"    # Launcher main area
 BACKGROUND = "#1e1e1e"         # Dialogs, panels, standalone windows
@@ -24,6 +29,26 @@ ACTION_GREEN_HOVER = "#35a355" # Green button hover
 SIDEBAR = "#1e2a3a"            # Launcher sidebar
 SIDEBAR_ACTIVE = "#0d1b2a"    # Launcher sidebar checked state
 SIDEBAR_HOVER = "#2a3d52"     # Launcher sidebar hover
+
+# ── Arrow icons (written to temp dir for stylesheet url() refs) ────
+_ARROW_DIR = Path(tempfile.mkdtemp(prefix="percell4_arrows_"))
+
+_ARROW_UP_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6">'
+    '<polygon points="5,0 10,6 0,6" fill="#cccccc"/></svg>'
+)
+_ARROW_DOWN_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6">'
+    '<polygon points="0,0 10,0 5,6" fill="#cccccc"/></svg>'
+)
+
+_arrow_up_path = _ARROW_DIR / "arrow_up.svg"
+_arrow_down_path = _ARROW_DIR / "arrow_down.svg"
+_arrow_up_path.write_text(_ARROW_UP_SVG)
+_arrow_down_path.write_text(_ARROW_DOWN_SVG)
+
+_ARROW_UP = str(_arrow_up_path).replace("\\", "/")
+_ARROW_DOWN = str(_arrow_down_path).replace("\\", "/")
 
 APP_STYLESHEET = f"""
     /* ── Base ── */
@@ -67,11 +92,11 @@ APP_STYLESHEET = f"""
         background-color: {BORDER_INPUT};
     }}
     QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-        image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><polygon points='5,0 10,6 0,6' fill='%23cccccc'/></svg>");
+        image: url({_ARROW_UP});
         width: 10px; height: 6px;
     }}
     QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-        image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><polygon points='0,0 10,0 5,6' fill='%23cccccc'/></svg>");
+        image: url({_ARROW_DOWN});
         width: 10px; height: 6px;
     }}
     QComboBox QAbstractItemView {{
@@ -86,7 +111,7 @@ APP_STYLESHEET = f"""
         width: 20px;
     }}
     QComboBox::down-arrow {{
-        image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><polygon points='0,0 10,0 5,6' fill='%23cccccc'/></svg>");
+        image: url({_ARROW_DOWN});
         width: 10px; height: 6px;
     }}
 
