@@ -511,10 +511,10 @@ class AddLayerDialog(QDialog):
 
                 # Scan this dataset's files
                 scanner = FileScanner(token_config)
-                if ds.source_dir:
-                    scan = scanner.scan(path=ds.source_dir)
+                if ds.files:
+                    scan = scanner.scan(files=[str(f.path) if hasattr(f, "path") else str(f) for f in ds.files])
                 else:
-                    scan = scanner.scan(files=[str(f.path) for f in ds.files])
+                    scan = scanner.scan(path=ds.source_dir)
 
                 # Group by channel
                 from collections import defaultdict
