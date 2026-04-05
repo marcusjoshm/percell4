@@ -166,7 +166,7 @@ class PhasorPlotWindow(QMainWindow):
 
         controls.addSpacing(16)
         self._filtered_check = QCheckBox("Filtered")
-        self._filtered_check.setStyleSheet("QCheckBox { color: #e0e0e0; }")
+        # Checkbox styling inherited from global theme
         self._filtered_check.setEnabled(False)
         self._filtered_check.toggled.connect(self._on_filtered_toggled)
         controls.addWidget(self._filtered_check)
@@ -175,7 +175,9 @@ class PhasorPlotWindow(QMainWindow):
 
         # Plot
         self._plot = pg.PlotWidget()
-        self._plot.setBackground("w")
+        from percell4.gui import theme
+
+        self._plot.setBackground(theme.BACKGROUND)
         self._plot.setAspectLocked(False)
         self._plot.setLabel("bottom", "G")
         self._plot.setLabel("left", "S")
@@ -194,7 +196,7 @@ class PhasorPlotWindow(QMainWindow):
         semi_g = 0.5 + 0.5 * np.cos(theta)
         semi_s = 0.5 * np.sin(theta)
         self._semicircle = pg.PlotCurveItem(
-            semi_g, semi_s, pen=pg.mkPen("k", width=2),
+            semi_g, semi_s, pen=pg.mkPen(theme.TEXT_LABEL, width=2),
         )
         self._semicircle.setZValue(10)
         self._plot.addItem(self._semicircle)

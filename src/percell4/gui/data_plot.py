@@ -108,7 +108,9 @@ class DataPlotWindow(QMainWindow):
         # Plot widget with custom ViewBox for Shift+drag selection
         self._vb = SelectionViewBox()
         self._plot = pg.PlotWidget(viewBox=self._vb)
-        self._plot.setBackground("#1e1e1e")
+        from percell4.gui import theme
+
+        self._plot.setBackground(theme.BACKGROUND)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._plot.installEventFilter(self)  # for Escape key
         layout.addWidget(self._plot)
