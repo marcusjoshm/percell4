@@ -1,7 +1,9 @@
 """Compress dialog for converting TIFF directories to HDF5 datasets.
 
 Replaces ImportDialog with support for batch compression. Discovers
-datasets from a root directory and lets the user select which to compress.
+datasets from a root directory and lets the user select which datasets
+and channels to compress. Operates at the semantic level (datasets,
+channels) rather than individual files.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from pathlib import Path
 
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -18,11 +21,11 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
-    QRadioButton,
     QScrollArea,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +33,8 @@ from qtpy.QtWidgets import (
 from percell4.io.models import (
     CompressConfig,
     DatasetGuiState,
+    DatasetSpec,
+    TileConfig,
     TokenConfig,
 )
 
@@ -37,20 +42,24 @@ from percell4.io.models import (
 class CompressDialog(QDialog):
     """Dialog for discovering and compressing TIFF datasets to HDF5.
 
-    Supports both single-dataset and batch compression. The dialog
-    auto-detects: one dataset shows a simple view, multiple datasets
-    show a tree with checkboxes for selection.
+    Presents semantic-level selection: pick datasets (left list) and
+    channels (right list). Tiles, z-slices, and timepoints are shown
+    as informational summaries with global configuration.
     """
 
     def __init__(self, parent=None, project_dir: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Compress TIFF Dataset")
-        self.setMinimumWidth(600)
-        self.resize(650, 600)
+        self.setMinimumWidth(700)
+        self.resize(750, 650)
         self._project_dir = project_dir
 
         self._datasets: list[DatasetSpec] = []
         self._gui_states: dict[str, DatasetGuiState] = {}
+        self._all_channels: list[str] = []
+        self._all_tiles: list[str] = []
+        self._all_z_slices: list[str] = []
+        self._all_timepoints: list[str] = []
         self._discovery_generation = 0
 
         self._build_ui()
@@ -66,7 +75,9 @@ class CompressDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background-color: #1e1e1e; border: none; }")
+        scroll.setStyleSheet(
+            "QScrollArea { background-color: #1e1e1e; border: none; }"
+        )
         outer.addWidget(scroll)
 
         content = QWidget()
@@ -81,7 +92,9 @@ class CompressDialog(QDialog):
         row_src = QHBoxLayout()
         row_src.addWidget(QLabel("Directory:"))
         self._source_edit = QLineEdit()
-        self._source_edit.setPlaceholderText("Select a folder containing TIFFs...")
+        self._source_edit.setPlaceholderText(
+            "Select a folder containing TIFFs..."
+        )
         self._source_edit.setReadOnly(True)
         row_src.addWidget(self._source_edit, 1)
         btn_browse_src = QPushButton("Browse...")
@@ -92,7 +105,9 @@ class CompressDialog(QDialog):
         row_out = QHBoxLayout()
         row_out.addWidget(QLabel("Output:"))
         self._output_edit = QLineEdit()
-        self._output_edit.setPlaceholderText("Defaults to source parent directory")
+        self._output_edit.setPlaceholderText(
+            "Defaults to source parent directory"
+        )
         row_out.addWidget(self._output_edit, 1)
         btn_browse_out = QPushButton("Browse...")
         btn_browse_out.clicked.connect(self._on_browse_output)
@@ -111,59 +126,107 @@ class CompressDialog(QDialog):
             "Flat Directory: groups files by stripping token patterns\n"
             "(channel, tile, etc.) from filenames."
         )
-        self._discovery_combo.currentIndexChanged.connect(self._on_discovery_mode_changed)
+        self._discovery_combo.currentIndexChanged.connect(
+            self._on_discovery_mode_changed
+        )
         mode_row.addWidget(self._discovery_combo)
         mode_row.addStretch()
         layout.addLayout(mode_row)
 
-        # ── Auto/Manual toggle ──
-        toggle_row = QHBoxLayout()
-        toggle_row.addWidget(QLabel("Mode:"))
-        self._auto_radio = QRadioButton("Auto")
-        self._auto_radio.setChecked(True)
-        self._manual_radio = QRadioButton("Manual")
-        toggle_row.addWidget(self._auto_radio)
-        toggle_row.addWidget(self._manual_radio)
-        toggle_row.addStretch()
-        layout.addLayout(toggle_row)
+        # ── Datasets + Channels (side by side) ──
+        lists_row = QHBoxLayout()
 
-        # ── Dataset Tree ──
-        tree_group = QGroupBox("Discovered Datasets")
-        tree_layout = QVBoxLayout(tree_group)
+        # Left: datasets
+        ds_group = QGroupBox("Datasets")
+        ds_layout = QVBoxLayout(ds_group)
 
-        btn_row = QHBoxLayout()
-        btn_select_all = QPushButton("Select All")
-        btn_select_all.clicked.connect(self._on_select_all)
-        btn_deselect_all = QPushButton("Deselect All")
-        btn_deselect_all.clicked.connect(self._on_deselect_all)
-        btn_row.addWidget(btn_select_all)
-        btn_row.addWidget(btn_deselect_all)
-        btn_row.addStretch()
-        self._dataset_count_label = QLabel("")
-        btn_row.addWidget(self._dataset_count_label)
-        tree_layout.addLayout(btn_row)
+        ds_btn_row = QHBoxLayout()
+        btn_ds_all = QPushButton("Select All")
+        btn_ds_all.clicked.connect(self._on_select_all_datasets)
+        btn_ds_none = QPushButton("Deselect All")
+        btn_ds_none.clicked.connect(self._on_deselect_all_datasets)
+        ds_btn_row.addWidget(btn_ds_all)
+        ds_btn_row.addWidget(btn_ds_none)
+        ds_btn_row.addStretch()
+        self._ds_count_label = QLabel("")
+        ds_btn_row.addWidget(self._ds_count_label)
+        ds_layout.addLayout(ds_btn_row)
 
-        self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Name", "Files", "Channels", "Output"])
-        self._tree.setColumnWidth(0, 200)
-        self._tree.setColumnWidth(1, 50)
-        self._tree.setColumnWidth(2, 100)
-        self._tree.header().setStretchLastSection(True)
-        self._tree.setRootIsDecorated(True)
-        self._tree.itemChanged.connect(self._on_item_changed)
-        tree_layout.addWidget(self._tree)
+        self._ds_list = QListWidget()
+        ds_layout.addWidget(self._ds_list)
+        lists_row.addWidget(ds_group, 3)
 
-        layout.addWidget(tree_group)
+        # Right: channels
+        ch_group = QGroupBox("Channels")
+        ch_layout = QVBoxLayout(ch_group)
 
-        # ── Global Settings ──
+        ch_btn_row = QHBoxLayout()
+        btn_ch_all = QPushButton("Select All")
+        btn_ch_all.clicked.connect(self._on_select_all_channels)
+        btn_ch_none = QPushButton("Deselect All")
+        btn_ch_none.clicked.connect(self._on_deselect_all_channels)
+        ch_btn_row.addWidget(btn_ch_all)
+        ch_btn_row.addWidget(btn_ch_none)
+        ch_btn_row.addStretch()
+        ch_layout.addLayout(ch_btn_row)
+
+        self._ch_list = QListWidget()
+        ch_layout.addWidget(self._ch_list)
+        lists_row.addWidget(ch_group, 1)
+
+        layout.addLayout(lists_row)
+
+        # ── Discovery summary ──
+        self._summary_label = QLabel("")
+        self._summary_label.setWordWrap(True)
+        layout.addWidget(self._summary_label)
+
+        # ── Settings ──
         settings_group = QGroupBox("Settings")
-        settings_layout = QHBoxLayout(settings_group)
+        settings_layout = QVBoxLayout(settings_group)
 
-        settings_layout.addWidget(QLabel("Z-Projection:"))
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Z-Projection:"))
         self._z_combo = QComboBox()
         self._z_combo.addItems(["mip", "mean", "sum", "none"])
-        settings_layout.addWidget(self._z_combo)
-        settings_layout.addStretch()
+        row1.addWidget(self._z_combo)
+        row1.addStretch()
+        settings_layout.addLayout(row1)
+
+        # Tile stitching
+        self._stitch_check = QCheckBox("Tile Stitching")
+        self._stitch_check.toggled.connect(self._on_stitch_toggled)
+        settings_layout.addWidget(self._stitch_check)
+
+        self._stitch_widget = QWidget()
+        stitch_layout = QHBoxLayout(self._stitch_widget)
+        stitch_layout.setContentsMargins(20, 0, 0, 0)
+        stitch_layout.addWidget(QLabel("Rows:"))
+        self._stitch_rows = QSpinBox()
+        self._stitch_rows.setRange(1, 100)
+        self._stitch_rows.setValue(1)
+        stitch_layout.addWidget(self._stitch_rows)
+        stitch_layout.addWidget(QLabel("Cols:"))
+        self._stitch_cols = QSpinBox()
+        self._stitch_cols.setRange(1, 100)
+        self._stitch_cols.setValue(1)
+        stitch_layout.addWidget(self._stitch_cols)
+        stitch_layout.addWidget(QLabel("Pattern:"))
+        self._stitch_type = QComboBox()
+        self._stitch_type.addItems(
+            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
+        )
+        stitch_layout.addWidget(self._stitch_type)
+        stitch_layout.addWidget(QLabel("Start:"))
+        self._stitch_order = QComboBox()
+        self._stitch_order.addItems(
+            ["right_down", "right_up", "left_down", "left_up",
+             "top_left", "top_right", "bottom_left", "bottom_right"]
+        )
+        stitch_layout.addWidget(self._stitch_order)
+        stitch_layout.addStretch()
+        self._stitch_widget.setVisible(False)
+        settings_layout.addWidget(self._stitch_widget)
 
         layout.addWidget(settings_group)
 
@@ -191,8 +254,11 @@ class CompressDialog(QDialog):
             row.addWidget(widget)
             token_layout.addLayout(row)
 
+        btn_rescan = QPushButton("Re-scan with new patterns")
+        btn_rescan.clicked.connect(self._run_discovery)
+        token_layout.addWidget(btn_rescan)
+
         layout.addWidget(self._token_group)
-        # Hide token content when unchecked
         self._token_group.toggled.connect(self._on_token_group_toggled)
         self._on_token_group_toggled(False)
 
@@ -211,7 +277,7 @@ class CompressDialog(QDialog):
         outer.addLayout(action_row)
 
     # ------------------------------------------------------------------
-    # Properties — single materialized config, read once after exec_()
+    # Properties
     # ------------------------------------------------------------------
 
     @property
@@ -221,12 +287,42 @@ class CompressDialog(QDialog):
         if self._output_edit.text().strip():
             output_dir = Path(self._output_edit.text().strip())
 
+        selected_channels = set()
+        for i in range(self._ch_list.count()):
+            item = self._ch_list.item(i)
+            if item.checkState() == Qt.Checked:
+                selected_channels.add(item.data(Qt.UserRole))
+
+        tile_config = None
+        if self._stitch_check.isChecked():
+            tile_config = TileConfig(
+                grid_rows=self._stitch_rows.value(),
+                grid_cols=self._stitch_cols.value(),
+                grid_type=self._stitch_type.currentText(),
+                order=self._stitch_order.currentText(),
+            )
+
+        # Sync dataset check states
+        checked_names = set()
+        for i in range(self._ds_list.count()):
+            item = self._ds_list.item(i)
+            if item.checkState() == Qt.Checked:
+                checked_names.add(item.data(Qt.UserRole))
+
+        gui_states = {}
+        for ds in self._datasets:
+            gui_states[ds.name] = DatasetGuiState(
+                checked=ds.name in checked_names,
+            )
+
         return CompressConfig(
             z_project_method=self._z_combo.currentText(),
             token_config=self._current_token_config(),
             output_dir=output_dir,
+            selected_channels=selected_channels,
+            tile_config=tile_config,
             datasets=list(self._datasets),
-            gui_states=copy.deepcopy(self._gui_states),
+            gui_states=gui_states,
         )
 
     # ------------------------------------------------------------------
@@ -251,72 +347,42 @@ class CompressDialog(QDialog):
         )
         if path:
             self._output_edit.setText(path)
-            self._run_discovery()
 
     def _on_discovery_mode_changed(self, index: int) -> None:
         if self._source_edit.text().strip():
             self._run_discovery()
+
+    def _on_stitch_toggled(self, checked: bool) -> None:
+        self._stitch_widget.setVisible(checked)
 
     def _on_token_group_toggled(self, checked: bool) -> None:
         for child in self._token_group.findChildren(QWidget):
             if child is not self._token_group:
                 child.setVisible(checked)
 
-    def _on_select_all(self) -> None:
-        self._set_all_check_state(Qt.Checked)
+    def _on_select_all_datasets(self) -> None:
+        self._set_list_check_state(self._ds_list, Qt.Checked)
 
-    def _on_deselect_all(self) -> None:
-        self._set_all_check_state(Qt.Unchecked)
+    def _on_deselect_all_datasets(self) -> None:
+        self._set_list_check_state(self._ds_list, Qt.Unchecked)
 
-    def _set_all_check_state(self, state: Qt.CheckState) -> None:
-        self._tree.blockSignals(True)
-        for i in range(self._tree.topLevelItemCount()):
-            item = self._tree.topLevelItem(i)
-            item.setCheckState(0, state)
-            for j in range(item.childCount()):
-                item.child(j).setCheckState(0, state)
-        self._tree.blockSignals(False)
-        self._sync_gui_states_from_tree()
+    def _on_select_all_channels(self) -> None:
+        self._set_list_check_state(self._ch_list, Qt.Checked)
+
+    def _on_deselect_all_channels(self) -> None:
+        self._set_list_check_state(self._ch_list, Qt.Unchecked)
+
+    def _set_list_check_state(
+        self, list_widget: QListWidget, state: Qt.CheckState
+    ) -> None:
+        list_widget.blockSignals(True)
+        for i in range(list_widget.count()):
+            list_widget.item(i).setCheckState(state)
+        list_widget.blockSignals(False)
         self._update_compress_button()
-
-    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
-        if column != 0:
-            return
-
-        self._tree.blockSignals(True)
-
-        # Parent changed → propagate to children
-        if item.childCount() > 0:
-            state = item.checkState(0)
-            if state != Qt.PartiallyChecked:
-                for i in range(item.childCount()):
-                    item.child(i).setCheckState(0, state)
-        else:
-            # Child changed → update parent tri-state
-            parent = item.parent()
-            if parent is not None:
-                self._update_parent_check_state(parent)
-
-        self._tree.blockSignals(False)
-        self._sync_gui_states_from_tree()
-        self._update_compress_button()
-
-    def _update_parent_check_state(self, parent: QTreeWidgetItem) -> None:
-        checked = sum(
-            1
-            for i in range(parent.childCount())
-            if parent.child(i).checkState(0) == Qt.Checked
-        )
-        total = parent.childCount()
-        if checked == 0:
-            parent.setCheckState(0, Qt.Unchecked)
-        elif checked == total:
-            parent.setCheckState(0, Qt.Checked)
-        else:
-            parent.setCheckState(0, Qt.PartiallyChecked)
 
     # ------------------------------------------------------------------
-    # Discovery + tree population
+    # Discovery + list population
     # ------------------------------------------------------------------
 
     def _current_token_config(self) -> TokenConfig:
@@ -345,74 +411,114 @@ class CompressDialog(QDialog):
 
         try:
             if self._discovery_combo.currentIndex() == 0:
-                datasets = discover_by_subdirectory(root, token_config, output_dir)
+                datasets = discover_by_subdirectory(
+                    root, token_config, output_dir
+                )
             else:
                 datasets = discover_flat(root, token_config, output_dir)
         except Exception as e:
-            self._dataset_count_label.setText(f"Error: {e}")
+            self._ds_count_label.setText(f"Error: {e}")
             return
 
-        # Guard against stale discovery
         if gen != self._discovery_generation:
             return
 
         self._datasets = datasets
-        # Initialize gui states for new datasets, preserve existing
-        for ds in datasets:
-            if ds.name not in self._gui_states:
-                self._gui_states[ds.name] = DatasetGuiState()
-        self._populate_tree()
+        self._aggregate_tokens()
+        self._populate_lists()
 
-    def _populate_tree(self) -> None:
-        self._tree.setUpdatesEnabled(False)
-        self._tree.blockSignals(True)
-        try:
-            self._tree.clear()
-            for ds in self._datasets:
-                gs = self._gui_states.get(ds.name, DatasetGuiState())
-                channels_str = ", ".join(
-                    sorted(ds.scan_result.channels) if ds.scan_result else []
-                )
-                parent = QTreeWidgetItem(
-                    self._tree,
-                    [ds.name, str(len(ds.files)), channels_str, ds.output_path.name],
-                )
-                parent.setFlags(
-                    parent.flags() | Qt.ItemIsUserCheckable
-                )
-                parent.setCheckState(
-                    0, Qt.Checked if gs.checked else Qt.Unchecked
-                )
-                parent.setData(0, Qt.UserRole, ds.name)
+    def _aggregate_tokens(self) -> None:
+        """Collect all unique channels, tiles, z-slices, timepoints."""
+        channels: set[str] = set()
+        tiles: set[str] = set()
+        z_slices: set[str] = set()
+        timepoints: set[str] = set()
 
+        for ds in self._datasets:
+            if ds.scan_result:
+                channels.update(ds.scan_result.channels)
+                tiles.update(ds.scan_result.tiles)
+                z_slices.update(ds.scan_result.z_slices)
+                timepoints.update(ds.scan_result.timepoints)
+            else:
                 for f in ds.files:
-                    child = QTreeWidgetItem(parent, [f.path.name, "", "", ""])
-                    child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
-                    child.setCheckState(0, parent.checkState(0))
-        finally:
-            self._tree.blockSignals(False)
-            self._tree.setUpdatesEnabled(True)
+                    if "channel" in f.tokens:
+                        channels.add(f.tokens["channel"])
+                    if "tile" in f.tokens:
+                        tiles.add(f.tokens["tile"])
+                    if "z_slice" in f.tokens:
+                        z_slices.add(f.tokens["z_slice"])
+                    if "timepoint" in f.tokens:
+                        timepoints.add(f.tokens["timepoint"])
+
+        self._all_channels = sorted(channels, key=_sort_key)
+        self._all_tiles = sorted(tiles, key=_sort_key)
+        self._all_z_slices = sorted(z_slices, key=_sort_key)
+        self._all_timepoints = sorted(timepoints, key=_sort_key)
+
+    def _populate_lists(self) -> None:
+        # ── Datasets ──
+        self._ds_list.blockSignals(True)
+        self._ds_list.clear()
+        for ds in self._datasets:
+            item = QListWidgetItem(ds.name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, ds.name)
+            self._ds_list.addItem(item)
+        self._ds_list.blockSignals(False)
 
         n = len(self._datasets)
-        self._dataset_count_label.setText(
-            f"{n} dataset{'s' if n != 1 else ''} found"
+        self._ds_count_label.setText(
+            f"{n} dataset{'s' if n != 1 else ''}"
         )
+
+        # ── Channels ──
+        self._ch_list.blockSignals(True)
+        self._ch_list.clear()
+        for ch in self._all_channels:
+            item = QListWidgetItem(f"ch{ch}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, ch)
+            self._ch_list.addItem(item)
+        self._ch_list.blockSignals(False)
+
+        # ── Summary ──
+        parts = []
+        if self._all_tiles:
+            t = self._all_tiles
+            parts.append(
+                f"Tiles: {len(t)} (s{t[0]}–s{t[-1]})"
+            )
+        if self._all_z_slices:
+            z = self._all_z_slices
+            parts.append(f"Z-slices: {len(z)} (z{z[0]}–z{z[-1]})")
+        if self._all_timepoints:
+            tp = self._all_timepoints
+            parts.append(
+                f"Timepoints: {len(tp)} (t{tp[0]}–t{tp[-1]})"
+            )
+        if not parts:
+            parts.append("No tiles, z-slices, or timepoints detected")
+        self._summary_label.setText("    ".join(parts))
+
+        # Auto-enable stitching if tiles detected
+        if self._all_tiles and not self._stitch_check.isChecked():
+            self._stitch_check.setChecked(True)
+
         self._update_compress_button()
 
-    def _sync_gui_states_from_tree(self) -> None:
-        """Sync check states from tree back to gui_states."""
-        for i in range(self._tree.topLevelItemCount()):
-            item = self._tree.topLevelItem(i)
-            name = item.data(0, Qt.UserRole)
-            if name and name in self._gui_states:
-                self._gui_states[name].checked = (
-                    item.checkState(0) != Qt.Unchecked
-                )
-
     def _update_compress_button(self) -> None:
-        any_checked = any(gs.checked for gs in self._gui_states.values())
-        has_datasets = len(self._datasets) > 0
-        self._btn_compress.setEnabled(has_datasets and any_checked)
+        any_ds = any(
+            self._ds_list.item(i).checkState() == Qt.Checked
+            for i in range(self._ds_list.count())
+        )
+        any_ch = any(
+            self._ch_list.item(i).checkState() == Qt.Checked
+            for i in range(self._ch_list.count())
+        )
+        self._btn_compress.setEnabled(any_ds and any_ch)
 
     # ------------------------------------------------------------------
     # Styling
@@ -441,7 +547,7 @@ class CompressDialog(QDialog):
                 border-radius: 4px;
                 padding: 4px 8px;
             }
-            QLineEdit:focus, QComboBox:focus {
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
                 border-color: #4ea8de;
             }
             QPushButton {
@@ -453,46 +559,40 @@ class CompressDialog(QDialog):
             }
             QPushButton:hover { background-color: #3a3a3a; border-color: #4ea8de; }
             QPushButton:disabled { color: #666666; }
-            QCheckBox, QRadioButton { color: #e0e0e0; }
+            QCheckBox { color: #e0e0e0; }
             QLabel { color: #cccccc; }
-            QTreeWidget {
+            QListWidget {
                 background-color: #1e1e1e;
                 color: #e0e0e0;
                 border: 1px solid #3a3a3a;
                 border-radius: 4px;
                 outline: none;
             }
-            QTreeWidget::item { padding: 3px 2px; }
-            QTreeWidget::item:selected {
+            QListWidget::item { padding: 3px 4px; }
+            QListWidget::item:selected {
                 background-color: #2a4a6b;
                 color: #ffffff;
             }
-            QTreeWidget::item:hover:!selected {
+            QListWidget::item:hover:!selected {
                 background-color: #2a2a2a;
             }
-            QTreeWidget::indicator { width: 16px; height: 16px; }
-            QTreeWidget::indicator:unchecked {
+            QListWidget::indicator { width: 16px; height: 16px; }
+            QListWidget::indicator:unchecked {
                 border: 1px solid #555555;
                 border-radius: 3px;
                 background-color: #2a2a2a;
             }
-            QTreeWidget::indicator:checked {
+            QListWidget::indicator:checked {
                 border: 1px solid #4ea8de;
                 border-radius: 3px;
                 background-color: #4ea8de;
             }
-            QTreeWidget::indicator:indeterminate {
-                border: 1px solid #4ea8de;
-                border-radius: 3px;
-                background-color: #2a4a6b;
-            }
-            QHeaderView::section {
-                background-color: #252525;
-                color: #4ea8de;
-                border: none;
-                border-right: 1px solid #3a3a3a;
-                border-bottom: 1px solid #3a3a3a;
-                padding: 4px 8px;
-                font-weight: bold;
-            }
         """)
+
+
+def _sort_key(val: str) -> tuple[int, str]:
+    """Sort token values numerically if possible, else alphabetically."""
+    try:
+        return (0, str(int(val)).zfill(10))
+    except ValueError:
+        return (1, val)

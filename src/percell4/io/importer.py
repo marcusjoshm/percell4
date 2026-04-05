@@ -32,6 +32,7 @@ def import_dataset(
     metadata: dict[str, Any] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
     flim_params: dict[str, Any] | None = None,
+    selected_channels: set[str] | None = None,
 ) -> int:
     """Import a directory of TIFFs into a single .h5 dataset.
 
@@ -105,6 +106,12 @@ def import_dataset(
             intensity_result.z_slices.add(f.tokens["z_slice"])
 
     channel_groups = _group_by_channel(intensity_result) if intensity_files else {}
+
+    # Filter to selected channels if specified
+    if selected_channels is not None:
+        channel_groups = {
+            k: v for k, v in channel_groups.items() if k in selected_channels
+        }
 
     # 3. Assemble intensity channels
     _progress(2, 5, "Assembling images...")

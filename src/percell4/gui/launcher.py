@@ -885,7 +885,9 @@ class LauncherWindow(QMainWindow):
                     str(ds.source_dir) if ds.source_dir else str(ds.files[0].path.parent),
                     str(ds.output_path),
                     token_config=config.token_config,
+                    tile_config=config.tile_config,
                     z_project_method=config.z_project_method,
+                    selected_channels=config.selected_channels or None,
                 )
                 completed.append(ds.name)
             except Exception as e:

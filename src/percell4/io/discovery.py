@@ -10,7 +10,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from percell4.io.models import DatasetSpec, DiscoveredFile, TokenConfig
+from percell4.io.models import DatasetSpec, DiscoveredFile, ScanResult, TokenConfig
 from percell4.io.scanner import FileScanner
 
 _TIFF_EXTENSIONS = {".tif", ".tiff"}
@@ -115,12 +115,24 @@ def discover_flat(
     datasets: list[DatasetSpec] = []
     for name in sorted(groups):
         files = groups[name]
+        # Build a ScanResult for this group
+        sr = ScanResult(files=files)
+        for f in files:
+            if "channel" in f.tokens:
+                sr.channels.add(f.tokens["channel"])
+            if "tile" in f.tokens:
+                sr.tiles.add(f.tokens["tile"])
+            if "z_slice" in f.tokens:
+                sr.z_slices.add(f.tokens["z_slice"])
+            if "timepoint" in f.tokens:
+                sr.timepoints.add(f.tokens["timepoint"])
         datasets.append(
             DatasetSpec(
                 name=name,
                 source_dir=root,
                 files=tuple(files),
                 output_path=out / f"{name}.h5",
+                scan_result=sr,
             )
         )
 

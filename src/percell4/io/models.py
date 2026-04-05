@@ -173,6 +173,8 @@ class CompressConfig:
     z_project_method: str = "mip"
     token_config: TokenConfig = field(default_factory=TokenConfig)
     output_dir: Path | None = None
+    selected_channels: set[str] = field(default_factory=set)
+    tile_config: TileConfig | None = None
     datasets: list[DatasetSpec] = field(default_factory=list)
     gui_states: dict[str, DatasetGuiState] = field(default_factory=dict)
 
