@@ -894,6 +894,7 @@ class LauncherWindow(QMainWindow):
                     tile_config=config.tile_config,
                     z_project_method=config.z_project_method,
                     selected_channels=config.selected_channels or None,
+                    layer_assignments=config.layer_assignments,
                 )
                 completed.append(display_name)
             except Exception as e:

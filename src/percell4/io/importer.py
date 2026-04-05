@@ -33,6 +33,7 @@ def import_dataset(
     progress_callback: Callable[[int, int, str], None] | None = None,
     flim_params: dict[str, Any] | None = None,
     selected_channels: set[str] | None = None,
+    layer_assignments: dict[str, Any] | None = None,
 ) -> int:
     """Import a directory of TIFFs into a single .h5 dataset.
 
@@ -113,14 +114,16 @@ def import_dataset(
             k: v for k, v in channel_groups.items() if k in selected_channels
         }
 
-    # 3. Assemble intensity channels
+    # 3. Assemble channels (intensity, labels, masks based on layer_assignments)
     _progress(2, 5, "Assembling images...")
     channel_images: list[np.ndarray] = []
     channel_names: list[str] = []
+    label_layers: list[tuple[str, np.ndarray]] = []  # (name, array)
+    mask_layers: list[tuple[str, np.ndarray]] = []   # (name, array)
 
     for ch_key in sorted(channel_groups.keys()):
         files = channel_groups[ch_key]
-        channel_names.append(f"ch{ch_key}" if ch_key else "ch0")
+        default_name = f"ch{ch_key}" if ch_key else "ch0"
 
         z_groups = _group_by_z(files)
 
@@ -137,7 +140,22 @@ def import_dataset(
                 all_files.extend(z_groups[z_key])
             channel_img = _load_and_stitch(all_files, tile_config)
 
-        channel_images.append(channel_img.astype(np.float32))
+        # Route to correct layer type based on assignment
+        assignment = layer_assignments.get(ch_key) if layer_assignments else None
+        if assignment is not None:
+            layer_type = getattr(assignment, "layer_type", "channel")
+            layer_name = getattr(assignment, "name", "") or default_name
+        else:
+            layer_type = "channel"
+            layer_name = default_name
+
+        if layer_type == "segmentation":
+            label_layers.append((layer_name, channel_img))
+        elif layer_type == "mask":
+            mask_layers.append((layer_name, channel_img))
+        else:
+            channel_names.append(layer_name)
+            channel_images.append(channel_img.astype(np.float32))
 
     # 4. Handle TCSPC data (FLIM)
     _progress(3, 5, "Processing TCSPC data...")
@@ -318,6 +336,14 @@ def import_dataset(
             intensity = assemble_channels(channel_images)
             dims = ["C", "H", "W"]
             store.write_array("intensity", intensity, attrs={"dims": dims})
+
+    # Write segmentation label layers
+    for name, array in label_layers:
+        store.write_labels(name, array)
+
+    # Write mask layers
+    for name, array in mask_layers:
+        store.write_mask(name, array)
 
     # Write TCSPC decay data
     for ch_name, decay_info in tcspc_data.items():
