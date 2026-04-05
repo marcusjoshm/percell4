@@ -66,6 +66,14 @@ APP_STYLESHEET = f"""
     QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
         background-color: {BORDER_INPUT};
     }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><polygon points='5,0 10,6 0,6' fill='%23cccccc'/></svg>");
+        width: 10px; height: 6px;
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><polygon points='0,0 10,0 5,6' fill='%23cccccc'/></svg>");
+        width: 10px; height: 6px;
+    }}
     QComboBox QAbstractItemView {{
         background-color: {SURFACE};
         color: {TEXT_BRIGHT};
@@ -76,6 +84,10 @@ APP_STYLESHEET = f"""
         border: none;
         border-left: 1px solid {BORDER_INPUT};
         width: 20px;
+    }}
+    QComboBox::down-arrow {{
+        image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><polygon points='0,0 10,0 5,6' fill='%23cccccc'/></svg>");
+        width: 10px; height: 6px;
     }}
 
     /* ── Buttons ── */
