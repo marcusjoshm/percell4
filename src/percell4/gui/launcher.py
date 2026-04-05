@@ -931,144 +931,18 @@ class LauncherWindow(QMainWindow):
             self._load_h5_into_viewer(path)
 
     def _on_add_layer_to_dataset(self) -> None:
-        """Add a TIFF image to the current dataset as a channel, mask, or labels."""
-        from qtpy.QtWidgets import (
-            QComboBox,
-            QDialog,
-            QDialogButtonBox,
-            QFormLayout,
-            QLineEdit,
-            QMessageBox,
-            QVBoxLayout,
-        )
-
+        """Open the Add Layer dialog to import layers into the current dataset."""
         store = getattr(self, "_current_store", None)
         if store is None:
-            self.statusBar().showMessage("No dataset loaded")
+            self.statusBar().showMessage("No dataset loaded — load a dataset first")
             return
 
-        # Pick TIFF file(s)
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select TIFF Image(s)",
-            "",
-            "TIFF Files (*.tif *.tiff);;All Files (*)",
-        )
-        if not paths:
-            return
+        from percell4.gui.add_layer_dialog import AddLayerDialog
 
-        import numpy as np
-        import tifffile
-
-        for tiff_path in paths:
-            # Show a small dialog for each file
-            dlg = QDialog(self)
-            dlg.setWindowTitle(f"Add Layer: {Path(tiff_path).name}")
-            dlg.setMinimumWidth(350)
-            layout = QVBoxLayout(dlg)
-
-            form = QFormLayout()
-            name_edit = QLineEdit(Path(tiff_path).stem)
-            form.addRow("Layer name:", name_edit)
-
-            type_combo = QComboBox()
-            type_combo.addItems(["Channel", "Segmentation", "Mask"])
-            form.addRow("Layer type:", type_combo)
-            layout.addLayout(form)
-
-            buttons = QDialogButtonBox(
-                QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-            )
-            buttons.accepted.connect(dlg.accept)
-            buttons.rejected.connect(dlg.reject)
-            layout.addWidget(buttons)
-
-            # Apply dark theme
-            dlg.setStyleSheet("""
-                QDialog { background-color: #1e1e1e; color: #e0e0e0; }
-                QLineEdit, QComboBox {
-                    background-color: #2a2a2a; color: #ffffff;
-                    border: 1px solid #444444; border-radius: 4px;
-                    padding: 4px 8px;
-                }
-                QLabel { color: #cccccc; }
-                QPushButton {
-                    background-color: #2a2a2a; color: #ffffff;
-                    border: 1px solid #444444; border-radius: 4px;
-                    padding: 6px 12px;
-                }
-                QPushButton:hover { background-color: #3a3a3a; }
-            """)
-
-            if dlg.exec_() != QDialog.Accepted:
-                continue
-
-            layer_name = name_edit.text().strip()
-            layer_type = type_combo.currentText()
-            dlg.deleteLater()
-
-            if not layer_name:
-                continue
-
-            try:
-                array = tifffile.imread(tiff_path)
-                if array.ndim > 2:
-                    # Take first frame if multi-dimensional
-                    array = array[0] if array.ndim == 3 else array[0, 0]
-
-                if layer_type == "Channel":
-                    array = array.astype(np.float32)
-                    # Append to existing intensity or write as new
-                    try:
-                        existing = store.read_array("intensity")
-                        if existing.ndim == 2:
-                            stacked = np.stack([existing, array], axis=0)
-                        else:
-                            stacked = np.concatenate(
-                                [existing, array[np.newaxis]], axis=0
-                            )
-                        store.write_array(
-                            "intensity", stacked,
-                            attrs={"dims": ["C", "H", "W"]},
-                        )
-                        # Update channel_names metadata
-                        meta = store.metadata
-                        names = list(meta.get("channel_names", []))
-                        names.append(layer_name)
-                        store.set_metadata({
-                            "channel_names": names,
-                            "n_channels": len(names),
-                        })
-                    except KeyError:
-                        # No existing intensity — write as first channel
-                        store.write_array(
-                            "intensity", array,
-                            attrs={"dims": ["H", "W"]},
-                        )
-                        store.set_metadata({
-                            "channel_names": [layer_name],
-                            "n_channels": 1,
-                        })
-
-                elif layer_type == "Segmentation":
-                    store.write_labels(layer_name, array)
-
-                elif layer_type == "Mask":
-                    binary = (array > 0).astype(np.uint8)
-                    store.write_mask(layer_name, binary)
-
-                self.statusBar().showMessage(
-                    f"Added {layer_type.lower()} '{layer_name}' to dataset"
-                )
-
-            except Exception as e:
-                QMessageBox.warning(
-                    self, "Error", f"Failed to add {tiff_path}:\n{e}"
-                )
-
-        # Refresh viewer with the updated store
-        self._update_data_tab_from_store()
-        self._populate_viewer_from_store()
+        viewer_win = self._windows.get("viewer")
+        dlg = AddLayerDialog(self, store, self.data_model, viewer_win)
+        dlg.exec_()
+        dlg.deleteLater()
 
     def _load_h5_into_viewer(self, h5_path: str) -> None:
         """Set the current dataset and load it into the viewer."""

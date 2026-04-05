@@ -99,20 +99,6 @@ class SegmentationPanel(QWidget):
 
         layout.addWidget(cp_group)
 
-        # ── Load ROIs section ─────────────────────────────────
-        roi_group = QGroupBox("Load ROIs")
-        roi_layout = QVBoxLayout(roi_group)
-
-        btn_imagej = QPushButton("Import ImageJ ROIs (.zip)...")
-        btn_imagej.clicked.connect(self._on_import_imagej)
-        roi_layout.addWidget(btn_imagej)
-
-        btn_cellpose_seg = QPushButton("Import Cellpose _seg.npy...")
-        btn_cellpose_seg.clicked.connect(self._on_import_cellpose_seg)
-        roi_layout.addWidget(btn_cellpose_seg)
-
-        layout.addWidget(roi_group)
-
         # ── Manual Editing section ─────────────────────────────
         draw_group = QGroupBox("Manual Editing")
         draw_layout = QVBoxLayout(draw_group)
@@ -322,59 +308,6 @@ class SegmentationPanel(QWidget):
             if layer.__class__.__name__ == "Image":
                 return layer.data.shape[-2:]
         return None
-
-    def _on_import_imagej(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import ImageJ ROIs", "", "ROI Files (*.zip);;All Files (*)"
-        )
-        if not path:
-            return
-        shape = self._get_image_shape()
-        if shape is None:
-            self._show_status("Load an image first")
-            return
-        try:
-            from percell4.segment.roi_import import import_imagej_rois
-            labels = import_imagej_rois(path, shape)
-            n_cells = int(labels.max())
-            name = f"roi_import_{n_cells}"
-            store = getattr(self._launcher, "_current_store", None)
-            if store is not None:
-                store.write_labels(name, labels)
-            viewer_win = self._launcher._windows.get("viewer")
-            if viewer_win is not None:
-                viewer_win.add_labels(labels, name=name)
-            self.data_model.set_active_segmentation(name)
-            self._show_status(f"Imported {n_cells} ROIs from {Path(path).name}")
-        except ImportError:
-            QMessageBox.warning(
-                self, "Missing Dependency",
-                "roifile package required.\nInstall: pip install roifile"
-            )
-        except Exception as e:
-            self._show_status(f"ROI import error: {e}")
-
-    def _on_import_cellpose_seg(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import Cellpose Segmentation", "", "Numpy Files (*.npy);;All Files (*)"
-        )
-        if not path:
-            return
-        try:
-            from percell4.segment.roi_import import import_cellpose_seg
-            labels = import_cellpose_seg(path)
-            n_cells = int(labels.max())
-            name = f"cellpose_import_{n_cells}"
-            store = getattr(self._launcher, "_current_store", None)
-            if store is not None:
-                store.write_labels(name, labels)
-            viewer_win = self._launcher._windows.get("viewer")
-            if viewer_win is not None:
-                viewer_win.add_labels(labels, name=name)
-            self.data_model.set_active_segmentation(name)
-            self._show_status(f"Imported {n_cells} cells from {Path(path).name}")
-        except Exception as e:
-            self._show_status(f"Import error: {e}")
 
     # ── Manual Editing ────────────────────────────────────────
 
