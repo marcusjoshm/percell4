@@ -34,6 +34,7 @@ def import_dataset(
     flim_params: dict[str, Any] | None = None,
     selected_channels: set[str] | None = None,
     layer_assignments: dict[str, Any] | None = None,
+    files: list | None = None,
 ) -> int:
     """Import a directory of TIFFs into a single .h5 dataset.
 
@@ -65,7 +66,11 @@ def import_dataset(
     # 1. Scan directory — find TIFFs and .bin files
     _progress(0, 5, "Scanning files...")
     scanner = FileScanner(token_config)
-    result = scanner.scan(path=source_dir)
+    if files is not None:
+        # Use pre-discovered file list (avoids re-scanning the whole directory)
+        result = scanner.scan(files=[str(f.path) if hasattr(f, "path") else str(f) for f in files])
+    else:
+        result = scanner.scan(path=source_dir)
 
     # Also check for .bin TCSPC files
     bin_files = sorted(source_dir.glob("*.bin"))
