@@ -116,11 +116,11 @@ APP_STYLESHEET = f"""
 
     /* ── Check / Radio ── */
     QCheckBox, QRadioButton {{ color: {TEXT}; }}
-    QCheckBox::indicator {{ width: 16px; height: 16px; }}
-    QCheckBox::indicator:unchecked {{
+    QCheckBox::indicator, QGroupBox::indicator {{ width: 16px; height: 16px; }}
+    QCheckBox::indicator:unchecked, QGroupBox::indicator:unchecked {{
         border: 1px solid #555555; border-radius: 3px; background-color: {SURFACE};
     }}
-    QCheckBox::indicator:checked {{
+    QCheckBox::indicator:checked, QGroupBox::indicator:checked {{
         border: 1px solid {ACCENT}; border-radius: 3px; background-color: {ACCENT};
     }}
 
