@@ -27,8 +27,7 @@ SIDEBAR_HOVER = "#2a3d52"     # Launcher sidebar hover
 
 APP_STYLESHEET = f"""
     /* ── Base ── */
-    QMainWindow, QDialog {{ background-color: {BACKGROUND}; color: {TEXT}; }}
-    QWidget {{ color: {TEXT}; }}
+    QMainWindow, QDialog, QWidget {{ background-color: {BACKGROUND}; color: {TEXT}; }}
 
     /* ── Group boxes ── */
     QGroupBox {{
