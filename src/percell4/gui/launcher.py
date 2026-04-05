@@ -250,11 +250,11 @@ class LauncherWindow(QMainWindow):
         import_group = QGroupBox("Import")
         import_layout = QVBoxLayout(import_group)
 
-        btn_import = QPushButton("Import TIFF Dataset...")
+        btn_import = QPushButton("Compress TIFF Dataset...")
         btn_import.clicked.connect(self._on_import_dataset)
         import_layout.addWidget(btn_import)
 
-        btn_load = QPushButton("Load Existing .h5 Dataset...")
+        btn_load = QPushButton("Load Dataset...")
         btn_load.clicked.connect(self._on_load_dataset)
         import_layout.addWidget(btn_load)
 
@@ -276,7 +276,6 @@ class LauncherWindow(QMainWindow):
 
         # ── Placeholders ──
         layout.addWidget(self._placeholder("Prism Export"))
-        layout.addWidget(self._placeholder("Batch Import"))
         layout.addWidget(self._placeholder("Batch Export"))
         layout.addStretch()
         return panel
@@ -873,18 +872,13 @@ class LauncherWindow(QMainWindow):
                 project_csv=project_csv,
                 flim_params=flim_params,
             )
-            self._on_import_finished(output_path, n_channels)
+            self.statusBar().showMessage(
+                f"Compressed: {n_channels} channel(s) → {Path(output_path).name}"
+            )
         except Exception as e:
-            self.statusBar().showMessage(f"Import error: {e}")
+            self.statusBar().showMessage(f"Compress error: {e}")
         finally:
             QApplication.restoreOverrideCursor()
-
-    def _on_import_finished(self, h5_path: str, n_channels: int) -> None:
-        self.statusBar().showMessage(
-            f"Import complete: {n_channels} channel(s) → {Path(h5_path).name}"
-        )
-        # Auto-load the new dataset into the viewer
-        self._load_h5_into_viewer(h5_path)
 
     def _on_load_dataset(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
