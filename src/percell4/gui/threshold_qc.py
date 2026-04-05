@@ -128,9 +128,10 @@ class ThresholdQCController(QObject):
         # Reusable buffer for group images
         self._group_image_buffer = np.zeros_like(channel_image, dtype=np.float32)
 
-        # Windows and dock widgets (for cleanup)
+        # Windows (for cleanup)
         self._preview_window = None
-        self._qc_dock = None
+        self._qc_window = None
+        self._hidden_layers: dict[str, bool] = {}  # layer_name → original visibility
         self._preview_pending = False
 
     # ── Phase 1: Group Preview ──
@@ -293,6 +294,15 @@ class ThresholdQCController(QObject):
             self._finish(False, "Viewer closed")
             return
 
+        # Hide all non-QC layers so only the group image, preview, and ROI are visible
+        qc_layer_names = {_LAYER_GROUP_IMAGE, _LAYER_THRESHOLD_PREVIEW, _LAYER_ROI}
+        if not self._hidden_layers:
+            # First group — record original visibility and hide
+            for layer in viewer.layers:
+                if layer.name not in qc_layer_names:
+                    self._hidden_layers[layer.name] = layer.visible
+                    layer.visible = False
+
         gs = self._groups[self._current_index]
         group_id = gs.group_id
 
@@ -351,25 +361,37 @@ class ThresholdQCController(QObject):
             blending="additive",
         )
 
-        # Wire ROI changes — use set_data event which fires only AFTER
-        # drawing is complete (not during drag like the data event)
+        # Wire ROI changes — listen to mode changes so we update only when
+        # the user finishes drawing (exits add_rectangle mode back to pan_zoom
+        # or direct), not during the drag.  Also listen to data changes but
+        # only act when the mode is not an "add" mode.
+        self._roi_layer = None
+        self._last_roi_count = 0
         for layer in viewer.layers:
             if layer.name == _LAYER_ROI:
-                layer.events.set_data.connect(self._on_roi_changed)
+                self._roi_layer = layer
+                layer.events.data.connect(self._on_roi_data_changed)
                 break
 
-        # Build/update QC dock widget
+        # Build/update QC window
         self._build_qc_dock(value)
 
         self._current_threshold = value
         self._current_method = "otsu"
 
     def _build_qc_dock(self, initial_value: float) -> None:
-        """Build or rebuild the per-group QC dock widget."""
-        viewer = self._viewer_win.viewer
+        """Build or rebuild the per-group QC as a separate window."""
+        from qtpy.QtWidgets import QMainWindow
+
         self._remove_qc_dock()
 
         gs = self._groups[self._current_index]
+
+        win = QMainWindow()
+        win.setWindowTitle(f"Threshold QC — Group {gs.group_id} of {len(self._groups)}")
+        win.setMinimumSize(350, 300)
+        win.setStyleSheet("background-color: #2b2b2b; color: white;")
+
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
@@ -432,17 +454,35 @@ class ThresholdQCController(QObject):
         layout.addLayout(btn_layout)
         layout.addStretch()
 
-        self._qc_dock = viewer.window.add_dock_widget(
-            widget, name="Threshold QC", area="right",
-        )
+        win.setCentralWidget(widget)
+        win.show()
+        self._qc_window = win
 
     # ── Live Preview ──
 
-    def _on_roi_changed(self, event=None) -> None:
-        """Coalesce ROI changes with a timer to avoid double recomputation."""
+    def _on_roi_data_changed(self, event=None) -> None:
+        """ROI data changed — only update if a shape was completed (not mid-draw).
+
+        During drawing, napari fires data events for every mouse move.
+        We detect completion by checking if the shape count increased
+        while the mode is still an add mode, then delay the update
+        slightly so napari finishes its internal state first.
+        """
+        if self._roi_layer is None:
+            return
+        current_count = len(self._roi_layer.data)
+        mode = str(getattr(self._roi_layer, "mode", ""))
+        # Only update when:
+        # - The shape count changed (new shape completed or shape deleted)
+        # - OR the mode is not an add mode (user is editing/moving existing shapes)
+        is_adding = "add" in mode
+        count_changed = current_count != self._last_roi_count
+        if is_adding and not count_changed:
+            return  # mid-draw, ignore
+        self._last_roi_count = current_count
         if not self._preview_pending:
             self._preview_pending = True
-            QTimer.singleShot(0, self._update_preview)
+            QTimer.singleShot(50, self._update_preview)
 
     def _on_method_changed(self, text: str) -> None:
         """Threshold method changed — recompute preview."""
@@ -647,12 +687,20 @@ class ThresholdQCController(QObject):
     # ── Cleanup ──
 
     def _cleanup_all(self) -> None:
-        """Remove all temporary layers and dock widgets."""
+        """Remove all temporary layers and windows, restore hidden layers."""
         self._close_preview_window()
         self._remove_qc_dock()
         for name in (_LAYER_GROUP_PREVIEW, _LAYER_GROUP_IMAGE,
                      _LAYER_THRESHOLD_PREVIEW, _LAYER_ROI):
             self._remove_layer(name)
+
+        # Restore original visibility of layers hidden during QC
+        viewer = self._viewer_win.viewer
+        if viewer is not None and self._hidden_layers:
+            for layer in viewer.layers:
+                if layer.name in self._hidden_layers:
+                    layer.visible = self._hidden_layers[layer.name]
+        self._hidden_layers = {}
 
     def _remove_layer(self, name: str) -> None:
         viewer = self._viewer_win.viewer
@@ -674,14 +722,12 @@ class ThresholdQCController(QObject):
             self._preview_window = None
 
     def _remove_qc_dock(self) -> None:
-        if self._qc_dock is not None:
+        if hasattr(self, "_qc_window") and self._qc_window is not None:
             try:
-                viewer = self._viewer_win.viewer
-                if viewer is not None:
-                    viewer.window.remove_dock_widget(self._qc_dock)
+                self._qc_window.close()
             except Exception:
                 pass
-            self._qc_dock = None
+            self._qc_window = None
 
     def _finish(self, success: bool, msg: str) -> None:
         logger.info(msg)
