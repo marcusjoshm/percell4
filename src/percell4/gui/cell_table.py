@@ -181,22 +181,7 @@ class CellTableWindow(QMainWindow):
         self._table.setAlternatingRowColors(True)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
-        self._table.setStyleSheet("""
-            QTableView {
-                background-color: #1e1e1e;
-                alternate-background-color: #252525;
-                color: #e0e0e0;
-                gridline-color: #333333;
-                selection-background-color: #2a4a6a;
-                selection-color: #ffffff;
-            }
-            QHeaderView::section {
-                background-color: #2a2a2a;
-                color: #e0e0e0;
-                border: 1px solid #333333;
-                padding: 4px;
-            }
-        """)
+        # Table styling inherited from global theme
         layout.addWidget(self._table)
 
         # Status bar

@@ -52,11 +52,13 @@ class SegmentationPanel(QWidget):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
 
+        from percell4.gui import theme
+
         title = QLabel("Segmentation")
         title.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: #ffffff;"
-            " margin-bottom: 12px; padding-bottom: 4px;"
-            " border-bottom: 1px solid #3a3a3a;"
+            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
+            f" margin-bottom: 12px; padding-bottom: 4px;"
+            f" border-bottom: 1px solid {theme.BORDER};"
         )
         layout.addWidget(title)
 
@@ -64,7 +66,7 @@ class SegmentationPanel(QWidget):
         chan_row = QHBoxLayout()
         chan_row.addWidget(QLabel("Active Channel:"))
         self._channel_label = QLabel("None selected")
-        self._channel_label.setStyleSheet("color: #4ea8de; font-weight: bold;")
+        self._channel_label.setStyleSheet(f"color: {theme.ACCENT}; font-weight: bold;")
         chan_row.addWidget(self._channel_label)
         chan_row.addStretch()
         layout.addLayout(chan_row)
@@ -90,7 +92,7 @@ class SegmentationPanel(QWidget):
         cp_layout.addLayout(diam_row)
 
         self._cp_gpu = QCheckBox("Use GPU")
-        self._cp_gpu.setStyleSheet("QCheckBox { color: #e0e0e0; }")
+        self._cp_gpu.setStyleSheet(f"QCheckBox {{ color: {theme.TEXT}; }}")
         cp_layout.addWidget(self._cp_gpu)
 
         btn_run_cp = QPushButton("Run Cellpose")
@@ -442,7 +444,7 @@ class SegmentationPanel(QWidget):
         labels_layer = self._get_active_labels_layer()
         if labels_layer is None:
             self._cleanup_status.setText("No labels layer active.")
-            self._cleanup_status.setStyleSheet("color: #ff6666;")
+            self._cleanup_status.setStyleSheet(f"color: {theme.ERROR};")
             return
 
         labels = np.asarray(labels_layer.data, dtype=np.int32)
@@ -461,7 +463,7 @@ class SegmentationPanel(QWidget):
 
         if total_removed == 0:
             self._cleanup_status.setText("No cells to remove at these settings.")
-            self._cleanup_status.setStyleSheet("color: #888888;")
+            self._cleanup_status.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             self._btn_apply_cleanup.setEnabled(False)
             return
 
@@ -479,14 +481,14 @@ class SegmentationPanel(QWidget):
         self._cleanup_status.setText(
             f"{total_removed} cells to remove ({', '.join(parts)})."
         )
-        self._cleanup_status.setStyleSheet("color: #ffaa44;")
+        self._cleanup_status.setStyleSheet(f"color: {theme.WARNING};")
         self._btn_apply_cleanup.setEnabled(True)
 
     def _on_cleanup_apply(self) -> None:
         labels_layer = self._get_active_labels_layer()
         if labels_layer is None:
             self._cleanup_status.setText("No labels layer active.")
-            self._cleanup_status.setStyleSheet("color: #ff6666;")
+            self._cleanup_status.setStyleSheet(f"color: {theme.ERROR};")
             return
 
         from percell4.segment.postprocess import relabel_sequential
@@ -519,7 +521,7 @@ class SegmentationPanel(QWidget):
             f"Removed {total_removed} cells ({', '.join(parts)}). "
             f"{n_remaining} cells remaining."
         )
-        self._cleanup_status.setStyleSheet("color: #66cc66;")
+        self._cleanup_status.setStyleSheet(f"color: {theme.SUCCESS};")
         self._show_status(f"Cleanup: removed {total_removed}, {n_remaining} remaining")
 
     # ── Save ──────────────────────────────────────────────────

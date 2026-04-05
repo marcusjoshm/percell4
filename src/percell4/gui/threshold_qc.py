@@ -36,6 +36,8 @@ if TYPE_CHECKING:
     from percell4.model import CellDataModel
     from percell4.store import DatasetStore
 
+from percell4.gui import theme
+
 logger = logging.getLogger(__name__)
 
 # Temporary layer names — underscore prefix avoids dropdown pollution
@@ -184,13 +186,13 @@ class ThresholdQCController(QObject):
         win = QMainWindow()
         win.setWindowTitle("Group Preview")
         win.setMinimumSize(500, 450)
-        win.setStyleSheet("background-color: #2b2b2b; color: white;")
+        win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
 
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
         title = QLabel("Group Preview")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; color: white;")
+        title.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {theme.TEXT_BRIGHT};")
         layout.addWidget(title)
 
         # Interactive histogram — clicking a bar selects cells in that bin
@@ -198,7 +200,7 @@ class ThresholdQCController(QObject):
             import pyqtgraph as pg
 
             plot = pg.PlotWidget()
-            plot.setBackground("#2b2b2b")
+            plot.setBackground(theme.BACKGROUND)
             plot.getAxis("bottom").enableAutoSIPrefix(False)
             plot.getAxis("left").enableAutoSIPrefix(False)
             plot.setLabel("bottom", f"{self._metric}")
@@ -255,7 +257,7 @@ class ThresholdQCController(QObject):
 
         # Group summary — each group is a clickable button that selects its cells
         summary = QLabel(f"Groups found: {len(self._groups)}")
-        summary.setStyleSheet("color: white; font-weight: bold;")
+        summary.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-weight: bold;")
         layout.addWidget(summary)
 
         for i, gs in enumerate(self._groups):
@@ -278,7 +280,7 @@ class ThresholdQCController(QObject):
         btn_row = QHBoxLayout()
         proceed_btn = QPushButton("Proceed to Thresholding")
         proceed_btn.setStyleSheet(
-            "background-color: #2d7d46; color: white; padding: 6px; font-weight: bold;"
+            f"background-color: {theme.ACTION_GREEN}; color: white; padding: 6px; font-weight: bold;"
         )
         proceed_btn.clicked.connect(self._on_proceed)
         btn_row.addWidget(proceed_btn)
@@ -428,14 +430,14 @@ class ThresholdQCController(QObject):
         win = QMainWindow()
         win.setWindowTitle(f"Threshold QC — Group {gs.group_id} of {len(self._groups)}")
         win.setMinimumSize(350, 300)
-        win.setStyleSheet("background-color: #2b2b2b; color: white;")
+        win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
 
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
         # Title
         title = QLabel(f"Group {gs.group_id} of {len(self._groups)}")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; color: white;")
+        title.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {theme.TEXT_BRIGHT};")
         layout.addWidget(title)
 
         # Method selector
@@ -449,15 +451,15 @@ class ThresholdQCController(QObject):
 
         # Stats
         self._thresh_label = QLabel(f"Threshold: {initial_value:.1f}")
-        self._thresh_label.setStyleSheet("color: #4ea8de;")
+        self._thresh_label.setStyleSheet(f"color: {theme.ACCENT};")
         layout.addWidget(self._thresh_label)
 
         self._pixels_label = QLabel("Positive pixels: —")
-        self._pixels_label.setStyleSheet("color: #aaaaaa;")
+        self._pixels_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._pixels_label)
 
         self._fraction_label = QLabel("Positive fraction: —")
-        self._fraction_label.setStyleSheet("color: #aaaaaa;")
+        self._fraction_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._fraction_label)
 
         self._update_stats_display(initial_value)
@@ -468,7 +470,7 @@ class ThresholdQCController(QObject):
         row1 = QHBoxLayout()
         accept_btn = QPushButton("Accept")
         accept_btn.setStyleSheet(
-            "background-color: #2d7d46; color: white; padding: 6px; font-weight: bold;"
+            f"background-color: {theme.ACTION_GREEN}; color: white; padding: 6px; font-weight: bold;"
         )
         accept_btn.clicked.connect(self._on_accept)
         row1.addWidget(accept_btn)

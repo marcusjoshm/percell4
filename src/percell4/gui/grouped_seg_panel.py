@@ -137,17 +137,19 @@ class GroupedSegPanel(QWidget):
 
         # ── Run button ──
         self._run_btn = QPushButton("Run Grouped Thresholding")
+        from percell4.gui import theme
+
         self._run_btn.setStyleSheet(
-            "QPushButton { background-color: #2d7d46; color: white;"
-            " padding: 8px; font-weight: bold; border-radius: 4px; }"
-            " QPushButton:hover { background-color: #35a355; }"
+            f"QPushButton {{ background-color: {theme.ACTION_GREEN}; color: white;"
+            f" padding: 8px; font-weight: bold; border-radius: 4px; }}"
+            f" QPushButton:hover {{ background-color: {theme.ACTION_GREEN_HOVER}; }}"
         )
         self._run_btn.clicked.connect(self._on_run)
         layout.addWidget(self._run_btn)
 
         # ── Status ──
         self._status = QLabel("Ready")
-        self._status.setStyleSheet("color: #888888; font-style: italic;")
+        self._status.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-style: italic;")
         layout.addWidget(self._status)
 
         layout.addStretch()
