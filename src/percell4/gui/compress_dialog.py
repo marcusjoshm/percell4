@@ -8,7 +8,6 @@ channels) rather than individual files.
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 
 from qtpy.QtCore import Qt
@@ -24,6 +23,7 @@ from qtpy.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QVBoxLayout,
@@ -34,6 +34,8 @@ from percell4.io.models import (
     CompressConfig,
     DatasetGuiState,
     DatasetSpec,
+    LayerAssignment,
+    LayerType,
     TileConfig,
     TokenConfig,
 )
@@ -43,24 +45,26 @@ class CompressDialog(QDialog):
     """Dialog for discovering and compressing TIFF datasets to HDF5.
 
     Presents semantic-level selection: pick datasets (left list) and
-    channels (right list). Tiles, z-slices, and timepoints are shown
-    as informational summaries with global configuration.
+    channels (right list). Auto mode imports all selected channels as
+    intensity. Manual mode allows renaming and assigning layer types.
     """
 
     def __init__(self, parent=None, project_dir: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Compress TIFF Dataset")
-        self.setMinimumWidth(700)
-        self.resize(750, 650)
+        self.setMinimumWidth(750)
+        self.resize(800, 700)
         self._project_dir = project_dir
 
         self._datasets: list[DatasetSpec] = []
-        self._gui_states: dict[str, DatasetGuiState] = {}
         self._all_channels: list[str] = []
         self._all_tiles: list[str] = []
         self._all_z_slices: list[str] = []
         self._all_timepoints: list[str] = []
         self._discovery_generation = 0
+
+        # Manual mode state: per-channel config (shared across datasets)
+        self._channel_configs: dict[str, _ChannelConfig] = {}
 
         self._build_ui()
         self._apply_style()
@@ -116,9 +120,9 @@ class CompressDialog(QDialog):
 
         layout.addWidget(src_group)
 
-        # ── Discovery Mode ──
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Discovery:"))
+        # ── Discovery Mode + Auto/Manual ──
+        options_row = QHBoxLayout()
+        options_row.addWidget(QLabel("Discovery:"))
         self._discovery_combo = QComboBox()
         self._discovery_combo.addItems(["Subdirectory", "Flat Directory"])
         self._discovery_combo.setToolTip(
@@ -129,9 +133,18 @@ class CompressDialog(QDialog):
         self._discovery_combo.currentIndexChanged.connect(
             self._on_discovery_mode_changed
         )
-        mode_row.addWidget(self._discovery_combo)
-        mode_row.addStretch()
-        layout.addLayout(mode_row)
+        options_row.addWidget(self._discovery_combo)
+
+        options_row.addSpacing(30)
+        options_row.addWidget(QLabel("Mode:"))
+        self._auto_radio = QRadioButton("Auto")
+        self._auto_radio.setChecked(True)
+        self._auto_radio.toggled.connect(self._on_mode_changed)
+        self._manual_radio = QRadioButton("Manual")
+        options_row.addWidget(self._auto_radio)
+        options_row.addWidget(self._manual_radio)
+        options_row.addStretch()
+        layout.addLayout(options_row)
 
         # ── Datasets + Channels (side by side) ──
         lists_row = QHBoxLayout()
@@ -156,9 +169,9 @@ class CompressDialog(QDialog):
         ds_layout.addWidget(self._ds_list)
         lists_row.addWidget(ds_group, 3)
 
-        # Right: channels
-        ch_group = QGroupBox("Channels")
-        ch_layout = QVBoxLayout(ch_group)
+        # Right: channels (auto mode = simple checkboxes)
+        self._ch_group = QGroupBox("Channels")
+        ch_layout = QVBoxLayout(self._ch_group)
 
         ch_btn_row = QHBoxLayout()
         btn_ch_all = QPushButton("Select All")
@@ -172,7 +185,19 @@ class CompressDialog(QDialog):
 
         self._ch_list = QListWidget()
         ch_layout.addWidget(self._ch_list)
-        lists_row.addWidget(ch_group, 1)
+
+        # Manual mode: channel config panel (hidden in auto mode)
+        self._manual_ch_panel = QWidget()
+        manual_ch_layout = QVBoxLayout(self._manual_ch_panel)
+        manual_ch_layout.setContentsMargins(0, 4, 0, 0)
+
+        # This will be populated dynamically per-channel
+        self._manual_ch_container = QVBoxLayout()
+        manual_ch_layout.addLayout(self._manual_ch_container)
+        self._manual_ch_panel.setVisible(False)
+        ch_layout.addWidget(self._manual_ch_panel)
+
+        lists_row.addWidget(self._ch_group, 2)
 
         layout.addLayout(lists_row)
 
@@ -220,8 +245,10 @@ class CompressDialog(QDialog):
         stitch_layout.addWidget(QLabel("Start:"))
         self._stitch_order = QComboBox()
         self._stitch_order.addItems(
-            ["right_down", "right_up", "left_down", "left_up",
-             "top_left", "top_right", "bottom_left", "bottom_right"]
+            [
+                "right_down", "right_up", "left_down", "left_up",
+                "top_left", "top_right", "bottom_left", "bottom_right",
+            ]
         )
         stitch_layout.addWidget(self._stitch_order)
         stitch_layout.addStretch()
@@ -287,11 +314,30 @@ class CompressDialog(QDialog):
         if self._output_edit.text().strip():
             output_dir = Path(self._output_edit.text().strip())
 
-        selected_channels = set()
-        for i in range(self._ch_list.count()):
-            item = self._ch_list.item(i)
-            if item.checkState() == Qt.Checked:
-                selected_channels.add(item.data(Qt.UserRole))
+        is_manual = self._manual_radio.isChecked()
+
+        # Gather selected channels
+        selected_channels: set[str] = set()
+        if is_manual:
+            for ch_id, cfg in self._channel_configs.items():
+                if cfg.checkbox.isChecked():
+                    selected_channels.add(ch_id)
+        else:
+            for i in range(self._ch_list.count()):
+                item = self._ch_list.item(i)
+                if item.checkState() == Qt.Checked:
+                    selected_channels.add(item.data(Qt.UserRole))
+
+        # Gather layer assignments from manual mode
+        layer_assignments: dict[str, LayerAssignment] | None = None
+        if is_manual:
+            layer_assignments = {}
+            for ch_id, cfg in self._channel_configs.items():
+                if cfg.checkbox.isChecked():
+                    layer_assignments[ch_id] = LayerAssignment(
+                        layer_type=LayerType(cfg.type_combo.currentText().lower()),
+                        name=cfg.name_edit.text().strip() or f"ch{ch_id}",
+                    )
 
         tile_config = None
         if self._stitch_check.isChecked():
@@ -302,14 +348,19 @@ class CompressDialog(QDialog):
                 order=self._stitch_order.currentText(),
             )
 
-        # Sync dataset check states
-        checked_names = set()
+        # Dataset check states + name overrides
+        checked_names: set[str] = set()
+        dataset_name_overrides: dict[str, str] = {}
         for i in range(self._ds_list.count()):
             item = self._ds_list.item(i)
+            original_name = item.data(Qt.UserRole)
             if item.checkState() == Qt.Checked:
-                checked_names.add(item.data(Qt.UserRole))
+                checked_names.add(original_name)
+            display_name = item.text()
+            if display_name != original_name:
+                dataset_name_overrides[original_name] = display_name
 
-        gui_states = {}
+        gui_states: dict[str, DatasetGuiState] = {}
         for ds in self._datasets:
             gui_states[ds.name] = DatasetGuiState(
                 checked=ds.name in checked_names,
@@ -323,6 +374,8 @@ class CompressDialog(QDialog):
             tile_config=tile_config,
             datasets=list(self._datasets),
             gui_states=gui_states,
+            layer_assignments=layer_assignments,
+            dataset_name_overrides=dataset_name_overrides,
         )
 
     # ------------------------------------------------------------------
@@ -352,6 +405,20 @@ class CompressDialog(QDialog):
         if self._source_edit.text().strip():
             self._run_discovery()
 
+    def _on_mode_changed(self, checked: bool) -> None:
+        """Toggle between auto and manual mode."""
+        is_manual = self._manual_radio.isChecked()
+        self._ch_list.setVisible(not is_manual)
+        self._manual_ch_panel.setVisible(is_manual)
+        # Make dataset names editable in manual mode
+        for i in range(self._ds_list.count()):
+            item = self._ds_list.item(i)
+            flags = item.flags()
+            if is_manual:
+                item.setFlags(flags | Qt.ItemIsEditable)
+            else:
+                item.setFlags(flags & ~Qt.ItemIsEditable)
+
     def _on_stitch_toggled(self, checked: bool) -> None:
         self._stitch_widget.setVisible(checked)
 
@@ -367,10 +434,20 @@ class CompressDialog(QDialog):
         self._set_list_check_state(self._ds_list, Qt.Unchecked)
 
     def _on_select_all_channels(self) -> None:
-        self._set_list_check_state(self._ch_list, Qt.Checked)
+        if self._manual_radio.isChecked():
+            for cfg in self._channel_configs.values():
+                cfg.checkbox.setChecked(True)
+        else:
+            self._set_list_check_state(self._ch_list, Qt.Checked)
+        self._update_compress_button()
 
     def _on_deselect_all_channels(self) -> None:
-        self._set_list_check_state(self._ch_list, Qt.Unchecked)
+        if self._manual_radio.isChecked():
+            for cfg in self._channel_configs.values():
+                cfg.checkbox.setChecked(False)
+        else:
+            self._set_list_check_state(self._ch_list, Qt.Unchecked)
+        self._update_compress_button()
 
     def _set_list_check_state(
         self, list_widget: QListWidget, state: Qt.CheckState
@@ -457,14 +534,19 @@ class CompressDialog(QDialog):
         self._all_timepoints = sorted(timepoints, key=_sort_key)
 
     def _populate_lists(self) -> None:
+        is_manual = self._manual_radio.isChecked()
+
         # ── Datasets ──
         self._ds_list.blockSignals(True)
         self._ds_list.clear()
         for ds in self._datasets:
             item = QListWidgetItem(ds.name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            flags = item.flags() | Qt.ItemIsUserCheckable
+            if is_manual:
+                flags |= Qt.ItemIsEditable
+            item.setFlags(flags)
             item.setCheckState(Qt.Checked)
-            item.setData(Qt.UserRole, ds.name)
+            item.setData(Qt.UserRole, ds.name)  # original name
             self._ds_list.addItem(item)
         self._ds_list.blockSignals(False)
 
@@ -473,7 +555,7 @@ class CompressDialog(QDialog):
             f"{n} dataset{'s' if n != 1 else ''}"
         )
 
-        # ── Channels ──
+        # ── Channels (auto mode list) ──
         self._ch_list.blockSignals(True)
         self._ch_list.clear()
         for ch in self._all_channels:
@@ -484,21 +566,20 @@ class CompressDialog(QDialog):
             self._ch_list.addItem(item)
         self._ch_list.blockSignals(False)
 
+        # ── Channels (manual mode panel) ──
+        self._build_manual_channel_panel()
+
         # ── Summary ──
         parts = []
         if self._all_tiles:
             t = self._all_tiles
-            parts.append(
-                f"Tiles: {len(t)} (s{t[0]}–s{t[-1]})"
-            )
+            parts.append(f"Tiles: {len(t)} (s{t[0]}\u2013s{t[-1]})")
         if self._all_z_slices:
             z = self._all_z_slices
-            parts.append(f"Z-slices: {len(z)} (z{z[0]}–z{z[-1]})")
+            parts.append(f"Z-slices: {len(z)} (z{z[0]}\u2013z{z[-1]})")
         if self._all_timepoints:
             tp = self._all_timepoints
-            parts.append(
-                f"Timepoints: {len(tp)} (t{tp[0]}–t{tp[-1]})"
-            )
+            parts.append(f"Timepoints: {len(tp)} (t{tp[0]}\u2013t{tp[-1]})")
         if not parts:
             parts.append("No tiles, z-slices, or timepoints detected")
         self._summary_label.setText("    ".join(parts))
@@ -509,15 +590,57 @@ class CompressDialog(QDialog):
 
         self._update_compress_button()
 
+    def _build_manual_channel_panel(self) -> None:
+        """Build the manual mode channel configuration widgets."""
+        # Clear existing
+        while self._manual_ch_container.count():
+            child = self._manual_ch_container.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        self._channel_configs.clear()
+
+        for ch in self._all_channels:
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 2, 0, 2)
+
+            cb = QCheckBox(f"ch{ch}")
+            cb.setChecked(True)
+            cb.toggled.connect(self._update_compress_button)
+            row.addWidget(cb)
+
+            name_edit = QLineEdit(f"ch{ch}")
+            name_edit.setPlaceholderText("Name")
+            name_edit.setFixedWidth(100)
+            row.addWidget(name_edit)
+
+            type_combo = QComboBox()
+            type_combo.addItems(["Channel", "Segmentation", "Mask"])
+            type_combo.setFixedWidth(110)
+            row.addWidget(type_combo)
+
+            row.addStretch()
+
+            self._manual_ch_container.addWidget(row_widget)
+            self._channel_configs[ch] = _ChannelConfig(
+                checkbox=cb, name_edit=name_edit, type_combo=type_combo
+            )
+
     def _update_compress_button(self) -> None:
         any_ds = any(
             self._ds_list.item(i).checkState() == Qt.Checked
             for i in range(self._ds_list.count())
         )
-        any_ch = any(
-            self._ch_list.item(i).checkState() == Qt.Checked
-            for i in range(self._ch_list.count())
-        )
+        if self._manual_radio.isChecked():
+            any_ch = any(
+                cfg.checkbox.isChecked() for cfg in self._channel_configs.values()
+            )
+        else:
+            any_ch = any(
+                self._ch_list.item(i).checkState() == Qt.Checked
+                for i in range(self._ch_list.count())
+            )
         self._btn_compress.setEnabled(any_ds and any_ch)
 
     # ------------------------------------------------------------------
@@ -559,7 +682,7 @@ class CompressDialog(QDialog):
             }
             QPushButton:hover { background-color: #3a3a3a; border-color: #4ea8de; }
             QPushButton:disabled { color: #666666; }
-            QCheckBox { color: #e0e0e0; }
+            QCheckBox, QRadioButton { color: #e0e0e0; }
             QLabel { color: #cccccc; }
             QListWidget {
                 background-color: #1e1e1e;
@@ -588,6 +711,19 @@ class CompressDialog(QDialog):
                 background-color: #4ea8de;
             }
         """)
+
+
+class _ChannelConfig:
+    """Holds the manual-mode widgets for a single channel."""
+
+    __slots__ = ("checkbox", "name_edit", "type_combo")
+
+    def __init__(
+        self, checkbox: QCheckBox, name_edit: QLineEdit, type_combo: QComboBox
+    ) -> None:
+        self.checkbox = checkbox
+        self.name_edit = name_edit
+        self.type_combo = type_combo
 
 
 def _sort_key(val: str) -> tuple[int, str]:

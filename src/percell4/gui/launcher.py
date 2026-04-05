@@ -878,18 +878,24 @@ class LauncherWindow(QMainWindow):
                 break
 
             progress.setValue(i)
-            progress.setLabelText(f"({i + 1}/{n}) {ds.name}")
+            display_name = config.dataset_name_overrides.get(ds.name, ds.name)
+            progress.setLabelText(f"({i + 1}/{n}) {display_name}")
+
+            # Use overridden name for output path if renamed
+            output_path = ds.output_path
+            if ds.name in config.dataset_name_overrides:
+                output_path = ds.output_path.parent / f"{config.dataset_name_overrides[ds.name]}.h5"
 
             try:
                 n_ch = import_dataset(
                     str(ds.source_dir) if ds.source_dir else str(ds.files[0].path.parent),
-                    str(ds.output_path),
+                    str(output_path),
                     token_config=config.token_config,
                     tile_config=config.tile_config,
                     z_project_method=config.z_project_method,
                     selected_channels=config.selected_channels or None,
                 )
-                completed.append(ds.name)
+                completed.append(display_name)
             except Exception as e:
                 failed.append((ds.name, str(e)))
 

@@ -175,6 +175,8 @@ class CompressConfig:
     output_dir: Path | None = None
     selected_channels: set[str] = field(default_factory=set)
     tile_config: TileConfig | None = None
+    layer_assignments: dict[str, LayerAssignment] | None = None  # ch_id -> assignment
+    dataset_name_overrides: dict[str, str] = field(default_factory=dict)  # orig -> new
     datasets: list[DatasetSpec] = field(default_factory=list)
     gui_states: dict[str, DatasetGuiState] = field(default_factory=dict)
 
