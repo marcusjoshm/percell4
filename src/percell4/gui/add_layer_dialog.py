@@ -543,7 +543,13 @@ class AddLayerDialog(QDialog):
                         tile_groups[tile_idx] = img
 
                     if tile_config and len(tile_groups) > 1:
-                        array = assemble_tiles(tile_groups, tile_config)
+                        array = assemble_tiles(
+                            tile_groups,
+                            grid_rows=tile_config.grid_rows,
+                            grid_cols=tile_config.grid_cols,
+                            grid_type=tile_config.grid_type,
+                            order=tile_config.order,
+                        )
                     else:
                         array = next(iter(tile_groups.values()))
 
