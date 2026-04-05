@@ -209,6 +209,7 @@ class ThresholdQCController(QObject):
 
             # Build bin→labels mapping for click selection
             self._hist_bin_labels: list[list[int]] = []
+            self._hist_bin_edges: np.ndarray | None = None
             n_bins = 50
 
             if df is not None and col_name in df.columns:
@@ -221,6 +222,7 @@ class ThresholdQCController(QObject):
 
                 if len(vals_all) > 0:
                     bin_edges = np.linspace(vals_all.min(), vals_all.max(), n_bins + 1)
+                    self._hist_bin_edges = bin_edges
                     bar_width = (bin_edges[1] - bin_edges[0]) * 0.95
 
                     # Assign each cell to a bin
@@ -256,19 +258,9 @@ class ThresholdQCController(QObject):
                         plot.addItem(bar)
                         cumulative += counts
 
-                    # Invisible scatter overlay for click detection
-                    # One point per bin at the center, sized to fill the bar
-                    total_counts = cumulative
-                    self._hist_scatter = pg.ScatterPlotItem(
-                        x=bar_centers,
-                        y=total_counts / 2,
-                        size=bar_width,
-                        pen=pg.mkPen(None),
-                        brush=pg.mkBrush(0, 0, 0, 0),  # invisible
-                        symbol="s",
-                    )
-                    self._hist_scatter.sigClicked.connect(self._on_hist_bar_clicked)
-                    plot.addItem(self._hist_scatter)
+            # Wire mouse click on the plot to select histogram bins
+            plot.scene().sigMouseClicked.connect(self._on_hist_clicked)
+            self._hist_plot = plot
 
             plot.setMinimumHeight(250)
             layout.addWidget(plot)
@@ -323,22 +315,42 @@ class ThresholdQCController(QObject):
         self._cleanup_all()
         self._finish(False, "Re-group requested — adjust parameters and run again")
 
-    def _on_hist_bar_clicked(self, scatter_item, points, ev) -> None:
-        """Histogram bar clicked — select cells in that bin."""
-        if not points or not hasattr(self, "_hist_bin_labels"):
+    def _on_hist_clicked(self, event) -> None:
+        """Mouse clicked on histogram plot — map to bin and select cells."""
+        if not hasattr(self, "_hist_bin_edges") or self._hist_bin_edges is None:
             return
-        idx = points[0].index()
-        if idx is None or idx >= len(self._hist_bin_labels):
+        if not hasattr(self, "_hist_bin_labels") or not self._hist_bin_labels:
             return
-        labels = self._hist_bin_labels[idx]
-        if labels:
-            from qtpy.QtCore import Qt as _Qt
-            if ev.modifiers() & _Qt.ControlModifier:
-                current = set(self._data_model.selected_ids)
-                current.update(labels)
-                self._data_model.set_selection(list(current))
-            else:
-                self._data_model.set_selection(labels)
+
+        # Only handle left-clicks
+        from qtpy.QtCore import Qt as _Qt
+        if event.button() != _Qt.LeftButton:
+            return
+
+        # Map screen position to data coordinates
+        plot = self._hist_plot
+        vb = plot.plotItem.vb
+        pos = event.scenePos()
+        if not vb.sceneBoundingRect().contains(pos):
+            return
+        mouse_point = vb.mapSceneToView(pos)
+        x_val = mouse_point.x()
+
+        # Find which bin this x value falls in
+        edges = self._hist_bin_edges
+        bin_idx = int(np.searchsorted(edges, x_val)) - 1
+        bin_idx = np.clip(bin_idx, 0, len(self._hist_bin_labels) - 1)
+
+        labels = self._hist_bin_labels[bin_idx]
+        if not labels:
+            return
+
+        if event.modifiers() & _Qt.ControlModifier:
+            current = set(self._data_model.selected_ids)
+            current.update(labels)
+            self._data_model.set_selection(list(current))
+        else:
+            self._data_model.set_selection(labels)
 
     def _on_cancel(self) -> None:
         """Discard everything."""
