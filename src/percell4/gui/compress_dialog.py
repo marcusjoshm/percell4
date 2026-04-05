@@ -67,7 +67,6 @@ class CompressDialog(QDialog):
         self._channel_configs: dict[str, _ChannelConfig] = {}
 
         self._build_ui()
-        self._apply_style()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -79,13 +78,9 @@ class CompressDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea { background-color: #1e1e1e; border: none; }"
-        )
         outer.addWidget(scroll)
 
         content = QWidget()
-        content.setStyleSheet("QWidget { background-color: #1e1e1e; }")
         scroll.setWidget(content)
         layout = QVBoxLayout(content)
 
@@ -647,70 +642,6 @@ class CompressDialog(QDialog):
     # Styling
     # ------------------------------------------------------------------
 
-    def _apply_style(self) -> None:
-        self.setStyleSheet("""
-            QDialog { background-color: #1e1e1e; color: #e0e0e0; }
-            QGroupBox {
-                color: #ffffff;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 16px;
-            }
-            QGroupBox::title {
-                color: #4ea8de;
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
-            }
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 4px 8px;
-            }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
-                border-color: #4ea8de;
-            }
-            QPushButton {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover { background-color: #3a3a3a; border-color: #4ea8de; }
-            QPushButton:disabled { color: #666666; }
-            QCheckBox, QRadioButton { color: #e0e0e0; }
-            QLabel { color: #cccccc; }
-            QListWidget {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                outline: none;
-            }
-            QListWidget::item { padding: 3px 4px; }
-            QListWidget::item:selected {
-                background-color: #2a4a6b;
-                color: #ffffff;
-            }
-            QListWidget::item:hover:!selected {
-                background-color: #2a2a2a;
-            }
-            QListWidget::indicator { width: 16px; height: 16px; }
-            QListWidget::indicator:unchecked {
-                border: 1px solid #555555;
-                border-radius: 3px;
-                background-color: #2a2a2a;
-            }
-            QListWidget::indicator:checked {
-                border: 1px solid #4ea8de;
-                border-radius: 3px;
-                background-color: #4ea8de;
-            }
-        """)
 
 
 class _ChannelConfig:

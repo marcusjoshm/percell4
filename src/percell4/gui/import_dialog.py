@@ -40,7 +40,6 @@ class ImportDialog(QDialog):
         self._project_dir = project_dir
 
         self._build_ui()
-        self._apply_style()
 
     def _build_ui(self) -> None:
         from qtpy.QtWidgets import QScrollArea
@@ -50,11 +49,9 @@ class ImportDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background-color: #1e1e1e; border: none; }")
         outer_layout.addWidget(scroll)
 
         content = QWidget()
-        content.setStyleSheet("QWidget { background-color: #1e1e1e; }")
         scroll.setWidget(content)
         layout = QVBoxLayout(content)
 
@@ -403,41 +400,3 @@ class ImportDialog(QDialog):
             "header_bytes": self._bin_header.value(),
         }
 
-    def _apply_style(self) -> None:
-        self.setStyleSheet("""
-            QDialog { background-color: #1e1e1e; color: #e0e0e0; }
-            QGroupBox {
-                color: #ffffff;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 16px;
-            }
-            QGroupBox::title {
-                color: #4ea8de;
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
-            }
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 4px 8px;
-            }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-                border-color: #4ea8de;
-            }
-            QPushButton {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover { background-color: #3a3a3a; border-color: #4ea8de; }
-            QCheckBox { color: #e0e0e0; }
-            QLabel { color: #cccccc; }
-            QDialogButtonBox QPushButton { min-width: 80px; }
-        """)

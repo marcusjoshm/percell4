@@ -52,7 +52,6 @@ class AddLayerDialog(QDialog):
         self._launcher = parent
 
         self._build_ui()
-        self._apply_style()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -147,9 +146,6 @@ class AddLayerDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea { background-color: #1e1e1e; border: none; }"
-        )
         outer.addWidget(scroll)
 
         content = QWidget()
@@ -757,58 +753,6 @@ class AddLayerDialog(QDialog):
     # Styling
     # ------------------------------------------------------------------
 
-    def _apply_style(self) -> None:
-        self.setStyleSheet("""
-            QDialog { background-color: #1e1e1e; color: #e0e0e0; }
-            QTabWidget::pane {
-                border: 1px solid #3a3a3a;
-                background-color: #1e1e1e;
-            }
-            QTabBar::tab {
-                background-color: #252525;
-                color: #cccccc;
-                border: 1px solid #3a3a3a;
-                padding: 6px 14px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background-color: #1e1e1e;
-                color: #4ea8de;
-                border-bottom-color: #1e1e1e;
-            }
-            QGroupBox {
-                color: #ffffff;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 16px;
-            }
-            QGroupBox::title {
-                color: #4ea8de;
-                subcontrol-origin: margin;
-                left: 10px;
-            }
-            QLineEdit, QComboBox, QSpinBox {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 4px 8px;
-            }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
-                border-color: #4ea8de;
-            }
-            QPushButton {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover { background-color: #3a3a3a; border-color: #4ea8de; }
-            QCheckBox { color: #e0e0e0; }
-            QLabel { color: #cccccc; }
-        """)
 
 
 class _ChannelRowWidgets:
