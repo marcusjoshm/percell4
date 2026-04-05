@@ -55,30 +55,12 @@ APP_STYLESHEET = f"""
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
         border-color: {ACCENT};
     }}
-    QSpinBox::up-button, QDoubleSpinBox::up-button {{
-        background-color: {BORDER};
-        border: none;
-        border-left: 1px solid {BORDER_INPUT};
-        border-bottom: 1px solid {BORDER_INPUT};
-        width: 16px;
-    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button,
     QSpinBox::down-button, QDoubleSpinBox::down-button {{
         background-color: {BORDER};
         border: none;
         border-left: 1px solid {BORDER_INPUT};
-        width: 16px;
-    }}
-    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-        image: none;
-        border-left: 4px solid transparent;
-        border-right: 4px solid transparent;
-        border-bottom: 5px solid {TEXT_LABEL};
-    }}
-    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-        image: none;
-        border-left: 4px solid transparent;
-        border-right: 4px solid transparent;
-        border-top: 5px solid {TEXT_LABEL};
+        width: 18px;
     }}
     QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
     QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
@@ -94,13 +76,6 @@ APP_STYLESHEET = f"""
         border: none;
         border-left: 1px solid {BORDER_INPUT};
         width: 20px;
-    }}
-    QComboBox::down-arrow {{
-        image: none;
-        border-left: 4px solid transparent;
-        border-right: 4px solid transparent;
-        border-top: 6px solid {TEXT_LABEL};
-        margin-right: 6px;
     }}
 
     /* ── Buttons ── */
