@@ -193,9 +193,10 @@ class ThresholdQCController(QObject):
         title.setStyleSheet("font-weight: bold; font-size: 14px; color: white;")
         layout.addWidget(title)
 
-        # Histogram
+        # Interactive histogram — clicking a bar selects cells in that bin
         try:
             import pyqtgraph as pg
+
             plot = pg.PlotWidget()
             plot.setBackground("#2b2b2b")
             plot.getAxis("bottom").enableAutoSIPrefix(False)
@@ -203,27 +204,72 @@ class ThresholdQCController(QObject):
             plot.setLabel("bottom", f"{self._metric}")
             plot.setLabel("left", "Count")
 
-            # Plot histogram per group
             col_name = f"{self._channel}_{self._metric}"
             df = self._data_model.df
+
+            # Build bin→labels mapping for click selection
+            self._hist_bin_labels: list[list[int]] = []
+            n_bins = 50
+
             if df is not None and col_name in df.columns:
-                all_vals = df[col_name].dropna().values
-                if len(all_vals) > 0:
-                    bins = np.linspace(all_vals.min(), all_vals.max(), 50)
+                # Use only grouped cells
+                grouped_labels = set()
+                for gs in self._groups:
+                    grouped_labels.update(int(cl) for cl in gs.cell_labels)
+                grouped_df = df[df["label"].isin(list(grouped_labels))].copy()
+                vals_all = grouped_df[col_name].dropna()
+
+                if len(vals_all) > 0:
+                    bin_edges = np.linspace(vals_all.min(), vals_all.max(), n_bins + 1)
+                    bar_width = (bin_edges[1] - bin_edges[0]) * 0.95
+
+                    # Assign each cell to a bin
+                    bin_indices = np.digitize(vals_all.values, bin_edges) - 1
+                    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+                    grouped_df = grouped_df.loc[vals_all.index]
+                    grouped_df["_bin"] = bin_indices
+
+                    # Pre-compute bin→labels mapping
+                    self._hist_bin_labels = [[] for _ in range(n_bins)]
+                    for _, row in grouped_df.iterrows():
+                        b = int(row["_bin"])
+                        self._hist_bin_labels[b].append(int(row["label"]))
+
+                    # Plot stacked bars per group (bottom-up)
+                    bar_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    cumulative = np.zeros(n_bins, dtype=float)
+
                     for i, gs in enumerate(self._groups):
-                        group_df = df[df["label"].isin(list(gs.cell_labels))]
-                        vals = group_df[col_name].dropna().values
-                        if len(vals) > 0:
-                            counts, edges = np.histogram(vals, bins=bins)
-                            color = _GROUP_COLORS[i % len(_GROUP_COLORS)]
-                            plot.plot(
-                                edges, counts,
-                                stepMode="center",
-                                fillLevel=0,
-                                fillOutline=True,
-                                pen=pg.mkPen(color, width=2),
-                                brush=pg.mkBrush(color + "40"),
-                            )
+                        group_cells = set(int(cl) for cl in gs.cell_labels)
+                        group_df = grouped_df[grouped_df["label"].isin(group_cells)]
+                        counts = np.zeros(n_bins, dtype=float)
+                        for _, row in group_df.iterrows():
+                            counts[int(row["_bin"])] += 1
+
+                        color = _GROUP_COLORS[i % len(_GROUP_COLORS)]
+                        bar = pg.BarGraphItem(
+                            x=bar_centers, height=counts, width=bar_width,
+                            y0=cumulative,
+                            brush=pg.mkBrush(color + "80"),
+                            pen=pg.mkPen(color, width=1),
+                        )
+                        plot.addItem(bar)
+                        cumulative += counts
+
+                    # Invisible scatter overlay for click detection
+                    # One point per bin at the center, sized to fill the bar
+                    total_counts = cumulative
+                    self._hist_scatter = pg.ScatterPlotItem(
+                        x=bar_centers,
+                        y=total_counts / 2,
+                        size=bar_width,
+                        pen=pg.mkPen(None),
+                        brush=pg.mkBrush(0, 0, 0, 0),  # invisible
+                        symbol="s",
+                    )
+                    self._hist_scatter.sigClicked.connect(self._on_hist_bar_clicked)
+                    plot.addItem(self._hist_scatter)
+
             plot.setMinimumHeight(250)
             layout.addWidget(plot)
         except ImportError:
@@ -266,6 +312,7 @@ class ThresholdQCController(QObject):
 
     def _on_proceed(self) -> None:
         """Remove preview and start per-group thresholding."""
+        self._data_model.set_selection([])  # clear any histogram selections
         self._close_preview_window()
         self._remove_layer(_LAYER_GROUP_PREVIEW)
         self._current_index = 0
@@ -275,6 +322,23 @@ class ThresholdQCController(QObject):
         """Remove preview and return control to the panel."""
         self._cleanup_all()
         self._finish(False, "Re-group requested — adjust parameters and run again")
+
+    def _on_hist_bar_clicked(self, scatter_item, points, ev) -> None:
+        """Histogram bar clicked — select cells in that bin."""
+        if not points or not hasattr(self, "_hist_bin_labels"):
+            return
+        idx = points[0].index()
+        if idx is None or idx >= len(self._hist_bin_labels):
+            return
+        labels = self._hist_bin_labels[idx]
+        if labels:
+            from qtpy.QtCore import Qt as _Qt
+            if ev.modifiers() & _Qt.ControlModifier:
+                current = set(self._data_model.selected_ids)
+                current.update(labels)
+                self._data_model.set_selection(list(current))
+            else:
+                self._data_model.set_selection(labels)
 
     def _on_cancel(self) -> None:
         """Discard everything."""
