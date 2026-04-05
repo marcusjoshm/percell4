@@ -341,9 +341,10 @@ def import_dataset(
     for name, array in label_layers:
         store.write_labels(name, array)
 
-    # Write mask layers
+    # Write mask layers (binarize: any nonzero value → 1)
     for name, array in mask_layers:
-        store.write_mask(name, array)
+        binary = (array > 0).astype(np.uint8)
+        store.write_mask(name, binary)
 
     # Write TCSPC decay data
     for ch_name, decay_info in tcspc_data.items():
