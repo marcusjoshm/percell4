@@ -130,6 +130,7 @@ class AddLayerDialog(QDialog):
             self._write_layer(name, layer_type, array)
             self._refresh_viewer()
             self.statusBar_msg(f"Added {layer_type.lower()} '{name}'")
+            self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed:\n{e}")
 
@@ -558,6 +559,7 @@ class AddLayerDialog(QDialog):
 
             self._refresh_viewer()
             self.statusBar_msg(f"Imported {imported_count} layers")
+            self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Import failed:\n{e}")
         finally:
@@ -623,6 +625,7 @@ class AddLayerDialog(QDialog):
                 self._viewer_win.add_labels(labels, name=name)
             self._data_model.set_active_segmentation(name)
             self.statusBar_msg(f"Imported {n_cells} ROIs as '{name}'")
+            self.accept()
         except ImportError:
             QMessageBox.warning(
                 self, "Missing Dependency",
@@ -685,6 +688,7 @@ class AddLayerDialog(QDialog):
                 self._viewer_win.add_labels(labels, name=name)
             self._data_model.set_active_segmentation(name)
             self.statusBar_msg(f"Imported {n_cells} cells as '{name}'")
+            self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Import error:\n{e}")
 
