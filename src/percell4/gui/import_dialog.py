@@ -142,7 +142,7 @@ class ImportDialog(QDialog):
 
         # ── FLIM / TCSPC ──────────────────────────────────────
         self._flim_enabled = QCheckBox("Dataset contains TCSPC FLIM data")
-        self._flim_enabled.setStyleSheet("QCheckBox { color: #e0e0e0; }")
+        # Checkbox styling inherited from global theme
         layout.addWidget(self._flim_enabled)
 
         self._flim_group = QGroupBox("FLIM Parameters")
