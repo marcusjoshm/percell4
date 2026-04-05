@@ -809,76 +809,106 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage(f"Opened project: {path}")
 
     def _on_import_dataset(self) -> None:
-        from percell4.gui.import_dialog import ImportDialog
+        from percell4.gui.compress_dialog import CompressDialog
 
-        dialog = ImportDialog(
+        dialog = CompressDialog(
             self, project_dir=getattr(self, "_project_dir", None)
         )
-        if dialog.exec_() != ImportDialog.Accepted:
+        if dialog.exec_() != CompressDialog.Accepted:
             return
 
-        # Capture ALL dialog values immediately (before dialog is destroyed)
-        source_dir = dialog.source_dir
-        output_path = dialog.output_path
-        d_token_config = dialog.token_config
-        d_tile_config = dialog.tile_config
-        d_z_method = dialog.z_project_method
-        d_condition = dialog.condition
-        d_replicate = dialog.replicate
-        d_notes = dialog.notes
-        d_has_flim = dialog.has_flim
-        flim_params = None
-        if d_has_flim:
-            flim_params = {
-                "frequency_mhz": dialog.flim_frequency_mhz,
-                "channel_calibrations": dialog.flim_channel_calibrations,
-                "bin_dimensions": dialog.bin_dimensions,
-            }
-
-        # Done with dialog — let Qt clean it up
+        # Capture config immediately (before dialog is destroyed)
+        config = dialog.compress_config
         dialog.deleteLater()
 
-        if not source_dir or not output_path:
-            self.statusBar().showMessage("Import cancelled — missing paths")
+        checked = [
+            ds
+            for ds in config.datasets
+            if config.gui_states.get(ds.name, None)
+            and config.gui_states[ds.name].checked
+        ]
+        if not checked:
+            self.statusBar().showMessage("No datasets selected")
             return
 
-        # Build project.csv path if we have a project dir
-        project_csv = None
-        if hasattr(self, "_project_dir") and self._project_dir:
-            project_csv = str(Path(self._project_dir) / "project.csv")
+        self._run_batch_compress(config, checked)
 
-        self.statusBar().showMessage(f"Importing from {source_dir}...")
-
-        # Run import on the main thread (with wait cursor) to avoid
-        # bus errors from QThread + external drive I/O combination
+    def _run_batch_compress(self, config, datasets) -> None:
+        """Compress one or more datasets with a progress dialog."""
         from qtpy.QtCore import Qt
-        from qtpy.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
         from percell4.io.importer import import_dataset
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            n_channels = import_dataset(
-                source_dir,
-                output_path,
-                token_config=d_token_config,
-                tile_config=d_tile_config,
-                z_project_method=d_z_method,
-                metadata={
-                    "condition": d_condition,
-                    "replicate": d_replicate,
-                    "notes": d_notes,
-                },
-                project_csv=project_csv,
-                flim_params=flim_params,
+        n = len(datasets)
+
+        # Pre-flight collision check
+        existing = [ds for ds in datasets if ds.output_path.exists()]
+        if existing:
+            names = ", ".join(ds.name for ds in existing[:5])
+            if len(existing) > 5:
+                names += f" (+{len(existing) - 5} more)"
+            reply = QMessageBox.question(
+                self,
+                "Files Exist",
+                f"{len(existing)} output file(s) already exist:\n{names}\n\nOverwrite all?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
             )
-            self.statusBar().showMessage(
-                f"Compressed: {n_channels} channel(s) → {Path(output_path).name}"
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.No:
+                datasets = [ds for ds in datasets if not ds.output_path.exists()]
+                n = len(datasets)
+                if n == 0:
+                    self.statusBar().showMessage("No datasets to compress")
+                    return
+
+        # Window-modal progress dialog — blocks parent, prevents re-entrancy
+        progress = QProgressDialog("Compressing...", "Cancel", 0, n, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        completed = []
+        failed = []
+        cancelled = False
+
+        for i, ds in enumerate(datasets):
+            if progress.wasCanceled():
+                cancelled = True
+                break
+
+            progress.setValue(i)
+            progress.setLabelText(f"({i + 1}/{n}) {ds.name}")
+
+            try:
+                n_ch = import_dataset(
+                    str(ds.source_dir) if ds.source_dir else str(ds.files[0].path.parent),
+                    str(ds.output_path),
+                    token_config=config.token_config,
+                    z_project_method=config.z_project_method,
+                )
+                completed.append(ds.name)
+            except Exception as e:
+                failed.append((ds.name, str(e)))
+
+        progress.setValue(n)
+
+        # Summary
+        parts = []
+        if completed:
+            parts.append(f"{len(completed)} compressed")
+        if failed:
+            parts.append(f"{len(failed)} failed")
+        if cancelled:
+            parts.append("cancelled")
+        summary = ", ".join(parts)
+        self.statusBar().showMessage(f"Batch compress: {summary}")
+
+        if failed:
+            error_text = "\n".join(f"• {name}: {err}" for name, err in failed)
+            QMessageBox.warning(
+                self, "Compression Errors", f"Failed datasets:\n\n{error_text}"
             )
-        except Exception as e:
-            self.statusBar().showMessage(f"Compress error: {e}")
-        finally:
-            QApplication.restoreOverrideCursor()
 
     def _on_load_dataset(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
