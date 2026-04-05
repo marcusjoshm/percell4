@@ -35,6 +35,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.gui import theme
 from percell4.model import CellDataModel
 
 
@@ -57,28 +58,30 @@ class LauncherWindow(QMainWindow):
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
 
-        # Global dark theme for the launcher window
-        self.setStyleSheet("""
-            QMainWindow { background-color: #121212; }
-            QMenuBar {
-                background-color: #1e2a3a;
-                color: #e0e0e0;
-            }
-            QMenuBar::item:selected { background-color: #2a3d52; }
-            QMenu {
-                background-color: #1e2a3a;
-                color: #e0e0e0;
-                border: 1px solid #3a3a3a;
-            }
-            QMenu::item:selected {
-                background-color: #4ea8de;
-                color: #ffffff;
-            }
-            QStatusBar {
-                background-color: #0d1b2a;
+        # Launcher-specific overrides (sidebar, menubar, statusbar)
+        from percell4.gui import theme
+
+        self.setStyleSheet(f"""
+            QMainWindow {{ background-color: {theme.BACKGROUND_DEEP}; }}
+            QMenuBar {{
+                background-color: {theme.SIDEBAR};
+                color: {theme.TEXT};
+            }}
+            QMenuBar::item:selected {{ background-color: {theme.SIDEBAR_HOVER}; }}
+            QMenu {{
+                background-color: {theme.SIDEBAR};
+                color: {theme.TEXT};
+                border: 1px solid {theme.BORDER};
+            }}
+            QMenu::item:selected {{
+                background-color: {theme.ACCENT};
+                color: {theme.TEXT_BRIGHT};
+            }}
+            QStatusBar {{
+                background-color: {theme.SIDEBAR_ACTIVE};
                 color: #a0a0a0;
-                border-top: 1px solid #2a2a2a;
-            }
+                border-top: 1px solid {theme.SURFACE};
+            }}
         """)
 
         # Build UI
@@ -118,86 +121,37 @@ class LauncherWindow(QMainWindow):
         # Sidebar — distinct dark blue-gray, white text
         sidebar = QWidget()
         sidebar.setFixedWidth(150)
-        sidebar.setStyleSheet("""
-            QWidget { background-color: #1e2a3a; }
-            QPushButton {
-                background-color: #1e2a3a;
-                color: #e0e0e0;
+        from percell4.gui import theme as _t
+
+        sidebar.setStyleSheet(f"""
+            QWidget {{ background-color: {_t.SIDEBAR}; }}
+            QPushButton {{
+                background-color: {_t.SIDEBAR};
+                color: {_t.TEXT};
                 border: none;
                 padding: 14px 12px;
                 text-align: left;
                 font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #2a3d52;
-                color: #ffffff;
-            }
-            QPushButton:checked {
-                background-color: #0d1b2a;
-                color: #ffffff;
-                border-left: 3px solid #4ea8de;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {_t.SIDEBAR_HOVER};
+                color: {_t.TEXT_BRIGHT};
+            }}
+            QPushButton:checked {{
+                background-color: {_t.SIDEBAR_ACTIVE};
+                color: {_t.TEXT_BRIGHT};
+                border-left: 3px solid {_t.ACCENT};
+            }}
         """)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 8, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        # Content stack — dark background, white text
+        # Content stack — inherits from global theme, just needs deep background
         self._content_stack = QStackedWidget()
-        self._content_stack.setStyleSheet("""
-            QStackedWidget {
-                background-color: #121212;
-                color: #ffffff;
-            }
-            QLabel { color: #e0e0e0; }
-            QGroupBox {
-                color: #ffffff;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 16px;
-            }
-            QGroupBox::title {
-                color: #4ea8de;
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
-            }
-            QPushButton {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #3a3a3a;
-                border-color: #4ea8de;
-            }
-            QPushButton:pressed {
-                background-color: #1a1a1a;
-            }
-            QComboBox {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 4px 8px;
-            }
-            QComboBox:hover { border-color: #4ea8de; }
-            QComboBox QAbstractItemView {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                selection-background-color: #4ea8de;
-            }
-            QSpinBox, QDoubleSpinBox {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 4px;
-            }
-        """)
+        self._content_stack.setStyleSheet(
+            f"QStackedWidget {{ background-color: {theme.BACKGROUND_DEEP}; }}"
+        )
 
         # Create sidebar buttons and content panels
         categories = [
@@ -341,7 +295,7 @@ class LauncherWindow(QMainWindow):
         filter_layout.addLayout(filter_btn_row)
 
         self._filter_status_label = QLabel("No filter active")
-        self._filter_status_label.setStyleSheet("color: #888888;")
+        self._filter_status_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         filter_layout.addWidget(self._filter_status_label)
 
         layout.addWidget(filter_group)
@@ -703,19 +657,23 @@ class LauncherWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(widget)
+        from percell4.gui import theme
+
         scroll.setStyleSheet(
-            "QScrollArea { background-color: #121212; border: none; }"
-            " QScrollArea > QWidget > QWidget { background-color: #121212; }"
+            f"QScrollArea {{ background-color: {theme.BACKGROUND_DEEP}; border: none; }}"
+            f" QScrollArea > QWidget > QWidget {{ background-color: {theme.BACKGROUND_DEEP}; }}"
         )
         return scroll
 
     @staticmethod
     def _section_label(text: str) -> QLabel:
+        from percell4.gui import theme
+
         label = QLabel(text)
         label.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: #ffffff;"
-            " margin-bottom: 12px; padding-bottom: 4px;"
-            " border-bottom: 1px solid #3a3a3a;"
+            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
+            f" margin-bottom: 12px; padding-bottom: 4px;"
+            f" border-bottom: 1px solid {theme.BORDER};"
         )
         return label
 
@@ -723,7 +681,7 @@ class LauncherWindow(QMainWindow):
     def _placeholder(text: str) -> QLabel:
         label = QLabel(f"  {text} — coming soon")
         label.setStyleSheet(
-            "color: #555555; font-style: italic; padding: 4px 8px;"
+            f"color: {theme.TEXT_MUTED}; font-style: italic; padding: 4px 8px;"
         )
         return label
 
@@ -1289,11 +1247,11 @@ class LauncherWindow(QMainWindow):
             self._filter_status_label.setText(
                 f"Showing {n_filtered} of {n_total} cells"
             )
-            self._filter_status_label.setStyleSheet("color: #4ea8de; font-weight: bold;")
+            self._filter_status_label.setStyleSheet(f"color: {theme.ACCENT}; font-weight: bold;")
             self._clear_filter_btn.setEnabled(True)
         else:
             self._filter_status_label.setText("No filter active")
-            self._filter_status_label.setStyleSheet("color: #888888;")
+            self._filter_status_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             self._clear_filter_btn.setEnabled(False)
 
     def _on_threshold_preview(self) -> None:
@@ -1468,7 +1426,7 @@ class LauncherWindow(QMainWindow):
             f"Threshold: {value:.1f}{roi_note}\n"
             f"Positive: {n_pos:,} / {n_total:,} px ({pct:.1f}%)"
         )
-        self._thresh_result_label.setStyleSheet("color: #ffaa44;")
+        self._thresh_result_label.setStyleSheet(f"color: {theme.WARNING};")
 
     def _on_threshold_accept(self) -> None:
         """Accept the current preview threshold and save the mask to HDF5."""
@@ -1511,7 +1469,7 @@ class LauncherWindow(QMainWindow):
             f"Saved: {mask_name}\n"
             f"Threshold: {value:.1f} | {n_pos:,} / {n_total:,} px ({pct:.1f}%)"
         )
-        self._thresh_result_label.setStyleSheet("color: #66cc66;")
+        self._thresh_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self.statusBar().showMessage(f"Saved mask '{mask_name}' (threshold {value:.1f})")
 
         # Clean up working state
@@ -1702,7 +1660,7 @@ class LauncherWindow(QMainWindow):
             f"Measured {n_cells} cells across {len(image_layers)} channel(s)\n"
             f"{n_cols} columns | seg: {seg_name}{mask_note}"
         )
-        self._meas_result_label.setStyleSheet("color: #66cc66;")
+        self._meas_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self.statusBar().showMessage(
             f"Measured {n_cells} cells, {n_cols} columns"
         )
@@ -1804,7 +1762,7 @@ class LauncherWindow(QMainWindow):
             f"{total_particles} particles in {n_cells} cells\n"
             f"mask: {mask_name} | min area: {min_area} px"
         )
-        self._particle_result_label.setStyleSheet("color: #66cc66;")
+        self._particle_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self.statusBar().showMessage(
             f"Found {total_particles} particles across {n_cells} cells"
         )
