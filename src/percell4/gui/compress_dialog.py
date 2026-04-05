@@ -29,10 +29,7 @@ from qtpy.QtWidgets import (
 
 from percell4.io.models import (
     CompressConfig,
-    CompressMode,
     DatasetGuiState,
-    DatasetSpec,
-    DiscoveryMode,
     TokenConfig,
 )
 
@@ -108,13 +105,14 @@ class CompressDialog(QDialog):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Discovery:"))
         self._discovery_combo = QComboBox()
-        self._discovery_combo.addItems(["Subdirectory", "Group by Token"])
+        self._discovery_combo.addItems(["Subdirectory", "Flat Directory"])
+        self._discovery_combo.setToolTip(
+            "Subdirectory: each child folder = one dataset.\n"
+            "Flat Directory: groups files by stripping token patterns\n"
+            "(channel, tile, etc.) from filenames."
+        )
         self._discovery_combo.currentIndexChanged.connect(self._on_discovery_mode_changed)
         mode_row.addWidget(self._discovery_combo)
-        self._group_token_edit = QLineEdit()
-        self._group_token_edit.setPlaceholderText(r"e.g. (sample\d+)")
-        self._group_token_edit.setVisible(False)
-        mode_row.addWidget(self._group_token_edit, 1)
         mode_row.addStretch()
         layout.addLayout(mode_row)
 
@@ -256,7 +254,6 @@ class CompressDialog(QDialog):
             self._run_discovery()
 
     def _on_discovery_mode_changed(self, index: int) -> None:
-        self._group_token_edit.setVisible(index == 1)
         if self._source_edit.text().strip():
             self._run_discovery()
 
@@ -344,18 +341,13 @@ class CompressDialog(QDialog):
         if self._output_edit.text().strip():
             output_dir = Path(self._output_edit.text().strip())
 
-        from percell4.io.discovery import discover_by_subdirectory, discover_by_token
+        from percell4.io.discovery import discover_by_subdirectory, discover_flat
 
         try:
             if self._discovery_combo.currentIndex() == 0:
                 datasets = discover_by_subdirectory(root, token_config, output_dir)
             else:
-                group_token = self._group_token_edit.text().strip()
-                if not group_token:
-                    self._datasets = []
-                    self._populate_tree()
-                    return
-                datasets = discover_by_token(root, group_token, token_config, output_dir)
+                datasets = discover_flat(root, token_config, output_dir)
         except Exception as e:
             self._dataset_count_label.setText(f"Error: {e}")
             return

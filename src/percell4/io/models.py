@@ -111,7 +111,7 @@ class DiscoveryMode(StrEnum):
     """How datasets are discovered from a root directory."""
 
     SUBDIRECTORY = "subdirectory"
-    TOKEN = "token"
+    FLAT = "flat"
 
 
 class CompressMode(StrEnum):

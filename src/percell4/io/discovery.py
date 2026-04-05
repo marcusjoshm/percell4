@@ -80,34 +80,37 @@ def discover_by_subdirectory(
     return datasets
 
 
-def discover_by_token(
+def discover_flat(
     root: Path,
-    group_token: str,
     token_config: TokenConfig | None = None,
     output_dir: Path | None = None,
 ) -> list[DatasetSpec]:
-    """Discover datasets by grouping files in a flat directory by a regex token.
+    """Discover datasets in a flat directory by stripping known tokens.
 
-    The *group_token* regex must have one capture group. Files whose names
-    don't match the pattern are collected into a group named ``_ungrouped``.
+    Scans all TIFFs in *root* (non-recursive), strips the known token
+    matches (channel, tile, z-slice, timepoint) from each filename, and
+    groups files by the remaining stem.  This is the PerCell3-style FOV
+    derivation approach.
+
+    Example::
+
+        1hr_Ars_1A_Capture_s00_ch00.tif  →  strip _s00, _ch00
+        1hr_Ars_1A_Capture_s00_ch01.tif  →  strip _s00, _ch01
+        1hr_Ars_1B_Capture_s00_ch00.tif  →  strip _s00, _ch00
+
+        Groups: "1hr_Ars_1A_Capture" and "1hr_Ars_1B_Capture"
     """
     root = Path(root)
     out = output_dir or root
+    config = token_config or TokenConfig()
 
-    compiled = re.compile(group_token)
-    if compiled.groups < 1:
-        raise ValueError(
-            f"group_token {group_token!r} must have at least one capture group"
-        )
-
-    scanner = FileScanner(token_config)
+    scanner = FileScanner(config)
     scan = scanner.scan(path=root)
 
     groups: dict[str, list[DiscoveredFile]] = defaultdict(list)
     for f in scan.files:
-        match = re.search(compiled, f.path.stem)
-        group_name = match.group(1) if match else "_ungrouped"
-        groups[group_name].append(f)
+        dataset_name = _derive_dataset_name(f.path.stem, config)
+        groups[dataset_name].append(f)
 
     datasets: list[DatasetSpec] = []
     for name in sorted(groups):
@@ -115,13 +118,33 @@ def discover_by_token(
         datasets.append(
             DatasetSpec(
                 name=name,
-                source_dir=None,
+                source_dir=root,
                 files=tuple(files),
                 output_path=out / f"{name}.h5",
             )
         )
 
     return datasets
+
+
+def _derive_dataset_name(stem: str, config: TokenConfig) -> str:
+    """Derive dataset name by stripping all matched token patterns from stem.
+
+    Strips the full match (not just the capture group) of each token pattern,
+    then cleans up trailing underscores/hyphens.
+    """
+    result = stem
+    for field_name in ("channel", "timepoint", "z_slice", "tile"):
+        pattern = getattr(config, field_name)
+        if pattern is None:
+            continue
+        result = re.sub(pattern, "", result)
+
+    # Clean up trailing/leading separators left after stripping
+    result = result.strip("_- ")
+    # Collapse runs of underscores
+    result = re.sub(r"_{2,}", "_", result)
+    return result or stem  # fallback to original if everything was stripped
 
 
 def _scan_single(
