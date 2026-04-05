@@ -14,6 +14,10 @@ def main() -> None:
     """Launch the PerCell4 GUI application."""
     app = QApplication.instance() or QApplication(sys.argv)
 
+    from percell4.gui.theme import apply_theme
+
+    apply_theme(app)
+
     from percell4.gui.launcher import LauncherWindow
     from percell4.model import CellDataModel
 
