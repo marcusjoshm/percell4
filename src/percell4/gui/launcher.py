@@ -2204,7 +2204,7 @@ class LauncherWindow(QMainWindow):
         self.statusBar().showMessage(f"Deleted '{name}'")
 
     def _on_rename_channel(self) -> None:
-        """Rename a channel (image layer) in the viewer."""
+        """Rename a channel (image layer) in the viewer and HDF5 metadata."""
         old_name = self._mgmt_chan_combo.currentText()
         if not old_name:
             self.statusBar().showMessage("Nothing selected to rename")
@@ -2216,6 +2216,16 @@ class LauncherWindow(QMainWindow):
         if not ok or not new_name or new_name == old_name:
             return
 
+        # Update channel_names in HDF5 metadata
+        store = getattr(self, "_current_store", None)
+        if store is not None:
+            meta = store.metadata
+            names = list(meta.get("channel_names", []))
+            if old_name in names:
+                names[names.index(old_name)] = new_name
+                store.set_metadata({"channel_names": names})
+
+        # Rename in viewer
         viewer_win = self._windows.get("viewer")
         if viewer_win is not None and viewer_win.viewer is not None:
             for layer in viewer_win.viewer.layers:
