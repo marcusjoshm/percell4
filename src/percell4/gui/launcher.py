@@ -672,8 +672,7 @@ class LauncherWindow(QMainWindow):
         label = QLabel(text)
         label.setStyleSheet(
             f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; padding-bottom: 4px;"
-            f" border-bottom: 1px solid {theme.BORDER};"
+            f" margin-bottom: 12px; border: none; background: transparent;"
         )
         return label
 
