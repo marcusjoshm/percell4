@@ -178,6 +178,10 @@ class ThresholdQCController(QObject):
         # Build preview dock widget
         self._build_preview_dock()
         self._viewer_win.show()
+        # Re-raise preview after viewer.show() so it isn't hidden behind the viewer
+        if self._preview_window is not None:
+            self._preview_window.raise_()
+            self._preview_window.activateWindow()
 
     def _build_preview_dock(self) -> None:
         """Build the group preview as a separate window with histogram and buttons."""
@@ -297,6 +301,8 @@ class ThresholdQCController(QObject):
 
         win.setCentralWidget(widget)
         win.show()
+        win.raise_()
+        win.activateWindow()
         self._preview_window = win
 
     def _on_proceed(self) -> None:
@@ -496,6 +502,8 @@ class ThresholdQCController(QObject):
 
         win.setCentralWidget(widget)
         win.show()
+        win.raise_()
+        win.activateWindow()
         self._qc_window = win
 
     # ── Live Preview ──

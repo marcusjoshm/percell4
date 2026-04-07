@@ -178,7 +178,7 @@ class CellTableWindow(QMainWindow):
         self._table.setSortingEnabled(True)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._table.setAlternatingRowColors(True)
+        self._table.setAlternatingRowColors(False)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         # Table styling inherited from global theme
