@@ -929,6 +929,11 @@ class LauncherWindow(QMainWindow):
         self._show_window("viewer")
         self._populate_viewer_from_store()
 
+        # Show filename in viewer title bar
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None:
+            viewer_win.set_subtitle(Path(h5_path).name)
+
         self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
 
     def _populate_viewer_from_store(self) -> None:
@@ -1040,6 +1045,7 @@ class LauncherWindow(QMainWindow):
         viewer = self._windows.get("viewer")
         if viewer is not None:
             viewer.clear()
+            viewer.set_subtitle("")
         self.data_model.clear()
         self._current_store = None
         self._current_h5_path = None

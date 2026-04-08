@@ -119,6 +119,14 @@ class ViewerWindow:
         self._ensure_viewer()
         return self._viewer
 
+    def set_subtitle(self, subtitle: str) -> None:
+        """Update the window title to show a subtitle (e.g. filename)."""
+        self._ensure_viewer()
+        if subtitle:
+            self._qt_window.setWindowTitle(f"PerCell4 — Viewer — {subtitle}")
+        else:
+            self._qt_window.setWindowTitle("PerCell4 — Viewer")
+
     def show(self) -> None:
         self._ensure_viewer()
         self._qt_window.show()
