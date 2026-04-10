@@ -39,5 +39,15 @@ Thumbs.db
 *.lif
 *.czi
 
+# Test / scratch outputs from running the app
+*.csv
+*.xlsx
+*.xls
+
+# R
+.Rhistory
+.Rdata
+.Rproj.user/
+
 # Claude
 .claude/
