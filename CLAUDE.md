@@ -34,7 +34,7 @@ pip install <package> && pip freeze > requirements.txt
 
 Single Qt process, multi-window. Each functional unit (napari viewer, data plots, phasor plot, plugin manager) is its own independent top-level window. A launcher/hub window manages the app. All windows communicate through a shared `CellDataModel` (QObject with Qt signals) — windows never talk to each other directly.
 
-Key pattern: `CellDataModel` holds a pandas DataFrame (one row per cell) and emits `data_updated` / `selection_changed` signals. All windows react to these.
+Key pattern: `CellDataModel` holds a pandas DataFrame (one row per cell) and emits a single `state_changed` signal carrying a `StateChange` descriptor (which of `data`, `selection`, `filter`, `segmentation`, `mask` changed). Each window has one handler that processes all relevant changes in a defined order within a single call. See `src/percell4/model.py`.
 
 Heavy computation (Cellpose, etc.) runs in QThread workers to avoid freezing the UI.
 
