@@ -1,3 +1,8 @@
+> **SUPERSEDED — 2026-04-10.** This is the original pre-rebuild architecture
+> writeup (dated 2026-03-25). The canonical current-state description of the
+> PerCell4 architecture lives in `CLAUDE.md` and the per-module `CLAUDE.md`
+> files under `src/percell4/`. Kept here for historical context only.
+
 # Microscopy Analysis App — Architecture Guide
 
 ## Overview
