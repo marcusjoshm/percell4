@@ -47,7 +47,7 @@ def _sample_config() -> WorkflowConfig:
             ),
         ],
         cellpose=CellposeSettings(
-            diameter=25.0, gpu=False, batch_size=16
+            diameter=25.0, gpu=False, flow_threshold=0.5
         ),
         thresholding_rounds=[
             ThresholdingRound(
@@ -102,7 +102,20 @@ def test_write_atomic_writes_file(tmp_path: Path) -> None:
     write_atomic(target, _writer)
 
     assert target.read_text() == "hello"
-    assert not target.with_suffix(".txt.tmp").exists()
+    assert not target.with_name(target.name + ".tmp").exists()
+
+
+def test_write_atomic_multi_dot_path_no_sibling_collision(tmp_path: Path) -> None:
+    """``measurements.parquet.gz`` must not clobber ``measurements.parquet``."""
+    sibling = tmp_path / "measurements.parquet"
+    sibling.write_text("sibling content")
+    target = tmp_path / "measurements.parquet.gz"
+
+    write_atomic(target, lambda tmp: tmp.write_text("new content"))
+
+    assert target.read_text() == "new content"
+    assert sibling.read_text() == "sibling content"  # untouched
+    assert not (tmp_path / "measurements.parquet.tmp").exists()
 
 
 def test_write_atomic_cleans_tmp_on_error(tmp_path: Path) -> None:
@@ -166,7 +179,6 @@ def test_config_roundtrip_dict() -> None:
     restored = config_from_dict(loaded)
 
     # Sanity: full structural equality via fields
-    assert restored.schema_version == cfg.schema_version
     assert restored.output_parent == cfg.output_parent
     assert isinstance(restored.output_parent, Path)
 

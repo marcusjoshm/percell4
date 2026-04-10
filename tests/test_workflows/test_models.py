@@ -109,10 +109,6 @@ def test_cellpose_rejects_bad_values():
         CellposeSettings(diameter=-1)
     with pytest.raises(ValueError, match="min_size"):
         CellposeSettings(min_size=-1)
-    with pytest.raises(ValueError, match="batch_size"):
-        CellposeSettings(batch_size=0)
-    with pytest.raises(ValueError, match="channel_idx"):
-        CellposeSettings(channel_idx=-1)
 
 
 # ── WorkflowDatasetEntry ─────────────────────────────────────

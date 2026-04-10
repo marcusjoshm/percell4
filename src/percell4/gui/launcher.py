@@ -57,7 +57,8 @@ class LauncherWindow(QMainWindow):
 
         # Batch workflow state (see set_workflow_locked / close_child_windows)
         self._workflow_locked: bool = False
-        self._child_windows_to_restore: set[str] = set()
+        self._child_windows_to_restore: list[str] = []
+        self._viewer_created_by_workflow: bool = False
 
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
@@ -2482,7 +2483,14 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage(phase_name)
 
     def get_viewer_window(self):
-        """Return the shared ``ViewerWindow``, creating it if needed."""
+        """Return the shared ``ViewerWindow``, creating and wiring it if needed.
+
+        Lazily creates the viewer on first access. If the workflow itself
+        is what caused the creation (there was no viewer before
+        :meth:`close_child_windows` was called), the host will close the
+        viewer automatically in :meth:`restore_child_windows` so the user
+        is not left with a dangling napari window after the run.
+        """
         return self._get_or_create_window("viewer")
 
     def get_data_model(self) -> "CellDataModel":
@@ -2491,12 +2499,19 @@ class LauncherWindow(QMainWindow):
     def close_child_windows(self) -> None:
         """Close cell_table / data_plot / phasor_plot for the run.
 
-        Remembers which were open so :meth:`restore_child_windows` can
-        reopen exactly that set on run finish / cancel / error. The viewer
-        window is NOT closed — the workflow uses it to host QC sessions.
+        Actually closes the windows (not just ``hide()``) and removes them
+        from the window registry so they do not receive
+        ``CellDataModel.state_changed`` signals during the run — the plan
+        explicitly called out that signal thrash was the reason to close
+        them. They are re-instantiated on demand in
+        :meth:`restore_child_windows` via the usual factories.
+
+        Also records whether the viewer existed before this call so that
+        :meth:`restore_child_windows` can close a workflow-created viewer
+        instead of leaving it dangling.
         """
         child_keys = ("cell_table", "data_plot", "phasor_plot")
-        self._child_windows_to_restore = set()
+        self._child_windows_to_restore = []
         for key in child_keys:
             win = self._windows.get(key)
             if win is None:
@@ -2506,17 +2521,37 @@ class LauncherWindow(QMainWindow):
             except Exception:
                 was_visible = False
             if was_visible:
-                self._child_windows_to_restore.add(key)
-                win.hide()
+                self._child_windows_to_restore.append(key)
+            win.close()
+            # Remove from registry so _show_window reinstantiates a fresh
+            # window on restore; this guarantees no leaked signal handlers.
+            del self._windows[key]
+
+        # Track whether the viewer existed before the run. If not, and the
+        # runner later calls get_viewer_window, restore_child_windows will
+        # close the viewer on cleanup.
+        self._viewer_created_by_workflow = "viewer" not in self._windows
 
     def restore_child_windows(self) -> None:
-        """Re-show the child windows that were open before the workflow."""
-        for key in sorted(self._child_windows_to_restore):
-            win = self._windows.get(key)
-            if win is not None:
-                win.show()
-                win.raise_()
-        self._child_windows_to_restore = set()
+        """Re-show the child windows that were open before the workflow.
+
+        Preserves the original open order via the list recorded in
+        :meth:`close_child_windows`. If the workflow implicitly created
+        the viewer (see :meth:`get_viewer_window`), the viewer is closed
+        here so the user is not left with a dangling napari window.
+        """
+        for key in self._child_windows_to_restore:
+            self._show_window(key)
+        self._child_windows_to_restore = []
+
+        if self._viewer_created_by_workflow:
+            viewer = self._windows.get("viewer")
+            if viewer is not None:
+                viewer.close()
+                # Leave the registry entry intact so the user can still
+                # open the viewer via the sidebar — it will be lazily
+                # re-shown by the existing _show_window path.
+            self._viewer_created_by_workflow = False
 
     # ── Lifecycle ─────────────────────────────────────────────
 

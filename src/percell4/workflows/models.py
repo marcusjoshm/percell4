@@ -49,7 +49,7 @@ class DatasetSource(StrEnum):
     TIFF_PENDING = "tiff_pending"
 
 
-@dataclass(kw_only=True, slots=True, frozen=True)
+@dataclass(frozen=True)
 class CellposeSettings:
     """Global Cellpose configuration for a run.
 
@@ -64,23 +64,15 @@ class CellposeSettings:
     flow_threshold: float = 0.4
     cellprob_threshold: float = 0.0
     min_size: int = 15
-    # Tiles per GPU forward pass — ignored on CPU.
-    batch_size: int = 8
-    # Which intensity channel feeds the segmenter.
-    channel_idx: int = 0
 
     def __post_init__(self) -> None:
         if self.diameter < 0:
             raise ValueError("diameter must be >= 0 (0 = auto)")
         if self.min_size < 0:
             raise ValueError("min_size must be >= 0")
-        if self.batch_size < 1:
-            raise ValueError("batch_size must be >= 1")
-        if self.channel_idx < 0:
-            raise ValueError("channel_idx must be >= 0")
 
 
-@dataclass(kw_only=True, slots=True, frozen=True)
+@dataclass(frozen=True)
 class ThresholdingRound:
     """One named round of grouped thresholding.
 
@@ -119,7 +111,7 @@ class ThresholdingRound:
             raise ValueError("gaussian_sigma must be >= 0")
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass
 class WorkflowDatasetEntry:
     """One dataset selected for a workflow run.
 
@@ -134,6 +126,7 @@ class WorkflowDatasetEntry:
     source: DatasetSource
     h5_path: Path
     channel_names: list[str] = field(default_factory=list)
+    # TODO(phase2): promote to CompressPlan TypedDict / frozen dataclass
     compress_plan: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -145,11 +138,10 @@ class WorkflowDatasetEntry:
             )
 
 
-@dataclass(kw_only=True, slots=True, frozen=True)
+@dataclass(frozen=True)
 class WorkflowConfig:
     """The recipe. Immutable once the user clicks Start."""
 
-    schema_version: int = 1
     datasets: list[WorkflowDatasetEntry]
     cellpose: CellposeSettings
     thresholding_rounds: list[ThresholdingRound]
@@ -169,7 +161,7 @@ class WorkflowConfig:
             raise ValueError(f"dataset names must be unique: {ds_names}")
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass
 class RunMetadata:
     """The runtime instance. Separate from WorkflowConfig (the recipe).
 

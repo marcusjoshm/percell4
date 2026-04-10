@@ -23,9 +23,9 @@ class DatasetFailure(StrEnum):
     MEASUREMENT_ERROR = "measurement_error"
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass(frozen=True)
 class FailureRecord:
-    """One per-dataset failure."""
+    """One per-dataset failure. Immutable once recorded."""
 
     dataset_name: str
     phase_name: str

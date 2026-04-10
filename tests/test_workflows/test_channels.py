@@ -44,18 +44,20 @@ def test_partial_overlap_preserves_first_order() -> None:
     assert outliers == []
 
 
-def test_one_outlier_dataset() -> None:
+def test_empty_intersection_reports_all_datasets() -> None:
+    # Phase 1 rule: empty intersection = all-or-nothing; every selected
+    # dataset is reported so the config dialog can surface the mismatch.
     sources = [
         ("DS1", ["GFP", "RFP"]),
         ("DS2", ["GFP", "RFP"]),
         ("DS3", ["DAPI", "Cy5"]),  # zero overlap with DS1/DS2
     ]
     inter, outliers = intersect_channels(sources)
-    assert outliers == ["DS3"]
-    assert inter == ["GFP", "RFP"]
+    assert inter == []
+    assert outliers == ["DS1", "DS2", "DS3"]
 
 
-def test_no_common_channels_at_all() -> None:
+def test_chained_overlap_no_common_channel() -> None:
     # Every source overlaps *some* other source, but nothing common to all.
     sources = [
         ("DS1", ["A", "B"]),
@@ -64,8 +66,7 @@ def test_no_common_channels_at_all() -> None:
     ]
     inter, outliers = intersect_channels(sources)
     assert inter == []
-    # Each dataset contributes to the mismatch, so all are reported as outliers.
-    assert set(outliers) == {"DS1", "DS2", "DS3"}
+    assert outliers == ["DS1", "DS2", "DS3"]
 
 
 def test_intersection_preserves_first_source_order() -> None:

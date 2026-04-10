@@ -23,27 +23,36 @@ def _get_cellpose_version() -> int:
 
 
 def build_cellpose_model(
-    model_type: str = "cpsam",
+    model_type: str | None = None,
     gpu: bool = False,
 ):
     """Construct a Cellpose model instance, handling both 3.x and 4.x.
 
-    Useful for batch workflows that want to build the model once and reuse it
-    across many images, avoiding the per-image model-construction overhead.
-    Returns the raw Cellpose model object; pass it to ``run_cellpose(..., model=)``.
+    Useful for batch workflows that want to build the model once and reuse
+    it across many images, avoiding the per-image model-construction
+    overhead. Returns the raw Cellpose model object; pass it to
+    ``run_cellpose(..., model=)``.
+
+    ``model_type`` is ignored on Cellpose 4.x (cpsam is the only model).
+    On Cellpose 3.x it defaults to ``"cyto3"`` if unset. The previous
+    default of ``"cpsam"`` was a v4-only string and would crash v3 batch
+    callers that did not override the parameter.
     """
     from cellpose import models
 
     version = _get_cellpose_version()
     if version >= 4:
+        # Cellpose 4.x: model_type is ignored.
         return models.CellposeModel(gpu=gpu)
+    if model_type is None:
+        model_type = "cyto3"
     model_cls = getattr(models, "Cellpose", models.CellposeModel)
     return model_cls(model_type=model_type, gpu=gpu)
 
 
 def run_cellpose(
     image: NDArray,
-    model_type: str = "cpsam",
+    model_type: str | None = None,
     diameter: float | None = None,
     gpu: bool = False,
     channels: list[int] | None = None,
@@ -57,9 +66,9 @@ def run_cellpose(
     Parameters
     ----------
     image : 2D array (H, W) or 3D array (H, W, C) for multi-channel
-    model_type : Cellpose model name.
-        - Cellpose 4.x: 'cpsam' (default, SAM-based — the only model in v4)
-        - Cellpose 3.x: 'cyto3', 'cyto2', 'cyto', 'nuclei'
+    model_type : Cellpose model name. Ignored on Cellpose 4.x (cpsam is
+        the only model). On Cellpose 3.x, defaults to ``"cyto3"`` if
+        unset; other valid values are ``"cyto2"``, ``"cyto"``, ``"nuclei"``.
     diameter : estimated cell diameter in pixels (None = auto-detect)
     gpu : use GPU acceleration
     channels : channel mapping for Cellpose 3.x (ignored in v4)

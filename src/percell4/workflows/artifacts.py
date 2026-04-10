@@ -17,7 +17,7 @@ import json
 import os
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -38,22 +38,33 @@ from percell4.workflows.models import (
 
 
 def write_atomic(path: Path, writer_fn: Callable[[Path], None]) -> None:
-    """Write a file atomically via a .tmp sibling + os.replace.
+    """Write a file atomically via a .tmp sibling + fsync + os.replace.
 
     ``writer_fn`` receives the temp path and is responsible for actually
-    writing the bytes. On success the temp file is moved into place with
-    :func:`os.replace`; on any exception the temp file is removed and the
-    error re-raised.
+    writing the bytes. After it returns, this helper fsyncs the temp file's
+    contents so a crash between write and replace cannot surface a
+    zero-length file on ext4 / APFS. Then :func:`os.replace` atomically
+    moves the temp into place; on POSIX we also fsync the parent directory
+    so the rename itself is durable.
 
-    Rationale: a crash between an ``os.unlink(path)`` and the subsequent
-    write would leave the user with *nothing*. ``os.replace`` is atomic on
-    every supported platform (POSIX and Windows), so we never unlink first.
+    On any exception the temp file is removed and the error re-raised.
+    We never ``os.unlink`` the target first — a crash between unlink and
+    replace would leave the user with *nothing*. ``os.replace`` is atomic
+    on every supported platform (POSIX and Windows).
+
+    The temp path uses ``path.name + ".tmp"`` rather than ``with_suffix``
+    so a multi-dot path like ``measurements.parquet.gz`` produces
+    ``measurements.parquet.gz.tmp``, not ``measurements.parquet.tmp`` that
+    would collide with an unrelated sibling.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(path.name + ".tmp")
     try:
         writer_fn(tmp)
+        # Ensure the temp file's bytes are on disk before the rename.
+        with open(tmp, "rb") as fd:
+            os.fsync(fd.fileno())
     except BaseException:
         if tmp.exists():
             try:
@@ -62,25 +73,38 @@ def write_atomic(path: Path, writer_fn: Callable[[Path], None]) -> None:
                 pass
         raise
     os.replace(tmp, path)
+    # Fsync the parent directory so the rename survives a crash. POSIX
+    # only; Windows does not support directory fsync and is best-effort.
+    if os.name == "posix":
+        try:
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
 
 
 # ── Run folder creation ──────────────────────────────────────────────────
 
 
 def create_run_folder(output_parent: Path) -> Path:
-    """Create a new ``run_<timestamp>_<shortuuid>/`` folder under ``output_parent``.
+    """Create a new ``run_<utc-timestamp>_<shortuuid>/`` folder.
 
-    The timestamp is a local time ``YYYY-MM-DD_HHMMSS``; the uuid suffix
-    guards against collisions when two runs start within the same second.
-    ``mkdir(exist_ok=False)`` fails fast on any collision — the caller should
-    surface the error rather than silently sharing a folder between runs.
+    The timestamp is UTC in ``YYYY-MM-DDTHHMMSSZ`` form — matches the
+    ``run_log.jsonl`` entries (also UTC), sorts lexicographically, and is
+    DST-safe. The uuid suffix guards against collisions when two runs
+    start within the same second. ``mkdir(exist_ok=False)`` fails fast on
+    any collision — the caller should surface the error rather than
+    silently sharing a folder between runs.
 
     Subdirectories created up front: ``per_dataset/`` and ``staging/``.
     """
     output_parent = Path(output_parent)
     output_parent.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
     suffix = uuid.uuid4().hex[:8]
     folder = output_parent / f"run_{ts}_{suffix}"
     folder.mkdir(parents=True, exist_ok=False)
@@ -114,13 +138,18 @@ def _cellpose_to_dict(c: CellposeSettings) -> dict[str, Any]:
         "flow_threshold": c.flow_threshold,
         "cellprob_threshold": c.cellprob_threshold,
         "min_size": c.min_size,
-        "batch_size": c.batch_size,
-        "channel_idx": c.channel_idx,
     }
 
 
 def _cellpose_from_dict(d: dict[str, Any]) -> CellposeSettings:
-    return CellposeSettings(**d)
+    return CellposeSettings(
+        model=d.get("model", "cpsam"),
+        diameter=d.get("diameter", 30.0),
+        gpu=d.get("gpu", True),
+        flow_threshold=d.get("flow_threshold", 0.4),
+        cellprob_threshold=d.get("cellprob_threshold", 0.0),
+        min_size=d.get("min_size", 15),
+    )
 
 
 def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
@@ -172,7 +201,6 @@ def _entry_from_dict(d: dict[str, Any]) -> WorkflowDatasetEntry:
 def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
     """Serialize a WorkflowConfig to a plain JSON-safe dict."""
     return {
-        "schema_version": cfg.schema_version,
         "datasets": [_entry_to_dict(e) for e in cfg.datasets],
         "cellpose": _cellpose_to_dict(cfg.cellpose),
         "thresholding_rounds": [_round_to_dict(r) for r in cfg.thresholding_rounds],
@@ -184,7 +212,6 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
 def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
     """Reconstruct a WorkflowConfig from its JSON-safe dict form."""
     return WorkflowConfig(
-        schema_version=data.get("schema_version", 1),
         datasets=[_entry_from_dict(d) for d in data["datasets"]],
         cellpose=_cellpose_from_dict(data["cellpose"]),
         thresholding_rounds=[

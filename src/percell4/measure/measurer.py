@@ -25,6 +25,11 @@ CORE_COLUMNS = [
     "bbox_y", "bbox_x", "bbox_h", "bbox_w", "area",
 ]
 
+# (round_name, inside_mask, outside_mask, inside_area, outside_area) — used by
+# the multi-mask single-pass measurer to carry per-round crop state across
+# channels without redundant mask arithmetic.
+_PerRound = tuple[str, NDArray[np.bool_], NDArray[np.bool_], float, float]
+
 
 @dataclass
 class _CellCrop:
@@ -457,12 +462,16 @@ def measure_multichannel_with_masks(
 ) -> pd.DataFrame:
     """Measure multiple channels in a single pass with multiple named masks.
 
-    Combines :func:`measure_cells_with_masks` (single-pass, multi-mask) with
-    the standard multichannel merge so the result has columns named
-    ``{channel}_{metric}`` for whole-cell plus
+    Result has columns named ``{channel}_{metric}`` for whole-cell plus
     ``{channel}_{metric}_in_{round_name}`` / ``_out_{round_name}`` for each
-    configured mask. Designed for batch workflows that measure every channel
-    against multiple rounds of thresholding in one sweep.
+    configured mask. Designed for batch workflows that measure every
+    channel against multiple rounds of thresholding in one sweep.
+
+    Unlike calling :func:`measure_cells_with_masks` once per channel, this
+    runs ``find_objects`` + ``regionprops`` exactly **once** per dataset
+    and reuses the per-cell ``sl`` crop plus the per-round inside/outside
+    boolean masks across all channels. For a 4-channel × 3-round dataset
+    this is roughly 4× cheaper than the naive per-channel approach.
 
     Parameters
     ----------
@@ -475,10 +484,89 @@ def measure_multichannel_with_masks(
     if not images:
         raise ValueError("No channel images to measure")
 
-    per_channel = {
-        ch_name: measure_cells_with_masks(
-            image, labels, metrics=metrics, masks=masks
-        )
-        for ch_name, image in images.items()
-    }
+    metric_names = _validate_metrics(metrics)
+    mask_items: list[tuple[str, NDArray[np.uint8]]] = (
+        list(masks.items()) if masks else []
+    )
+    mask_names = [name for name, _ in mask_items]
+
+    # Build the empty-frame fallback matching _merge_multichannel's output.
+    if labels.max() == 0:
+        # Each channel contributes an empty DataFrame with the expected column
+        # layout; _merge_multichannel handles the empty inputs gracefully.
+        per_channel = {
+            ch_name: pd.DataFrame(
+                columns=_build_column_list_with_masks(metric_names, mask_names)
+            )
+            for ch_name in images
+        }
+        return _merge_multichannel(per_channel)
+
+    # Precompute per-cell crop metadata once: bounding box slice, cell mask,
+    # and per-round inside/outside boolean arrays. Everything here is
+    # label-only — it does not depend on any channel image, so the cost is
+    # paid once per dataset, not once per channel.
+    #
+    # Each entry is ``(cell_crop, per_round)`` where ``per_round`` is a list
+    # of _PerRound tuples defined at module level.
+    crop_metas: list[tuple[_CellCrop, list[_PerRound]]] = []
+    # _iter_cell_crops is called with the first channel's image just to get
+    # the slice metadata; the .image_crop field is re-derived per channel
+    # below so we never rely on the first channel's data.
+    first_image = next(iter(images.values()))
+    for crop in _iter_cell_crops(first_image, labels):
+        per_round: list[_PerRound] = []
+        for round_name, mask in mask_items:
+            mask_bool = mask[crop.sl] > 0
+            inside = crop.cell_mask & mask_bool
+            outside = crop.cell_mask & ~mask_bool
+            per_round.append(
+                (
+                    round_name,
+                    inside,
+                    outside,
+                    float(np.sum(inside)),
+                    float(np.sum(outside)),
+                )
+            )
+        crop_metas.append((crop, per_round))
+
+    # Now iterate channels, reusing crop_metas.
+    rows_per_channel: dict[str, list[dict]] = {ch: [] for ch in images}
+    for crop, per_round in crop_metas:
+        core = _core_row(crop)
+        for ch_name, image in images.items():
+            img_crop = image[crop.sl]
+            row = dict(core)
+            # whole-cell metrics
+            for m in metric_names:
+                if m == "area":
+                    row[m] = crop.area
+                else:
+                    row[m] = BUILTIN_METRICS[m](img_crop, crop.cell_mask)
+            # per-round inside/outside metrics
+            for round_name, inside, outside, inside_area, outside_area in per_round:
+                for m in metric_names:
+                    if m == "area":
+                        row[f"{m}_in_{round_name}"] = inside_area
+                        row[f"{m}_out_{round_name}"] = outside_area
+                    else:
+                        row[f"{m}_in_{round_name}"] = BUILTIN_METRICS[m](
+                            img_crop, inside
+                        )
+                        row[f"{m}_out_{round_name}"] = BUILTIN_METRICS[m](
+                            img_crop, outside
+                        )
+            rows_per_channel[ch_name].append(row)
+
+    per_channel = {}
+    for ch_name, rows in rows_per_channel.items():
+        if rows:
+            df = pd.DataFrame(rows)
+            df["label"] = df["label"].astype(np.int32)
+            per_channel[ch_name] = df
+        else:
+            per_channel[ch_name] = pd.DataFrame(
+                columns=_build_column_list_with_masks(metric_names, mask_names)
+            )
     return _merge_multichannel(per_channel)
