@@ -25,5 +25,8 @@ The `percell4` Python package.
 - `measure/` — per-cell metrics, multi-ROI measurement, grouping, particles
 - `segment/` — Cellpose wrapper, postprocessing filters, ROI import
 - `flim/` — phasor computation and DTCWT wavelet filtering
+- `workflows/` — Qt-agnostic building blocks for batch analysis workflows
+  (config dataclasses, run-folder I/O, channel intersection, host protocol,
+  run-log helper). The Qt driver lives under `gui/workflows/`.
 - `cli/` — command-line entry points
 - `plugins/` — plugin scaffolding (currently empty)

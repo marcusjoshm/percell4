@@ -138,6 +138,38 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
+    def read_channel(self, hdf5_path: str, channel_idx: int) -> NDArray:
+        """Read a single channel plane from a 2D or 3D array.
+
+        For 2D arrays, ``channel_idx`` must be 0 and the full array is returned.
+        For 3D ``(C, H, W)`` arrays, returns only ``array[channel_idx]`` without
+        loading the other channels — useful for phases that only need one channel
+        on each dataset.
+        """
+        f = self._open_read()
+        try:
+            if hdf5_path not in f:
+                raise KeyError(f"Dataset not found: {hdf5_path}")
+            ds = f[hdf5_path]
+            if ds.ndim == 2:
+                if channel_idx != 0:
+                    raise IndexError(
+                        f"channel_idx={channel_idx} out of range for 2D array"
+                    )
+                return ds[()]
+            if ds.ndim == 3:
+                n_channels = ds.shape[0]
+                if not 0 <= channel_idx < n_channels:
+                    raise IndexError(
+                        f"channel_idx={channel_idx} out of range [0, {n_channels})"
+                    )
+                return ds[channel_idx, ...]
+            raise ValueError(
+                f"read_channel expects 2D or 3D array, got {ds.ndim}D at {hdf5_path}"
+            )
+        finally:
+            self._close_if_not_session(f)
+
     # ── DataFrame operations ──────────────────────────────────
 
     def write_dataframe(self, hdf5_path: str, df: pd.DataFrame) -> int:

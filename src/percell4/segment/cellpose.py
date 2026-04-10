@@ -22,6 +22,25 @@ def _get_cellpose_version() -> int:
     return 3
 
 
+def build_cellpose_model(
+    model_type: str = "cpsam",
+    gpu: bool = False,
+):
+    """Construct a Cellpose model instance, handling both 3.x and 4.x.
+
+    Useful for batch workflows that want to build the model once and reuse it
+    across many images, avoiding the per-image model-construction overhead.
+    Returns the raw Cellpose model object; pass it to ``run_cellpose(..., model=)``.
+    """
+    from cellpose import models
+
+    version = _get_cellpose_version()
+    if version >= 4:
+        return models.CellposeModel(gpu=gpu)
+    model_cls = getattr(models, "Cellpose", models.CellposeModel)
+    return model_cls(model_type=model_type, gpu=gpu)
+
+
 def run_cellpose(
     image: NDArray,
     model_type: str = "cpsam",
@@ -31,6 +50,7 @@ def run_cellpose(
     flow_threshold: float = 0.4,
     cellprob_threshold: float = 0.0,
     min_size: int = 15,
+    model=None,
 ) -> NDArray[np.int32]:
     """Run Cellpose segmentation on a 2D image.
 
@@ -46,19 +66,22 @@ def run_cellpose(
     flow_threshold : flow error threshold (higher = more permissive)
     cellprob_threshold : cell probability threshold
     min_size : minimum cell size in pixels
+    model : optional pre-built Cellpose model. When provided, the internal
+        model construction is skipped and this model is reused. ``model_type``
+        and ``gpu`` are ignored in that case. Use :func:`build_cellpose_model`
+        to construct a reusable model for batch workflows.
 
     Returns
     -------
     Label array (H, W) int32 where each cell has a unique integer ID.
     Background is 0.
     """
-    from cellpose import models
-
     version = _get_cellpose_version()
 
     if version >= 4:
         # Cellpose 4.x: CellposeModel, model_type is ignored (cpsam only)
-        model = models.CellposeModel(gpu=gpu)
+        if model is None:
+            model = build_cellpose_model(gpu=gpu)
 
         # v4 eval returns 3-tuple: (masks, flows, diams)
         # channels parameter is deprecated in v4
@@ -75,8 +98,8 @@ def run_cellpose(
         if channels is None:
             channels = [0, 0]
 
-        model_cls = getattr(models, "Cellpose", models.CellposeModel)
-        model = model_cls(model_type=model_type, gpu=gpu)
+        if model is None:
+            model = build_cellpose_model(model_type=model_type, gpu=gpu)
 
         # v3 eval returns 4-tuple: (masks, flows, styles, diams)
         masks, _flows, _styles, _diams = model.eval(

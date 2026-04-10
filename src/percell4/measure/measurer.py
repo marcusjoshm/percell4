@@ -353,3 +353,132 @@ def _build_column_list(metric_names: list[str], has_mask: bool) -> list[str]:
             cols.append(f"{name}_mask_inside")
             cols.append(f"{name}_mask_outside")
     return cols
+
+
+def _build_column_list_with_masks(
+    metric_names: list[str],
+    mask_names: list[str],
+) -> list[str]:
+    """Build the expected column list for an empty masked-multi DataFrame."""
+    cols = list(CORE_COLUMNS)
+    for name in metric_names:
+        if name not in cols:
+            cols.append(name)
+    for round_name in mask_names:
+        for name in metric_names:
+            cols.append(f"{name}_in_{round_name}")
+            cols.append(f"{name}_out_{round_name}")
+    return cols
+
+
+def measure_cells_with_masks(
+    image: NDArray,
+    labels: NDArray[np.int32],
+    metrics: list[str] | None = None,
+    masks: dict[str, NDArray[np.uint8]] | None = None,
+) -> pd.DataFrame:
+    """Single-pass per-cell measurement with multiple named masks.
+
+    Produces the same whole-cell metric columns as :func:`measure_cells`,
+    plus per-mask inside/outside columns named ``{metric}_in_{round_name}``
+    and ``{metric}_out_{round_name}`` instead of the ``_mask_inside`` /
+    ``_mask_outside`` suffixes used by the single-mask path. This avoids
+    column collisions when the caller wants metrics for several rounds of
+    thresholding in one pass, and re-uses a single ``find_objects`` +
+    ``regionprops`` pass — much cheaper than calling
+    :func:`measure_cells` once per mask.
+
+    Parameters
+    ----------
+    image : (H, W) intensity image
+    labels : (H, W) int32 label array (0 = background)
+    metrics : metric names (None = all builtins)
+    masks : mapping of ``{round_name: (H, W) uint8 mask}``. May be empty or
+        ``None`` — in that case the result has only whole-cell columns.
+
+    Returns
+    -------
+    DataFrame with one row per cell. See :func:`measure_cells` for the
+    core + whole-cell metric columns, plus ``{metric}_in_{round_name}`` and
+    ``{metric}_out_{round_name}`` for each mask.
+    """
+    metric_names = _validate_metrics(metrics)
+    mask_items: list[tuple[str, NDArray[np.uint8]]] = (
+        list(masks.items()) if masks else []
+    )
+    mask_names = [name for name, _ in mask_items]
+
+    if labels.max() == 0:
+        columns = _build_column_list_with_masks(metric_names, mask_names)
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict] = []
+    for crop in _iter_cell_crops(image, labels):
+        row = _core_row(crop)
+        row.update(_compute_metrics(
+            crop.image_crop, crop.cell_mask, metric_names, crop.area
+        ))
+
+        for round_name, mask in mask_items:
+            mask_crop = mask[crop.sl]
+            mask_bool = mask_crop > 0
+            inside = crop.cell_mask & mask_bool
+            outside = crop.cell_mask & ~mask_bool
+            inside_area = float(np.sum(inside))
+            outside_area = float(np.sum(outside))
+            for name in metric_names:
+                if name == "area":
+                    row[f"{name}_in_{round_name}"] = inside_area
+                    row[f"{name}_out_{round_name}"] = outside_area
+                else:
+                    row[f"{name}_in_{round_name}"] = BUILTIN_METRICS[name](
+                        crop.image_crop, inside
+                    )
+                    row[f"{name}_out_{round_name}"] = BUILTIN_METRICS[name](
+                        crop.image_crop, outside
+                    )
+
+        rows.append(row)
+
+    if not rows:
+        columns = _build_column_list_with_masks(metric_names, mask_names)
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(rows)
+    df["label"] = df["label"].astype(np.int32)
+    return df
+
+
+def measure_multichannel_with_masks(
+    images: dict[str, NDArray],
+    labels: NDArray[np.int32],
+    metrics: list[str] | None = None,
+    masks: dict[str, NDArray[np.uint8]] | None = None,
+) -> pd.DataFrame:
+    """Measure multiple channels in a single pass with multiple named masks.
+
+    Combines :func:`measure_cells_with_masks` (single-pass, multi-mask) with
+    the standard multichannel merge so the result has columns named
+    ``{channel}_{metric}`` for whole-cell plus
+    ``{channel}_{metric}_in_{round_name}`` / ``_out_{round_name}`` for each
+    configured mask. Designed for batch workflows that measure every channel
+    against multiple rounds of thresholding in one sweep.
+
+    Parameters
+    ----------
+    images : dict mapping channel name to (H, W) array
+    labels : (H, W) int32 label array
+    metrics : metric names (None = all builtins)
+    masks : mapping of ``{round_name: (H, W) uint8 mask}``. Empty or ``None``
+        produces whole-cell columns only.
+    """
+    if not images:
+        raise ValueError("No channel images to measure")
+
+    per_channel = {
+        ch_name: measure_cells_with_masks(
+            image, labels, metrics=metrics, masks=masks
+        )
+        for ch_name, image in images.items()
+    }
+    return _merge_multichannel(per_channel)

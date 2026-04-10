@@ -55,6 +55,10 @@ class LauncherWindow(QMainWindow):
         self._last_particle_df = None
         self._last_particle_detail_df = None
 
+        # Batch workflow state (see set_workflow_locked / close_child_windows)
+        self._workflow_locked: bool = False
+        self._child_windows_to_restore: set[str] = set()
+
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
 
@@ -2434,6 +2438,85 @@ class LauncherWindow(QMainWindow):
             )
         except Exception as e:
             self.statusBar().showMessage(f"Export error: {e}")
+
+    # ── Batch workflow host API ───────────────────────────────
+    #
+    # These methods implement the percell4.workflows.host.WorkflowHost
+    # protocol used by batch workflow runners. They are called from the
+    # batch runner; regular launcher actions should not poke at
+    # ``_workflow_locked`` directly.
+
+    @property
+    def is_workflow_locked(self) -> bool:
+        """Whether a batch workflow currently owns the main UI."""
+        return self._workflow_locked
+
+    def set_workflow_locked(self, locked: bool) -> None:
+        """Disable (or re-enable) the launcher's main UI.
+
+        While locked, the sidebar, every content panel, and the File menu
+        are disabled. The workflow runner is expected to host its own UI
+        (config dialog, progress dialogs, QC controller windows), which
+        are separate top-level windows and stay interactive.
+
+        Calling with the same value twice is a no-op.
+        """
+        if locked == self._workflow_locked:
+            return
+        self._workflow_locked = locked
+
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(not locked)
+        self.menuBar().setEnabled(not locked)
+        if locked:
+            self.statusBar().showMessage("Workflow running...")
+        else:
+            self.statusBar().showMessage("Ready")
+
+    def show_workflow_status(self, phase_name: str, sub_progress: str) -> None:
+        """Display a live status string for the running workflow."""
+        if sub_progress:
+            self.statusBar().showMessage(f"{phase_name} — {sub_progress}")
+        else:
+            self.statusBar().showMessage(phase_name)
+
+    def get_viewer_window(self):
+        """Return the shared ``ViewerWindow``, creating it if needed."""
+        return self._get_or_create_window("viewer")
+
+    def get_data_model(self) -> "CellDataModel":
+        return self.data_model
+
+    def close_child_windows(self) -> None:
+        """Close cell_table / data_plot / phasor_plot for the run.
+
+        Remembers which were open so :meth:`restore_child_windows` can
+        reopen exactly that set on run finish / cancel / error. The viewer
+        window is NOT closed — the workflow uses it to host QC sessions.
+        """
+        child_keys = ("cell_table", "data_plot", "phasor_plot")
+        self._child_windows_to_restore = set()
+        for key in child_keys:
+            win = self._windows.get(key)
+            if win is None:
+                continue
+            try:
+                was_visible = bool(win.isVisible())
+            except Exception:
+                was_visible = False
+            if was_visible:
+                self._child_windows_to_restore.add(key)
+                win.hide()
+
+    def restore_child_windows(self) -> None:
+        """Re-show the child windows that were open before the workflow."""
+        for key in sorted(self._child_windows_to_restore):
+            win = self._windows.get(key)
+            if win is not None:
+                win.show()
+                win.raise_()
+        self._child_windows_to_restore = set()
 
     # ── Lifecycle ─────────────────────────────────────────────
 

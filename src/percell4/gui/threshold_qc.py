@@ -87,6 +87,7 @@ class ThresholdQCController(QObject):
         sigma: float,
         mask_name: str,
         on_complete: Callable[[bool, str], None] | None = None,
+        write_measurements_to_store: bool = True,
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -100,6 +101,10 @@ class ThresholdQCController(QObject):
         self._sigma = sigma
         self._mask_name = mask_name
         self._on_complete = on_complete
+        # When False, /masks/<name> and /groups/<name> are still written,
+        # but /measurements is left alone. Used by the batch workflow runner,
+        # which owns measurement persistence separately.
+        self._write_measurements_to_store = write_measurements_to_store
 
         # Build group states
         self._groups: list[GroupState] = []
@@ -714,8 +719,9 @@ class ThresholdQCController(QObject):
             )
             self._data_model.set_measurements(df)
 
-            # Persist updated DataFrame
-            if self._store is not None:
+            # Persist updated DataFrame (skipped by the batch workflow runner,
+            # which owns measurement persistence in its own run folder).
+            if self._store is not None and self._write_measurements_to_store:
                 self._store.write_dataframe("/measurements", df)
 
         # Show final mask in viewer

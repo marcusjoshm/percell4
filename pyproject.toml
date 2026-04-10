@@ -31,6 +31,7 @@ dependencies = [
     # Data storage
     "h5py>=3.10,<4",
     "pandas>=2.0,<3",
+    "pyarrow>=14",
 
     # Image processing
     "numpy>=1.26",
