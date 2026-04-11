@@ -21,3 +21,11 @@ run-folder I/O, channel intersection, host protocol — lives under
   unattended phases run synchronously in a tight loop and interactive
   phases register a completion callback and return, resuming at
   natural Qt event boundaries.
+
+## Subpackages
+
+- `single_cell/` — concrete UI for the **single-cell thresholding
+  analysis workflow**. Currently holds only `config_dialog.py`
+  (`WorkflowConfigDialog`). The Phase 4+ runner subclass, segmentation
+  QC controller, and threshold QC queue wrapper will land here as
+  their phases come online.

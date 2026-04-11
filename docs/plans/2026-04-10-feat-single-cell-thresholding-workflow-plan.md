@@ -395,21 +395,21 @@ Nested `QEventLoop.exec_()` works in PyQt5 but is the most common Qt-Python foot
 #### Phase 3: Config dialog — dataset picker, settings, column picker
 
 **Tasks:**
-- [ ] Create `src/percell4/gui/workflows/single_cell/config_dialog.py` with `WorkflowConfigDialog(QDialog)`
-- [ ] Expose config via `@property workflow_config(self) -> WorkflowConfig` (matching `CompressDialog.compress_config` at `compress_dialog.py:305-374`); Start button connects to `self.accept` with an `accept()` override that runs cross-field validation
-- [ ] **Dataset picker section** — `QTreeWidget` with four add-buttons:
-  - [ ] "Add .h5 files..." (multi-select file dialog)
-  - [ ] "Add folder of .h5 files..." (directory picker; recursive checkbox; globs `*.h5`)
-  - [ ] "Add .tiff source..." (nested `CompressDialog.exec_()` single-dataset mode; capture `dialog.compress_config` immediately after `exec_() == Accepted`, per `docs/solutions/ui-bugs/percell4-flim-phasor-troubleshooting.md`; read `datasets[0].channel_names` from the scan result)
-  - [ ] "Add .tiff folder..." (nested `CompressDialog.exec_()` batch mode)
-  - [ ] "Remove" button
-  - [ ] **Dedupe on add** by resolved `h5_path` (or by `(source_dir, file_list)` for tiff sources); show a status-bar toast on skip
-  - [ ] **Disambiguate display names** — if two entries have the same stem, auto-suffix with `(2)`
-- [ ] **Cellpose settings group**: model combo, diameter/flow_threshold/cellprob_threshold/min_size spinboxes, GPU checkbox, batch_size spinbox, segmentation channel index; edge-removal shown as a non-interactive label
-- [ ] **Thresholding rounds section** — **inline `QTableWidget`** (not a modal sub-dialog per `code-simplicity-reviewer` simplification). Columns: Name | Channel | Metric | Algorithm | Params | σ. Name column live-validates the regex and colors invalid cells red. Add/Remove/Up/Down buttons
-- [ ] **Column picker section**: `QListWidget` with checkboxes. `_recompute_available_columns()` computes from current intersected channels × `BUILTIN_METRICS` + `group_{round_name}` for each round + core columns + per-round `{ch}_{metric}_in_{round}` / `_out_{round}`. Re-runs whenever datasets or rounds change; preserves check state for columns that still exist
-- [ ] **Output parent** — `QLineEdit` + Browse + "write probe" test on focus-out. Default from `QSettings("LeeLabPerCell4", "PerCell4").value("single_cell_threshold_workflow/output_parent")` (flat 2-segment per pattern reviewer)
-- [ ] **Start button → `accept()` override** runs validation in order:
+- [x] Create `src/percell4/gui/workflows/single_cell/config_dialog.py` with `WorkflowConfigDialog(QDialog)`
+- [x] Expose config via `@property workflow_config(self) -> WorkflowConfig` (matching `CompressDialog.compress_config` at `compress_dialog.py:305-374`); Start button connects to `self.accept` with an `accept()` override that runs cross-field validation
+- [x] **Dataset picker section** — `QTreeWidget` with four add-buttons:
+  - [x] "Add .h5 files..." (multi-select file dialog)
+  - [x] "Add folder of .h5 files..." (directory picker; recursive checkbox; globs `*.h5`)
+  - [x] "Add .tiff source..." (nested `CompressDialog.exec_()` single-dataset mode; capture `dialog.compress_config` immediately after `exec_() == Accepted`, per `docs/solutions/ui-bugs/percell4-flim-phasor-troubleshooting.md`; read `datasets[0].channel_names` from the scan result)
+  - [x] "Add .tiff folder..." (nested `CompressDialog.exec_()` batch mode)
+  - [x] "Remove" button
+  - [x] **Dedupe on add** by resolved `h5_path` (or by `(source_dir, file_list)` for tiff sources); show a status-bar toast on skip
+  - [x] **Disambiguate display names** — if two entries have the same stem, auto-suffix with `(2)`
+- [x] **Cellpose settings group**: model combo, diameter/flow_threshold/cellprob_threshold/min_size spinboxes, GPU checkbox, batch_size spinbox, segmentation channel index; edge-removal shown as a non-interactive label
+- [x] **Thresholding rounds section** — **inline `QTableWidget`** (not a modal sub-dialog per `code-simplicity-reviewer` simplification). Columns: Name | Channel | Metric | Algorithm | Params | σ. Name column live-validates the regex and colors invalid cells red. Add/Remove/Up/Down buttons
+- [x] **Column picker section**: `QListWidget` with checkboxes. `_recompute_available_columns()` computes from current intersected channels × `BUILTIN_METRICS` + `group_{round_name}` for each round + core columns + per-round `{ch}_{metric}_in_{round}` / `_out_{round}`. Re-runs whenever datasets or rounds change; preserves check state for columns that still exist
+- [x] **Output parent** — `QLineEdit` + Browse + "write probe" test on focus-out. Default from `QSettings("LeeLabPerCell4", "PerCell4").value("single_cell_threshold_workflow/output_parent")` (flat 2-segment per pattern reviewer)
+- [x] **Start button → `accept()` override** runs validation in order:
   1. `_build_channel_sources(entries)` — builds `list[ChannelSource]` mixing `h5_existing` (read via `store.metadata["channel_names"]`, wrapped in a `QProgressDialog` for feedback on slow drives) and `tiff_pending` (read from stored `CompressConfig.datasets[i].channel_names`)
   2. `intersect_channels(sources)` → (intersected, outliers)
   3. If outliers present → `QMessageBox.warning` with "Proceed without these N datasets" / "Abort and fix selection"; drops outliers on Proceed
@@ -427,16 +427,16 @@ Grep of `src/percell4/gui/` shows 16 `QMessageBox.*` calls — all `.warning` or
 - `src/percell4/gui/workflows/single_cell/config_dialog.py`
 
 **Tests:**
-- [ ] `tests/gui_workflows/test_config_dialog.py` with `pytest-qt` — qtbot opens dialog, Add 2 h5 files, Add 1 round, click Start, assert `workflow_config` materializes a valid `WorkflowConfig`; test outlier prompt on mixed-channel h5 fixtures
+- [x] `tests/gui_workflows/test_config_dialog.py` with `pytest-qt` — qtbot opens dialog, Add 2 h5 files, Add 1 round, click Start, assert `workflow_config` materializes a valid `WorkflowConfig`; test outlier prompt on mixed-channel h5 fixtures
 
 **Success criteria:**
-- [ ] Opening dialog with empty state disables Start
-- [ ] Adding a folder of `.h5` files auto-discovers all `*.h5`
-- [ ] Outlier datasets trigger Proceed/Abort prompt; Proceed removes them
-- [ ] Column picker refreshes on dataset/round changes and preserves check marks for columns that still exist
-- [ ] Start writes `output_parent` to `QSettings` under `single_cell_threshold_workflow/output_parent`
-- [ ] Round name regex violations block Start with inline red highlight
-- [ ] Duplicate dataset additions show a status-bar toast and skip silently
+- [x] Opening dialog with empty state disables Start
+- [x] Adding a folder of `.h5` files auto-discovers all `*.h5`
+- [x] Outlier datasets trigger Proceed/Abort prompt; Proceed removes them
+- [x] Column picker refreshes on dataset/round changes and preserves check marks for columns that still exist
+- [x] Start writes `output_parent` to `QSettings` under `single_cell_threshold_workflow/output_parent`
+- [x] Round name regex violations block Start with inline red highlight
+- [x] Duplicate dataset additions show a status-bar toast and skip silently
 
 #### Phase 4: Unattended phases — compress, segment, threshold compute, measure, export
 
@@ -572,11 +572,11 @@ Phase 7 is `_run_phase_measure` from Phase 4. Key acceptance: one `store.open_re
 #### Phase 8: Workflows tab wiring + end-to-end acceptance
 
 **Tasks:**
-- [ ] Edit `LauncherWindow._create_workflows_panel` at `src/percell4/gui/launcher.py:534-544` to remove the dead placeholders and add a single entry: `[Single-cell thresholding analysis workflow]` → opens `WorkflowConfigDialog`
+- [x] Edit `LauncherWindow._create_workflows_panel` at `src/percell4/gui/launcher.py:534-544` to remove the dead placeholders and add a single entry: `[Single-cell thresholding analysis workflow]` → opens `WorkflowConfigDialog`
 - [ ] On Start click: prompt "Close current dataset and start workflow?"; on confirm call `CellDataModel.clear()` and `host.close_child_windows()`
 - [ ] Wire runner `workflow_event` signal to the launcher's status bar and an appropriate `QProgressDialog` per phase
 - [ ] Trap `LauncherWindow.closeEvent` while `is_workflow_locked`: prompt "Cancel the running workflow and quit?"; on confirm call `runner.request_cancel()` then accept the close
-- [ ] Ensure only one runner can be active at a time (reentrance guard on Start)
+- [x] Ensure only one runner can be active at a time (reentrance guard on Start)
 - [ ] Archive the brainstorm per project rules: move `docs/brainstorms/2026-04-10-single-cell-thresholding-workflow-brainstorm.md` to `docs/archive/` after successful implementation
 
 **Files:**

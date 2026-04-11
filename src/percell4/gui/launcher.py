@@ -541,12 +541,81 @@ class LauncherWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setAlignment(Qt.AlignTop)
         layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
 
         layout.addWidget(self._section_label("Workflows"))
-        layout.addWidget(self._placeholder("Standard Analysis Pipeline"))
-        layout.addWidget(self._placeholder("Custom Workflow Builder"))
+
+        self._btn_single_cell_workflow = QPushButton(
+            "Single-cell thresholding analysis workflow"
+        )
+        self._btn_single_cell_workflow.setToolTip(
+            "Batch workflow: Cellpose → seg QC → grouped thresholding → "
+            "per-cell measurement → Parquet + CSV export. Opens a "
+            "configuration dialog."
+        )
+        self._btn_single_cell_workflow.clicked.connect(
+            self._on_open_single_cell_workflow
+        )
+        layout.addWidget(self._btn_single_cell_workflow)
+
         layout.addStretch()
         return panel
+
+    def _on_open_single_cell_workflow(self) -> None:
+        """Open the single-cell thresholding workflow config dialog.
+
+        Reentrance-guarded against ``is_workflow_locked``. On Accepted,
+        the dialog hands back a validated :class:`WorkflowConfig`. The
+        actual runner that executes the config is wired in Phases 4-8;
+        for now we confirm the config with a status-bar message plus a
+        summary dialog so users can exercise the full config UI.
+        """
+        if self.is_workflow_locked:
+            self.statusBar().showMessage(
+                "A workflow is already running — click Cancel to stop it first."
+            )
+            return
+
+        from percell4.gui.workflows.single_cell.config_dialog import (
+            WorkflowConfigDialog,
+        )
+
+        dialog = WorkflowConfigDialog(parent=self)
+        try:
+            if dialog.exec_() != QDialog.Accepted:
+                self.statusBar().showMessage("Workflow configuration cancelled.")
+                return
+            cfg = dialog.workflow_config
+        finally:
+            dialog.deleteLater()
+
+        if cfg is None:
+            return
+
+        # Phase 3 stops here: the runner (Phases 4-7) that actually
+        # executes the config is not wired yet. Surface a confirmation so
+        # the user knows their config was valid end-to-end and which run
+        # folder would have been created.
+        summary = (
+            f"Configuration validated.\n\n"
+            f"  Datasets: {len(cfg.datasets)}\n"
+            f"  Thresholding rounds: {len(cfg.thresholding_rounds)}\n"
+            f"  CSV columns selected: {len(cfg.selected_csv_columns)}\n"
+            f"  Output parent: {cfg.output_parent}\n\n"
+            f"The batch runner that would execute this config is not yet "
+            f"wired (Phases 4-7 of the implementation plan). No files "
+            f"have been written."
+        )
+        QMessageBox.warning(
+            self,
+            "Workflow runner not yet implemented",
+            summary,
+        )
+        self.statusBar().showMessage(
+            f"Workflow config validated: {len(cfg.datasets)} datasets, "
+            f"{len(cfg.thresholding_rounds)} rounds "
+            f"(runner pending)."
+        )
 
     def _create_data_panel(self) -> QWidget:
         panel = QWidget()
