@@ -443,17 +443,17 @@ Grep of `src/percell4/gui/` shows 16 `QMessageBox.*` calls — all `.warning` or
 All unattended phase drivers, implemented as pure helpers in `workflows/phases.py` plus thin Qt wrappers in `gui/workflows/single_cell/runner.py`.
 
 **Tasks:**
-- [ ] `compress_one(entry: WorkflowDatasetEntry, run_folder: Path, host_progress) -> WorkflowDatasetEntry` — calls `import_dataset(..., files=compress_plan["files"])`, writes output to `entry.compress_plan["output_path"]` via `.tmp + os.replace`, returns a new entry with `source=H5_EXISTING` and `h5_path` populated
+- [x] `compress_one(entry: WorkflowDatasetEntry, run_folder: Path, host_progress) -> WorkflowDatasetEntry` — calls `import_dataset(..., files=compress_plan["files"])`, writes output to `entry.compress_plan["output_path"]` via `.tmp + os.replace`, returns a new entry with `source=H5_EXISTING` and `h5_path` populated
 - [ ] **Post-Phase-0 re-validation**: after all tiff compresses, re-read `store.metadata["channel_names"]` for every freshly-minted h5 and confirm it matches the sealed `RunMetadata.intersected_channels`. If any dataset's channels drift, abort the run via a `QMessageBox.warning` listing the drifted datasets (the user can remove them from the selection and restart)
-- [ ] `segment_one(store, cfg, cellpose_model) -> NDArray[int32]` — reads one intensity channel via `store.read_channel`, calls `run_cellpose(image, model=cellpose_model, ...)`, runs `filter_edge_cells`, `filter_small_cells`, `relabel_sequential`, writes to `/labels/cellpose_qc` via `store.write_labels`. If `labels.max() == 0`, returns the empty array but the wrapper records a `DatasetFailure.SEGMENTATION_EMPTY` and asks the user what to do (Skip / Draw manually / Cancel)
-- [ ] **Cellpose model hoist**: `_run_phase_segment` builds one `CellposeModel(...)` **once** and passes it to every per-dataset `segment_one` call. Saves ~1–15 s per dataset of model-init cost
+- [x] `segment_one(store, cfg, cellpose_model) -> NDArray[int32]` — reads one intensity channel via `store.read_channel`, calls `run_cellpose(image, model=cellpose_model, ...)`, runs `filter_edge_cells`, `filter_small_cells`, `relabel_sequential`, writes to `/labels/cellpose_qc` via `store.write_labels`. If `labels.max() == 0`, returns the empty array but the wrapper records a `DatasetFailure.SEGMENTATION_EMPTY` and asks the user what to do (Skip / Draw manually / Cancel)
+- [x] **Cellpose model hoist**: `_run_phase_segment` builds one `CellposeModel(...)` **once** and passes it to every per-dataset `segment_one` call. Saves ~1–15 s per dataset of model-init cost
 - [ ] Phase 1 (segment) is the one phase that uses `Worker(QThread)` per dataset. Wrap in a helper `run_in_worker(fn, *args)` that hides the worker lifecycle, connects `finished` / `error`, and yields to the runner's generator via `gen.send(result)`. **Cancellation is cooperative** — on cancel, calls `worker.request_abort()` and waits for `.finished` or `.error` to avoid half-written h5 state
-- [ ] `threshold_compute_one(store, round_spec) -> GroupingResult` — reads the round's channel via `read_channel`, reads `/labels/cellpose_qc`, calls `measure_cells` (single channel, one metric), then `group_cells_gmm` / `group_cells_kmeans`. The `GroupingResult` is held in an in-memory `dict[tuple[str, str], GroupingResult]` on the runner (keyed by dataset + round name) and consumed by the corresponding Phase 4/6 QC immediately. On empty groups (GMM failure), records `DatasetFailure.THRESHOLD_EMPTY` and skips that (dataset, round) pair
-- [ ] `measure_one(store, rounds, round_masks) -> pd.DataFrame` — opens **one** `store.open_read()` session per dataset, reads all channels, labels, and `/masks/<round>` for every round. Calls `measure_multichannel_with_masks(images, labels, metrics=BUILTIN_METRICS, masks={r.name: round_masks[r.name]})`. Merges `group_{round}` columns from `/groups/<round>` (renamed from whatever `ThresholdQCController` wrote). Prepends `dataset` column. **Streams to `run_folder/staging/<dataset.name>.parquet`** per-dataset (not held in memory). On error, records `DatasetFailure.MEASUREMENT_ERROR` and skips
-- [ ] `export_run(run_folder, config, metadata)` — scans `staging/*.parquet`, concatenates with `pyarrow.dataset.dataset(run_folder / "staging").to_table().to_pandas()`, adds a `pd.Categorical` conversion on the `dataset` column, downcasts float64 → float32 where lossless, writes `measurements.parquet` via `to_parquet(engine="pyarrow", compression="snappy", index=False, row_group_size=100_000, use_dictionary=True)`, then writes `combined.csv` (selected columns + identity) and `per_dataset/*.csv`. Deletes `staging/` on success
-- [ ] **CSV hygiene** — `to_csv(..., index=False, float_format="%.6g", na_rep="", encoding="utf-8", lineterminator="\n")`
-- [ ] **Progress reporting**: every unattended phase emits `workflow_event(kind="phase_progress", current=i, total=n, dataset_name=name, sub_progress="<step>")` at dataset boundaries. Sub-progress strings for Phase 7: "Base metrics...", "Round 1 metrics...", "Merging groups...". **Never** per-cell — `QProgressDialog.setValue()` calls `processEvents()` and would thrash if called per cell
-- [ ] **`setValue()` reentrancy discipline**: the runner NEVER mutates `CellDataModel` from inside a progress loop; all model updates happen at phase transition points
+- [x] `threshold_compute_one(store, round_spec) -> GroupingResult` — reads the round's channel via `read_channel`, reads `/labels/cellpose_qc`, calls `measure_cells` (single channel, one metric), then `group_cells_gmm` / `group_cells_kmeans`. The `GroupingResult` is held in an in-memory `dict[tuple[str, str], GroupingResult]` on the runner (keyed by dataset + round name) and consumed by the corresponding Phase 4/6 QC immediately. On empty groups (GMM failure), records `DatasetFailure.THRESHOLD_EMPTY` and skips that (dataset, round) pair
+- [x] `measure_one(store, rounds, round_masks) -> pd.DataFrame` — opens **one** `store.open_read()` session per dataset, reads all channels, labels, and `/masks/<round>` for every round. Calls `measure_multichannel_with_masks(images, labels, metrics=BUILTIN_METRICS, masks={r.name: round_masks[r.name]})`. Merges `group_{round}` columns from `/groups/<round>` (renamed from whatever `ThresholdQCController` wrote). Prepends `dataset` column. **Streams to `run_folder/staging/<dataset.name>.parquet`** per-dataset (not held in memory). On error, records `DatasetFailure.MEASUREMENT_ERROR` and skips
+- [x] `export_run(run_folder, config, metadata)` — scans `staging/*.parquet`, concatenates with `pyarrow.dataset.dataset(run_folder / "staging").to_table().to_pandas()`, adds a `pd.Categorical` conversion on the `dataset` column, downcasts float64 → float32 where lossless, writes `measurements.parquet` via `to_parquet(engine="pyarrow", compression="snappy", index=False, row_group_size=100_000, use_dictionary=True)`, then writes `combined.csv` (selected columns + identity) and `per_dataset/*.csv`. Deletes `staging/` on success
+- [x] **CSV hygiene** — `to_csv(..., index=False, float_format="%.6g", na_rep="", encoding="utf-8", lineterminator="\n")`
+- [x] **Progress reporting**: every unattended phase emits `workflow_event(kind="phase_progress", current=i, total=n, dataset_name=name, sub_progress="<step>")` at dataset boundaries. Sub-progress strings for Phase 7: "Base metrics...", "Round 1 metrics...", "Merging groups...". **Never** per-cell — `QProgressDialog.setValue()` calls `processEvents()` and would thrash if called per cell
+- [x] **`setValue()` reentrancy discipline**: the runner NEVER mutates `CellDataModel` from inside a progress loop; all model updates happen at phase transition points
 
 **Research insights: `measure_multichannel_with_masks` single-pass helper**
 
@@ -486,20 +486,20 @@ All per-dataset unattended work wraps `store.open_read()` once per dataset so th
 - `src/percell4/gui/workflows/single_cell/runner.py` — `SingleCellThresholdingRunner` with `_run_phase_*` coroutine methods
 
 **Tests:**
-- [ ] `test_phases.py` — each pure helper with a `DatasetStore` tmp-path fixture
-- [ ] `test_measure_one_with_masks.py` — verify single-pass output matches sequential calls numerically
-- [ ] `test_export_run.py` — synthetic `staging/` dir + config → verify `measurements.parquet` + `combined.csv` + `per_dataset/*.csv` match expected shape
+- [x] `test_phases.py` — each pure helper with a `DatasetStore` tmp-path fixture
+- [x] `test_measure_one_with_masks.py` — verify single-pass output matches sequential calls numerically
+- [x] `test_export_run.py` — synthetic `staging/` dir + config → verify `measurements.parquet` + `combined.csv` + `per_dataset/*.csv` match expected shape
 
 **Success criteria:**
-- [ ] Phase 0 compresses a fixture tiff folder via `import_dataset`, emits dataset-level `phase_progress`, and produces `.h5` files at expected paths
+- [x] Phase 0 compresses a fixture tiff folder via `import_dataset`, emits dataset-level `phase_progress`, and produces `.h5` files at expected paths
 - [ ] Phase 0 post-validation catches channel drift and aborts the run with a warning
-- [ ] Phase 1 produces `/labels/cellpose_qc` in each dataset's h5 with edge cells removed; detects `labels.max() == 0` and records a failure
-- [ ] Cellpose model is constructed once per phase, not per dataset (verify via mock or `id()`)
-- [ ] Phase 3/5 computes `GroupingResult` per (dataset, round) and holds it in runner memory for the matching Phase 4/6 QC
-- [ ] Phase 7 produces one `staging/<dataset>.parquet` per dataset without holding every DataFrame in memory
-- [ ] Phase 8 reads from `staging/`, writes `measurements.parquet` + CSVs, deletes `staging/` on success
-- [ ] No `/measurements` group is written to any input `.h5`
-- [ ] `QProgressDialog.setValue()` is never called per-cell — only per-dataset
+- [x] Phase 1 produces `/labels/cellpose_qc` in each dataset's h5 with edge cells removed; detects `labels.max() == 0` and records a failure
+- [x] Cellpose model is constructed once per phase, not per dataset (verify via mock or `id()`)
+- [x] Phase 3/5 computes `GroupingResult` per (dataset, round) and holds it in runner memory for the matching Phase 4/6 QC
+- [x] Phase 7 produces one `staging/<dataset>.parquet` per dataset without holding every DataFrame in memory
+- [x] Phase 8 reads from `staging/`, writes `measurements.parquet` + CSVs, deletes `staging/` on success
+- [x] No `/measurements` group is written to any input `.h5`
+- [x] `QProgressDialog.setValue()` is never called per-cell — only per-dataset
 
 #### Phase 5: Segmentation QC controller (not dialog) — slim, queue-aware
 

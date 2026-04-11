@@ -59,6 +59,9 @@ class LauncherWindow(QMainWindow):
         self._workflow_locked: bool = False
         self._child_windows_to_restore: list[str] = []
         self._viewer_created_by_workflow: bool = False
+        # Holds the currently-running workflow runner to prevent GC of
+        # the QObject. Cleared in _on_workflow_event when the run finishes.
+        self._active_workflow_runner = None
 
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
@@ -565,10 +568,12 @@ class LauncherWindow(QMainWindow):
         """Open the single-cell thresholding workflow config dialog.
 
         Reentrance-guarded against ``is_workflow_locked``. On Accepted,
-        the dialog hands back a validated :class:`WorkflowConfig`. The
-        actual runner that executes the config is wired in Phases 4-8;
-        for now we confirm the config with a status-bar message plus a
-        summary dialog so users can exercise the full config UI.
+        instantiates the runner, creates the run folder, wires
+        progress signals to the status bar, and calls
+        ``runner.start()``. Phase 4 MVP: the run executes synchronously
+        on the main thread; Phase 1 (Cellpose) blocks the UI during
+        each dataset's inference. Phase 8 polish will move Cellpose
+        into a QThread worker.
         """
         if self.is_workflow_locked:
             self.statusBar().showMessage(
@@ -576,9 +581,16 @@ class LauncherWindow(QMainWindow):
             )
             return
 
+        from datetime import UTC, datetime
+
         from percell4.gui.workflows.single_cell.config_dialog import (
             WorkflowConfigDialog,
         )
+        from percell4.gui.workflows.single_cell.runner import (
+            SingleCellThresholdingRunner,
+        )
+        from percell4.workflows.artifacts import create_run_folder
+        from percell4.workflows.models import RunMetadata
 
         dialog = WorkflowConfigDialog(parent=self)
         try:
@@ -592,30 +604,123 @@ class LauncherWindow(QMainWindow):
         if cfg is None:
             return
 
-        # Phase 3 stops here: the runner (Phases 4-7) that actually
-        # executes the config is not wired yet. Surface a confirmation so
-        # the user knows their config was valid end-to-end and which run
-        # folder would have been created.
-        summary = (
-            f"Configuration validated.\n\n"
-            f"  Datasets: {len(cfg.datasets)}\n"
-            f"  Thresholding rounds: {len(cfg.thresholding_rounds)}\n"
-            f"  CSV columns selected: {len(cfg.selected_csv_columns)}\n"
-            f"  Output parent: {cfg.output_parent}\n\n"
-            f"The batch runner that would execute this config is not yet "
-            f"wired (Phases 4-7 of the implementation plan). No files "
-            f"have been written."
+        # Build the run folder + metadata from the validated config.
+        try:
+            run_folder = create_run_folder(cfg.output_parent)
+        except OSError as e:
+            QMessageBox.warning(
+                self,
+                "Cannot create run folder",
+                f"Failed to create run folder under {cfg.output_parent}:\n\n{e}",
+            )
+            return
+
+        metadata = RunMetadata(
+            run_id=run_folder.name,
+            run_folder=run_folder,
+            started_at=datetime.now(UTC),
+            intersected_channels=sorted(
+                {
+                    ch
+                    for ds in cfg.datasets
+                    for ch in ds.channel_names
+                }
+            ),
         )
-        QMessageBox.warning(
-            self,
-            "Workflow runner not yet implemented",
-            summary,
-        )
-        self.statusBar().showMessage(
-            f"Workflow config validated: {len(cfg.datasets)} datasets, "
-            f"{len(cfg.thresholding_rounds)} rounds "
-            f"(runner pending)."
-        )
+
+        # Close the current dataset before the run so the launcher UI
+        # doesn't fight the workflow for control of the CellDataModel.
+        if self.data_model.df is not None and not self.data_model.df.empty:
+            answer = QMessageBox.question(
+                self,
+                "Close current dataset?",
+                "Starting a workflow run will close the currently loaded "
+                "dataset. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer != QMessageBox.Yes:
+                # Run folder was already created — clean up to avoid an
+                # orphan empty folder cluttering the output directory.
+                try:
+                    for sub in ("staging", "per_dataset"):
+                        (run_folder / sub).rmdir()
+                    run_folder.rmdir()
+                except OSError:
+                    pass
+                self.statusBar().showMessage("Workflow cancelled before start.")
+                return
+            self.data_model.clear()
+
+        # Build and wire the runner.
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=metadata)
+        # Keep a reference so the runner (a QObject) doesn't get GC'd
+        # mid-run. Cleared when the run finishes.
+        self._active_workflow_runner = runner
+        runner.workflow_event.connect(self._on_workflow_event)
+
+        # Start. This call returns immediately for interactive runs, but
+        # in Phase 4 MVP every phase is UNATTENDED and blocks until
+        # export completes.
+        try:
+            runner.start(config=cfg, host=self, metadata=metadata)
+        except Exception as e:
+            logger.exception("workflow runner raised out of start()")
+            QMessageBox.warning(
+                self,
+                "Workflow error",
+                f"The workflow runner raised an exception:\n\n{e}",
+            )
+            self._active_workflow_runner = None
+
+    def _on_workflow_event(self, event) -> None:
+        """Slot for ``BaseWorkflowRunner.workflow_event`` signal.
+
+        Updates the status bar on every phase progression and shows a
+        summary dialog on terminal ``run_finished`` events.
+        """
+        from percell4.gui.workflows.base_runner import WorkflowEventKind
+
+        if event.kind is WorkflowEventKind.PHASE_PROGRESS:
+            bits = [event.phase_name]
+            if event.total:
+                bits.append(f"{event.current + 1}/{event.total}")
+            if event.dataset_name:
+                bits.append(event.dataset_name)
+            if event.sub_progress:
+                bits.append(f"({event.sub_progress})")
+            self.statusBar().showMessage(" — ".join(bits))
+            return
+
+        if event.kind is WorkflowEventKind.RUN_FINISHED:
+            runner = self._active_workflow_runner
+            self._active_workflow_runner = None
+
+            # Build a concise summary dialog.
+            if event.success:
+                header = "Workflow complete"
+                body_prefix = "The workflow run finished successfully."
+            else:
+                header = "Workflow ended"
+                body_prefix = f"Run did not complete successfully: {event.message}"
+
+            run_folder = getattr(runner, "_metadata", None)
+            if run_folder is not None:
+                run_folder = run_folder.run_folder
+            n_failures = 0
+            if runner is not None and runner._metadata is not None:
+                n_failures = len(runner._metadata.failures)
+
+            body = (
+                f"{body_prefix}\n\n"
+                f"Run folder: {run_folder}\n"
+                f"Failures recorded: {n_failures}"
+            )
+            QMessageBox.warning(self, header, body)
+            self.statusBar().showMessage(
+                f"Workflow {'complete' if event.success else 'ended'}: "
+                f"{event.message}"
+            )
 
     def _create_data_panel(self) -> QWidget:
         panel = QWidget()
