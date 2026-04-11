@@ -504,39 +504,39 @@ All per-dataset unattended work wraps `store.open_read()` once per dataset so th
 #### Phase 5: Segmentation QC controller (not dialog) — slim, queue-aware
 
 **Tasks:**
-- [ ] Create `src/percell4/gui/workflows/single_cell/seg_qc.py` with `SegmentationQCController(QObject)` that **follows the `ThresholdQCController` shape** (`gui/threshold_qc.py:71`) — builds its own `QMainWindow` with a narrow tool dock, not a `QDialog`
-- [ ] Constructor takes `(viewer_win, data_model, store, entry, queue_index, queue_total, on_complete)` where `on_complete(result: Literal["next", "cancel", "skip"])` is a plain Python callback — matching `ThresholdQCController`'s contract
-- [ ] `start()` loads the dataset: opens `store.open_read()` once, reads `intensity` + `/labels/cellpose_qc`. **Reuses single image + labels layers across dataset advances** via `layer.data = ...` + `layer.refresh()`, dropping Python references on advance and calling `gc.collect()` between datasets
-- [ ] Hides non-QC layers on entry; restores on exit (pattern from `docs/solutions/logic-errors/grouped-thresholding-development-lessons.md`)
-- [ ] Nav bar: `[✕ Cancel run] [Accept & Next →] (DS i of N: <name>)`. Counter reads from `config.datasets` (post-outlier-filter)
-- [ ] **Keyboard shortcuts**: `Ctrl+Enter` → Accept & Next (focus on Accept by default), `Esc` → Cancel run (with confirmation)
-- [ ] Edit tools (lifted from `SegmentationPanel`, implementations copied):
+- [x] Create `src/percell4/gui/workflows/single_cell/seg_qc.py` with `SegmentationQCController(QObject)` that **follows the `ThresholdQCController` shape** (`gui/threshold_qc.py:71`) — builds its own `QMainWindow` with a narrow tool dock, not a `QDialog`
+- [x] Constructor takes `(viewer_win, data_model, store, entry, queue_index, queue_total, on_complete)` where `on_complete(result: Literal["next", "cancel", "skip"])` is a plain Python callback — matching `ThresholdQCController`'s contract
+- [x] `start()` loads the dataset: opens `store.open_read()` once, reads `intensity` + `/labels/cellpose_qc`. **Reuses single image + labels layers across dataset advances** via `layer.data = ...` + `layer.refresh()`, dropping Python references on advance and calling `gc.collect()` between datasets
+- [x] Hides non-QC layers on entry; restores on exit (pattern from `docs/solutions/logic-errors/grouped-thresholding-development-lessons.md`)
+- [x] Nav bar: `[✕ Cancel run] [Accept & Next →] (DS i of N: <name>)`. Counter reads from `config.datasets` (post-outlier-filter)
+- [x] **Keyboard shortcuts**: `Ctrl+Enter` → Accept & Next (focus on Accept by default), `Esc` → Cancel run (with confirmation)
+- [x] Edit tools (lifted from `SegmentationPanel`, implementations copied):
   - Delete selected label (`segmentation_panel.py:358-373`)
   - Draw new label (`segmentation_panel.py:375-407`, including the 100-ms napari mode-switch delay)
   - Edge-margin preview + Apply (`segmentation_panel.py:443-525`)
-- [ ] **Signal coalescing**: label edit handlers gated by `QTimer.singleShot(0, self._schedule_refresh)` per `docs/solutions/ui-bugs/percell4-phases-0-6-napari-qt-learnings.md` to avoid redundant layer refreshes on rapid edit events
-- [ ] `_on_accept_next` persists current labels to `store.write_labels("cellpose_qc", labels)` (overwrites the pre-QC Cellpose output) and advances the queue
-- [ ] `_on_cancel` fires `on_complete("cancel")` after a `QMessageBox.question("Cancel the running workflow? Labels and masks already written to disk will remain.")`
-- [ ] `closeEvent` on the QC window: trapped and treated as Cancel (with the same confirmation)
-- [ ] `skip` action — offered only when `segment_one` returned empty labels: records `FailureRecord(SEGMENTATION_EMPTY)` and advances
+- [x] **Signal coalescing**: label edit handlers gated by `QTimer.singleShot(0, self._schedule_refresh)` per `docs/solutions/ui-bugs/percell4-phases-0-6-napari-qt-learnings.md` to avoid redundant layer refreshes on rapid edit events
+- [x] `_on_accept_next` persists current labels to `store.write_labels("cellpose_qc", labels)` (overwrites the pre-QC Cellpose output) and advances the queue
+- [x] `_on_cancel` fires `on_complete("cancel")` after a `QMessageBox.question("Cancel the running workflow? Labels and masks already written to disk will remain.")`
+- [x] `closeEvent` on the QC window: trapped and treated as Cancel (with the same confirmation)
+- [x] `skip` action — offered only when `segment_one` returned empty labels: records `FailureRecord(SEGMENTATION_EMPTY)` and advances
 
 **Files:**
 - `src/percell4/gui/workflows/single_cell/seg_qc.py`
 
 **Tests:**
-- [ ] `test_seg_qc_smoke.py` with pytest-qt — instantiate controller, fake label edits, assert Accept writes to `/labels/cellpose_qc` and advances; assert Cancel fires `on_complete("cancel")`
+- [x] `test_seg_qc_smoke.py` with pytest-qt — instantiate controller, fake label edits, assert Accept writes to `/labels/cellpose_qc` and advances; assert Cancel fires `on_complete("cancel")`
 
 **Success criteria:**
-- [ ] Accept & Next persists edits to `/labels/cellpose_qc` and advances the queue
-- [ ] Cancel (button, keyboard, or window-X) prompts for confirmation and unwinds the runner cleanly through its `finally` block
-- [ ] Advancing datasets does not leak napari layers — RSS remains bounded across a 10-dataset QC queue
-- [ ] Keyboard shortcuts work for Accept/Cancel
+- [x] Accept & Next persists edits to `/labels/cellpose_qc` and advances the queue
+- [x] Cancel (button, keyboard, or window-X) prompts for confirmation and unwinds the runner cleanly through its `finally` block
+- [x] Advancing datasets does not leak napari layers — RSS remains bounded across a 10-dataset QC queue
+- [x] Keyboard shortcuts work for Accept/Cancel
 
 #### Phase 6: Threshold QC queue — wrapper around `ThresholdQCController`
 
 **Tasks:**
-- [ ] Create `src/percell4/gui/workflows/single_cell/threshold_qc_queue.py` with `ThresholdQCQueueBar(QWidget)` — a small floating widget with `[✕ Cancel run]`. Accept & Next is implicit: the controller's `on_complete(success=True)` fires the advance via the runner's generator dispatch
-- [ ] `_run_phase_threshold_qc(round_spec, entries)` on the runner:
+- [x] Create `src/percell4/gui/workflows/single_cell/threshold_qc_queue.py` with `ThresholdQCQueueBar(QWidget)` — a small floating widget with `[✕ Cancel run]`. Accept & Next is implicit: the controller's `on_complete(success=True)` fires the advance via the runner's generator dispatch
+- [x] `_run_phase_threshold_qc(round_spec, entries)` on the runner:
   1. For each dataset: open `store`, read `intensity` and `/labels/cellpose_qc`
   2. Look up the `GroupingResult` from runner memory (populated in the preceding Phase 3/5 compute)
   3. Instantiate `ThresholdQCController(... write_measurements_to_store=False, store=<dataset store>, mask_name=round.name)` with an `on_complete` callback that dispatches into the runner's generator
@@ -546,8 +546,8 @@ All per-dataset unattended work wraps `store.open_read()` once per dataset so th
   7. On `success=True`: mask + `/groups/<round>` have already been written by the controller's `_finalize`. Advance to the next dataset
   8. On `success=False`: record `FailureRecord(THRESHOLD_ERROR)` with the controller's message; prompt the user "Skip this dataset for this round" / "Cancel run"
   9. On Cancel (queue bar or window-X): call `_cleanup_all()` on the controller and unwind the runner through its `finally` block
-- [ ] **Verify `ThresholdQCController` does not use `events.colormap.blocker()`** on its `DirectLabelColormap` assignments. If it does, remove the blocker per `docs/solutions/ui-bugs/napari-direct-label-colormap-rendering-blocked-by-events.md`. This is a precondition for the workflow, not a new feature
-- [ ] Runner alternates `_run_phase_threshold_compute(round)` and `_run_phase_threshold_qc(round)` for every configured round
+- [x] **Verify `ThresholdQCController` does not use `events.colormap.blocker()`** on its `DirectLabelColormap` assignments. If it does, remove the blocker per `docs/solutions/ui-bugs/napari-direct-label-colormap-rendering-blocked-by-events.md`. This is a precondition for the workflow, not a new feature
+- [x] Runner alternates `_run_phase_threshold_compute(round)` and `_run_phase_threshold_qc(round)` for every configured round
 
 **Research insights: controller is already workflow-friendly**
 
@@ -557,13 +557,13 @@ All per-dataset unattended work wraps `store.open_read()` once per dataset so th
 - `src/percell4/gui/workflows/single_cell/threshold_qc_queue.py`
 
 **Tests:**
-- [ ] `test_threshold_qc_queue.py` with pytest-qt — stub controller fires `on_complete(True)`, queue advances; stub fires `on_complete(False)`, failure recorded and prompt shown
+- [x] `test_threshold_qc_queue.py` with pytest-qt — stub controller fires `on_complete(True)`, queue advances; stub fires `on_complete(False)`, failure recorded and prompt shown
 
 **Success criteria:**
-- [ ] `/masks/<round.name>` and `/groups/<round.name>` appear in each dataset's h5 after accept
-- [ ] No `/measurements` appears in any dataset's h5 at any point during threshold QC
-- [ ] Cancel during threshold QC cleans up the controller's temp layers before unwinding the runner
-- [ ] Verify `events.colormap.blocker()` is NOT used in the existing `ThresholdQCController` (grep check)
+- [x] `/masks/<round.name>` and `/groups/<round.name>` appear in each dataset's h5 after accept
+- [x] No `/measurements` appears in any dataset's h5 at any point during threshold QC
+- [x] Cancel during threshold QC cleans up the controller's temp layers before unwinding the runner
+- [x] Verify `events.colormap.blocker()` is NOT used in the existing `ThresholdQCController` (grep check)
 
 #### Phase 7: Measure phase — in detail (mostly in Phase 4 but calling out here)
 
@@ -573,11 +573,11 @@ Phase 7 is `_run_phase_measure` from Phase 4. Key acceptance: one `store.open_re
 
 **Tasks:**
 - [x] Edit `LauncherWindow._create_workflows_panel` at `src/percell4/gui/launcher.py:534-544` to remove the dead placeholders and add a single entry: `[Single-cell thresholding analysis workflow]` → opens `WorkflowConfigDialog`
-- [ ] On Start click: prompt "Close current dataset and start workflow?"; on confirm call `CellDataModel.clear()` and `host.close_child_windows()`
+- [x] On Start click: prompt "Close current dataset and start workflow?"; on confirm call `CellDataModel.clear()` and `host.close_child_windows()`
 - [ ] Wire runner `workflow_event` signal to the launcher's status bar and an appropriate `QProgressDialog` per phase
-- [ ] Trap `LauncherWindow.closeEvent` while `is_workflow_locked`: prompt "Cancel the running workflow and quit?"; on confirm call `runner.request_cancel()` then accept the close
+- [x] Trap `LauncherWindow.closeEvent` while `is_workflow_locked`: prompt "Cancel the running workflow and quit?"; on confirm call `runner.request_cancel()` then accept the close
 - [x] Ensure only one runner can be active at a time (reentrance guard on Start)
-- [ ] Archive the brainstorm per project rules: move `docs/brainstorms/2026-04-10-single-cell-thresholding-workflow-brainstorm.md` to `docs/archive/` after successful implementation
+- [x] Archive the brainstorm per project rules: move `docs/brainstorms/2026-04-10-single-cell-thresholding-workflow-brainstorm.md` to `docs/archive/` after successful implementation
 
 **Files:**
 - `src/percell4/gui/launcher.py`
@@ -586,13 +586,13 @@ Phase 7 is `_run_phase_measure` from Phase 4. Key acceptance: one `store.open_re
 **Success criteria — end-to-end:**
 - [ ] Configure 3 test datasets (2 h5 + 1 tiff) → 2 rounds → Start → run completes → run folder contains `measurements.parquet`, `combined.csv`, `per_dataset/*.csv`, `run_config.json` with `finished_at` set, and `run_log.jsonl`
 - [ ] `measurements.parquet` loads via `pd.read_parquet` with correct shape and dtypes
-- [ ] No `/measurements` group appears in any input `.h5`
-- [ ] `/labels/cellpose_qc`, `/masks/<round>`, `/groups/<round>` exist in each dataset's h5
-- [ ] Cancel during Phase 2 unwinds cleanly: launcher is unlocked, child windows are restored, `run_config.json.finished_at` is stamped with a cancel note
-- [ ] Raising an exception inside any phase (simulate via a monkey-patched stub) leaves the launcher unlocked and child windows restored
-- [ ] Outlier datasets prompt Proceed/Abort on Start
-- [ ] Round name with a space is rejected at dialog validation time
-- [ ] Closing the app while workflow-locked prompts to cancel first
+- [x] No `/measurements` group appears in any input `.h5`
+- [x] `/labels/cellpose_qc`, `/masks/<round>`, `/groups/<round>` exist in each dataset's h5
+- [x] Cancel during Phase 2 unwinds cleanly: launcher is unlocked, child windows are restored, `run_config.json.finished_at` is stamped with a cancel note
+- [x] Raising an exception inside any phase (simulate via a monkey-patched stub) leaves the launcher unlocked and child windows restored
+- [x] Outlier datasets prompt Proceed/Abort on Start
+- [x] Round name with a space is rejected at dialog validation time
+- [x] Closing the app while workflow-locked prompts to cancel first
 
 ## Failure Model
 

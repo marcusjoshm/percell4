@@ -2730,7 +2730,35 @@ class LauncherWindow(QMainWindow):
     # ── Lifecycle ─────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        """Close all managed windows and quit."""
+        """Close all managed windows and quit.
+
+        If a batch workflow is currently running, prompt the user to
+        cancel it first — otherwise the runner would be orphaned
+        mid-run with half-written h5 artifacts. On confirmation, call
+        :meth:`BaseWorkflowRunner.request_cancel` so the runner unwinds
+        cleanly at the next dataset boundary before we tear down the
+        window.
+        """
+        if self.is_workflow_locked and self._active_workflow_runner is not None:
+            answer = QMessageBox.question(
+                self,
+                "Cancel running workflow?",
+                "A workflow run is currently in progress. Quit and cancel "
+                "the run? The in-flight dataset will finish before the "
+                "runner unwinds; any labels, masks, and staging data "
+                "already written will remain on disk but the final run "
+                "artifacts may not be created.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+            try:
+                self._active_workflow_runner.request_cancel()
+            except Exception:
+                logger.exception("failed to propagate cancel to runner")
+
         self._save_geometry()
         for window in self._windows.values():
             window.close()

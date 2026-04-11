@@ -159,7 +159,7 @@ def test_runner_happy_path_skipping_cellpose(qtbot, fake_host, tmp_path):
     cfg = _make_config(entries, tmp_path / "runs")
     meta = _make_metadata(run_folder)
 
-    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
     events = []
     runner.workflow_event.connect(lambda e: events.append(e))
 
@@ -213,7 +213,7 @@ def test_runner_produces_expected_artifacts_when_segment_succeeds(
         import percell4.gui.workflows.single_cell.runner as runner_mod
         runner_mod.segment_one = _noop_segment
 
-        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta)
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
         events = []
         runner.workflow_event.connect(lambda e: events.append(e))
         runner.start(cfg, fake_host, meta)
@@ -308,7 +308,7 @@ def test_runner_records_failure_and_continues_other_datasets(
     phases.segment_one = _flaky_segment
     runner_mod.segment_one = _flaky_segment
     try:
-        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta)
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
         events = []
         runner.workflow_event.connect(lambda e: events.append(e))
         runner.start(cfg, fake_host, meta)
@@ -356,7 +356,7 @@ def test_runner_reentrance_guard(qtbot, fake_host, tmp_path):
     cfg = _make_config(entries, tmp_path / "runs")
     meta = _make_metadata(run_folder)
 
-    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
 
     # Patch segment_one to no-op so the run finishes without Cellpose.
     import percell4.gui.workflows.single_cell.runner as runner_mod

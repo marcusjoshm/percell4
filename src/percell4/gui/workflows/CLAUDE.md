@@ -25,7 +25,22 @@ run-folder I/O, channel intersection, host protocol — lives under
 ## Subpackages
 
 - `single_cell/` — concrete UI for the **single-cell thresholding
-  analysis workflow**. Currently holds only `config_dialog.py`
-  (`WorkflowConfigDialog`). The Phase 4+ runner subclass, segmentation
-  QC controller, and threshold QC queue wrapper will land here as
-  their phases come online.
+  analysis workflow**:
+  - `config_dialog.py` — `WorkflowConfigDialog` (dataset picker,
+    Cellpose settings, thresholding rounds table, CSV column picker,
+    output parent)
+  - `runner.py` — `SingleCellThresholdingRunner(BaseWorkflowRunner)`.
+    Phase generator yields UNATTENDED compress/threshold-compute/
+    threshold-apply/measure/export requests, INTERACTIVE segment
+    (Worker-backed) + seg QC + threshold QC requests. Has an
+    `interactive_qc=True/False` switch for production vs tests.
+    Propagates `request_cancel()` to the in-flight Cellpose Worker
+  - `seg_qc.py` — `SegmentationQCController`. Per-dataset interactive
+    label editor: delete / draw / edge-cleanup tools, Ctrl+Enter
+    accept, Esc cancel, layer visibility save/restore, signal
+    coalescing. Persists edited labels to `/labels/cellpose_qc` on
+    accept, restores hidden viewer layers on any exit
+  - `threshold_qc_queue.py` — `ThresholdQCQueueEntry`. Thin per-dataset
+    wrapper that instantiates the existing `ThresholdQCController`
+    with `write_measurements_to_store=False`, forwards its
+    `on_complete(success, msg)` into a `PhaseResult` for the runner
