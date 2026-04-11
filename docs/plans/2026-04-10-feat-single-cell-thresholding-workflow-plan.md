@@ -363,13 +363,13 @@ Stand up `workflows/`, the config dataclasses with full validation, atomic I/O h
 Build the Qt driver. **Note the split**: `BaseWorkflowRunner` is a generator-driven phase loop that avoids nested `QEventLoop` entirely by using `gen.send()` from signal handlers.
 
 **Tasks:**
-- [ ] Create `src/percell4/gui/workflows/__init__.py`
-- [ ] Create `src/percell4/gui/workflows/base_runner.py` with `BaseWorkflowRunner(QObject)` exposing a **single** `workflow_event = Signal(object)` carrying a `WorkflowEvent` descriptor dataclass (fields: `kind`, `phase_name`, `current`, `total`, `dataset_name`, `sub_progress`, `success`, `message`, `run_folder`)
-- [ ] Define `WorkflowEvent(kind=Literal["phase_started", "phase_progress", "phase_completed", "qc_dataset_ready", "run_finished"], ...)` in `gui/workflows/base_runner.py`
-- [ ] Implement the generator-driven loop. Each phase is a Python generator that `yield`s a `PhaseRequest` dataclass describing what the driver should do next (`show_progress_dialog`, `run_worker`, `show_seg_qc`, `show_threshold_qc`). A slot on the user action calls `gen.send(result)` to resume. **No nested `QEventLoop.exec_()`**. Rationale: nested event loops are a Qt reentrancy footgun (`kieran-python-reviewer` flagged as Critical).
-- [ ] Implement the top-level `start(config, host)` wrapped in `try/except/finally`. The `finally` branch unconditionally calls `host.set_workflow_locked(False)`, `host.restore_child_windows()`, stamps `finished_at` into `run_config.json`, and emits `workflow_event(kind="run_finished")` exactly once. Any uncaught exception logs traceback to `run_log.jsonl`, emits `kind="run_finished", success=False, message=<error>`, then re-unwinds through the `finally`
-- [ ] Implement `request_cancel()` — sets a cooperative cancel flag. For interactive phases, picked up by the QC controller's next event handler. For unattended phases, picked up at the next dataset boundary (not mid-dataset, to keep h5 writes clean). On cancel, the phase unwinds through the `finally` block like a normal finish but emits `kind="run_finished", success=False, message="cancelled"`
-- [ ] **Re-entrance guard**: `host.set_workflow_locked(True)` must no-op if already locked; the launcher's Start button must check `is_workflow_locked` and do nothing if set
+- [x] Create `src/percell4/gui/workflows/__init__.py`
+- [x] Create `src/percell4/gui/workflows/base_runner.py` with `BaseWorkflowRunner(QObject)` exposing a **single** `workflow_event = Signal(object)` carrying a `WorkflowEvent` descriptor dataclass (fields: `kind`, `phase_name`, `current`, `total`, `dataset_name`, `sub_progress`, `success`, `message`, `run_folder`)
+- [x] Define `WorkflowEvent(kind=Literal["phase_started", "phase_progress", "phase_completed", "qc_dataset_ready", "run_finished"], ...)` in `gui/workflows/base_runner.py`
+- [x] Implement the generator-driven loop. Each phase is a Python generator that `yield`s a `PhaseRequest` dataclass describing what the driver should do next (`show_progress_dialog`, `run_worker`, `show_seg_qc`, `show_threshold_qc`). A slot on the user action calls `gen.send(result)` to resume. **No nested `QEventLoop.exec_()`**. Rationale: nested event loops are a Qt reentrancy footgun (`kieran-python-reviewer` flagged as Critical).
+- [x] Implement the top-level `start(config, host)` wrapped in `try/except/finally`. The `finally` branch unconditionally calls `host.set_workflow_locked(False)`, `host.restore_child_windows()`, stamps `finished_at` into `run_config.json`, and emits `workflow_event(kind="run_finished")` exactly once. Any uncaught exception logs traceback to `run_log.jsonl`, emits `kind="run_finished", success=False, message=<error>`, then re-unwinds through the `finally`
+- [x] Implement `request_cancel()` — sets a cooperative cancel flag. For interactive phases, picked up by the QC controller's next event handler. For unattended phases, picked up at the next dataset boundary (not mid-dataset, to keep h5 writes clean). On cancel, the phase unwinds through the `finally` block like a normal finish but emits `kind="run_finished", success=False, message="cancelled"`
+- [x] **Re-entrance guard**: `host.set_workflow_locked(True)` must no-op if already locked; the launcher's Start button must check `is_workflow_locked` and do nothing if set
 - [ ] `BaseWorkflowRunner.request_cancel()` also propagates to the in-flight Cellpose Worker via `Worker.request_abort()`
 - [ ] Trap `QDialog.closeEvent` and `QMainWindow.closeEvent` on every workflow-owned window: X-button close is treated as Cancel with a "Cancel run and close?" confirmation
 
@@ -383,14 +383,14 @@ Nested `QEventLoop.exec_()` works in PyQt5 but is the most common Qt-Python foot
 - `src/percell4/gui/workflows/CLAUDE.md`
 
 **Tests:**
-- [ ] `tests/gui_workflows/test_base_runner_smoke.py` with `pytest-qt` + `qtbot` — drive a `FakeRunner` with a 3-dataset stub phase list; assert the emitted `WorkflowEvent` sequence
-- [ ] `test_cancel.py` — trigger cancel mid-phase; verify launcher unlocked, child windows restored, `run_finished(success=False, message="cancelled")` emitted exactly once
-- [ ] `test_exception_unlock.py` — raise inside a stub phase; assert `host.set_workflow_locked(False)` called, `host.restore_child_windows()` called, exactly one `run_finished(success=False)` emitted
+- [x] `tests/gui_workflows/test_base_runner_smoke.py` with `pytest-qt` + `qtbot` — drive a `FakeRunner` with a 3-dataset stub phase list; assert the emitted `WorkflowEvent` sequence
+- [x] `test_cancel.py` — trigger cancel mid-phase; verify launcher unlocked, child windows restored, `run_finished(success=False, message="cancelled")` emitted exactly once
+- [x] `test_exception_unlock.py` — raise inside a stub phase; assert `host.set_workflow_locked(False)` called, `host.restore_child_windows()` called, exactly one `run_finished(success=False)` emitted
 
 **Success criteria:**
-- [ ] Raising an exception inside any phase driver unlocks the launcher, restores child windows, and emits exactly one `run_finished(success=False)`
-- [ ] Cancel during unattended phase K waits for the current dataset to finish, then unwinds cleanly
-- [ ] Runner is importable and unit-testable without a running `QApplication` (via the `PhaseRequest`/`PhaseResult` generator protocol)
+- [x] Raising an exception inside any phase driver unlocks the launcher, restores child windows, and emits exactly one `run_finished(success=False)`
+- [x] Cancel during unattended phase K waits for the current dataset to finish, then unwinds cleanly
+- [x] Runner is importable and unit-testable without a running `QApplication` (via the `PhaseRequest`/`PhaseResult` generator protocol)
 
 #### Phase 3: Config dialog — dataset picker, settings, column picker
 

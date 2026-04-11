@@ -1,0 +1,23 @@
+# src/percell4/gui/workflows/
+
+Qt driver for batch workflows. The pure-Python core — config dataclasses,
+run-folder I/O, channel intersection, host protocol — lives under
+`src/percell4/workflows/`. Everything here is Qt-dependent: a
+`QObject`-based state machine, Qt dialogs, QC controllers, and the
+`workflow_event = Signal(object)` runner-progress surface.
+
+## Modules
+
+- `base_runner.py` — `BaseWorkflowRunner(QObject)` + the pure-Python
+  dataclasses (`PhaseKind`, `PhaseRequest`, `PhaseResult`,
+  `WorkflowEventKind`, `WorkflowEvent`) that drive it. The runner owns
+  host locking, child-window teardown/restore, `run_config.json`
+  lifecycle (initial write + `finished_at` stamp on termination),
+  cooperative cancellation, and exception safety (a single idempotent
+  `_finish` is the only exit point, so the launcher never stays locked
+  after a crash). Subclasses implement `_phase_generator` to yield
+  `PhaseRequest` objects; the base class handles everything else.
+  Generator-driven on purpose — no nested `QEventLoop.exec_()`, because
+  unattended phases run synchronously in a tight loop and interactive
+  phases register a completion callback and return, resuming at
+  natural Qt event boundaries.
