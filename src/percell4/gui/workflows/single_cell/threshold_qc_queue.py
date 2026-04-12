@@ -72,6 +72,19 @@ class ThresholdQCQueueEntry:
 
     def start(self) -> None:
         """Load the dataset and start the interactive threshold QC controller."""
+        # Clear stale layers from the previous dataset's threshold QC
+        # (or from the seg QC session). The ThresholdQCController's
+        # _cleanup_all removes its own temp layers when a dataset finishes,
+        # but any mask layers written to the viewer by _finalize for the
+        # PREVIOUS dataset would still be visible — and they don't belong
+        # to the current dataset.
+        try:
+            viewer = self._viewer_win.viewer
+            if viewer is not None:
+                viewer.layers.clear()
+        except Exception:
+            pass
+
         try:
             self._store = DatasetStore(self._entry.h5_path)
             channel_idx = _channel_index(self._store, self._round_spec.channel)

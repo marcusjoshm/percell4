@@ -425,6 +425,22 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             worker = Worker(_do_segment)
 
+            # Show a visible indicator so the user knows Cellpose is
+            # running (the viewer is blank between seg QC accept and the
+            # next dataset's seg QC open).
+            if self._host is not None:
+                self._host.show_workflow_status(
+                    "Segmenting",
+                    f"{entry.name} — running Cellpose (this may take a moment)...",
+                )
+                try:
+                    viewer_win = self._host.get_viewer_window()
+                    viewer_win.set_subtitle(
+                        f"⏳ Segmenting {entry.name}..."
+                    )
+                except Exception:
+                    pass
+
             def _on_worker_finished(result):
                 self._active_worker = None
                 _labels, failure, msg = result

@@ -191,7 +191,7 @@ class WorkflowConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Single-cell thresholding analysis workflow")
         self.setModal(True)
-        self.resize(1000, 900)
+        self.resize(960, 720)
 
         # State
         self._pending_datasets: list[_PendingDataset] = []
@@ -206,23 +206,47 @@ class WorkflowConfigDialog(QDialog):
     # ── UI construction ───────────────────────────────────────
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        from qtpy.QtWidgets import QScrollArea
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Wrap the content in a scroll area so the dialog is usable on
+        # smaller screens (the full layout can be quite tall with many
+        # rounds / columns).
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setSpacing(10)
+        layout.setContentsMargins(12, 12, 12, 12)
 
         layout.addWidget(self._build_datasets_group(), stretch=2)
         layout.addWidget(self._build_cellpose_group())
         layout.addWidget(self._build_rounds_group(), stretch=1)
         layout.addWidget(self._build_columns_group(), stretch=2)
         layout.addWidget(self._build_output_group())
+        layout.addStretch()
 
-        # Dialog buttons
+        scroll.setWidget(content)
+        outer.addWidget(scroll, stretch=1)
+
+        # Dialog buttons — outside the scroll area so Start/Cancel
+        # are always visible at the bottom.
         btn_box = QDialogButtonBox(QDialogButtonBox.Cancel)
         self._start_btn = QPushButton("Start")
         self._start_btn.setDefault(True)
         btn_box.addButton(self._start_btn, QDialogButtonBox.AcceptRole)
         btn_box.rejected.connect(self.reject)
         self._start_btn.clicked.connect(self._on_start_clicked)
-        layout.addWidget(btn_box)
+        btn_bar = QWidget()
+        btn_layout = QHBoxLayout(btn_bar)
+        btn_layout.setContentsMargins(12, 6, 12, 6)
+        btn_layout.addWidget(btn_box)
+        outer.addWidget(btn_bar)
 
     def _build_datasets_group(self) -> QGroupBox:
         box = QGroupBox("Datasets")
