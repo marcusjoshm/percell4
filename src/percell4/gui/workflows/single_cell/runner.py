@@ -284,6 +284,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
     def _make_compress_handler(self, entry):
         def handler() -> PhaseResult:
+            print(f"  [compress] {entry.name}...", flush=True)
             updated, failure, msg = compress_one(entry)
             if failure is not None:
                 record_failure(
@@ -425,21 +426,14 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             worker = Worker(_do_segment)
 
-            # Show a visible indicator so the user knows Cellpose is
-            # running (the viewer is blank between seg QC accept and the
-            # next dataset's seg QC open).
+            # Show progress in the status bar + terminal so the user
+            # knows Cellpose is running while the viewer is blank.
             if self._host is not None:
                 self._host.show_workflow_status(
                     "Segmenting",
-                    f"{entry.name} — running Cellpose (this may take a moment)...",
+                    f"{entry.name} — running Cellpose...",
                 )
-                try:
-                    viewer_win = self._host.get_viewer_window()
-                    viewer_win.set_subtitle(
-                        f"⏳ Segmenting {entry.name}..."
-                    )
-                except Exception:
-                    pass
+            print(f"  [segment] {entry.name} — running Cellpose...", flush=True)
 
             def _on_worker_finished(result):
                 self._active_worker = None
@@ -528,6 +522,10 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
     def _make_threshold_compute_handler(self, entry, round_spec):
         """UNATTENDED handler that computes the GroupingResult and stashes it."""
         def handler() -> PhaseResult:
+            print(
+                f"  [threshold compute] {entry.name} — round: {round_spec.name}...",
+                flush=True,
+            )
             try:
                 store = DatasetStore(entry.h5_path)
             except Exception as e:
@@ -684,6 +682,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
     def _make_measure_handler(self, entry):
         def handler() -> PhaseResult:
+            print(f"  [measure] {entry.name}...", flush=True)
             try:
                 store = DatasetStore(entry.h5_path)
             except Exception as e:
@@ -735,6 +734,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
     def _make_export_handler(self):
         def handler() -> PhaseResult:
+            print("  [export] aggregating measurements...", flush=True)
             failure, msg = export_run(
                 self._metadata.run_folder, self._config, self._metadata
             )

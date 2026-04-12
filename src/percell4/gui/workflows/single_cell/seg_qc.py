@@ -122,6 +122,15 @@ class SegmentationQCController(QObject):
 
     def start(self) -> None:
         """Load the dataset into the viewer and show the QC window."""
+        # Clear the viewer subtitle from any prior phase (e.g. a stale
+        # "Segmenting ..." message left by the Cellpose worker handler).
+        try:
+            self._viewer_win.set_subtitle(
+                f"Seg QC — {self._entry.name}"
+            )
+        except Exception:
+            pass
+
         try:
             self._store = DatasetStore(self._entry.h5_path)
             self._intensity = self._store.read_channel(

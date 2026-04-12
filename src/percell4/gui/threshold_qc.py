@@ -193,7 +193,7 @@ class ThresholdQCController(QObject):
         from qtpy.QtWidgets import QMainWindow
 
         win = QMainWindow()
-        win.setWindowTitle("Group Preview")
+        win.setWindowTitle(f"Group Preview — {self._mask_name}")
         win.setMinimumSize(500, 450)
         win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
 
@@ -217,6 +217,25 @@ class ThresholdQCController(QObject):
 
             col_name = f"{self._channel}_{self._metric}"
             df = self._data_model.df
+
+            # Fallback: if the data model's DataFrame is empty or missing
+            # the required column (happens in the batch workflow where the
+            # model was cleared at run start), compute per-cell metric
+            # values on the fly from the channel image + labels the
+            # controller already holds.
+            if df is None or df.empty or col_name not in df.columns:
+                from percell4.measure.measurer import measure_cells
+
+                df = measure_cells(
+                    self._channel_image,
+                    self._seg_labels,
+                    metrics=[self._metric],
+                )
+                if not df.empty:
+                    # Rename the metric column to the channel-prefixed form
+                    # so the histogram code below sees the expected name.
+                    if self._metric in df.columns and col_name not in df.columns:
+                        df = df.rename(columns={self._metric: col_name})
 
             n_bins = 50
 

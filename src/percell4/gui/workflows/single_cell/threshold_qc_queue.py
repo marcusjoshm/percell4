@@ -85,6 +85,17 @@ class ThresholdQCQueueEntry:
         except Exception:
             pass
 
+        # Set the viewer title so the user knows WHICH dataset + round
+        # is being thresholded (issue: only group count was visible).
+        try:
+            self._viewer_win.set_subtitle(
+                f"Threshold QC — {self._entry.name} — "
+                f"round: {self._round_spec.name} "
+                f"({self._queue_index + 1}/{self._queue_total})"
+            )
+        except Exception:
+            pass
+
         try:
             self._store = DatasetStore(self._entry.h5_path)
             channel_idx = _channel_index(self._store, self._round_spec.channel)
