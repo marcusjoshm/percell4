@@ -319,9 +319,17 @@ class ThresholdQCController(QObject):
         self._show_group_qc()
 
     def _on_regroup(self) -> None:
-        """Remove preview and return control to the panel."""
+        """Remove preview and return control to the caller.
+
+        In the single-dataset flow (GroupedSegPanel), this lets the user
+        adjust the algorithm parameters and re-run grouping. In the
+        batch workflow flow, the runner treats this as a per-dataset
+        skip (the dataset's threshold is not applied for this round)
+        because the workflow generator cannot go backward; the user can
+        re-run the entire workflow with different parameters if needed.
+        """
         self._cleanup_all()
-        self._finish(False, "Re-group requested — adjust parameters and run again")
+        self._finish(False, "Re-group requested — skipping this dataset for this round")
 
     def _on_group_select(self, labels: list[int]) -> None:
         """Group button clicked — select all cells in that group."""
@@ -710,10 +718,12 @@ class ThresholdQCController(QObject):
             group_df.columns = ["label", col_name]
             self._store.write_dataframe(f"/groups/{self._mask_name}", group_df)
 
-        # Add group column to DataFrame
+        # Add group column to DataFrame (only if the model has data with
+        # a 'label' column — in the batch workflow, the model may have been
+        # cleared at run start, so this is a no-op and that's fine).
         col_name = f"group_{self._channel}_{self._metric}"
         df = self._data_model.df
-        if df is not None:
+        if df is not None and not df.empty and "label" in df.columns:
             df = df.assign(
                 **{col_name: df["label"].map(self._result.group_assignments)}
             )

@@ -191,7 +191,7 @@ class WorkflowConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Single-cell thresholding analysis workflow")
         self.setModal(True)
-        self.resize(900, 720)
+        self.resize(1000, 900)
 
         # State
         self._pending_datasets: list[_PendingDataset] = []
@@ -232,6 +232,7 @@ class WorkflowConfigDialog(QDialog):
         self._dataset_tree.setHeaderLabels(("Name", "Source", "Path", "Channels"))
         self._dataset_tree.setRootIsDecorated(False)
         self._dataset_tree.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self._dataset_tree.setMinimumHeight(120)
         self._dataset_tree.header().setStretchLastSection(True)
         self._dataset_tree.header().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
@@ -333,6 +334,7 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.verticalHeader().setVisible(False)
         self._rounds_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._rounds_table.setSelectionMode(QTableWidget.SingleSelection)
+        self._rounds_table.setMinimumHeight(100)
         self._rounds_table.itemChanged.connect(self._on_round_item_changed)
         outer.addWidget(self._rounds_table, stretch=1)
 
@@ -376,6 +378,7 @@ class WorkflowConfigDialog(QDialog):
         outer.addWidget(note)
 
         self._columns_list = QListWidget()
+        self._columns_list.setMinimumHeight(150)
         self._columns_list.itemChanged.connect(self._on_column_item_changed)
         outer.addWidget(self._columns_list, stretch=1)
 

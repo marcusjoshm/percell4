@@ -589,16 +589,27 @@ class SegmentationQCController(QObject):
             return
         self._finished = True
 
-        # Clean up temp cleanup-preview layer, if any.
+        # Clean up ALL workflow-specific layers (the seg QC image, the
+        # labels layer, and the cleanup-preview layer). These MUST be
+        # removed before the next phase (threshold QC) adds its own
+        # layers; leaving them behind confuses the ThresholdQCController's
+        # group-preview visualization.
         try:
             viewer = self._viewer_win.viewer
             if viewer is not None:
-                for existing in list(viewer.layers):
-                    if existing.name == _LAYER_CLEANUP_PREVIEW:
-                        viewer.layers.remove(existing)
-                        break
+                for layer_name in (
+                    _LAYER_IMAGE,
+                    _LAYER_LABELS,
+                    _LAYER_CLEANUP_PREVIEW,
+                ):
+                    if layer_name in viewer.layers:
+                        viewer.layers.remove(layer_name)
         except Exception:
             pass
+
+        # Drop Python references so numpy arrays can be freed.
+        self._intensity = None
+        self._labels = None
 
         # Restore any layers we hid on entry.
         try:
