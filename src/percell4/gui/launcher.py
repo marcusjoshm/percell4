@@ -696,6 +696,23 @@ class LauncherWindow(QMainWindow):
             runner = self._active_workflow_runner
             self._active_workflow_runner = None
 
+            # Clean up the viewer: clear stale workflow layers and reset
+            # the subtitle so the user doesn't see "Threshold QC —
+            # Rep3_Untreated — round: SG_mask (6/6)" after the run is
+            # done with only a leftover mask layer in the layer list.
+            viewer_win = self._windows.get("viewer")
+            if viewer_win is not None:
+                try:
+                    viewer = viewer_win.viewer
+                    if viewer is not None:
+                        viewer.layers.clear()
+                except Exception:
+                    pass
+                try:
+                    viewer_win.set_subtitle("")
+                except Exception:
+                    pass
+
             # Build a concise summary dialog.
             if event.success:
                 header = "Workflow complete"

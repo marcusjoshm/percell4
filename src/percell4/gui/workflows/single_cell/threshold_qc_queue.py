@@ -115,6 +115,19 @@ class ThresholdQCQueueEntry:
             )
             return
 
+        # Add the channel image as a background layer in the viewer so
+        # the user sees the actual data underneath the _group_preview
+        # overlay. The ThresholdQCController only adds the group-preview
+        # labels layer; without this the viewer would show a blank canvas
+        # with colored cells floating in the void.
+        try:
+            self._viewer_win.add_image(
+                channel_image,
+                name=f"{self._round_spec.channel} ({self._entry.name})",
+            )
+        except Exception:
+            logger.exception("failed to add channel image layer for threshold QC")
+
         if seg_labels is None or int(seg_labels.max()) == 0:
             # Empty segmentation — skip QC, advance without writing masks.
             self._finish(
