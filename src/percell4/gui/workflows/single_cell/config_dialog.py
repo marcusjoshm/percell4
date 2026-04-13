@@ -941,7 +941,7 @@ class WorkflowConfigDialog(QDialog):
         dialog = QDialog(self)
         dialog.setWindowTitle("Configure CSV Export Columns")
         dialog.setModal(True)
-        dialog.resize(400, 500)
+        dialog.resize(450, 640)
         layout = QVBoxLayout(dialog)
 
         # ── Channels section ──
