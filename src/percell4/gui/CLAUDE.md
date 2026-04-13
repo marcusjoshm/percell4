@@ -9,6 +9,10 @@ its `state_changed` signal.
   content area, status bar. Creates and manages every other window. Owns
   dataset loading, measurement runs, filter controls, export actions, and
   plugin launching. Large (~2.5k lines) — a deliberate god object for now.
+  Structurally conforms to `percell4.workflows.host.WorkflowHost` — see the
+  "Batch workflow host API" section near the bottom of the file for the
+  public surface batch runners rely on (`set_workflow_locked`,
+  `close_child_windows`, `restore_child_windows`, etc.).
 - `viewer.py` — `ViewerWindow` wraps a `napari.Viewer`. Renders the
   selection + filter highlighting via `DirectLabelColormap` (single code
   path handling all four combinations of filter/selection state).
@@ -39,3 +43,10 @@ its `state_changed` signal.
   `ACCENT`, etc.) and the global Fusion-style stylesheet. Every GUI file
   imports constants from here; no hardcoded hex colors elsewhere.
 - `workers.py` — `QThread` workers for Cellpose and other long-running ops.
+
+## Subpackages
+
+- `workflows/` — Qt driver for batch workflows. `BaseWorkflowRunner`
+  generator-driven state machine and the `PhaseRequest` / `PhaseResult` /
+  `WorkflowEvent` dataclasses. The pure-Python core lives under
+  `src/percell4/workflows/`; this subpackage is the Qt-dependent half.

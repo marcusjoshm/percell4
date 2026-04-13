@@ -55,6 +55,14 @@ class LauncherWindow(QMainWindow):
         self._last_particle_df = None
         self._last_particle_detail_df = None
 
+        # Batch workflow state (see set_workflow_locked / close_child_windows)
+        self._workflow_locked: bool = False
+        self._child_windows_to_restore: list[str] = []
+        self._viewer_created_by_workflow: bool = False
+        # Holds the currently-running workflow runner to prevent GC of
+        # the QObject. Cleared in _on_workflow_event when the run finishes.
+        self._active_workflow_runner = None
+
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
 
@@ -536,12 +544,183 @@ class LauncherWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setAlignment(Qt.AlignTop)
         layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
 
         layout.addWidget(self._section_label("Workflows"))
-        layout.addWidget(self._placeholder("Standard Analysis Pipeline"))
-        layout.addWidget(self._placeholder("Custom Workflow Builder"))
+
+        self._btn_single_cell_workflow = QPushButton(
+            "Single-cell thresholding analysis workflow"
+        )
+        self._btn_single_cell_workflow.setToolTip(
+            "Batch workflow: Cellpose → seg QC → grouped thresholding → "
+            "per-cell measurement → Parquet + CSV export. Opens a "
+            "configuration dialog."
+        )
+        self._btn_single_cell_workflow.clicked.connect(
+            self._on_open_single_cell_workflow
+        )
+        layout.addWidget(self._btn_single_cell_workflow)
+
         layout.addStretch()
         return panel
+
+    def _on_open_single_cell_workflow(self) -> None:
+        """Open the single-cell thresholding workflow config dialog.
+
+        Reentrance-guarded against ``is_workflow_locked``. On Accepted,
+        instantiates the runner, creates the run folder, wires
+        progress signals to the status bar, and calls
+        ``runner.start()``. Phase 4 MVP: the run executes synchronously
+        on the main thread; Phase 1 (Cellpose) blocks the UI during
+        each dataset's inference. Phase 8 polish will move Cellpose
+        into a QThread worker.
+        """
+        if self.is_workflow_locked:
+            self.statusBar().showMessage(
+                "A workflow is already running — click Cancel to stop it first."
+            )
+            return
+
+        from datetime import UTC, datetime
+
+        from percell4.gui.workflows.single_cell.config_dialog import (
+            WorkflowConfigDialog,
+        )
+        from percell4.gui.workflows.single_cell.runner import (
+            SingleCellThresholdingRunner,
+        )
+        from percell4.workflows.artifacts import create_run_folder
+        from percell4.workflows.models import RunMetadata
+
+        dialog = WorkflowConfigDialog(parent=self)
+        try:
+            if dialog.exec_() != QDialog.Accepted:
+                self.statusBar().showMessage("Workflow configuration cancelled.")
+                return
+            cfg = dialog.workflow_config
+        finally:
+            dialog.deleteLater()
+
+        if cfg is None:
+            return
+
+        # Build the run folder + metadata from the validated config.
+        try:
+            run_folder = create_run_folder(cfg.output_parent)
+        except OSError as e:
+            QMessageBox.warning(
+                self,
+                "Cannot create run folder",
+                f"Failed to create run folder under {cfg.output_parent}:\n\n{e}",
+            )
+            return
+
+        metadata = RunMetadata(
+            run_id=run_folder.name,
+            run_folder=run_folder,
+            started_at=datetime.now(UTC),
+            intersected_channels=sorted(
+                {
+                    ch
+                    for ds in cfg.datasets
+                    for ch in ds.channel_names
+                }
+            ),
+        )
+
+        # Close the current dataset before the run so the launcher UI
+        # doesn't fight the workflow for control of the CellDataModel.
+        if self.data_model.df is not None and not self.data_model.df.empty:
+            answer = QMessageBox.question(
+                self,
+                "Close current dataset?",
+                "Starting a workflow run will close the currently loaded "
+                "dataset. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer != QMessageBox.Yes:
+                # Run folder was already created — clean up to avoid an
+                # orphan empty folder cluttering the output directory.
+                try:
+                    for sub in ("staging", "per_dataset"):
+                        (run_folder / sub).rmdir()
+                    run_folder.rmdir()
+                except OSError:
+                    pass
+                self.statusBar().showMessage("Workflow cancelled before start.")
+                return
+            self.data_model.clear()
+
+        # Build and wire the runner.
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=metadata)
+        # Keep a reference so the runner (a QObject) doesn't get GC'd
+        # mid-run. Cleared when the run finishes.
+        self._active_workflow_runner = runner
+        runner.workflow_event.connect(self._on_workflow_event)
+
+        # Start. This call returns immediately for interactive runs, but
+        # in Phase 4 MVP every phase is UNATTENDED and blocks until
+        # export completes.
+        try:
+            runner.start(config=cfg, host=self, metadata=metadata)
+        except Exception as e:
+            logger.exception("workflow runner raised out of start()")
+            QMessageBox.warning(
+                self,
+                "Workflow error",
+                f"The workflow runner raised an exception:\n\n{e}",
+            )
+            self._active_workflow_runner = None
+
+    def _on_workflow_event(self, event) -> None:
+        """Slot for ``BaseWorkflowRunner.workflow_event`` signal.
+
+        Updates the status bar on every phase progression and shows a
+        summary dialog on terminal ``run_finished`` events.
+        """
+        from percell4.gui.workflows.base_runner import WorkflowEventKind
+
+        if event.kind is WorkflowEventKind.PHASE_PROGRESS:
+            bits = [event.phase_name]
+            if event.total:
+                bits.append(f"{event.current + 1}/{event.total}")
+            if event.dataset_name:
+                bits.append(event.dataset_name)
+            if event.sub_progress:
+                bits.append(f"({event.sub_progress})")
+            self.statusBar().showMessage(" — ".join(bits))
+            return
+
+        if event.kind is WorkflowEventKind.RUN_FINISHED:
+            runner = self._active_workflow_runner
+            self._active_workflow_runner = None
+
+            # Build a concise summary dialog.
+            if event.success:
+                header = "Workflow complete"
+                body_prefix = "The workflow run finished successfully."
+            else:
+                header = "Workflow ended"
+                body_prefix = f"Run did not complete successfully: {event.message}"
+
+            run_folder = getattr(runner, "_metadata", None)
+            if run_folder is not None:
+                run_folder = run_folder.run_folder
+            n_failures = 0
+            if runner is not None and runner._metadata is not None:
+                n_failures = len(runner._metadata.failures)
+
+            body = (
+                f"{body_prefix}\n\n"
+                f"Run folder: {run_folder}\n"
+                f"Failures recorded: {n_failures}"
+            )
+            QMessageBox.warning(self, header, body)
+            self.statusBar().showMessage(
+                f"Workflow {'complete' if event.success else 'ended'}: "
+                f"{event.message}"
+            )
 
     def _create_data_panel(self) -> QWidget:
         panel = QWidget()
@@ -2435,10 +2614,151 @@ class LauncherWindow(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Export error: {e}")
 
+    # ── Batch workflow host API ───────────────────────────────
+    #
+    # These methods implement the percell4.workflows.host.WorkflowHost
+    # protocol used by batch workflow runners. They are called from the
+    # batch runner; regular launcher actions should not poke at
+    # ``_workflow_locked`` directly.
+
+    @property
+    def is_workflow_locked(self) -> bool:
+        """Whether a batch workflow currently owns the main UI."""
+        return self._workflow_locked
+
+    def set_workflow_locked(self, locked: bool) -> None:
+        """Disable (or re-enable) the launcher's main UI.
+
+        While locked, the sidebar, every content panel, and the File menu
+        are disabled. The workflow runner is expected to host its own UI
+        (config dialog, progress dialogs, QC controller windows), which
+        are separate top-level windows and stay interactive.
+
+        Calling with the same value twice is a no-op.
+        """
+        if locked == self._workflow_locked:
+            return
+        self._workflow_locked = locked
+
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(not locked)
+        self.menuBar().setEnabled(not locked)
+        if locked:
+            self.statusBar().showMessage("Workflow running...")
+        else:
+            self.statusBar().showMessage("Ready")
+
+    def show_workflow_status(self, phase_name: str, sub_progress: str) -> None:
+        """Display a live status string for the running workflow."""
+        if sub_progress:
+            self.statusBar().showMessage(f"{phase_name} — {sub_progress}")
+        else:
+            self.statusBar().showMessage(phase_name)
+
+    def get_viewer_window(self):
+        """Return the shared ``ViewerWindow``, creating and wiring it if needed.
+
+        Lazily creates the viewer on first access. If the workflow itself
+        is what caused the creation (there was no viewer before
+        :meth:`close_child_windows` was called), the host will close the
+        viewer automatically in :meth:`restore_child_windows` so the user
+        is not left with a dangling napari window after the run.
+        """
+        return self._get_or_create_window("viewer")
+
+    def get_data_model(self) -> "CellDataModel":
+        return self.data_model
+
+    def close_child_windows(self) -> None:
+        """Close cell_table / data_plot / phasor_plot for the run.
+
+        Actually closes the windows (not just ``hide()``) and removes them
+        from the window registry so they do not receive
+        ``CellDataModel.state_changed`` signals during the run — the plan
+        explicitly called out that signal thrash was the reason to close
+        them. They are re-instantiated on demand in
+        :meth:`restore_child_windows` via the usual factories.
+
+        Also records whether the viewer existed before this call so that
+        :meth:`restore_child_windows` can close a workflow-created viewer
+        instead of leaving it dangling.
+        """
+        child_keys = ("cell_table", "data_plot", "phasor_plot")
+        self._child_windows_to_restore = []
+        for key in child_keys:
+            win = self._windows.get(key)
+            if win is None:
+                continue
+            try:
+                was_visible = bool(win.isVisible())
+            except Exception:
+                was_visible = False
+            if was_visible:
+                self._child_windows_to_restore.append(key)
+            win.close()
+            # Remove from registry so _show_window reinstantiates a fresh
+            # window on restore; this guarantees no leaked signal handlers.
+            del self._windows[key]
+
+        # Track whether the viewer existed before the run. If not, and the
+        # runner later calls get_viewer_window, restore_child_windows will
+        # close the viewer on cleanup.
+        self._viewer_created_by_workflow = "viewer" not in self._windows
+
+    def restore_child_windows(self) -> None:
+        """Re-show the child windows that were open before the workflow.
+
+        Preserves the original open order via the list recorded in
+        :meth:`close_child_windows`. If the workflow implicitly created
+        the viewer (see :meth:`get_viewer_window`), the viewer is closed
+        here so the user is not left with a dangling napari window.
+        """
+        for key in self._child_windows_to_restore:
+            self._show_window(key)
+        self._child_windows_to_restore = []
+
+        if self._viewer_created_by_workflow:
+            viewer = self._windows.get("viewer")
+            if viewer is not None:
+                viewer.close()
+                # Leave the registry entry intact so the user can still
+                # open the viewer via the sidebar — it will be lazily
+                # re-shown by the existing _show_window path.
+            self._viewer_created_by_workflow = False
+
     # ── Lifecycle ─────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        """Close all managed windows and quit."""
+        """Close all managed windows and quit.
+
+        If a batch workflow is currently running, prompt the user to
+        cancel it first — otherwise the runner would be orphaned
+        mid-run with half-written h5 artifacts. On confirmation, call
+        :meth:`BaseWorkflowRunner.request_cancel` so the runner unwinds
+        cleanly at the next dataset boundary before we tear down the
+        window.
+        """
+        if self.is_workflow_locked and self._active_workflow_runner is not None:
+            answer = QMessageBox.question(
+                self,
+                "Cancel running workflow?",
+                "A workflow run is currently in progress. Quit and cancel "
+                "the run? The in-flight dataset will finish before the "
+                "runner unwinds; any labels, masks, and staging data "
+                "already written will remain on disk but the final run "
+                "artifacts may not be created.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+            try:
+                self._active_workflow_runner.request_cancel()
+            except Exception:
+                logger.exception("failed to propagate cancel to runner")
+
         self._save_geometry()
         for window in self._windows.values():
             window.close()

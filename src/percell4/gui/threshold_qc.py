@@ -87,6 +87,7 @@ class ThresholdQCController(QObject):
         sigma: float,
         mask_name: str,
         on_complete: Callable[[bool, str], None] | None = None,
+        write_measurements_to_store: bool = True,
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -100,6 +101,10 @@ class ThresholdQCController(QObject):
         self._sigma = sigma
         self._mask_name = mask_name
         self._on_complete = on_complete
+        # When False, /masks/<name> and /groups/<name> are still written,
+        # but /measurements is left alone. Used by the batch workflow runner,
+        # which owns measurement persistence separately.
+        self._write_measurements_to_store = write_measurements_to_store
 
         # Build group states
         self._groups: list[GroupState] = []
@@ -188,7 +193,7 @@ class ThresholdQCController(QObject):
         from qtpy.QtWidgets import QMainWindow
 
         win = QMainWindow()
-        win.setWindowTitle("Group Preview")
+        win.setWindowTitle(f"Group Preview — {self._mask_name}")
         win.setMinimumSize(500, 450)
         win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
 
@@ -212,6 +217,25 @@ class ThresholdQCController(QObject):
 
             col_name = f"{self._channel}_{self._metric}"
             df = self._data_model.df
+
+            # Fallback: if the data model's DataFrame is empty or missing
+            # the required column (happens in the batch workflow where the
+            # model was cleared at run start), compute per-cell metric
+            # values on the fly from the channel image + labels the
+            # controller already holds.
+            if df is None or df.empty or col_name not in df.columns:
+                from percell4.measure.measurer import measure_cells
+
+                df = measure_cells(
+                    self._channel_image,
+                    self._seg_labels,
+                    metrics=[self._metric],
+                )
+                if not df.empty:
+                    # Rename the metric column to the channel-prefixed form
+                    # so the histogram code below sees the expected name.
+                    if self._metric in df.columns and col_name not in df.columns:
+                        df = df.rename(columns={self._metric: col_name})
 
             n_bins = 50
 
@@ -314,9 +338,17 @@ class ThresholdQCController(QObject):
         self._show_group_qc()
 
     def _on_regroup(self) -> None:
-        """Remove preview and return control to the panel."""
+        """Remove preview and return control to the caller.
+
+        In the single-dataset flow (GroupedSegPanel), this lets the user
+        adjust the algorithm parameters and re-run grouping. In the
+        batch workflow flow, the runner treats this as a per-dataset
+        skip (the dataset's threshold is not applied for this round)
+        because the workflow generator cannot go backward; the user can
+        re-run the entire workflow with different parameters if needed.
+        """
         self._cleanup_all()
-        self._finish(False, "Re-group requested — adjust parameters and run again")
+        self._finish(False, "Re-group requested — skipping this dataset for this round")
 
     def _on_group_select(self, labels: list[int]) -> None:
         """Group button clicked — select all cells in that group."""
@@ -705,17 +737,20 @@ class ThresholdQCController(QObject):
             group_df.columns = ["label", col_name]
             self._store.write_dataframe(f"/groups/{self._mask_name}", group_df)
 
-        # Add group column to DataFrame
+        # Add group column to DataFrame (only if the model has data with
+        # a 'label' column — in the batch workflow, the model may have been
+        # cleared at run start, so this is a no-op and that's fine).
         col_name = f"group_{self._channel}_{self._metric}"
         df = self._data_model.df
-        if df is not None:
+        if df is not None and not df.empty and "label" in df.columns:
             df = df.assign(
                 **{col_name: df["label"].map(self._result.group_assignments)}
             )
             self._data_model.set_measurements(df)
 
-            # Persist updated DataFrame
-            if self._store is not None:
+            # Persist updated DataFrame (skipped by the batch workflow runner,
+            # which owns measurement persistence in its own run folder).
+            if self._store is not None and self._write_measurements_to_store:
                 self._store.write_dataframe("/measurements", df)
 
         # Show final mask in viewer

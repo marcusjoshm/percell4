@@ -25,6 +25,11 @@ CORE_COLUMNS = [
     "bbox_y", "bbox_x", "bbox_h", "bbox_w", "area",
 ]
 
+# (round_name, inside_mask, outside_mask, inside_area, outside_area) — used by
+# the multi-mask single-pass measurer to carry per-round crop state across
+# channels without redundant mask arithmetic.
+_PerRound = tuple[str, NDArray[np.bool_], NDArray[np.bool_], float, float]
+
 
 @dataclass
 class _CellCrop:
@@ -353,3 +358,215 @@ def _build_column_list(metric_names: list[str], has_mask: bool) -> list[str]:
             cols.append(f"{name}_mask_inside")
             cols.append(f"{name}_mask_outside")
     return cols
+
+
+def _build_column_list_with_masks(
+    metric_names: list[str],
+    mask_names: list[str],
+) -> list[str]:
+    """Build the expected column list for an empty masked-multi DataFrame."""
+    cols = list(CORE_COLUMNS)
+    for name in metric_names:
+        if name not in cols:
+            cols.append(name)
+    for round_name in mask_names:
+        for name in metric_names:
+            cols.append(f"{name}_in_{round_name}")
+            cols.append(f"{name}_out_{round_name}")
+    return cols
+
+
+def measure_cells_with_masks(
+    image: NDArray,
+    labels: NDArray[np.int32],
+    metrics: list[str] | None = None,
+    masks: dict[str, NDArray[np.uint8]] | None = None,
+) -> pd.DataFrame:
+    """Single-pass per-cell measurement with multiple named masks.
+
+    Produces the same whole-cell metric columns as :func:`measure_cells`,
+    plus per-mask inside/outside columns named ``{metric}_in_{round_name}``
+    and ``{metric}_out_{round_name}`` instead of the ``_mask_inside`` /
+    ``_mask_outside`` suffixes used by the single-mask path. This avoids
+    column collisions when the caller wants metrics for several rounds of
+    thresholding in one pass, and re-uses a single ``find_objects`` +
+    ``regionprops`` pass — much cheaper than calling
+    :func:`measure_cells` once per mask.
+
+    Parameters
+    ----------
+    image : (H, W) intensity image
+    labels : (H, W) int32 label array (0 = background)
+    metrics : metric names (None = all builtins)
+    masks : mapping of ``{round_name: (H, W) uint8 mask}``. May be empty or
+        ``None`` — in that case the result has only whole-cell columns.
+
+    Returns
+    -------
+    DataFrame with one row per cell. See :func:`measure_cells` for the
+    core + whole-cell metric columns, plus ``{metric}_in_{round_name}`` and
+    ``{metric}_out_{round_name}`` for each mask.
+    """
+    metric_names = _validate_metrics(metrics)
+    mask_items: list[tuple[str, NDArray[np.uint8]]] = (
+        list(masks.items()) if masks else []
+    )
+    mask_names = [name for name, _ in mask_items]
+
+    if labels.max() == 0:
+        columns = _build_column_list_with_masks(metric_names, mask_names)
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict] = []
+    for crop in _iter_cell_crops(image, labels):
+        row = _core_row(crop)
+        row.update(_compute_metrics(
+            crop.image_crop, crop.cell_mask, metric_names, crop.area
+        ))
+
+        for round_name, mask in mask_items:
+            mask_crop = mask[crop.sl]
+            mask_bool = mask_crop > 0
+            inside = crop.cell_mask & mask_bool
+            outside = crop.cell_mask & ~mask_bool
+            inside_area = float(np.sum(inside))
+            outside_area = float(np.sum(outside))
+            for name in metric_names:
+                if name == "area":
+                    row[f"{name}_in_{round_name}"] = inside_area
+                    row[f"{name}_out_{round_name}"] = outside_area
+                else:
+                    row[f"{name}_in_{round_name}"] = BUILTIN_METRICS[name](
+                        crop.image_crop, inside
+                    )
+                    row[f"{name}_out_{round_name}"] = BUILTIN_METRICS[name](
+                        crop.image_crop, outside
+                    )
+
+        rows.append(row)
+
+    if not rows:
+        columns = _build_column_list_with_masks(metric_names, mask_names)
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(rows)
+    df["label"] = df["label"].astype(np.int32)
+    return df
+
+
+def measure_multichannel_with_masks(
+    images: dict[str, NDArray],
+    labels: NDArray[np.int32],
+    metrics: list[str] | None = None,
+    masks: dict[str, NDArray[np.uint8]] | None = None,
+) -> pd.DataFrame:
+    """Measure multiple channels in a single pass with multiple named masks.
+
+    Result has columns named ``{channel}_{metric}`` for whole-cell plus
+    ``{channel}_{metric}_in_{round_name}`` / ``_out_{round_name}`` for each
+    configured mask. Designed for batch workflows that measure every
+    channel against multiple rounds of thresholding in one sweep.
+
+    Unlike calling :func:`measure_cells_with_masks` once per channel, this
+    runs ``find_objects`` + ``regionprops`` exactly **once** per dataset
+    and reuses the per-cell ``sl`` crop plus the per-round inside/outside
+    boolean masks across all channels. For a 4-channel × 3-round dataset
+    this is roughly 4× cheaper than the naive per-channel approach.
+
+    Parameters
+    ----------
+    images : dict mapping channel name to (H, W) array
+    labels : (H, W) int32 label array
+    metrics : metric names (None = all builtins)
+    masks : mapping of ``{round_name: (H, W) uint8 mask}``. Empty or ``None``
+        produces whole-cell columns only.
+    """
+    if not images:
+        raise ValueError("No channel images to measure")
+
+    metric_names = _validate_metrics(metrics)
+    mask_items: list[tuple[str, NDArray[np.uint8]]] = (
+        list(masks.items()) if masks else []
+    )
+    mask_names = [name for name, _ in mask_items]
+
+    # Build the empty-frame fallback matching _merge_multichannel's output.
+    if labels.max() == 0:
+        # Each channel contributes an empty DataFrame with the expected column
+        # layout; _merge_multichannel handles the empty inputs gracefully.
+        per_channel = {
+            ch_name: pd.DataFrame(
+                columns=_build_column_list_with_masks(metric_names, mask_names)
+            )
+            for ch_name in images
+        }
+        return _merge_multichannel(per_channel)
+
+    # Precompute per-cell crop metadata once: bounding box slice, cell mask,
+    # and per-round inside/outside boolean arrays. Everything here is
+    # label-only — it does not depend on any channel image, so the cost is
+    # paid once per dataset, not once per channel.
+    #
+    # Each entry is ``(cell_crop, per_round)`` where ``per_round`` is a list
+    # of _PerRound tuples defined at module level.
+    crop_metas: list[tuple[_CellCrop, list[_PerRound]]] = []
+    # _iter_cell_crops is called with the first channel's image just to get
+    # the slice metadata; the .image_crop field is re-derived per channel
+    # below so we never rely on the first channel's data.
+    first_image = next(iter(images.values()))
+    for crop in _iter_cell_crops(first_image, labels):
+        per_round: list[_PerRound] = []
+        for round_name, mask in mask_items:
+            mask_bool = mask[crop.sl] > 0
+            inside = crop.cell_mask & mask_bool
+            outside = crop.cell_mask & ~mask_bool
+            per_round.append(
+                (
+                    round_name,
+                    inside,
+                    outside,
+                    float(np.sum(inside)),
+                    float(np.sum(outside)),
+                )
+            )
+        crop_metas.append((crop, per_round))
+
+    # Now iterate channels, reusing crop_metas.
+    rows_per_channel: dict[str, list[dict]] = {ch: [] for ch in images}
+    for crop, per_round in crop_metas:
+        core = _core_row(crop)
+        for ch_name, image in images.items():
+            img_crop = image[crop.sl]
+            row = dict(core)
+            # whole-cell metrics
+            for m in metric_names:
+                if m == "area":
+                    row[m] = crop.area
+                else:
+                    row[m] = BUILTIN_METRICS[m](img_crop, crop.cell_mask)
+            # per-round inside/outside metrics
+            for round_name, inside, outside, inside_area, outside_area in per_round:
+                for m in metric_names:
+                    if m == "area":
+                        row[f"{m}_in_{round_name}"] = inside_area
+                        row[f"{m}_out_{round_name}"] = outside_area
+                    else:
+                        row[f"{m}_in_{round_name}"] = BUILTIN_METRICS[m](
+                            img_crop, inside
+                        )
+                        row[f"{m}_out_{round_name}"] = BUILTIN_METRICS[m](
+                            img_crop, outside
+                        )
+            rows_per_channel[ch_name].append(row)
+
+    per_channel = {}
+    for ch_name, rows in rows_per_channel.items():
+        if rows:
+            df = pd.DataFrame(rows)
+            df["label"] = df["label"].astype(np.int32)
+            per_channel[ch_name] = df
+        else:
+            per_channel[ch_name] = pd.DataFrame(
+                columns=_build_column_list_with_masks(metric_names, mask_names)
+            )
+    return _merge_multichannel(per_channel)
