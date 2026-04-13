@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QMessageBox
 
 from percell4.gui.workflows.single_cell.config_dialog import (
@@ -231,91 +230,74 @@ def test_algo_toggles_enabled_spinboxes(dialog, h5_ds1):
 # ── Column picker ───────────────────────────────────────────────────────
 
 
-def test_column_picker_populates_after_adding_dataset(dialog, h5_ds1, h5_ds2):
-    # Before any dataset: only always-on identity columns are visible
-    # plus section headers. No channel-prefixed columns yet.
-    initial_count = dialog._columns_list.count()
+def test_seg_channel_combo_populates_from_intersection(dialog, h5_ds1, h5_ds2):
+    """Seg channel combo should show GFP and RFP (the intersection)."""
     dialog._add_h5_paths([h5_ds1, h5_ds2])
-    after_count = dialog._columns_list.count()
-    assert after_count > initial_count
+    combo = dialog._cp_seg_channel
+    items = [combo.itemText(i) for i in range(combo.count())]
+    assert "GFP" in items
+    assert "RFP" in items
+    # DAPI is NOT in the intersection (only in DS1)
+    assert "DAPI" not in items
+    assert combo.isEnabled()
 
-    # The intersection of DS1={GFP,RFP,DAPI} and DS2={GFP,RFP} is {GFP,RFP},
-    # so we should see GFP_mean_intensity and RFP_mean_intensity.
-    labels = [
-        dialog._columns_list.item(i).text()
-        for i in range(dialog._columns_list.count())
+
+def test_seg_channel_combo_placeholder_without_datasets(dialog):
+    combo = dialog._cp_seg_channel
+    assert not combo.isEnabled()
+    assert combo.currentText() == "(add datasets first)"
+
+
+def test_csv_export_selection_persists(dialog, h5_ds1, h5_ds2):
+    """Setting channel + metric selections updates the summary label."""
+    dialog._add_h5_paths([h5_ds1, h5_ds2])
+    dialog._selected_csv_channels = {"GFP"}
+    dialog._selected_csv_metrics = {"mean_intensity", "area"}
+    dialog._update_csv_summary()
+    text = dialog._csv_summary_label.text()
+    assert "1 channel" in text
+    assert "2 metric" in text
+
+
+def test_csv_export_prunes_invalid_channels(dialog, h5_ds1, h5_ds2):
+    """If datasets change and a channel drops out of the intersection,
+    the selection set is pruned."""
+    dialog._add_h5_paths([h5_ds1, h5_ds2])
+    dialog._selected_csv_channels = {"GFP", "DAPI"}  # DAPI not in intersection
+    dialog._refresh_column_picker()
+    # DAPI should be pruned because it's not in the intersection
+    assert "DAPI" not in dialog._selected_csv_channels
+    assert "GFP" in dialog._selected_csv_channels
+
+
+def test_build_selected_csv_columns_cross_product(dialog, h5_ds1, h5_ds2):
+    """The cross-product builder should produce the expected column names."""
+    from percell4.workflows.models import ThresholdAlgorithm, ThresholdingRound
+
+    dialog._add_h5_paths([h5_ds1, h5_ds2])
+    dialog._selected_csv_channels = {"GFP"}
+    dialog._selected_csv_metrics = {"mean_intensity"}
+
+    rounds = [
+        ThresholdingRound(
+            name="R1",
+            channel="GFP",
+            metric="mean_intensity",
+            algorithm=ThresholdAlgorithm.GMM,
+        )
     ]
-    assert "GFP_mean_intensity" in labels
-    assert "RFP_mean_intensity" in labels
-    # DAPI is not in the intersection
-    assert "DAPI_mean_intensity" not in labels
+    cols = dialog._build_selected_csv_columns(["GFP", "RFP"], rounds)
 
-
-def test_column_picker_refreshes_after_adding_round(dialog, h5_ds1, h5_ds2):
-    dialog._add_h5_paths([h5_ds1, h5_ds2])
-    dialog._on_add_round()
-    labels = [
-        dialog._columns_list.item(i).text()
-        for i in range(dialog._columns_list.count())
-    ]
-    # round name is "round_1"
-    assert "group_round_1" in labels
-    assert "GFP_mean_intensity_in_round_1" in labels
-    assert "GFP_mean_intensity_out_round_1" in labels
-
-
-def test_column_picker_preserves_checks_across_refresh(dialog, h5_ds1, h5_ds2):
-    dialog._add_h5_paths([h5_ds1, h5_ds2])
-    # Check a specific optional column
-    target_label = "GFP_mean_intensity"
-    for i in range(dialog._columns_list.count()):
-        item = dialog._columns_list.item(i)
-        if item.text() == target_label:
-            item.setCheckState(Qt.Checked)
-            break
-    assert target_label in dialog._selected_columns
-
-    # Add a round — this refreshes the list. The check should persist.
-    dialog._on_add_round()
-    assert target_label in dialog._selected_columns
-    # And the item should still show as checked
-    for i in range(dialog._columns_list.count()):
-        item = dialog._columns_list.item(i)
-        if item.text() == target_label:
-            assert item.checkState() == Qt.Checked
-            break
-
-
-def test_column_picker_prunes_vanished_selections(dialog, h5_ds1, h5_ds2):
-    dialog._add_h5_paths([h5_ds1, h5_ds2])
-    dialog._on_add_round()
-    target_label = "GFP_mean_intensity_in_round_1"
-    for i in range(dialog._columns_list.count()):
-        item = dialog._columns_list.item(i)
-        if item.text() == target_label:
-            item.setCheckState(Qt.Checked)
-            break
-    assert target_label in dialog._selected_columns
-
-    # Remove the round — the in_round_1 columns vanish; the selection
-    # set should drop the stale label.
-    dialog._rounds_table.setCurrentCell(0, 0)
-    dialog._on_remove_round()
-    assert target_label not in dialog._selected_columns
-
-
-def test_check_all_and_uncheck_all(dialog, h5_ds1):
-    dialog._add_h5_paths([h5_ds1])
-    dialog._set_all_columns(True)
-    # Every optional item should be checked and in the selection set
-    for i in range(dialog._columns_list.count()):
-        item = dialog._columns_list.item(i)
-        if item.flags() & Qt.ItemIsUserCheckable:
-            assert item.checkState() == Qt.Checked
-            assert item.text() in dialog._selected_columns
-
-    dialog._set_all_columns(False)
-    assert dialog._selected_columns == set()
+    # Whole-cell: GFP_mean_intensity (only GFP selected, not RFP)
+    assert "GFP_mean_intensity" in cols
+    assert "RFP_mean_intensity" not in cols
+    # Group column
+    assert "group_R1" in cols
+    # Per-round in/out
+    assert "GFP_mean_intensity_in_R1" in cols
+    assert "GFP_mean_intensity_out_R1" in cols
+    # RFP was NOT selected so its in/out should be absent
+    assert "RFP_mean_intensity_in_R1" not in cols
 
 
 # ── Start button / accept ───────────────────────────────────────────────
@@ -363,6 +345,8 @@ def test_accept_with_valid_config_builds_workflow_config(
     assert len(cfg.thresholding_rounds) == 1
     assert cfg.output_parent == tmp_path / "runs"
     assert cfg.cellpose.model == "cpsam"
+    # Seg channel is auto-selected from the first channel in the intersection
+    assert cfg.seg_channel_name in ("GFP", "RFP")
 
 
 def test_accept_with_outlier_dataset_prompts_user(

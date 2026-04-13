@@ -147,6 +147,10 @@ class WorkflowConfig:
     thresholding_rounds: list[ThresholdingRound]
     selected_csv_columns: list[str]
     output_parent: Path
+    # Which channel from /intensity to feed to Cellpose. Stored as a
+    # name (not an index) so the runner resolves it per-dataset via
+    # store.metadata["channel_names"].
+    seg_channel_name: str = ""
 
     def __post_init__(self) -> None:
         if not self.datasets:

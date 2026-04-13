@@ -29,7 +29,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import QSettings
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QCheckBox,
@@ -44,8 +44,6 @@ from qtpy.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -195,7 +193,8 @@ class WorkflowConfigDialog(QDialog):
 
         # State
         self._pending_datasets: list[_PendingDataset] = []
-        self._selected_columns: set[str] = set()
+        self._selected_csv_channels: set[str] = set()
+        self._selected_csv_metrics: set[str] = set()
         self._workflow_config: WorkflowConfig | None = None
 
         self._build_ui()
@@ -224,10 +223,10 @@ class WorkflowConfigDialog(QDialog):
         layout.setSpacing(10)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        layout.addWidget(self._build_datasets_group(), stretch=2)
+        layout.addWidget(self._build_datasets_group(), stretch=3)
         layout.addWidget(self._build_cellpose_group())
-        layout.addWidget(self._build_rounds_group(), stretch=1)
-        layout.addWidget(self._build_columns_group(), stretch=2)
+        layout.addWidget(self._build_rounds_group(), stretch=2)
+        layout.addWidget(self._build_columns_group())
         layout.addWidget(self._build_output_group())
         layout.addStretch()
 
@@ -303,6 +302,13 @@ class WorkflowConfigDialog(QDialog):
     def _build_cellpose_group(self) -> QGroupBox:
         box = QGroupBox("Cellpose Settings (applied to every dataset)")
         form = QFormLayout(box)
+
+        self._cp_seg_channel = QComboBox()
+        self._cp_seg_channel.setToolTip(
+            "Which channel to feed to Cellpose for segmentation. "
+            "Populated from the intersection of all selected datasets."
+        )
+        form.addRow("Segmentation channel:", self._cp_seg_channel)
 
         self._cp_model = QComboBox()
         self._cp_model.addItems(_CELLPOSE_MODELS)
@@ -389,34 +395,29 @@ class WorkflowConfigDialog(QDialog):
         return box
 
     def _build_columns_group(self) -> QGroupBox:
-        box = QGroupBox("CSV Columns to Export")
+        box = QGroupBox("CSV Export")
         outer = QVBoxLayout(box)
 
         note = QLabel(
             "The full measurements.parquet always contains every column. "
-            "Only the checked columns are emitted to combined.csv and the "
-            "per_dataset CSVs."
+            "Configure which channels and metrics appear in the exported "
+            "combined.csv and per-dataset CSVs."
         )
         note.setStyleSheet("color: #888;")
         note.setWordWrap(True)
         outer.addWidget(note)
 
-        self._columns_list = QListWidget()
-        self._columns_list.setMinimumHeight(150)
-        self._columns_list.itemChanged.connect(self._on_column_item_changed)
-        outer.addWidget(self._columns_list, stretch=1)
-
         btn_row = QHBoxLayout()
-        btn_all = QPushButton("Check all")
-        btn_all.clicked.connect(lambda: self._set_all_columns(True))
-        btn_row.addWidget(btn_all)
-
-        btn_none = QPushButton("Uncheck all")
-        btn_none.clicked.connect(lambda: self._set_all_columns(False))
-        btn_row.addWidget(btn_none)
-
+        btn_configure = QPushButton("Configure CSV Export...")
+        btn_configure.clicked.connect(self._on_configure_csv_export)
+        btn_row.addWidget(btn_configure)
         btn_row.addStretch()
         outer.addLayout(btn_row)
+
+        self._csv_summary_label = QLabel("No channels or metrics selected yet.")
+        self._csv_summary_label.setWordWrap(True)
+        self._csv_summary_label.setStyleSheet("color: #aaa;")
+        outer.addWidget(self._csv_summary_label)
 
         return box
 
@@ -854,104 +855,166 @@ class WorkflowConfigDialog(QDialog):
         self._refresh_column_picker()
 
     def _refresh_column_picker(self) -> None:
-        """Rebuild the column picker list, preserving checked state.
+        """Update the seg channel combo and the CSV summary label.
 
-        Columns are grouped as:
-          - always-on identity columns (checked, disabled)
-          - core optional columns
-          - whole-cell metric columns per intersected channel
-          - per-round ``group_<round>`` columns
-          - per-round ``{channel}_{metric}_in_{round}`` / ``_out_{round}``
+        Called whenever the dataset list or rounds change. The old giant
+        flat column list is replaced by a compact "Configure CSV Export..."
+        dialog that the user opens on demand.
         """
-        self._columns_list.blockSignals(True)
-        try:
-            self._columns_list.clear()
+        intersected = self._current_intersection()
 
-            intersected = self._current_intersection()
-            round_names = self._round_names_from_table()
-            metric_names = sorted(BUILTIN_METRICS.keys())
-
-            def _add_always_on(label: str) -> None:
-                item = QListWidgetItem(label)
-                item.setFlags(Qt.ItemIsEnabled)
-                item.setCheckState(Qt.Checked)
-                self._columns_list.addItem(item)
-
-            def _add_optional(label: str) -> None:
-                item = QListWidgetItem(label)
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-                checked = label in self._selected_columns
-                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-                self._columns_list.addItem(item)
-
-            # Section headers are bare read-only items.
-            def _add_header(label: str) -> None:
-                item = QListWidgetItem(label)
-                item.setFlags(Qt.NoItemFlags)
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-                self._columns_list.addItem(item)
-
-            _add_header("── always-on (identity) ──")
-            for col in _ALWAYS_ON_COLUMNS:
-                _add_always_on(col)
-
-            _add_header("── core per-cell ──")
-            for col in _CORE_OPTIONAL_COLUMNS:
-                _add_optional(col)
-
-            if intersected:
-                _add_header("── whole-cell metrics per channel ──")
-                for ch in intersected:
-                    for metric in metric_names:
-                        _add_optional(f"{ch}_{metric}")
-
-            if round_names:
-                _add_header("── group assignments per round ──")
-                for rn in round_names:
-                    _add_optional(f"group_{rn}")
-
-            if intersected and round_names:
-                _add_header("── per-round inside / outside metrics ──")
-                for ch in intersected:
-                    for metric in metric_names:
-                        for rn in round_names:
-                            _add_optional(f"{ch}_{metric}_in_{rn}")
-                            _add_optional(f"{ch}_{metric}_out_{rn}")
-
-            # Purge selections that no longer have matching rows.
-            visible_columns = set()
-            for i in range(self._columns_list.count()):
-                item = self._columns_list.item(i)
-                if item.flags() & Qt.ItemIsUserCheckable:
-                    visible_columns.add(item.text())
-            self._selected_columns &= visible_columns
-        finally:
-            self._columns_list.blockSignals(False)
-
-    def _on_column_item_changed(self, item: QListWidgetItem) -> None:
-        if not (item.flags() & Qt.ItemIsUserCheckable):
-            return
-        label = item.text()
-        if item.checkState() == Qt.Checked:
-            self._selected_columns.add(label)
+        # Update the segmentation channel combo.
+        prev_seg = self._cp_seg_channel.currentText()
+        self._cp_seg_channel.blockSignals(True)
+        self._cp_seg_channel.clear()
+        if intersected:
+            self._cp_seg_channel.addItems(intersected)
+            self._cp_seg_channel.setEnabled(True)
+            # Restore previous selection if still valid.
+            idx = self._cp_seg_channel.findText(prev_seg)
+            if idx >= 0:
+                self._cp_seg_channel.setCurrentIndex(idx)
         else:
-            self._selected_columns.discard(label)
+            self._cp_seg_channel.addItem("(add datasets first)")
+            self._cp_seg_channel.setEnabled(False)
+        self._cp_seg_channel.blockSignals(False)
 
-    def _set_all_columns(self, checked: bool) -> None:
-        self._columns_list.blockSignals(True)
-        try:
-            for i in range(self._columns_list.count()):
-                item = self._columns_list.item(i)
-                if item.flags() & Qt.ItemIsUserCheckable:
-                    item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-                    if checked:
-                        self._selected_columns.add(item.text())
-                    else:
-                        self._selected_columns.discard(item.text())
-        finally:
-            self._columns_list.blockSignals(False)
+        # Prune selected channels/metrics to those still valid.
+        valid_channels = set(intersected)
+        self._selected_csv_channels &= valid_channels
+
+        self._update_csv_summary()
+
+    def _update_csv_summary(self) -> None:
+        """Update the summary label under the Configure CSV Export button."""
+        n_ch = len(self._selected_csv_channels)
+        n_met = len(self._selected_csv_metrics)
+        round_names = self._round_names_from_table()
+        if n_ch == 0 and n_met == 0:
+            self._csv_summary_label.setText(
+                "No channels or metrics selected yet. "
+                "Click 'Configure CSV Export...' to choose."
+            )
+        else:
+            parts = [f"{n_ch} channel(s)", f"{n_met} metric(s)"]
+            if round_names:
+                parts.append(f"{len(round_names)} round(s)")
+            col_count = self._estimate_csv_column_count()
+            self._csv_summary_label.setText(
+                f"CSV export: {', '.join(parts)} → ~{col_count} columns. "
+                f"Core columns (label, centroid, area) always included."
+            )
+
+    def _estimate_csv_column_count(self) -> int:
+        """Rough count of the CSV columns that will be produced."""
+        n_ch = len(self._selected_csv_channels)
+        n_met = len(self._selected_csv_metrics)
+        round_names = self._round_names_from_table()
+        n_rounds = len(round_names)
+        # identity (3) + core (7) + ch×met + group_per_round + ch×met×round×2 (in/out)
+        return (
+            len(_ALWAYS_ON_COLUMNS)
+            + len(_CORE_OPTIONAL_COLUMNS)
+            + n_ch * n_met
+            + n_rounds
+            + n_ch * n_met * n_rounds * 2
+        )
+
+    def _on_configure_csv_export(self) -> None:
+        """Open a compact dialog for selecting channels + metrics to export.
+
+        Two sections of checkboxes: one for channels (from the current
+        intersection) and one for metrics (from BUILTIN_METRICS). The
+        cross-product is computed automatically — the user doesn't have
+        to scroll a 200-item list. Matches the pattern of the existing
+        Measure Cells metric-selection dialog in the launcher.
+        """
+        intersected = self._current_intersection()
+        if not intersected:
+            QMessageBox.warning(
+                self,
+                "No channels available",
+                "Add at least one dataset so channels can be detected.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Configure CSV Export Columns")
+        dialog.setModal(True)
+        dialog.resize(400, 500)
+        layout = QVBoxLayout(dialog)
+
+        # ── Channels section ──
+        ch_box = QGroupBox("Channels to include in CSV")
+        ch_layout = QVBoxLayout(ch_box)
+        ch_cbs: dict[str, QCheckBox] = {}
+        for ch in intersected:
+            cb = QCheckBox(ch)
+            cb.setChecked(ch in self._selected_csv_channels)
+            ch_cbs[ch] = cb
+            ch_layout.addWidget(cb)
+
+        ch_btn_row = QHBoxLayout()
+        ch_all = QPushButton("All")
+        ch_all.clicked.connect(lambda: [cb.setChecked(True) for cb in ch_cbs.values()])
+        ch_btn_row.addWidget(ch_all)
+        ch_none = QPushButton("None")
+        ch_none.clicked.connect(lambda: [cb.setChecked(False) for cb in ch_cbs.values()])
+        ch_btn_row.addWidget(ch_none)
+        ch_btn_row.addStretch()
+        ch_layout.addLayout(ch_btn_row)
+        layout.addWidget(ch_box)
+
+        # ── Metrics section ──
+        met_box = QGroupBox("Metrics to include in CSV")
+        met_layout = QVBoxLayout(met_box)
+        met_cbs: dict[str, QCheckBox] = {}
+        for name in sorted(BUILTIN_METRICS.keys()):
+            cb = QCheckBox(name.replace("_", " ").title())
+            cb.setObjectName(name)  # store the original key
+            cb.setChecked(name in self._selected_csv_metrics)
+            met_cbs[name] = cb
+            met_layout.addWidget(cb)
+
+        met_btn_row = QHBoxLayout()
+        met_all = QPushButton("All")
+        met_all.clicked.connect(lambda: [cb.setChecked(True) for cb in met_cbs.values()])
+        met_btn_row.addWidget(met_all)
+        met_none = QPushButton("None")
+        met_none.clicked.connect(lambda: [cb.setChecked(False) for cb in met_cbs.values()])
+        met_btn_row.addWidget(met_none)
+        met_btn_row.addStretch()
+        met_layout.addLayout(met_btn_row)
+        layout.addWidget(met_box)
+
+        # ── Note ──
+        note = QLabel(
+            "The exported CSVs will contain every combination of the "
+            "selected channels × metrics, plus core columns (label, "
+            "centroid, area), group assignments per round, and per-round "
+            "inside/outside columns. The full measurements.parquet "
+            "always contains everything regardless of this selection."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888;")
+        layout.addWidget(note)
+
+        # ── Buttons ──
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        self._selected_csv_channels = {
+            ch for ch, cb in ch_cbs.items() if cb.isChecked()
+        }
+        self._selected_csv_metrics = {
+            name for name, cb in met_cbs.items() if cb.isChecked()
+        }
+        self._update_csv_summary()
 
     def _round_names_from_table(self) -> list[str]:
         names: list[str] = []
@@ -1050,11 +1113,12 @@ class WorkflowConfigDialog(QDialog):
             self._warn(f"Output parent is not a directory: {output_parent}")
             return None
 
-        selected_cols = [
-            label
-            for label in self._iter_column_labels()
-            if label in self._selected_columns
-        ]
+        selected_cols = self._build_selected_csv_columns(intersected, rounds)
+
+        seg_channel = self._cp_seg_channel.currentText()
+        if not seg_channel or seg_channel.startswith("("):
+            self._warn("Choose a segmentation channel in the Cellpose settings.")
+            return None
 
         entries = [pd.to_entry() for pd in kept_datasets]
         try:
@@ -1064,6 +1128,7 @@ class WorkflowConfigDialog(QDialog):
                 thresholding_rounds=rounds,
                 selected_csv_columns=selected_cols,
                 output_parent=output_parent,
+                seg_channel_name=seg_channel,
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")
@@ -1148,17 +1213,40 @@ class WorkflowConfigDialog(QDialog):
                 raise ValueError(f"Round {row + 1}: {e}") from e
         return rounds
 
-    def _iter_column_labels(self) -> list[str]:
-        """Return the current list of available column labels in display order."""
-        labels: list[str] = []
-        for i in range(self._columns_list.count()):
-            item = self._columns_list.item(i)
-            if item.flags() & Qt.ItemIsUserCheckable:
-                labels.append(item.text())
-            elif item.flags() & Qt.ItemIsEnabled and item.checkState() == Qt.Checked:
-                # always-on identity columns
-                labels.append(item.text())
-        return labels
+    def _build_selected_csv_columns(
+        self,
+        intersected: list[str],
+        rounds: list[ThresholdingRound],
+    ) -> list[str]:
+        """Compute the full list of CSV columns from the user's channel + metric selection.
+
+        Returns the cross-product of selected channels × selected metrics,
+        plus core columns, group columns, and per-round in/out columns.
+        Identity columns (dataset, cell_id, label) are always prepended by
+        the export step regardless of what's in this list.
+        """
+        cols: list[str] = list(_CORE_OPTIONAL_COLUMNS)
+        channels = [ch for ch in intersected if ch in self._selected_csv_channels]
+        metrics = sorted(self._selected_csv_metrics)
+        round_names = [r.name for r in rounds]
+
+        # {channel}_{metric} whole-cell columns
+        for ch in channels:
+            for m in metrics:
+                cols.append(f"{ch}_{m}")
+
+        # group_{round_name} columns
+        for rn in round_names:
+            cols.append(f"group_{rn}")
+
+        # {channel}_{metric}_in_{round} / _out_{round} columns
+        for ch in channels:
+            for m in metrics:
+                for rn in round_names:
+                    cols.append(f"{ch}_{m}_in_{rn}")
+                    cols.append(f"{ch}_{m}_out_{rn}")
+
+        return cols
 
     def _save_output_setting(self) -> None:
         out = self._output_edit.text().strip()

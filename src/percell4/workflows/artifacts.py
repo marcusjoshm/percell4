@@ -206,6 +206,7 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
         "thresholding_rounds": [_round_to_dict(r) for r in cfg.thresholding_rounds],
         "selected_csv_columns": list(cfg.selected_csv_columns),
         "output_parent": str(cfg.output_parent),
+        "seg_channel_name": cfg.seg_channel_name,
     }
 
 
@@ -219,6 +220,7 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
         ],
         selected_csv_columns=list(data["selected_csv_columns"]),
         output_parent=Path(data["output_parent"]),
+        seg_channel_name=data.get("seg_channel_name", ""),
     )
 
 

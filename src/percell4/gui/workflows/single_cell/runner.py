@@ -346,7 +346,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 store,
                 self._config.cellpose,
                 cellpose_model=self._cellpose_model,
-                channel_idx=0,
+                channel_idx=self._seg_channel_idx(store),
             )
             if failure is not None:
                 record_failure(
@@ -415,13 +415,15 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 on_complete(PhaseResult(success=False, message=str(e)))
                 return
 
+            seg_ch_idx = self._seg_channel_idx(store)
+
             def _do_segment() -> tuple:
                 """Runs in the Worker thread. Pure numpy + h5py, no Qt."""
                 return segment_one(
                     store,
                     self._config.cellpose,
                     cellpose_model=self._cellpose_model,
-                    channel_idx=0,
+                    channel_idx=seg_ch_idx,
                 )
 
             worker = Worker(_do_segment)
@@ -505,13 +507,21 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     self.request_cancel()
                 on_complete(result)
 
+            # Resolve the seg channel index for this dataset so the QC
+            # controller loads the right intensity channel.
+            try:
+                _store = DatasetStore(entry.h5_path)
+                seg_ch = self._seg_channel_idx(_store)
+            except Exception:
+                seg_ch = 0
+
             controller = SegmentationQCController(
                 viewer_win=viewer_win,
                 entry=entry,
                 queue_index=queue_index,
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
-                channel_idx=0,
+                channel_idx=seg_ch,
             )
             self._active_qc_controller = controller
             self._log(phase="seg_qc", dataset=entry.name, event="opened")
@@ -759,6 +769,25 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         return handler
 
     # ── Helpers ───────────────────────────────────────────────
+
+    def _seg_channel_idx(self, store: DatasetStore) -> int:
+        """Resolve the configured seg_channel_name to an integer index.
+
+        Falls back to 0 if the name is empty or not found (defensive).
+        """
+        name = self._config.seg_channel_name
+        if not name:
+            return 0
+        from percell4.workflows.phases import _channel_index
+
+        try:
+            return _channel_index(store, name)
+        except KeyError:
+            logger.warning(
+                "seg_channel_name %r not found in dataset; falling back to 0",
+                name,
+            )
+            return 0
 
     def _log(self, **fields) -> None:
         """Forward a structured log entry to the run's RunLog."""
