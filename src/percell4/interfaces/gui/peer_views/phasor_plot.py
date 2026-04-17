@@ -108,8 +108,8 @@ class PhasorPlotWindow(QMainWindow):
 
     # (mask_ndarray, DirectLabelColormap) — for live ROI preview in viewer
     preview_mask_ready = Signal(object, object)
-    # (mask_ndarray, color_dict, mask_name) — for final mask application
-    mask_applied = Signal(object, object, str)
+    # list[tuple[str, ndarray, str]] — per-ROI (name, binary_mask, hex_color)
+    mask_applied = Signal(object)
 
     def __init__(self, session: Session) -> None:
         super().__init__()
@@ -642,25 +642,36 @@ class PhasorPlotWindow(QMainWindow):
     # ── Apply mask ────────────────────────────────────────────
 
     def _on_apply_mask(self) -> None:
-        """Emit mask_applied signal — launcher handles viewer + HDF5."""
+        """Emit mask_applied with per-ROI binary masks.
+
+        Each visible ROI becomes its own binary mask named after the ROI.
+        The launcher saves each to HDF5 and adds each as a napari layer.
+        """
         if self._g_map is None or not self._roi_widgets:
             self._status.showMessage("No phasor data or ROIs", 3000)
             return
 
-        mask = self._compute_combined_mask()
-        if mask.max() == 0:
+        from percell4.domain.flim.phasor import phasor_roi_to_mask
+
+        roi_masks: list[tuple[str, np.ndarray, str]] = []
+        for w in self._roi_widgets:
+            if not w.phasor_roi.visible:
+                continue
+            if w.cached_mask is None:
+                w.cached_mask = phasor_roi_to_mask(
+                    self._g_map, self._s_map, w.phasor_roi,
+                )
+            binary = np.zeros(self._g_map.shape, dtype=np.uint8)
+            binary[w.cached_mask] = 1
+            roi_masks.append((w.phasor_roi.name, binary, w.phasor_roi.color))
+
+        if not roi_masks:
             self._status.showMessage("No visible ROIs to apply", 3000)
             return
 
-        mask_name = "phasor_roi"
-        color_dict = {0: "transparent", None: "transparent"}
-        for w in self._roi_widgets:
-            if w.phasor_roi.visible:
-                color_dict[w.phasor_roi.label] = w.phasor_roi.color
-
-        # Emit signal — launcher removes preview, adds mask, saves to HDF5
-        self.mask_applied.emit(mask, color_dict, mask_name)
-        self._status.showMessage("Multi-ROI mask applied", 3000)
+        self.mask_applied.emit(roi_masks)
+        names = ", ".join(name for name, _, _ in roi_masks)
+        self._status.showMessage(f"Applied {len(roi_masks)} mask(s): {names}", 5000)
 
     # ── Save / Load ROIs ──────────────────────────────────────
 

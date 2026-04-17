@@ -1023,12 +1023,14 @@ class LauncherWindow(QMainWindow):
                 blending="translucent",
             )
 
-    def _on_phasor_mask_applied(self, mask, color_dict, mask_name) -> None:
-        """Handle finalized phasor mask: remove preview, add mask, save to HDF5."""
+    def _on_phasor_mask_applied(self, roi_masks) -> None:
+        """Handle per-ROI phasor masks: one binary mask per ROI.
+
+        Each entry is (roi_name, binary_mask_uint8, hex_color).
+        Store-before-layer invariant preserved for each mask.
+        """
         viewer_win = self._windows.get("viewer")
         if viewer_win is not None and viewer_win._is_alive():
-            # Remove preview layer and stop preview timer to prevent stale
-            # preview from reappearing after apply
             try:
                 viewer_win._viewer.layers.remove("_phasor_roi_preview")
             except ValueError:
@@ -1036,16 +1038,22 @@ class LauncherWindow(QMainWindow):
             if hasattr(self, "_preview_timer"):
                 self._preview_timer.stop()
 
-        # Write to store BEFORE adding layer — sync may fire during add_mask
-        # and needs to find the mask in the store
         store = getattr(self, "_current_store", None)
-        if store is not None:
-            store.write_mask(mask_name, mask)
+        last_name = None
 
-        if viewer_win is not None and viewer_win._is_alive():
-            viewer_win.add_mask(mask, name=mask_name, color_dict=color_dict)
+        for roi_name, binary_mask, hex_color in roi_masks:
+            # Store-before-layer: write to HDF5 before adding napari layer
+            if store is not None:
+                store.write_mask(roi_name, binary_mask)
 
-        self.data_model.set_active_mask(mask_name)
+            if viewer_win is not None and viewer_win._is_alive():
+                color_dict = {0: "transparent", 1: hex_color, None: "transparent"}
+                viewer_win.add_mask(binary_mask, name=roi_name, color_dict=color_dict)
+
+            last_name = roi_name
+
+        if last_name:
+            self.data_model.set_active_mask(last_name)
 
     # ── Analysis + FLIM handlers moved to task panels ──────
     # See: interfaces/gui/task_panels/analysis_panel.py
