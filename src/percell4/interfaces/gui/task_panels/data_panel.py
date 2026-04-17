@@ -5,7 +5,9 @@ Extracted from launcher._create_data_panel + associated handlers.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
@@ -30,12 +32,19 @@ class DataPanel(QWidget):
     def __init__(
         self,
         data_model: CellDataModel,
-        launcher=None,
-        parent=None,
+        *,
+        get_store: Callable[[], Any | None],
+        get_viewer_window: Callable[[], Any | None],
+        get_h5_path: Callable[[], str | None],
+        show_status: Callable[[str], None] = lambda _: None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.data_model = data_model
-        self._launcher = launcher
+        self._get_store = get_store
+        self._get_viewer_window = get_viewer_window
+        self._get_h5_path = get_h5_path
+        self._show_status = show_status
         self._build_ui()
 
         # Subscribe to model state changes for active layer sync
@@ -147,19 +156,8 @@ class DataPanel(QWidget):
 
     # ── Helpers ───────────────────────────────────────────────
 
-    def _show_status(self, msg: str) -> None:
-        if self._launcher is not None:
-            self._launcher.statusBar().showMessage(msg)
-
-    def _get_store(self):
-        if self._launcher is not None:
-            return getattr(self._launcher, "_current_store", None)
-        return None
-
     def _get_viewer_win(self):
-        if self._launcher is not None:
-            return self._launcher._windows.get("viewer")
-        return None
+        return self._get_viewer_window()
 
     # ─�� State change routing ─────────────────────────────────
 
@@ -257,7 +255,7 @@ class DataPanel(QWidget):
     def refresh_dataset_info(self) -> None:
         """Refresh the Dataset Info label from the current store."""
         store = self._get_store()
-        h5_path = getattr(self._launcher, "_current_h5_path", None) if self._launcher else None
+        h5_path = self._get_h5_path()
         if store is None or h5_path is None:
             self._info_label.setText("No dataset loaded")
             return

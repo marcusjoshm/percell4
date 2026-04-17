@@ -1,15 +1,15 @@
 """I/O task panel — import, load, close, export.
 
-Extracted from launcher._create_io_panel. Delegates heavy orchestration
-(batch compress, dataset loading, viewer population) back to the launcher
-via the launcher reference. These will move to use cases in a future pass.
+Receives action callbacks at construction — no launcher reference.
+Each button click delegates to the injected callback.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QFileDialog,
     QGroupBox,
     QLabel,
     QPushButton,
@@ -18,21 +18,35 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.gui import theme
-from percell4.model import CellDataModel
 
 
 class IoPanel(QWidget):
-    """Panel for dataset import, load, close, and export."""
+    """Panel for dataset import, load, close, and export.
+
+    All actions are injected as callbacks — the panel has no knowledge
+    of the launcher, use cases, or any other component.
+    """
 
     def __init__(
         self,
-        data_model: CellDataModel,
-        launcher=None,
-        parent=None,
+        *,
+        on_import: Callable[[], None],
+        on_load: Callable[[], None],
+        on_add_layer: Callable[[], None],
+        on_close: Callable[[], None],
+        on_export_csv: Callable[[], None],
+        on_export_images: Callable[[], None],
+        show_status: Callable[[str], None] = lambda _: None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.data_model = data_model
-        self._launcher = launcher
+        self._on_import = on_import
+        self._on_load = on_load
+        self._on_add_layer = on_add_layer
+        self._on_close = on_close
+        self._on_export_csv = on_export_csv
+        self._on_export_images = on_export_images
+        self._show_status = show_status
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -54,19 +68,19 @@ class IoPanel(QWidget):
         import_layout = QVBoxLayout(import_group)
 
         btn_import = QPushButton("Compress TIFF Dataset...")
-        btn_import.clicked.connect(self._on_import_dataset)
+        btn_import.clicked.connect(lambda: self._on_import())
         import_layout.addWidget(btn_import)
 
         btn_load = QPushButton("Load Dataset...")
-        btn_load.clicked.connect(self._on_load_dataset)
+        btn_load.clicked.connect(lambda: self._on_load())
         import_layout.addWidget(btn_load)
 
         btn_add_layer = QPushButton("Add Layer to Dataset...")
-        btn_add_layer.clicked.connect(self._on_add_layer_to_dataset)
+        btn_add_layer.clicked.connect(lambda: self._on_add_layer())
         import_layout.addWidget(btn_add_layer)
 
         btn_close = QPushButton("Close Dataset")
-        btn_close.clicked.connect(self._on_close_dataset)
+        btn_close.clicked.connect(lambda: self._on_close())
         import_layout.addWidget(btn_close)
 
         layout.addWidget(import_group)
@@ -76,45 +90,13 @@ class IoPanel(QWidget):
         export_layout = QVBoxLayout(export_group)
 
         btn_export_csv = QPushButton("Export Measurements to CSV...")
-        btn_export_csv.clicked.connect(self._on_export_csv)
+        btn_export_csv.clicked.connect(lambda: self._on_export_csv())
         export_layout.addWidget(btn_export_csv)
 
         btn_export_images = QPushButton("Export Images...")
-        btn_export_images.clicked.connect(self._on_export_images)
+        btn_export_images.clicked.connect(lambda: self._on_export_images())
         export_layout.addWidget(btn_export_images)
 
         layout.addWidget(export_group)
 
         layout.addStretch()
-
-    # ── Helpers ───────────────────────────────────────────────
-
-    def _show_status(self, msg: str) -> None:
-        if self._launcher is not None:
-            self._launcher.statusBar().showMessage(msg)
-
-    # ── Handlers (delegate heavy work to launcher) ───────────
-
-    def _on_import_dataset(self) -> None:
-        if self._launcher is not None:
-            self._launcher._on_import_dataset()
-
-    def _on_load_dataset(self) -> None:
-        if self._launcher is not None:
-            self._launcher._on_load_dataset()
-
-    def _on_add_layer_to_dataset(self) -> None:
-        if self._launcher is not None:
-            self._launcher._on_add_layer_to_dataset()
-
-    def _on_close_dataset(self) -> None:
-        if self._launcher is not None:
-            self._launcher._on_close_dataset()
-
-    def _on_export_csv(self) -> None:
-        if self._launcher is not None:
-            self._launcher._on_export_csv()
-
-    def _on_export_images(self) -> None:
-        if self._launcher is not None:
-            self._launcher._on_export_images()

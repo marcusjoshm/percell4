@@ -1,9 +1,12 @@
 """FLIM task panel — phasor computation, wavelet filter, lifetime.
 
-Extracted from launcher._create_flim_panel + associated handlers.
+Receives dependencies via callbacks — no launcher reference.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from qtpy.QtCore import Qt
@@ -28,12 +31,23 @@ class FlimPanel(QWidget):
     def __init__(
         self,
         data_model: CellDataModel,
-        launcher=None,
-        parent=None,
+        *,
+        get_repo: Callable[[], Any],
+        get_viewer_window: Callable[[], Any | None],
+        get_phasor_window: Callable[[], Any | None],
+        get_active_seg_labels: Callable[[], Any | None],
+        show_window: Callable[[str], None],
+        show_status: Callable[[str], None] = lambda _: None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.data_model = data_model
-        self._launcher = launcher
+        self._get_repo = get_repo
+        self._get_viewer_window = get_viewer_window
+        self._get_phasor_window = get_phasor_window
+        self._get_active_seg_labels_cb = get_active_seg_labels
+        self._show_window_cb = show_window
+        self._show_status = show_status
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -101,23 +115,11 @@ class FlimPanel(QWidget):
 
     # ── Helpers ───────────────────────────────────────────────
 
-    def _show_status(self, msg: str) -> None:
-        if self._launcher is not None:
-            self._launcher.statusBar().showMessage(msg)
-
     def _show_window(self, name: str) -> None:
-        if self._launcher is not None:
-            self._launcher._show_window(name)
-
-    def _get_repo(self):
-        if self._launcher is not None:
-            return self._launcher._repo
-        return None
+        self._show_window_cb(name)
 
     def _get_active_channel(self) -> str | None:
-        if self._launcher is None:
-            return None
-        viewer_win = self._launcher._windows.get("viewer")
+        viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             return None
         active = viewer_win.viewer.layers.selection.active
@@ -126,9 +128,7 @@ class FlimPanel(QWidget):
         return None
 
     def _get_active_seg_labels(self):
-        if self._launcher is not None and hasattr(self._launcher, "_get_active_seg_labels"):
-            return self._launcher._get_active_seg_labels()
-        return None
+        return self._get_active_seg_labels_cb()
 
     # ── Phasor ───────────────────────────────────────────────
 
@@ -175,9 +175,8 @@ class FlimPanel(QWidget):
 
         seg_labels = self._get_active_seg_labels()
         self._show_window("phasor_plot")
-        if self._launcher is not None:
-            phasor_win = self._launcher._windows.get("phasor_plot")
-            if phasor_win is not None:
+        phasor_win = self._get_phasor_window()
+        if phasor_win is not None:
                 phasor_win.set_phasor_data(
                     result.g_map, result.s_map,
                     intensity=phasor_intensity, labels=seg_labels,
@@ -255,9 +254,8 @@ class FlimPanel(QWidget):
                 pass
 
         seg_labels = self._get_active_seg_labels()
-        if self._launcher is not None:
-            phasor_win = self._launcher._windows.get("phasor_plot")
-            if phasor_win is not None:
+        phasor_win = self._get_phasor_window()
+        if phasor_win is not None:
                 phasor_win.set_phasor_data(
                     result.g_filtered, result.s_filtered,
                     intensity=intensity.astype(np.float32) if intensity is not None else None,
@@ -292,9 +290,8 @@ class FlimPanel(QWidget):
             return
 
         # Add lifetime layer to viewer
-        if self._launcher is not None:
-            viewer_win = self._launcher._windows.get("viewer")
-            if viewer_win is not None:
+        viewer_win = self._get_viewer_window()
+        if viewer_win is not None:
                 viewer_win.viewer.add_image(
                     result.lifetime,
                     name=f"Lifetime ({active_channel})",

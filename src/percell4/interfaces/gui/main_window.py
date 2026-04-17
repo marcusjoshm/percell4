@@ -208,7 +208,15 @@ class LauncherWindow(QMainWindow):
     def _create_io_panel(self) -> QWidget:
         from percell4.interfaces.gui.task_panels.io_panel import IoPanel
 
-        self._io_panel = IoPanel(self.data_model, launcher=self)
+        self._io_panel = IoPanel(
+            on_import=self._on_import_dataset,
+            on_load=self._on_load_dataset,
+            on_add_layer=self._on_add_layer_to_dataset,
+            on_close=self._on_close_dataset,
+            on_export_csv=self._on_export_csv,
+            on_export_images=self._on_export_images,
+            show_status=lambda msg: self.statusBar().showMessage(msg),
+        )
         return self._io_panel
 
     def _create_viewer_panel(self) -> QWidget:
@@ -239,7 +247,13 @@ class LauncherWindow(QMainWindow):
         from percell4.interfaces.gui.task_panels.analysis_panel import AnalysisPanel
 
         self._analysis_panel = AnalysisPanel(
-            self.data_model, launcher=self
+            self.data_model,
+            get_repo=lambda: self._repo,
+            get_viewer_window=lambda: self._windows.get("viewer"),
+            get_phasor_roi_names=self._get_phasor_roi_names,
+            show_window=self._show_window,
+            show_status=lambda msg: self.statusBar().showMessage(msg),
+            launcher=self,  # transitional: only for GroupedSegPanel
         )
         return self._analysis_panel
 
@@ -247,7 +261,13 @@ class LauncherWindow(QMainWindow):
         from percell4.interfaces.gui.task_panels.flim_panel import FlimPanel
 
         self._flim_panel = FlimPanel(
-            self.data_model, launcher=self
+            self.data_model,
+            get_repo=lambda: self._repo,
+            get_viewer_window=lambda: self._windows.get("viewer"),
+            get_phasor_window=lambda: self._windows.get("phasor_plot"),
+            get_active_seg_labels=self._get_active_seg_labels,
+            show_window=self._show_window,
+            show_status=lambda msg: self.statusBar().showMessage(msg),
         )
         return self._flim_panel
 
@@ -470,7 +490,13 @@ class LauncherWindow(QMainWindow):
     def _create_data_panel(self) -> QWidget:
         from percell4.interfaces.gui.task_panels.data_panel import DataPanel
 
-        self._data_panel = DataPanel(self.data_model, launcher=self)
+        self._data_panel = DataPanel(
+            self.data_model,
+            get_store=lambda: getattr(self, "_current_store", None),
+            get_viewer_window=lambda: self._windows.get("viewer"),
+            get_h5_path=lambda: getattr(self, "_current_h5_path", None),
+            show_status=lambda msg: self.statusBar().showMessage(msg),
+        )
         return self._data_panel
 
     # ── Helpers ────────────────────────────────────────────────

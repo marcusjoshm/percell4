@@ -1,12 +1,14 @@
 """Analysis task panel — filter, threshold, measurement, particles.
 
-Extracted from launcher._create_analysis_panel + associated handlers.
-Receives use cases + launcher reference at construction. The launcher
-reference is a transitional coupling that will be removed in Stage 5
-when the launcher is retired.
+Receives dependencies via callbacks — no launcher reference for its
+own operations. GroupedSegPanel still receives a launcher reference
+as a transitional coupling (separate file, separate concern).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from qtpy.QtCore import QSettings, Qt
@@ -31,20 +33,28 @@ from percell4.model import CellDataModel
 
 
 class AnalysisPanel(QWidget):
-    """Panel for cell filtering, thresholding, measurement, and particle analysis.
-
-    Designed to be embedded in the launcher's sidebar content area.
-    """
+    """Panel for cell filtering, thresholding, measurement, and particle analysis."""
 
     def __init__(
         self,
         data_model: CellDataModel,
-        launcher=None,
-        parent=None,
+        *,
+        get_repo: Callable[[], Any],
+        get_viewer_window: Callable[[], Any | None],
+        get_phasor_roi_names: Callable[[], dict[int, str] | None],
+        show_window: Callable[[str], None],
+        show_status: Callable[[str], None] = lambda _: None,
+        launcher=None,  # transitional: only for GroupedSegPanel
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.data_model = data_model
-        self._launcher = launcher
+        self._get_repo = get_repo
+        self._get_viewer_window = get_viewer_window
+        self._get_phasor_roi_names_cb = get_phasor_roi_names
+        self._show_window_cb = show_window
+        self._show_status = show_status
+        self._launcher_for_grouped = launcher  # only for GroupedSegPanel
 
         # Threshold preview state
         self._thresh_working_image = None
@@ -173,7 +183,7 @@ class AnalysisPanel(QWidget):
         from percell4.gui.grouped_seg_panel import GroupedSegPanel
 
         self._grouped_seg_panel = GroupedSegPanel(
-            self.data_model, launcher=self._launcher
+            self.data_model, launcher=self._launcher_for_grouped
         )
         grouped_group = QGroupBox("Grouped Thresholding")
         grouped_layout = QVBoxLayout(grouped_group)
@@ -244,18 +254,8 @@ class AnalysisPanel(QWidget):
 
     # ── Helpers ───────────────────────────────────────────────
 
-    def _show_status(self, msg: str) -> None:
-        if self._launcher is not None:
-            self._launcher.statusBar().showMessage(msg)
-
     def _show_window(self, name: str) -> None:
-        if self._launcher is not None:
-            self._launcher._show_window(name)
-
-    def _get_repo(self):
-        if self._launcher is not None:
-            return self._launcher._repo
-        return None
+        self._show_window_cb(name)
 
     # ── State change routing ─────────────────────────────────
 
@@ -297,7 +297,7 @@ class AnalysisPanel(QWidget):
     # ── Whole Field Thresholding ─────────────────────────────
 
     def _on_threshold_preview(self) -> None:
-        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             self._show_status("Open the viewer first")
             return
@@ -382,7 +382,7 @@ class AnalysisPanel(QWidget):
         )
 
     def _on_threshold_roi_changed(self, event=None) -> None:
-        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             return
 
@@ -441,7 +441,7 @@ class AnalysisPanel(QWidget):
         self._thresh_result_label.setStyleSheet(f"color: {theme.WARNING};")
 
     def _on_threshold_accept(self) -> None:
-        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             self._show_status("No preview to accept")
             return
@@ -574,9 +574,7 @@ class AnalysisPanel(QWidget):
         settings.setValue("metrics/selected", metrics)
 
     def _get_phasor_roi_names(self) -> dict[int, str] | None:
-        if self._launcher is not None and hasattr(self._launcher, "_get_phasor_roi_names"):
-            return self._launcher._get_phasor_roi_names()
-        return None
+        return self._get_phasor_roi_names_cb()
 
     # ���─ Particle Analysis ────────────────────────────────────
 

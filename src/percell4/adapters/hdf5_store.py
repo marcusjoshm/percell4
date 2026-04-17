@@ -160,5 +160,5 @@ class Hdf5DatasetRepository:
                                 )
                                 merged[col] = merged["label"].map(label_to_val)
                 return merged
-        except (KeyError, Exception):
+        except KeyError:
             return None
