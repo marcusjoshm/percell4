@@ -340,7 +340,7 @@ class AddLayerDialog(QDialog):
         self._run_batch_discovery()
 
     def _batch_token_config(self) -> "TokenConfig":
-        from percell4.io.models import TokenConfig
+        from percell4.domain.io.models import TokenConfig
         return TokenConfig(
             channel=self._batch_tok_channel.text().strip() or None,
             timepoint=self._batch_tok_timepoint.text().strip() or None,
@@ -356,7 +356,7 @@ class AddLayerDialog(QDialog):
         root = Path(source)
         token_config = self._batch_token_config()
 
-        from percell4.io.discovery import discover_by_subdirectory, discover_flat
+        from percell4.domain.io.discovery import discover_by_subdirectory, discover_flat
 
         try:
             if self._batch_discovery_combo.currentIndex() == 0:
@@ -464,7 +464,7 @@ class AddLayerDialog(QDialog):
         if not hasattr(self, "_batch_datasets"):
             return
 
-        from percell4.io.models import TileConfig, TokenConfig
+        from percell4.domain.io.models import TileConfig, TokenConfig
 
         # Gather selected datasets
         selected_ds_names: set[str] = set()
@@ -501,8 +501,8 @@ class AddLayerDialog(QDialog):
         try:
             import tifffile
 
-            from percell4.io.assembler import assemble_tiles
-            from percell4.io.scanner import FileScanner
+            from percell4.domain.io.assembler import assemble_tiles
+            from percell4.domain.io.scanner import FileScanner
 
             imported_count = 0
             for ds in self._batch_datasets:
@@ -612,7 +612,7 @@ class AddLayerDialog(QDialog):
             return
 
         try:
-            from percell4.segment.roi_import import import_imagej_rois
+            from percell4.adapters.roi_import import import_imagej_rois
             labels = import_imagej_rois(path, shape)
             n_cells = int(labels.max())
             name = self._roi_name_edit.text().strip() or f"roi_import_{n_cells}"
@@ -675,7 +675,7 @@ class AddLayerDialog(QDialog):
         if not path:
             return
         try:
-            from percell4.segment.roi_import import import_cellpose_seg
+            from percell4.adapters.roi_import import import_cellpose_seg
             labels = import_cellpose_seg(path)
             n_cells = int(labels.max())
             name = self._cp_name_edit.text().strip() or f"cellpose_import_{n_cells}"

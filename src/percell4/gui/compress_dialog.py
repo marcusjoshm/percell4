@@ -30,7 +30,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.io.models import (
+from percell4.domain.io.models import (
     CompressConfig,
     DatasetGuiState,
     DatasetSpec,
@@ -479,7 +479,7 @@ class CompressDialog(QDialog):
         if self._output_edit.text().strip():
             output_dir = Path(self._output_edit.text().strip())
 
-        from percell4.io.discovery import discover_by_subdirectory, discover_flat
+        from percell4.domain.io.discovery import discover_by_subdirectory, discover_flat
 
         try:
             if self._discovery_combo.currentIndex() == 0:

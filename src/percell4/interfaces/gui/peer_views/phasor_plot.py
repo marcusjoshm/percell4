@@ -459,7 +459,7 @@ class PhasorPlotWindow(QMainWindow):
         When a cell filter is active, the mask is restricted to pixels
         belonging to filtered cells only.
         """
-        from percell4.flim.phasor import phasor_roi_to_mask
+        from percell4.domain.flim.phasor import phasor_roi_to_mask
 
         g, s = self._get_active_gs_maps()
         mask = np.zeros(g.shape, dtype=np.uint8)

@@ -40,12 +40,12 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from percell4.measure.grouper import GroupingResult, group_cells_gmm, group_cells_kmeans
-from percell4.measure.measurer import measure_cells, measure_multichannel_with_masks
-from percell4.measure.metrics import BUILTIN_METRICS
-from percell4.measure.thresholding import apply_gaussian_smoothing
-from percell4.segment.cellpose import run_cellpose
-from percell4.segment.postprocess import (
+from percell4.domain.measure.grouper import GroupingResult, group_cells_gmm, group_cells_kmeans
+from percell4.domain.measure.measurer import measure_cells, measure_multichannel_with_masks
+from percell4.domain.measure.metrics import BUILTIN_METRICS
+from percell4.domain.measure.thresholding import apply_gaussian_smoothing
+from percell4.adapters.cellpose import run_cellpose
+from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
     relabel_sequential,
@@ -97,8 +97,8 @@ def compress_one(
     # that's a list of DiscoveredFile tuples; we need to reconstruct
     # those from the captured plan.
     try:
-        from percell4.io.importer import import_dataset
-        from percell4.io.models import DiscoveredFile
+        from percell4.adapters.importer import import_dataset
+        from percell4.domain.io.models import DiscoveredFile
 
         discovered = [DiscoveredFile(path=Path(p)) for p in files_paths]
         import_dataset(

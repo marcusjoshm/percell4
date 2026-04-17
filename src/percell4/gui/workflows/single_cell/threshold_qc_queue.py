@@ -29,7 +29,7 @@ import numpy as np
 
 from percell4.gui.threshold_qc import ThresholdQCController
 from percell4.gui.workflows.base_runner import PhaseResult
-from percell4.measure.grouper import GroupingResult
+from percell4.domain.measure.grouper import GroupingResult
 from percell4.store import DatasetStore
 from percell4.workflows.models import ThresholdingRound, WorkflowDatasetEntry
 from percell4.workflows.phases import _channel_index

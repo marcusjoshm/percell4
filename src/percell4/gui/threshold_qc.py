@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from percell4.gui.viewer import ViewerWindow
-    from percell4.measure.grouper import GroupingResult
+    from percell4.domain.measure.grouper import GroupingResult
     from percell4.model import CellDataModel
     from percell4.store import DatasetStore
 
@@ -125,7 +125,7 @@ class ThresholdQCController(QObject):
 
         # Pre-compute smoothed image if needed
         if sigma > 0:
-            from percell4.measure.thresholding import apply_gaussian_smoothing
+            from percell4.domain.measure.thresholding import apply_gaussian_smoothing
             self._smoothed_image = apply_gaussian_smoothing(
                 channel_image.astype(np.float32), sigma
             )
@@ -224,7 +224,7 @@ class ThresholdQCController(QObject):
             # values on the fly from the channel image + labels the
             # controller already holds.
             if df is None or df.empty or col_name not in df.columns:
-                from percell4.measure.measurer import measure_cells
+                from percell4.domain.measure.measurer import measure_cells
 
                 df = measure_cells(
                     self._channel_image,
@@ -402,7 +402,7 @@ class ThresholdQCController(QObject):
         )
 
         # Compute initial threshold
-        from percell4.measure.thresholding import THRESHOLD_METHODS
+        from percell4.domain.measure.thresholding import THRESHOLD_METHODS
         pixels = self._group_image_buffer[group_cell_mask]
         if len(pixels) > 0 and pixels.max() > 0:
             _, value = THRESHOLD_METHODS["otsu"](pixels)
@@ -606,7 +606,7 @@ class ThresholdQCController(QObject):
             return
 
         # Compute threshold
-        from percell4.measure.thresholding import THRESHOLD_METHODS
+        from percell4.domain.measure.thresholding import THRESHOLD_METHODS
         if method not in THRESHOLD_METHODS:
             return
 
@@ -665,7 +665,7 @@ class ThresholdQCController(QObject):
 
         if self._current_method == "adaptive":
             # Re-derive mask from adaptive
-            from percell4.measure.thresholding import THRESHOLD_METHODS
+            from percell4.domain.measure.thresholding import THRESHOLD_METHODS
             rows, cols = np.where(group_cell_mask)
             if len(rows) > 0:
                 y_min, y_max = rows.min(), rows.max() + 1

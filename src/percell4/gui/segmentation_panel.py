@@ -260,7 +260,7 @@ class SegmentationPanel(QWidget):
         self._show_status(f"Running Cellpose ({model_type})...")
 
         from percell4.gui.workers import Worker
-        from percell4.segment.cellpose import run_cellpose
+        from percell4.adapters.cellpose import run_cellpose
 
         self._worker = Worker(
             run_cellpose, image, model_type=model_type, diameter=diameter, gpu=gpu,
@@ -413,7 +413,7 @@ class SegmentationPanel(QWidget):
         if labels_layer is None:
             self._show_status("No labels layer active")
             return
-        from percell4.segment.postprocess import relabel_sequential
+        from percell4.domain.segmentation.postprocess import relabel_sequential
         old_data = labels_layer.data
         new_data = relabel_sequential(np.asarray(old_data, dtype=np.int32))
         n_cells = int(new_data.max())
@@ -427,7 +427,7 @@ class SegmentationPanel(QWidget):
         self, labels: np.ndarray,
     ) -> tuple[np.ndarray, int, int, int]:
         """Apply edge and area filters. Returns (filtered, edge_removed, small_removed, total)."""
-        from percell4.segment.postprocess import filter_edge_cells, filter_small_cells
+        from percell4.domain.segmentation.postprocess import filter_edge_cells, filter_small_cells
 
         margin = self._cleanup_margin.value()
         min_area = self._cleanup_min_area.value()
@@ -493,7 +493,7 @@ class SegmentationPanel(QWidget):
             self._cleanup_status.setStyleSheet(f"color: {theme.ERROR};")
             return
 
-        from percell4.segment.postprocess import relabel_sequential
+        from percell4.domain.segmentation.postprocess import relabel_sequential
 
         labels = np.asarray(labels_layer.data, dtype=np.int32)
         filtered, edge_removed, small_removed, total_removed = (

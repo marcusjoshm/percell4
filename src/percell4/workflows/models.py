@@ -19,7 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from percell4.measure.metrics import BUILTIN_METRICS
+from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.workflows.failures import FailureRecord
 
 # Matches single-line HDF5 paths AND pandas column suffixes. Length-capped so

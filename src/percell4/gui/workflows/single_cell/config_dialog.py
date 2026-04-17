@@ -55,7 +55,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.measure.metrics import BUILTIN_METRICS
+from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.store import DatasetStore
 from percell4.workflows.channels import ChannelSource, intersect_channels
 from percell4.workflows.models import (

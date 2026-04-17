@@ -21,7 +21,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.io.models import TileConfig, TokenConfig
+from percell4.domain.io.models import TileConfig, TokenConfig
 
 
 class ImportDialog(QDialog):

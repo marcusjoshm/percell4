@@ -542,9 +542,9 @@ class LauncherWindow(QMainWindow):
     def _get_or_create_window(self, key: str) -> QWidget:
         """Get an existing window or create it on demand."""
         if key not in self._windows:
-            from percell4.gui.cell_table import CellTableWindow
-            from percell4.gui.data_plot import DataPlotWindow
-            from percell4.gui.phasor_plot import PhasorPlotWindow
+            from percell4.interfaces.gui.peer_views.cell_table import CellTableWindow
+            from percell4.interfaces.gui.peer_views.data_plot import DataPlotWindow
+            from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
             from percell4.gui.viewer import ViewerWindow
 
             session = self.data_model.session
@@ -653,7 +653,7 @@ class LauncherWindow(QMainWindow):
         from qtpy.QtCore import Qt
         from qtpy.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
-        from percell4.io.importer import import_dataset
+        from percell4.adapters.importer import import_dataset
 
         n = len(datasets)
 

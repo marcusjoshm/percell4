@@ -27,7 +27,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.measure.metrics import BUILTIN_METRICS
+from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
@@ -283,7 +283,7 @@ class GroupedSegPanel(QWidget):
         self, channel, channel_image, seg_labels, metric, sigma, mask_name,
     ) -> None:
         from percell4.gui.workers import Worker
-        from percell4.measure.measurer import measure_cells
+        from percell4.domain.measure.measurer import measure_cells
 
         self._pending = {
             "channel": channel,
@@ -356,7 +356,7 @@ class GroupedSegPanel(QWidget):
         }
 
         if algo == "GMM":
-            from percell4.measure.grouper import group_cells_gmm
+            from percell4.domain.measure.grouper import group_cells_gmm
             criterion = self._criterion_combo.currentText().lower()
             max_comp = self._max_components.value()
             self._worker = Worker(
@@ -364,7 +364,7 @@ class GroupedSegPanel(QWidget):
                 criterion=criterion, max_components=max_comp,
             )
         else:
-            from percell4.measure.grouper import group_cells_kmeans
+            from percell4.domain.measure.grouper import group_cells_kmeans
             n_clusters = self._n_clusters.value()
             self._worker = Worker(
                 group_cells_kmeans, values, cell_labels, n_clusters=n_clusters,

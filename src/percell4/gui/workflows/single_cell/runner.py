@@ -39,7 +39,7 @@ from percell4.gui.workflows.base_runner import (
     PhaseRequest,
     PhaseResult,
 )
-from percell4.segment.cellpose import build_cellpose_model
+from percell4.adapters.cellpose import build_cellpose_model
 from percell4.store import DatasetStore
 from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (

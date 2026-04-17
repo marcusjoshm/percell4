@@ -50,7 +50,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.gui.workflows.base_runner import PhaseResult
-from percell4.segment.postprocess import (
+from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
     relabel_sequential,

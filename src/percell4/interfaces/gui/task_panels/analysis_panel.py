@@ -335,7 +335,7 @@ class AnalysisPanel(QWidget):
             self._show_status(f"Channel '{channel_name}' not found in viewer")
             return
 
-        from percell4.measure.thresholding import (
+        from percell4.domain.measure.thresholding import (
             THRESHOLD_METHODS,
             apply_gaussian_smoothing,
         )
@@ -428,7 +428,7 @@ class AnalysisPanel(QWidget):
         if roi_image is None or roi_image.size == 0:
             return
 
-        from percell4.measure.thresholding import THRESHOLD_METHODS
+        from percell4.domain.measure.thresholding import THRESHOLD_METHODS
 
         method = self._thresh_method.currentText().lower()
         if method == "manual":
@@ -549,7 +549,7 @@ class AnalysisPanel(QWidget):
         self._show_status(f"Measured {n_cells} cells, {n_cols} columns")
 
     def _show_metric_config_dialog(self) -> list[str] | None:
-        from percell4.measure.metrics import BUILTIN_METRICS
+        from percell4.domain.measure.metrics import BUILTIN_METRICS
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Select Metrics")
@@ -581,7 +581,7 @@ class AnalysisPanel(QWidget):
 
     @staticmethod
     def _load_selected_metrics() -> list[str]:
-        from percell4.measure.metrics import BUILTIN_METRICS
+        from percell4.domain.measure.metrics import BUILTIN_METRICS
         settings = QSettings("LeeLabPerCell4", "PerCell4")
         raw = settings.value("metrics/selected", defaultValue=None)
         if raw is None:
