@@ -20,10 +20,22 @@ class Hdf5DatasetRepository:
     """DatasetRepository backed by HDF5 files via DatasetStore.
 
     Conforms to percell4.ports.dataset_repository.DatasetRepository.
+    Caches DatasetStore instances by path to avoid re-opening HDF5
+    file metadata on every call (50-200ms overhead per open).
     """
 
+    def __init__(self) -> None:
+        self._stores: dict[Path, DatasetStore] = {}
+
     def _store(self, handle: DatasetHandle) -> DatasetStore:
-        return DatasetStore(handle.path)
+        path = handle.path
+        if path not in self._stores:
+            self._stores[path] = DatasetStore(path)
+        return self._stores[path]
+
+    def close(self, handle: DatasetHandle) -> None:
+        """Remove a cached store (called on dataset close)."""
+        self._stores.pop(handle.path, None)
 
     # ── Lifecycle ────────────────────────────────────────────
 

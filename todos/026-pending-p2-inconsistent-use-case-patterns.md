@@ -1,6 +1,6 @@
 ---
 status: pending
-priority: p2
+priority: p3
 issue_id: "026"
 tags: [code-review, patterns, application]
 dependencies: []
