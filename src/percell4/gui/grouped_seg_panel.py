@@ -4,13 +4,15 @@ This is NOT cell segmentation (Cellpose/boundary drawing). Grouped thresholding
 creates binary masks by intensity thresholding, grouping cells by expression
 level to handle polyclonal data where a single global threshold fails.
 
-Embedded as a sidebar tab in the launcher's Workflows section.
-Communicates with the viewer and store via the launcher reference.
+Embedded as a sidebar tab in the launcher's Analysis section.
+Receives dependencies via callbacks — no launcher reference.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from qtpy.QtCore import Qt
@@ -34,20 +36,22 @@ logger = logging.getLogger(__name__)
 
 
 class GroupedSegPanel(QWidget):
-    """Panel for grouped thresholding workflow.
-
-    Designed to be embedded in the launcher's Workflows tab.
-    """
+    """Panel for grouped thresholding workflow."""
 
     def __init__(
         self,
         data_model: CellDataModel,
-        launcher=None,
-        parent=None,
+        *,
+        get_store: Callable[[], Any | None] = lambda: None,
+        get_viewer_window: Callable[[], Any | None] = lambda: None,
+        show_status: Callable[[str], None] = lambda _: None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.data_model = data_model
-        self._launcher = launcher
+        self._get_store = get_store
+        self._get_viewer_window = get_viewer_window
+        self._show_status_cb = show_status
         self._worker = None
         self._qc_controller = None
 
@@ -176,9 +180,7 @@ class GroupedSegPanel(QWidget):
                 return
 
         # Fallback: viewer layers (legacy path)
-        if self._launcher is None:
-            return
-        viewer_win = self._launcher._windows.get("viewer")
+        viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             return
         for layer in viewer_win.viewer.layers:
@@ -187,21 +189,17 @@ class GroupedSegPanel(QWidget):
 
     def _show_status(self, msg: str) -> None:
         self._status.setText(msg)
-        if self._launcher is not None:
-            self._launcher.statusBar().showMessage(msg)
+        self._show_status_cb(msg)
 
     # ── Run workflow ──
 
     def _on_run(self) -> None:
-        if self._launcher is None:
-            return
-
-        viewer_win = self._launcher._windows.get("viewer")
+        viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             self._show_status("Open a dataset in the viewer first")
             return
 
-        store = getattr(self._launcher, "_current_store", None)
+        store = self._get_store()
         if store is None:
             self._show_status("No dataset loaded")
             return
@@ -384,8 +382,8 @@ class GroupedSegPanel(QWidget):
         # Launch the QC controller
         from percell4.gui.threshold_qc import ThresholdQCController
 
-        viewer_win = self._launcher._windows.get("viewer")
-        store = getattr(self._launcher, "_current_store", None)
+        viewer_win = self._get_viewer_window()
+        store = self._get_store()
 
         self._qc_controller = ThresholdQCController(
             viewer_win=viewer_win,

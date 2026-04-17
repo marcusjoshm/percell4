@@ -1,8 +1,7 @@
 """Analysis task panel — filter, threshold, measurement, particles.
 
-Receives dependencies via callbacks — no launcher reference for its
-own operations. GroupedSegPanel still receives a launcher reference
-as a transitional coupling (separate file, separate concern).
+Receives dependencies via callbacks — no launcher reference.
+GroupedSegPanel also receives callbacks (decoupled in this same pass).
 """
 
 from __future__ import annotations
@@ -43,8 +42,8 @@ class AnalysisPanel(QWidget):
         get_viewer_window: Callable[[], Any | None],
         get_phasor_roi_names: Callable[[], dict[int, str] | None],
         show_window: Callable[[str], None],
+        get_store: Callable[[], Any | None] = lambda: None,
         show_status: Callable[[str], None] = lambda _: None,
-        launcher=None,  # transitional: only for GroupedSegPanel
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -53,8 +52,8 @@ class AnalysisPanel(QWidget):
         self._get_viewer_window = get_viewer_window
         self._get_phasor_roi_names_cb = get_phasor_roi_names
         self._show_window_cb = show_window
+        self._get_store = get_store
         self._show_status = show_status
-        self._launcher_for_grouped = launcher  # only for GroupedSegPanel
 
         # Threshold preview state
         self._thresh_working_image = None
@@ -183,7 +182,10 @@ class AnalysisPanel(QWidget):
         from percell4.gui.grouped_seg_panel import GroupedSegPanel
 
         self._grouped_seg_panel = GroupedSegPanel(
-            self.data_model, launcher=self._launcher_for_grouped
+            self.data_model,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
         )
         grouped_group = QGroupBox("Grouped Thresholding")
         grouped_layout = QVBoxLayout(grouped_group)

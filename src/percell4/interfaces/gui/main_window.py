@@ -252,8 +252,8 @@ class LauncherWindow(QMainWindow):
             get_viewer_window=lambda: self._windows.get("viewer"),
             get_phasor_roi_names=self._get_phasor_roi_names,
             show_window=self._show_window,
+            get_store=lambda: getattr(self, "_current_store", None),
             show_status=lambda msg: self.statusBar().showMessage(msg),
-            launcher=self,  # transitional: only for GroupedSegPanel
         )
         return self._analysis_panel
 
