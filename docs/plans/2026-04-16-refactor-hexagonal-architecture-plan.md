@@ -446,16 +446,16 @@ Peer views now work against Session. Old launcher still exists via CellDataModel
 Time: 2-3 weeks.
 
 One domain at a time:
-- [ ] Segmentation: `SegmentCells` use case + `SegmentationPanel` in `task_panels/`
-- [x] Thresholding: `AcceptThreshold` use case (use case done; panel + launcher wiring pending)
-- [x] FLIM / phasor: `ComputePhasor`, `ApplyWavelet` use cases (use cases done; panels + launcher wiring pending)
-- [x] Measurement: `MeasureCells` use case (use case done; panel + launcher wiring pending)
-- [ ] Export: use cases + panel
-- [x] `CloseDataset` use case
+- [x] Segmentation: `SegmentCells` use case + segmentation panel wired
+- [x] Thresholding: `AcceptThreshold` use case + launcher wired
+- [x] FLIM / phasor: `ComputePhasor`, `ApplyWavelet`, `ComputeLifetime` use cases + launcher wired
+- [x] Measurement: `MeasureCells`, `AnalyzeParticles` use cases + launcher wired
+- [x] Export: `ExportImages` use case + launcher wired. CSV exports kept as thin launcher methods (one-liner `df.to_csv`).
+- [x] `CloseDataset` use case + launcher wired
 
 Each migration: write the use case (pure, testable), write the panel (wires buttons to use cases + Session), delete the corresponding methods from the old launcher.
 
-Remaining: task panels for each use case, wiring launcher buttons to use cases, deleting old launcher methods, SegmentCells + Export use cases.
+Remaining: task panel migration (move from launcher sidebar tabs to `interfaces/gui/task_panels/`), delete old launcher methods that are now fully delegated.
 
 By end of stage 4, the launcher is either empty or only contains window-management scaffolding.
 

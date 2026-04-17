@@ -2359,44 +2359,32 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("No output folder selected")
             return
 
-        output_folder.mkdir(parents=True, exist_ok=True)
-
-        # Dataset name for file prefix
         h5_name = Path(getattr(self, "_current_h5_path", "dataset")).stem
 
-        import tifffile
-
-        exported = 0
         try:
-            with store.open_read() as s:
-                # Export intensity channels
-                if channels:
-                    intensity = s.read_array("intensity")
-                    for name, idx in channels:
-                        if intensity.ndim == 3:
-                            data = intensity[idx]
-                        else:
-                            data = intensity
-                        out_path = output_folder / f"{h5_name}_{name}.tif"
-                        tifffile.imwrite(str(out_path), data)
-                        exported += 1
+            from percell4.application.use_cases.export_images import (
+                ExportImages,
+                ExportRequest,
+            )
 
-                # Export segmentation labels
-                for name in labels:
-                    data = s.read_labels(name)
-                    out_path = output_folder / f"{h5_name}_{name}.tif"
-                    tifffile.imwrite(str(out_path), data)
-                    exported += 1
+            handle = self.data_model.session.dataset
+            if handle is None:
+                self.statusBar().showMessage("No dataset loaded")
+                return
 
-                # Export masks
-                for name in masks:
-                    data = s.read_mask(name)
-                    out_path = output_folder / f"{h5_name}_{name}.tif"
-                    tifffile.imwrite(str(out_path), data)
-                    exported += 1
-
+            uc = ExportImages(self._repo)
+            result = uc.execute(
+                handle,
+                ExportRequest(
+                    output_folder=output_folder,
+                    dataset_name=h5_name,
+                    channels=channels,
+                    labels=labels,
+                    masks=masks,
+                ),
+            )
             self.statusBar().showMessage(
-                f"Exported {exported} image(s) to {output_folder}"
+                f"Exported {result.exported_count} image(s) to {result.output_folder}"
             )
         except Exception as e:
             self.statusBar().showMessage(f"Export error: {e}")

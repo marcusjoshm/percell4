@@ -270,33 +270,27 @@ class SegmentationPanel(QWidget):
         self._worker.start()
 
     def _on_cellpose_done(self, masks) -> None:
-        from percell4.segment.postprocess import (
-            filter_edge_cells,
-            filter_small_cells,
-            relabel_sequential,
-        )
+        from percell4.application.use_cases.segment_cells import SegmentCells
+        from percell4.adapters.hdf5_store import Hdf5DatasetRepository
 
-        labels, edge_removed = filter_edge_cells(masks)
-        labels, small_removed = filter_small_cells(labels, min_area=15)
-        labels = relabel_sequential(labels)
-        n_cells = int(labels.max())
+        # Delegate post-processing + store write to the use case
+        try:
+            repo = Hdf5DatasetRepository()
+            uc = SegmentCells(repo, self.data_model.session)
+            result = uc.finalize(masks)
+        except ValueError as e:
+            self._show_status(f"Error: {e}")
+            return
 
         self._show_status(
-            f"Done: {n_cells} cells "
-            f"({edge_removed} edge, {small_removed} small removed)"
+            f"Done: {result.n_cells} cells "
+            f"({result.edge_removed} edge, {result.small_removed} small removed)"
         )
 
-        seg_name = f"cellpose_{n_cells}"
-
-        store = getattr(self._launcher, "_current_store", None)
-        if store is not None:
-            store.write_labels(seg_name, labels)
-
-        viewer_win = self._launcher._windows.get("viewer")
+        # Add labels layer to viewer
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is not None:
-            viewer_win.add_labels(labels, name=seg_name)
-
-        self.data_model.set_active_segmentation(seg_name)
+            viewer_win.add_labels(result.labels, name=result.seg_name)
 
     # ── Load ROIs ─────────────────────────────────────────────
 
