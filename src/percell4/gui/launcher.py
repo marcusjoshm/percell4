@@ -894,11 +894,12 @@ class LauncherWindow(QMainWindow):
             from percell4.gui.phasor_plot import PhasorPlotWindow
             from percell4.gui.viewer import ViewerWindow
 
+            session = self.data_model.session
             factories = {
                 "viewer": lambda: ViewerWindow(self.data_model),
-                "data_plot": lambda: DataPlotWindow(self.data_model),
-                "phasor_plot": lambda: PhasorPlotWindow(self.data_model),
-                "cell_table": lambda: CellTableWindow(self.data_model),
+                "data_plot": lambda: DataPlotWindow(session),
+                "phasor_plot": lambda: PhasorPlotWindow(session),
+                "cell_table": lambda: CellTableWindow(session),
             }
             if key in factories:
                 window = factories[key]()

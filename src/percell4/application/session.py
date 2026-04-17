@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Callable
 
+import pandas as pd
+
 from percell4.domain.dataset import CellId, DatasetHandle, LayerName
 
 
@@ -45,6 +47,8 @@ class Session:
     _active_mask: LayerName | None = field(default=None, repr=False)
     _selection: frozenset[CellId] = field(default_factory=frozenset, repr=False)
     _filter_ids: frozenset[CellId] | None = field(default=None, repr=False)
+    _measurements: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+    _filtered_df_cache: pd.DataFrame | None = field(default=None, repr=False)
 
     _observers: dict[Event, list[Observer]] = field(
         default_factory=lambda: {e: [] for e in Event}, repr=False
@@ -88,15 +92,40 @@ class Session:
     def active_mask(self) -> LayerName | None:
         return self._active_mask
 
+    @property
+    def df(self) -> pd.DataFrame:
+        """Current per-cell measurements. Read-only — do not modify."""
+        return self._measurements
+
+    @property
+    def filtered_df(self) -> pd.DataFrame:
+        """Filtered DataFrame (by filter_ids), or full df if no filter."""
+        if self._filter_ids is None or self._measurements.empty:
+            return self._measurements
+        if "label" not in self._measurements.columns:
+            return self._measurements
+        if self._filtered_df_cache is None:
+            self._filtered_df_cache = self._measurements[
+                self._measurements["label"].isin(self._filter_ids)
+            ]
+        return self._filtered_df_cache
+
+    @property
+    def selected_ids(self) -> list[int]:
+        """Selected cell IDs as a list (convenience for Qt code)."""
+        return list(self._selection)
+
     # ── Mutations ────────────────────────────────────────────
 
     def set_dataset(self, handle: DatasetHandle | None) -> None:
-        """Set the active dataset. Resets selection, filter, and active layers."""
+        """Set the active dataset. Resets selection, filter, active layers, and measurements."""
         self._dataset = handle
         self._active_segmentation = None
         self._active_mask = None
         self._selection = frozenset()
         self._filter_ids = None
+        self._measurements = pd.DataFrame()
+        self._filtered_df_cache = None
         self._emit(Event.DATASET_CHANGED)
 
     def set_selection(self, ids: frozenset[CellId]) -> None:
@@ -105,8 +134,21 @@ class Session:
         self._selection = ids
         self._emit(Event.SELECTION_CHANGED)
 
+    def set_measurements(self, df: pd.DataFrame) -> None:
+        """Replace the measurements DataFrame. Prunes stale filter/selection IDs."""
+        self._measurements = df
+        self._filtered_df_cache = None
+        if self._filter_ids is not None and "label" in df.columns:
+            valid = frozenset(df["label"].tolist())
+            self._filter_ids = self._filter_ids & valid
+        if self._selection and "label" in df.columns:
+            valid = frozenset(df["label"].tolist())
+            self._selection = self._selection & valid
+        self._emit(Event.MEASUREMENTS_UPDATED)
+
     def set_filter(self, ids: frozenset[CellId] | None) -> None:
         self._filter_ids = ids
+        self._filtered_df_cache = None
         self._selection = frozenset()
         self._emit(Event.FILTER_CHANGED)
         self._emit(Event.SELECTION_CHANGED)
@@ -130,4 +172,6 @@ class Session:
         self._active_mask = None
         self._selection = frozenset()
         self._filter_ids = None
+        self._measurements = pd.DataFrame()
+        self._filtered_df_cache = None
         self._emit(Event.DATASET_CHANGED)

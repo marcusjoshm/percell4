@@ -37,10 +37,8 @@ def main() -> int:
     from percell4.gui.viewer import ViewerWindow
     from percell4.model import CellDataModel
 
-    # Temporary bridge: ViewerWindow still needs a CellDataModel.
-    # This will go away when ViewerWindow is migrated to subscribe
-    # to Session directly.
-    _bridge_model = CellDataModel()
+    # Bridge: ViewerWindow still needs CellDataModel (migrated in Stage 4).
+    _bridge_model = CellDataModel(session)
     viewer_window = ViewerWindow(_bridge_model)
     viewer = NapariViewerAdapter(viewer_window)
 

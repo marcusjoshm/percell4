@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
 from percell4.application.session import Event, Session
 from percell4.domain.dataset import DatasetHandle
 
@@ -175,3 +177,68 @@ class TestSessionActiveLayers:
         session.set_active_mask("threshold")
         assert events == [1]
         assert session.active_mask == "threshold"
+
+
+class TestSessionMeasurements:
+    """Verify measurements DataFrame support."""
+
+    def test_initial_df_is_empty(self):
+        session = Session()
+        assert session.df.empty
+
+    def test_set_measurements_emits_event(self):
+        session = Session()
+        events = []
+        session.subscribe(Event.MEASUREMENTS_UPDATED, lambda: events.append(1))
+        df = pd.DataFrame({"label": [1, 2, 3], "area": [10, 20, 30]})
+        session.set_measurements(df)
+        assert events == [1]
+        assert len(session.df) == 3
+
+    def test_filtered_df_with_no_filter(self):
+        session = Session()
+        df = pd.DataFrame({"label": [1, 2, 3], "area": [10, 20, 30]})
+        session.set_measurements(df)
+        assert len(session.filtered_df) == 3
+
+    def test_filtered_df_with_filter(self):
+        session = Session()
+        df = pd.DataFrame({"label": [1, 2, 3], "area": [10, 20, 30]})
+        session.set_measurements(df)
+        session.set_filter(frozenset({1, 3}))
+        assert len(session.filtered_df) == 2
+        assert set(session.filtered_df["label"]) == {1, 3}
+
+    def test_set_measurements_prunes_stale_filter(self):
+        session = Session()
+        session.set_filter(frozenset({1, 2, 99}))
+        df = pd.DataFrame({"label": [1, 2, 3]})
+        session.set_measurements(df)
+        # 99 was pruned because it's not in the new df
+        assert 99 not in session.filter_ids
+
+    def test_set_measurements_prunes_stale_selection(self):
+        session = Session()
+        session._selection = frozenset({1, 2, 99})
+        df = pd.DataFrame({"label": [1, 2, 3]})
+        session.set_measurements(df)
+        assert 99 not in session.selection
+
+    def test_selected_ids_returns_list(self):
+        session = Session()
+        session.set_selection(frozenset({3, 1, 2}))
+        ids = session.selected_ids
+        assert isinstance(ids, list)
+        assert set(ids) == {1, 2, 3}
+
+    def test_set_dataset_clears_measurements(self):
+        session = Session()
+        session.set_measurements(pd.DataFrame({"label": [1]}))
+        session.set_dataset(DatasetHandle(path="/tmp/test.h5"))
+        assert session.df.empty
+
+    def test_clear_clears_measurements(self):
+        session = Session()
+        session.set_measurements(pd.DataFrame({"label": [1]}))
+        session.clear()
+        assert session.df.empty

@@ -1,14 +1,12 @@
-"""Central data model for PerCell4.
+"""CellDataModel — Qt signal bridge over the application Session.
 
-CellDataModel is the communication hub — all windows connect to its signals.
-The DataFrame is ephemeral: computed on the fly for the currently loaded dataset,
-not persisted across datasets. Persistent measurements live in each .h5 file.
+During the hex architecture migration, CellDataModel delegates all state
+to Session and re-emits Session events as Qt signals. This lets the
+launcher, viewer, task panels, and workflow runners keep working with
+their existing state_changed signal connections while peer views are
+migrated to subscribe to Session directly.
 
-Convention: model.df for schema discovery (columns, types).
-            model.filtered_df for data display (rows to show).
-
-Thread safety: All mutations must occur on the main (GUI) thread. Worker threads
-emit results via Qt signals which are marshaled to the main thread by AutoConnection.
+Once all consumers are migrated to Session (Stage 5), this file is deleted.
 """
 
 from __future__ import annotations
@@ -17,6 +15,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 from qtpy.QtCore import QObject, Signal
+
+from percell4.application.session import Event, Session
 
 
 @dataclass
@@ -35,121 +35,112 @@ class StateChange:
 
 
 class CellDataModel(QObject):
-    """Holds per-cell measurements, selection, and filter state.
+    """Qt signal bridge over Session.
 
-    All windows listen to signals on this object — they never talk to each other
-    directly. Listeners get a read-only view of the DataFrame; they must not
-    modify it.
+    Delegates all state to a Session instance. Subscribes to Session
+    events and re-emits them as Qt state_changed signals for legacy
+    consumers (launcher, viewer, task panels, workflow runners).
     """
 
     state_changed = Signal(object)  # emits StateChange
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, session: Session | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._df = pd.DataFrame()
-        self._selected_ids: list[int] = []
-        self._filtered_ids: set[int] | None = None  # None = no filter
-        self._filtered_df_cache: pd.DataFrame | None = None
-        self._active_segmentation: str = ""
-        self._active_mask: str = ""
+        self._session = session or Session()
+        self._wiring_session = False  # guard against re-entrant emit
+
+        # Subscribe to all Session events and re-emit as Qt signals
+        self._session.subscribe(Event.DATASET_CHANGED, self._on_dataset_changed)
+        self._session.subscribe(Event.MEASUREMENTS_UPDATED, self._on_measurements_updated)
+        self._session.subscribe(Event.SELECTION_CHANGED, self._on_selection_changed)
+        self._session.subscribe(Event.FILTER_CHANGED, self._on_filter_changed)
+        self._session.subscribe(
+            Event.ACTIVE_SEGMENTATION_CHANGED, self._on_segmentation_changed
+        )
+        self._session.subscribe(Event.ACTIVE_MASK_CHANGED, self._on_mask_changed)
+
+    @property
+    def session(self) -> Session:
+        """Access the underlying Session (for passing to peer views)."""
+        return self._session
+
+    # ── Session event handlers → Qt signal emission ─────────
+
+    def _on_dataset_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(
+                data=True, filter=True, selection=True,
+                segmentation=True, mask=True,
+            ))
+
+    def _on_measurements_updated(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(data=True))
+
+    def _on_selection_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(selection=True))
+
+    def _on_filter_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(filter=True))
+
+    def _on_segmentation_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(segmentation=True))
+
+    def _on_mask_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(mask=True))
+
+    # ── Read-only properties (delegate to Session) ──────────
 
     @property
     def df(self) -> pd.DataFrame:
-        """Current per-cell measurements. Read-only — do not modify."""
-        return self._df
+        return self._session.df
 
     @property
     def filtered_df(self) -> pd.DataFrame:
-        """Return filtered DataFrame, or full DataFrame if no filter.
-
-        Cached — invalidated by set_filter() and set_measurements().
-        """
-        if self._filtered_ids is None or self._df.empty or "label" not in self._df.columns:
-            return self._df
-        if self._filtered_df_cache is None:
-            self._filtered_df_cache = self._df[
-                self._df["label"].isin(self._filtered_ids)
-            ]
-        return self._filtered_df_cache
+        return self._session.filtered_df
 
     @property
     def is_filtered(self) -> bool:
-        """True when a cell filter is active."""
-        return self._filtered_ids is not None
+        return self._session.is_filtered
 
     @property
     def filtered_ids(self) -> set[int] | None:
-        """Currently active filter IDs, or None if no filter."""
-        return self._filtered_ids
-
-    def set_filter(self, label_ids: list[int] | None) -> None:
-        """Set filter. None clears. Also clears selection."""
-        self._filtered_ids = set(label_ids) if label_ids is not None else None
-        self._filtered_df_cache = None
-        self._selected_ids = []
-        self.state_changed.emit(StateChange(filter=True, selection=True))
-
-    def set_measurements(self, df: pd.DataFrame) -> None:
-        """Replace the measurements DataFrame and notify all listeners.
-
-        Preserves filter and selection — cell IDs are stable (from segmentation
-        labels). Prunes any stale IDs that no longer exist in the new DataFrame.
-        """
-        self._df = df
-        self._filtered_df_cache = None
-        # Prune stale IDs but preserve the user's filter/selection intent
-        if self._filtered_ids is not None and "label" in df.columns:
-            valid = set(df["label"].tolist())
-            self._filtered_ids &= valid
-        if self._selected_ids and "label" in df.columns:
-            valid = set(df["label"].tolist())
-            self._selected_ids = [s for s in self._selected_ids if s in valid]
-        self.state_changed.emit(StateChange(data=True))
-
-    def set_selection(self, label_ids: list[int]) -> None:
-        """Update the selected cell IDs and notify all listeners."""
-        self._selected_ids = list(label_ids)
-        self.state_changed.emit(StateChange(selection=True))
+        ids = self._session.filter_ids
+        return set(ids) if ids is not None else None
 
     @property
     def selected_ids(self) -> list[int]:
-        """Currently selected cell label IDs."""
-        return self._selected_ids
+        return self._session.selected_ids
 
     @property
     def active_segmentation(self) -> str:
-        """Name of the currently active segmentation layer."""
-        return self._active_segmentation
-
-    def set_active_segmentation(self, name: str) -> None:
-        """Set the active segmentation layer and notify all listeners."""
-        if name != self._active_segmentation:
-            self._active_segmentation = name
-            self.state_changed.emit(StateChange(segmentation=True))
+        return self._session.active_segmentation or ""
 
     @property
     def active_mask(self) -> str:
-        """Name of the currently active mask layer."""
-        return self._active_mask
+        return self._session.active_mask or ""
+
+    # ── Mutators (delegate to Session, which fires events) ──
+
+    def set_measurements(self, df: pd.DataFrame) -> None:
+        self._session.set_measurements(df)
+
+    def set_selection(self, label_ids: list[int]) -> None:
+        self._session.set_selection(frozenset(label_ids))
+
+    def set_filter(self, label_ids: list[int] | None) -> None:
+        ids = frozenset(label_ids) if label_ids is not None else None
+        self._session.set_filter(ids)
+
+    def set_active_segmentation(self, name: str) -> None:
+        self._session.set_active_segmentation(name or None)
 
     def set_active_mask(self, name: str) -> None:
-        """Set the active mask layer and notify all listeners."""
-        if name != self._active_mask:
-            self._active_mask = name
-            self.state_changed.emit(StateChange(mask=True))
+        self._session.set_active_mask(name or None)
 
     def clear(self) -> None:
-        """Reset all state. Called when closing a dataset.
-
-        Emits state_changed AFTER state is fully consistent.
-        """
-        self._df = pd.DataFrame()
-        self._selected_ids = []
-        self._filtered_ids = None
-        self._filtered_df_cache = None
-        self._active_segmentation = ""
-        self._active_mask = ""
-        self.state_changed.emit(StateChange(
-            data=True, filter=True, selection=True,
-            segmentation=True, mask=True,
-        ))
+        self._session.clear()
