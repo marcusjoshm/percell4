@@ -423,13 +423,13 @@ If any of those are "awkward," revise the architecture before continuing. This s
 
 Time: 3-5 days.
 
-- Move `measure/`, `flim/`, `segment/`, `io/` into `domain/` and `adapters/` as appropriate:
-  - Pure functions (e.g., `measure_multichannel`, `compute_phasor_from_decay`) → `domain/`
-  - External-tool wrappers (Cellpose invocation, tifffile I/O) → `adapters/` with ports in `ports/`
-- Rename where it improves clarity. Don't rename where it doesn't.
-- Update all existing tests to new imports.
+- [x] Move `measure/`, `flim/`, `segment/`, `io/` into `domain/` and `adapters/` as appropriate:
+  - [x] Pure functions (e.g., `measure_multichannel`, `compute_phasor_from_decay`) → `domain/`
+  - [x] External-tool wrappers (Cellpose invocation, tifffile I/O) → `adapters/` with ports in `ports/`
+- [x] Rename where it improves clarity. Don't rename where it doesn't.
+- [x] Update all existing tests to new imports.
 
-No behavior changes. Import-linter's `domain-is-pure` contract should now pass.
+No behavior changes. Import-linter's `domain-is-pure` contract passes.
 
 ### Stage 3: Build the Session out + peer views
 
