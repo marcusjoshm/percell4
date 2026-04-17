@@ -446,13 +446,16 @@ Peer views now work against Session. Old launcher still exists via CellDataModel
 Time: 2-3 weeks.
 
 One domain at a time:
-- Segmentation: `SegmentCells` use case + `SegmentationPanel` in `task_panels/`
-- Thresholding: `ApplyThreshold` use case + `ThresholdPanel` (exercises `request_shapes`)
-- FLIM / phasor: `ComputePhasor`, `ApplyWavelet` use cases + panels
-- Measurement: `MeasureCells` use case + panel
-- Export: use cases + panel
+- [ ] Segmentation: `SegmentCells` use case + `SegmentationPanel` in `task_panels/`
+- [x] Thresholding: `AcceptThreshold` use case (use case done; panel + launcher wiring pending)
+- [x] FLIM / phasor: `ComputePhasor`, `ApplyWavelet` use cases (use cases done; panels + launcher wiring pending)
+- [x] Measurement: `MeasureCells` use case (use case done; panel + launcher wiring pending)
+- [ ] Export: use cases + panel
+- [x] `CloseDataset` use case
 
 Each migration: write the use case (pure, testable), write the panel (wires buttons to use cases + Session), delete the corresponding methods from the old launcher.
+
+Remaining: task panels for each use case, wiring launcher buttons to use cases, deleting old launcher methods, SegmentCells + Export use cases.
 
 By end of stage 4, the launcher is either empty or only contains window-management scaffolding.
 
