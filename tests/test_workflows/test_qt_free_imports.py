@@ -31,11 +31,14 @@ def test_workflows_package_imports_without_qt():
     import percell4.workflows as pkg
     import percell4.workflows.artifacts  # noqa: F401
     import percell4.workflows.channels  # noqa: F401
+    import percell4.workflows.diagnostics  # noqa: F401
     import percell4.workflows.failures  # noqa: F401
     import percell4.workflows.host  # noqa: F401
     import percell4.workflows.models  # noqa: F401
     import percell4.workflows.run_log  # noqa: F401
-    for mod_name in ("artifacts", "channels", "failures", "host", "models", "run_log"):
+    for mod_name in (
+        "artifacts", "channels", "diagnostics", "failures", "host", "models", "run_log",
+    ):
         mod = getattr(pkg, mod_name, None) or sys.modules[f"percell4.workflows.{mod_name}"]
         offenders = [
             bad for bad in _FORBIDDEN_MODULES if bad in mod.__dict__
