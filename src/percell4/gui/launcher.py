@@ -206,55 +206,10 @@ class LauncherWindow(QMainWindow):
     # ── Content panels ────────────────────────────────────────
 
     def _create_io_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setAlignment(Qt.AlignTop)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        from percell4.interfaces.gui.task_panels.io_panel import IoPanel
 
-        layout.addWidget(self._section_label("Import / Export"))
-
-        # ── Import ──
-        import_group = QGroupBox("Import")
-        import_layout = QVBoxLayout(import_group)
-
-        btn_import = QPushButton("Compress TIFF Dataset...")
-        btn_import.clicked.connect(self._on_import_dataset)
-        import_layout.addWidget(btn_import)
-
-        btn_load = QPushButton("Load Dataset...")
-        btn_load.clicked.connect(self._on_load_dataset)
-        import_layout.addWidget(btn_load)
-
-        btn_add_layer = QPushButton("Add Layer to Dataset...")
-        btn_add_layer.clicked.connect(self._on_add_layer_to_dataset)
-        import_layout.addWidget(btn_add_layer)
-
-        btn_close = QPushButton("Close Dataset")
-        btn_close.clicked.connect(self._on_close_dataset)
-        import_layout.addWidget(btn_close)
-
-        layout.addWidget(import_group)
-
-        # ── Export ──
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout(export_group)
-
-        btn_export_csv = QPushButton("Export Measurements to CSV...")
-        btn_export_csv.clicked.connect(self._on_export_csv)
-        export_layout.addWidget(btn_export_csv)
-
-        btn_export_images = QPushButton("Export Images...")
-        btn_export_images.clicked.connect(self._on_export_images)
-        export_layout.addWidget(btn_export_images)
-
-        layout.addWidget(export_group)
-
-        # ── Placeholders ──
-        layout.addWidget(self._placeholder("Prism Export"))
-        layout.addWidget(self._placeholder("Batch Export"))
-        layout.addStretch()
-        return panel
+        self._io_panel = IoPanel(self.data_model, launcher=self)
+        return self._io_panel
 
     def _create_viewer_panel(self) -> QWidget:
         panel = QWidget()
@@ -513,111 +468,10 @@ class LauncherWindow(QMainWindow):
             )
 
     def _create_data_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setAlignment(Qt.AlignTop)
-        layout.setContentsMargins(20, 20, 20, 20)
+        from percell4.interfaces.gui.task_panels.data_panel import DataPanel
 
-        layout.addWidget(self._section_label("Data"))
-
-        # ── Active layers ──
-        layers_group = QGroupBox("Active Layers")
-        layers_layout = QVBoxLayout(layers_group)
-
-        chan_row = QHBoxLayout()
-        chan_row.addWidget(QLabel("Active Channel:"))
-        self._data_channel_label = QLabel("None selected")
-        self._data_channel_label.setStyleSheet(
-            "color: #4ea8de; font-weight: bold;"
-        )
-        chan_row.addWidget(self._data_channel_label)
-        chan_row.addStretch()
-        layers_layout.addLayout(chan_row)
-
-        seg_row = QHBoxLayout()
-        seg_row.addWidget(QLabel("Active Segmentation:"))
-        self._active_seg_combo = QComboBox()
-        self._active_seg_combo.setPlaceholderText("None")
-        self._active_seg_combo.currentTextChanged.connect(
-            self._on_active_seg_combo_changed
-        )
-        seg_row.addWidget(self._active_seg_combo)
-        layers_layout.addLayout(seg_row)
-
-        mask_row = QHBoxLayout()
-        mask_row.addWidget(QLabel("Active Mask:"))
-        self._active_mask_combo = QComboBox()
-        self._active_mask_combo.setPlaceholderText("None")
-        self._active_mask_combo.currentTextChanged.connect(
-            self._on_active_mask_combo_changed
-        )
-        mask_row.addWidget(self._active_mask_combo)
-        layers_layout.addLayout(mask_row)
-
-        # Model state changes are handled by _on_state_changed (unified handler)
-
-        layout.addWidget(layers_group)
-
-        # ── Layer Management ──
-        mgmt_group = QGroupBox("Layer Management")
-        mgmt_layout = QVBoxLayout(mgmt_group)
-
-        # Segmentation management
-        mgmt_layout.addWidget(QLabel("Segmentations:"))
-        seg_mgmt_row = QHBoxLayout()
-        self._mgmt_seg_combo = QComboBox()
-        self._mgmt_seg_combo.setPlaceholderText("Select segmentation")
-        seg_mgmt_row.addWidget(self._mgmt_seg_combo)
-        btn_rename_seg = QPushButton("Rename")
-        btn_rename_seg.clicked.connect(lambda: self._on_rename_layer("labels"))
-        seg_mgmt_row.addWidget(btn_rename_seg)
-        btn_delete_seg = QPushButton("Delete")
-        btn_delete_seg.clicked.connect(lambda: self._on_delete_layer("labels"))
-        seg_mgmt_row.addWidget(btn_delete_seg)
-        mgmt_layout.addLayout(seg_mgmt_row)
-
-        # Mask management
-        mgmt_layout.addWidget(QLabel("Masks:"))
-        mask_mgmt_row = QHBoxLayout()
-        self._mgmt_mask_combo = QComboBox()
-        self._mgmt_mask_combo.setPlaceholderText("Select mask")
-        mask_mgmt_row.addWidget(self._mgmt_mask_combo)
-        btn_rename_mask = QPushButton("Rename")
-        btn_rename_mask.clicked.connect(lambda: self._on_rename_layer("masks"))
-        mask_mgmt_row.addWidget(btn_rename_mask)
-        btn_delete_mask = QPushButton("Delete")
-        btn_delete_mask.clicked.connect(lambda: self._on_delete_layer("masks"))
-        mask_mgmt_row.addWidget(btn_delete_mask)
-        mgmt_layout.addLayout(mask_mgmt_row)
-
-        # Channel management
-        mgmt_layout.addWidget(QLabel("Channels:"))
-        chan_mgmt_row = QHBoxLayout()
-        self._mgmt_chan_combo = QComboBox()
-        self._mgmt_chan_combo.setPlaceholderText("Select channel")
-        chan_mgmt_row.addWidget(self._mgmt_chan_combo)
-        btn_rename_chan = QPushButton("Rename")
-        btn_rename_chan.clicked.connect(self._on_rename_channel)
-        chan_mgmt_row.addWidget(btn_rename_chan)
-        btn_delete_chan = QPushButton("Delete")
-        btn_delete_chan.clicked.connect(self._on_delete_channel)
-        chan_mgmt_row.addWidget(btn_delete_chan)
-        mgmt_layout.addLayout(chan_mgmt_row)
-
-        layout.addWidget(mgmt_group)
-
-        # ── Dataset Info ──
-        info_group = QGroupBox("Dataset Info")
-        info_layout = QVBoxLayout(info_group)
-        self._info_label = QLabel("No dataset loaded")
-        self._info_label.setWordWrap(True)
-        info_layout.addWidget(self._info_label)
-        layout.addWidget(info_group)
-
-        # ── Placeholders ──
-        layout.addWidget(self._placeholder("Project Browser"))
-        layout.addStretch()
-        return panel
+        self._data_panel = DataPanel(self.data_model, launcher=self)
+        return self._data_panel
 
     # ── Helpers ────────────────────────────────────────────────
 
@@ -970,46 +824,10 @@ class LauncherWindow(QMainWindow):
 
     def _update_data_tab_from_store(self) -> None:
         """Update the Data tab info label and dropdowns from the current store."""
-        store = getattr(self, "_current_store", None)
-        h5_path = getattr(self, "_current_h5_path", None)
-
-        if store is None or h5_path is None:
-            if hasattr(self, "_info_label"):
-                self._info_label.setText("No dataset loaded")
-            return
-
-        # Read shape for info display
-        try:
-            with store.open_read() as s:
-                intensity = s.read_array("intensity")
-                shape = intensity.shape
-        except Exception:
-            shape = "unknown"
-
-        if hasattr(self, "_info_label"):
-            n_labels = len(store.list_labels())
-            n_masks = len(store.list_masks())
-            self._info_label.setText(
-                f"File: {Path(h5_path).name}\n"
-                f"Shape: {shape}\n"
-                f"Labels: {n_labels}  |  Masks: {n_masks}"
-            )
-
-        # Populate active layers dropdowns (exclude masks from segmentation list)
-        mask_set = set(store.list_masks())
-        if hasattr(self, "_active_seg_combo"):
-            self._active_seg_combo.clear()
-            for label_name in store.list_labels():
-                if label_name not in mask_set:
-                    self._active_seg_combo.addItem(label_name)
-
-        if hasattr(self, "_active_mask_combo"):
-            self._active_mask_combo.clear()
-            for mask_name in store.list_masks():
-                self._active_mask_combo.addItem(mask_name)
-
-        # Populate management combos
-        self._refresh_management_combos()
+        if hasattr(self, "_data_panel"):
+            self._data_panel.refresh_dataset_info()
+            self._data_panel.refresh_active_combos()
+            self._data_panel.refresh_management_combos()
 
     def _on_close_dataset(self) -> None:
         from percell4.application.use_cases.close_dataset import CloseDataset
@@ -1035,12 +853,8 @@ class LauncherWindow(QMainWindow):
             viewer_win.set_subtitle("")
         self._current_store = None
         self._current_h5_path = None
-        if hasattr(self, "_info_label"):
-            self._info_label.setText("No dataset loaded")
-        if hasattr(self, "_active_seg_combo"):
-            self._active_seg_combo.clear()
-        if hasattr(self, "_active_mask_combo"):
-            self._active_mask_combo.clear()
+        if hasattr(self, "_data_panel"):
+            self._data_panel.clear_ui()
         self.statusBar().showMessage("Dataset closed")
 
     def _update_active_channel_label(self) -> None:
@@ -1056,11 +870,9 @@ class LauncherWindow(QMainWindow):
             if active is not None and active.__class__.__name__ == "Image":
                 channel_name = active.name
 
-        # Update all channel labels
-        if hasattr(self, "_thresh_channel_label"):
-            self._thresh_channel_label.setText(channel_name)
-        if hasattr(self, "_data_channel_label"):
-            self._data_channel_label.setText(channel_name)
+        # Update channel labels in panels
+        if hasattr(self, "_data_panel"):
+            self._data_panel.update_channel_label(channel_name)
 
     def _sync_active_layers_from_viewer(self) -> None:
         """When user clicks a layer in napari, update the active seg/mask in the model."""
@@ -1166,13 +978,9 @@ class LauncherWindow(QMainWindow):
 
     def _on_state_changed(self, change) -> None:
         """Handle model state changes relevant to the launcher."""
-        # Filter state changes handled by AnalysisPanel directly
-        if change.segmentation:
-            name = self.data_model.active_segmentation
-            self._on_model_active_seg_changed(name)
-        if change.mask:
-            name = self.data_model.active_mask
-            self._on_model_active_mask_changed(name)
+        # Filter changes handled by AnalysisPanel
+        # Segmentation/mask changes handled by DataPanel
+        pass  # Launcher no longer needs to handle state changes directly
 
     # ── Phasor plot signal handlers ─────────────────────────────
 
@@ -1227,250 +1035,6 @@ class LauncherWindow(QMainWindow):
         )
         if path:
             self.statusBar().showMessage(f"Run script: {path} — not yet implemented")
-
-    # ── Layer management ────────────────────────────────────────
-
-    def _refresh_management_combos(self) -> None:
-        """Refresh all management dropdowns from the current store.
-
-        The management combos show ALL entries (including stale mask data
-        under /labels/) so users can delete legacy entries.
-        """
-        store = getattr(self, "_current_store", None)
-
-        if hasattr(self, "_mgmt_seg_combo"):
-            self._mgmt_seg_combo.clear()
-            if store is not None:
-                for name in store.list_labels():
-                    self._mgmt_seg_combo.addItem(name)
-
-        if hasattr(self, "_mgmt_mask_combo"):
-            self._mgmt_mask_combo.clear()
-            if store is not None:
-                for name in store.list_masks():
-                    self._mgmt_mask_combo.addItem(name)
-
-        if hasattr(self, "_mgmt_chan_combo"):
-            self._mgmt_chan_combo.clear()
-            viewer_win = self._windows.get("viewer")
-            if viewer_win is not None and viewer_win.viewer is not None:
-                for layer in viewer_win.viewer.layers:
-                    if layer.__class__.__name__ == "Image":
-                        self._mgmt_chan_combo.addItem(layer.name)
-
-    def _on_rename_layer(self, prefix: str) -> None:
-        """Rename a segmentation or mask in HDF5 and viewer."""
-        combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo
-        old_name = combo.currentText()
-        if not old_name:
-            self.statusBar().showMessage("Nothing selected to rename")
-            return
-
-        new_name, ok = QInputDialog.getText(
-            self, "Rename", f"New name for '{old_name}':", text=old_name
-        )
-        if not ok or not new_name or new_name == old_name:
-            return
-
-        store = getattr(self, "_current_store", None)
-        if store is not None:
-            try:
-                store.rename_item(f"{prefix}/{old_name}", f"{prefix}/{new_name}")
-            except ValueError as e:
-                self.statusBar().showMessage(str(e))
-                return
-
-        # Rename in viewer
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is not None and viewer_win.viewer is not None:
-            for layer in viewer_win.viewer.layers:
-                if layer.name == old_name:
-                    layer.name = new_name
-                    break
-
-        # Refresh dropdowns
-        self._refresh_management_combos()
-        self._refresh_active_combos()
-        self.statusBar().showMessage(f"Renamed '{old_name}' → '{new_name}'")
-
-    def _on_delete_layer(self, prefix: str) -> None:
-        """Delete a segmentation or mask from HDF5 and viewer."""
-        combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo
-        name = combo.currentText()
-        if not name:
-            self.statusBar().showMessage("Nothing selected to delete")
-            return
-
-        reply = QMessageBox.question(
-            self, "Confirm Delete",
-            f"Delete '{name}'? This cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        store = getattr(self, "_current_store", None)
-        if store is not None:
-            store.delete_item(f"{prefix}/{name}")
-
-        # Remove from viewer
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is not None and viewer_win.viewer is not None:
-            for layer in list(viewer_win.viewer.layers):
-                if layer.name == name:
-                    viewer_win.viewer.layers.remove(layer)
-                    break
-
-        self._refresh_management_combos()
-        self._refresh_active_combos()
-        self.statusBar().showMessage(f"Deleted '{name}'")
-
-    def _on_rename_channel(self) -> None:
-        """Rename a channel (image layer) in the viewer and HDF5 metadata."""
-        old_name = self._mgmt_chan_combo.currentText()
-        if not old_name:
-            self.statusBar().showMessage("Nothing selected to rename")
-            return
-
-        new_name, ok = QInputDialog.getText(
-            self, "Rename Channel", f"New name for '{old_name}':", text=old_name
-        )
-        if not ok or not new_name or new_name == old_name:
-            return
-
-        # Update channel_names in HDF5 metadata
-        store = getattr(self, "_current_store", None)
-        if store is not None:
-            meta = store.metadata
-            names = list(meta.get("channel_names", []))
-            if old_name in names:
-                names[names.index(old_name)] = new_name
-                store.set_metadata({"channel_names": names})
-
-        # Rename in viewer
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is not None and viewer_win.viewer is not None:
-            for layer in viewer_win.viewer.layers:
-                if layer.name == old_name:
-                    layer.name = new_name
-                    break
-
-        self._refresh_management_combos()
-        self.statusBar().showMessage(f"Renamed channel '{old_name}' → '{new_name}'")
-
-    def _on_delete_channel(self) -> None:
-        """Delete a channel (image layer) from the viewer."""
-        name = self._mgmt_chan_combo.currentText()
-        if not name:
-            self.statusBar().showMessage("Nothing selected to delete")
-            return
-
-        reply = QMessageBox.question(
-            self, "Confirm Delete",
-            f"Delete channel '{name}'? This cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is not None and viewer_win.viewer is not None:
-            for layer in list(viewer_win.viewer.layers):
-                if layer.name == name:
-                    viewer_win.viewer.layers.remove(layer)
-                    break
-
-        self._refresh_management_combos()
-        self.statusBar().showMessage(f"Deleted channel '{name}'")
-
-    # ── Active layer sync ───────────────────────────────────────
-
-    def _on_active_seg_combo_changed(self, name: str) -> None:
-        """User changed the active segmentation dropdown."""
-        if name:
-            self.data_model.set_active_segmentation(name)
-
-    def _on_active_mask_combo_changed(self, name: str) -> None:
-        """User changed the active mask dropdown."""
-        if name:
-            self.data_model.set_active_mask(name)
-
-    def _on_model_active_seg_changed(self, name: str) -> None:
-        """Model's active segmentation changed (e.g., from napari click)."""
-        if hasattr(self, "_active_seg_combo") and name:
-            self._active_seg_combo.blockSignals(True)
-            if self._active_seg_combo.findText(name) < 0:
-                self._active_seg_combo.addItem(name)
-            self._active_seg_combo.setCurrentText(name)
-            self._active_seg_combo.blockSignals(False)
-        self._refresh_management_combos()
-        self._refresh_dataset_info()
-
-    def _on_model_active_mask_changed(self, name: str) -> None:
-        """Model's active mask changed (e.g., from napari click)."""
-        if hasattr(self, "_active_mask_combo") and name:
-            self._active_mask_combo.blockSignals(True)
-            if self._active_mask_combo.findText(name) < 0:
-                self._active_mask_combo.addItem(name)
-            self._active_mask_combo.setCurrentText(name)
-            self._active_mask_combo.blockSignals(False)
-        self._refresh_management_combos()
-        self._refresh_dataset_info()
-
-    def _refresh_dataset_info(self) -> None:
-        """Refresh the Dataset Info label from the current store."""
-        store = getattr(self, "_current_store", None)
-        h5_path = getattr(self, "_current_h5_path", None)
-        if not hasattr(self, "_info_label"):
-            return
-        if store is None or h5_path is None:
-            self._info_label.setText("No dataset loaded")
-            return
-        try:
-            n_labels = len(store.list_labels())
-            n_masks = len(store.list_masks())
-            with store.open_read() as s:
-                intensity = s.read_array("intensity")
-                shape = intensity.shape
-            self._info_label.setText(
-                f"File: {Path(h5_path).name}\n"
-                f"Shape: {shape}\n"
-                f"Labels: {n_labels}  |  Masks: {n_masks}"
-            )
-        except Exception:
-            pass
-
-    def _refresh_active_combos(self) -> None:
-        """Refresh the active segmentation/mask dropdowns.
-
-        Block signals during repopulation to prevent spurious intermediate
-        state changes (e.g., first addItem becoming current on an empty combo).
-        """
-        store = getattr(self, "_current_store", None)
-        mask_set = set(store.list_masks()) if store is not None else set()
-
-        if hasattr(self, "_active_seg_combo"):
-            self._active_seg_combo.blockSignals(True)
-            current = self._active_seg_combo.currentText()
-            self._active_seg_combo.clear()
-            if store is not None:
-                for name in store.list_labels():
-                    if name not in mask_set:
-                        self._active_seg_combo.addItem(name)
-            if current and self._active_seg_combo.findText(current) >= 0:
-                self._active_seg_combo.setCurrentText(current)
-            self._active_seg_combo.blockSignals(False)
-
-        if hasattr(self, "_active_mask_combo"):
-            self._active_mask_combo.blockSignals(True)
-            current = self._active_mask_combo.currentText()
-            self._active_mask_combo.clear()
-            if store is not None:
-                for name in store.list_masks():
-                    self._active_mask_combo.addItem(name)
-            if current and self._active_mask_combo.findText(current) >= 0:
-                self._active_mask_combo.setCurrentText(current)
-            self._active_mask_combo.blockSignals(False)
 
     def _on_export_csv(self) -> None:
         if self.data_model.df.empty:
