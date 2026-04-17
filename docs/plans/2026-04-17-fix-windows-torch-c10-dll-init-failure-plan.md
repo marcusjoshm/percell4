@@ -496,18 +496,21 @@ pattern in the adapter comment for future maintainers:
 
 ### Code (Tracks 2 and 3)
 
-- [ ] `README.md` Windows section (line 37) gains a PyTorch/Cellpose
+- [x] `README.md` Windows section (line 37) gains a PyTorch/Cellpose
       subsection; Troubleshooting (line 149) gains a `WinError 1114` bullet.
-- [ ] `Worker.error` emits `WorkerError` dataclass (`Signal(object)`).
-- [ ] `src/percell4/workflows/diagnostics.py` classifies errors on
+- [x] `Worker.error` emits `WorkerError` dataclass (`Signal(object)`).
+- [x] `src/percell4/workflows/diagnostics.py` classifies errors on
       `winerror` codes without Qt imports.
-- [ ] `src/percell4/gui/torch_error.py` exports `handle_worker_error` using
+- [x] `src/percell4/gui/torch_error.py` exports `handle_worker_error` using
       `QMessageBox.warning`, matching house style.
-- [ ] All four worker-error handlers (`segmentation_panel.py:269`,
+- [x] All four worker-error handlers (`segmentation_panel.py:269`,
       `grouped_seg_panel.py:297` and `:372`, `workflows/single_cell/runner.py:473`)
-      route through the shared helper.
-- [ ] `ruff` and `lint-imports` pass — the diagnostics module must not
-      violate the `application`/`workflows` contracts in `pyproject.toml`.
+      route through the shared helper (runner uses structured fields for
+      failure-record logging; no mid-batch dialog).
+- [x] `ruff` and `lint-imports` pass — the diagnostics module does not
+      violate the `application`/`workflows` contracts in `pyproject.toml`
+      (3 contracts KEPT; new modules pass ruff clean; pre-existing ruff
+      issues in the three edited panels are unchanged — not in scope).
 
 ### Non-goals
 
