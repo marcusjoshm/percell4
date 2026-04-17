@@ -29,6 +29,16 @@ def main() -> None:
     launcher = LauncherWindow(data_model)
     launcher.show()
 
+    # Windows-only: warn if the MSVC Redistributable is too old for PyTorch.
+    # Silently passes on macOS/Linux.
+    from percell4.workflows.diagnostics import check_msvc_redist_version
+
+    is_current, version = check_msvc_redist_version()
+    if not is_current:
+        from percell4.gui.torch_error import show_msvc_redist_warning
+
+        show_msvc_redist_warning(launcher, version)
+
     sys.exit(app.exec_())
 
 

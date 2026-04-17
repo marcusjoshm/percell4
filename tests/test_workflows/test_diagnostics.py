@@ -3,7 +3,15 @@ error classifier."""
 
 from __future__ import annotations
 
-from percell4.workflows.diagnostics import ErrorKind, WorkerError, classify
+import sys
+
+from percell4.workflows.diagnostics import (
+    ErrorKind,
+    WorkerError,
+    _parse_msvc_version,
+    check_msvc_redist_version,
+    classify,
+)
 
 
 def _err(
@@ -106,3 +114,40 @@ class TestWorkerError:
     def test_uses_slots(self) -> None:
         err = _err()
         assert not hasattr(err, "__dict__")
+
+
+class TestParseMsvcVersion:
+    def test_canonical_format(self) -> None:
+        assert _parse_msvc_version("v14.44.35211.00") == (14, 44)
+
+    def test_no_leading_v(self) -> None:
+        assert _parse_msvc_version("14.50.35719.00") == (14, 50)
+
+    def test_only_major_minor(self) -> None:
+        assert _parse_msvc_version("v14.50") == (14, 50)
+
+    def test_below_threshold(self) -> None:
+        # Real observation from a Lee Lab Windows box, April 2026.
+        assert _parse_msvc_version("v14.44.35211.00") < (14, 50)
+
+    def test_at_threshold(self) -> None:
+        assert _parse_msvc_version("v14.50.35719.00") >= (14, 50)
+
+    def test_unparseable_returns_none(self) -> None:
+        assert _parse_msvc_version("garbage") is None
+
+    def test_empty_returns_none(self) -> None:
+        assert _parse_msvc_version("") is None
+
+
+class TestCheckMsvcRedistVersion:
+    def test_non_windows_always_current(self) -> None:
+        """On macOS/Linux the check must return (True, None) without
+        attempting to import winreg."""
+        if sys.platform == "win32":
+            # This test is for the non-Windows contract; skip on Windows
+            # where the behavior depends on registry state.
+            return
+        is_current, version = check_msvc_redist_version()
+        assert is_current is True
+        assert version is None

@@ -58,6 +58,38 @@ _TITLES_AND_BODIES: dict[ErrorKind, tuple[str, str]] = {
 }
 
 
+def show_msvc_redist_warning(
+    parent: QWidget | None,
+    current_version: str | None,
+) -> None:
+    """Warn the user that the installed MSVC Redistributable is too old
+    (or missing) for current PyTorch. Shown once at app startup on Windows
+    when :func:`percell4.workflows.diagnostics.check_msvc_redist_version`
+    reports stale state."""
+    if current_version is None:
+        body = (
+            "Microsoft Visual C++ 2015-2022 x64 Redistributable is not "
+            "installed on this system.\n\n"
+            "PyTorch (required by Cellpose segmentation) will fail to load "
+            "without it.\n\n"
+            "Install from:\n"
+            "  https://aka.ms/vs/17/release/vc_redist.x64.exe\n\n"
+            "Then reboot and relaunch PerCell4."
+        )
+    else:
+        body = (
+            f"Microsoft Visual C++ 2015-2022 x64 Redistributable is "
+            f"version {current_version} on this system.\n\n"
+            "PyTorch 2.9+ requires version 14.50 or newer; older copies "
+            "cause OSError [WinError 1114] during Cellpose segmentation "
+            "(pytorch#169429).\n\n"
+            "Upgrade from:\n"
+            "  https://aka.ms/vs/17/release/vc_redist.x64.exe\n\n"
+            "Then reboot and relaunch PerCell4."
+        )
+    QMessageBox.warning(parent, "PyTorch runtime may be out of date", body)
+
+
 def handle_worker_error(
     parent: QWidget | None,
     err: WorkerError,
