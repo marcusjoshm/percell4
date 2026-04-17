@@ -14,6 +14,11 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import uniform_filter
 
+# NumPy 2.0 removed np.asfarray. The dtcwt package still uses it internally.
+# Restore it as a shim so dtcwt works with NumPy 2.x.
+if not hasattr(np, "asfarray"):
+    np.asfarray = lambda a, dtype=np.float64: np.asarray(a, dtype=dtype)  # type: ignore[attr-defined]
+
 # ── Transforms ─────────────────────────────────────────────────
 
 
