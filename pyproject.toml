@@ -85,6 +85,57 @@ markers = [
     "gui: marks tests requiring Qt/napari (deselect with '-m \"not gui\"')",
 ]
 
+# ── Import-linter: hexagonal architecture contracts ──────────
+# These contracts enforce layer boundaries. They will FAIL until
+# migration is complete — that's intentional. Run: lint-imports
+
+[importlinter]
+root_packages = ["percell4"]
+include_external_packages = true
+
+[importlinter:contract:domain-is-pure]
+name = "domain/ must not import Qt, napari, h5py, or infrastructure"
+type = "forbidden"
+source_modules = ["percell4.domain"]
+forbidden_modules = [
+    "qtpy",
+    "PyQt5",
+    "napari",
+    "h5py",
+    "percell4.adapters",
+    "percell4.interfaces",
+    "percell4.application",
+]
+
+[importlinter:contract:application-no-infrastructure]
+name = "application/ must not import Qt, napari, or concrete adapters"
+type = "forbidden"
+source_modules = ["percell4.application"]
+forbidden_modules = [
+    "qtpy",
+    "PyQt5",
+    "napari",
+    "h5py",
+    "percell4.adapters",
+    "percell4.interfaces",
+    "percell4.gui",
+]
+
+[importlinter:contract:ports-are-abstract]
+name = "ports/ must not import adapters, interfaces, or infrastructure"
+type = "forbidden"
+source_modules = ["percell4.ports"]
+forbidden_modules = [
+    "qtpy",
+    "PyQt5",
+    "napari",
+    "h5py",
+    "percell4.adapters",
+    "percell4.interfaces",
+    "percell4.gui",
+    "percell4.application",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
