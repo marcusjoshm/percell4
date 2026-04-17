@@ -455,9 +455,9 @@ One domain at a time:
 
 Each migration: write the use case (pure, testable), write the panel (wires buttons to use cases + Session), delete the corresponding methods from the old launcher.
 
-Remaining: task panel migration (move from launcher sidebar tabs to `interfaces/gui/task_panels/`), delete old launcher methods that are now fully delegated.
+Task panels extracted: AnalysisPanel (filter, threshold, measurement, particles) and FlimPanel (phasor, wavelet, lifetime) in `interfaces/gui/task_panels/`. Handler methods deleted from launcher. Launcher reduced from 2793 → 1697 lines (39% reduction).
 
-By end of stage 4, the launcher is either empty or only contains window-management scaffolding.
+Remaining in launcher: I/O panel, Data panel (layer management/active combos), window lifecycle, workflow host, Scripts/Workflows tabs. These are deferred to Stage 5 (launcher retirement).
 
 ### Stage 5: Retire the launcher + workflow rework
 
