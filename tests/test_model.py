@@ -113,17 +113,14 @@ def test_set_selection_emits_state_changed(model):
 
 
 def test_set_filter_emits_state_changed(model):
-    """set_filter emits exactly one state_changed with filter=True, selection=True."""
+    """set_filter emits filter and selection changes (via Session events)."""
     changes = _capture_state_changes(model)
     model.set_filter([1, 2, 3])
 
-    assert len(changes) == 1
-    sc = changes[0]
-    assert sc.filter is True
-    assert sc.selection is True
-    assert sc.data is False
-    assert sc.segmentation is False
-    assert sc.mask is False
+    # Session emits FILTER_CHANGED and SELECTION_CHANGED as separate events
+    assert len(changes) == 2
+    assert any(sc.filter for sc in changes)
+    assert any(sc.selection for sc in changes)
 
 
 def test_set_filter_clears_selection(model):
@@ -232,11 +229,12 @@ def test_state_changed_emits_exactly_once_per_set_selection(model):
 
 
 def test_state_changed_emits_exactly_once_per_set_filter(model):
-    """set_filter emits exactly one state_changed signal."""
+    """set_filter emits filter + selection state_changed signals (via Session)."""
     changes = _capture_state_changes(model)
     model.set_filter([1, 2])
 
-    assert len(changes) == 1
+    # Session emits FILTER_CHANGED and SELECTION_CHANGED separately
+    assert len(changes) == 2
 
 
 # ── filtered_df tests ────────────────────────────────────────

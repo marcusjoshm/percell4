@@ -18,10 +18,12 @@ def main() -> None:
 
     apply_theme(app)
 
-    from percell4.gui.launcher import LauncherWindow
+    from percell4.application.session import Session
+    from percell4.interfaces.gui.main_window import LauncherWindow
     from percell4.model import CellDataModel
 
-    data_model = CellDataModel()
+    session = Session()
+    data_model = CellDataModel(session)
     launcher = LauncherWindow(data_model)
     launcher.show()
 

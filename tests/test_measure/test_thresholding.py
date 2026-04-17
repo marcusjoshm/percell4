@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from percell4.measure.thresholding import (
+from percell4.domain.measure.thresholding import (
     THRESHOLD_METHODS,
     apply_gaussian_smoothing,
     threshold_adaptive,

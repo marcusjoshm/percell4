@@ -161,8 +161,21 @@ class GroupedSegPanel(QWidget):
         self._kmeans_group.setVisible(text == "K-means")
 
     def update_channels(self) -> None:
-        """Refresh channel dropdown from viewer image layers."""
+        """Refresh channel dropdown from Session metadata (preferred) or viewer layers."""
         self._channel_combo.clear()
+
+        # Prefer Session metadata (works without viewer open)
+        session = self.data_model.session
+        if session.dataset is not None:
+            ch_names = list(session.dataset.metadata.get("channel_names", []))
+            for name in ch_names:
+                self._channel_combo.addItem(name)
+            if session.active_channel:
+                self._channel_combo.setCurrentText(session.active_channel)
+            if ch_names:
+                return
+
+        # Fallback: viewer layers (legacy path)
         if self._launcher is None:
             return
         viewer_win = self._launcher._windows.get("viewer")

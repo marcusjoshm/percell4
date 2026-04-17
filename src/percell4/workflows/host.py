@@ -14,16 +14,21 @@ that:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from percell4.application.session import Session
     from percell4.gui.viewer import ViewerWindow
-    from percell4.model import CellDataModel
 
 
 @runtime_checkable
 class WorkflowHost(Protocol):
-    """Methods a batch workflow runner needs from its host application."""
+    """Methods a batch workflow runner needs from its host application.
+
+    The host provides UI-level services (locking, window management,
+    status display) and access to the shared Session and viewer. Domain
+    operations go through use cases; the host is purely the GUI adapter.
+    """
 
     def set_workflow_locked(self, locked: bool) -> None:
         """Disable (or re-enable) all main-UI actions while a workflow runs."""
@@ -34,8 +39,15 @@ class WorkflowHost(Protocol):
     def get_viewer_window(self) -> ViewerWindow:
         """Return the host's shared napari viewer window."""
 
-    def get_data_model(self) -> CellDataModel:
-        """Return the host's shared measurement model."""
+    def get_session(self) -> Session:
+        """Return the host's shared application Session."""
+
+    def get_data_model(self) -> Any:
+        """Return the host's CellDataModel (deprecated — use get_session).
+
+        Kept for backward compatibility with ThresholdQCController and
+        SegmentationQCController which need the Qt signal bridge.
+        """
 
     def close_child_windows(self) -> None:
         """Close ancillary top-level windows (cell table, data plot, phasor).

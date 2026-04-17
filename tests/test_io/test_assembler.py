@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from percell4.io.assembler import assemble_channels, assemble_tiles, project_z
+from percell4.domain.io.assembler import assemble_channels, assemble_tiles, project_z
 
 
 # ── Tile stitching ────────────────────────────────────────────

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import tifffile
 
-from percell4.io.readers import read_flim_bin, read_tiff
+from percell4.adapters.readers import read_flim_bin, read_tiff
 
 
 def test_read_tiff(tmp_path):

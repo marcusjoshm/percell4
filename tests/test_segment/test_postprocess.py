@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from percell4.segment.postprocess import (
+from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
     relabel_sequential,
