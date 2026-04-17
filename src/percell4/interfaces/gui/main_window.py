@@ -888,13 +888,13 @@ class LauncherWindow(QMainWindow):
         self.statusBar().showMessage("Dataset closed")
 
     def _update_active_channel_label(self) -> None:
-        """Update channel label in the segmentation panel.
+        """No-op. Channel labels are now Session-backed.
 
-        The Data tab's channel display is now a Session-backed QComboBox
-        (populated on dataset load), so it no longer needs pushing here.
+        Data tab: QComboBox populated from Session on dataset load.
+        Seg panel: subscribes to state_changed and reads Session.
+        Analysis panel: reads Session.active_channel on state_changed.
         """
-        if hasattr(self, "_seg_panel"):
-            self._seg_panel.update_channel_label()
+        pass
 
     def _sync_active_layers_from_viewer(self) -> None:
         """When user clicks a layer in napari, update the active seg/mask in the model."""

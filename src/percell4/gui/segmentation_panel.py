@@ -46,6 +46,13 @@ class SegmentationPanel(QWidget):
 
         self._build_ui()
 
+        # Update channel label when dataset loads or channel changes
+        self.data_model.state_changed.connect(self._on_state_changed)
+
+    def _on_state_changed(self, change) -> None:
+        if change.data:
+            self.update_channel_label()
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -214,43 +221,36 @@ class SegmentationPanel(QWidget):
     # ── Channel tracking ──────────────────────────────────────
 
     def update_channel_label(self) -> None:
-        """Update the active channel label from the viewer."""
-        if self._launcher is None:
-            return
-        viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self._channel_label.setText("None selected")
-            return
-        active = viewer_win.viewer.layers.selection.active
-        if active is not None and active.__class__.__name__ == "Image":
-            self._channel_label.setText(active.name)
-        else:
-            for layer in viewer_win.viewer.layers:
-                if layer.__class__.__name__ == "Image":
-                    self._channel_label.setText(layer.name)
-                    return
-            self._channel_label.setText("No image loaded")
+        """Update the active channel label from the Session."""
+        ch = self.data_model.session.active_channel
+        self._channel_label.setText(ch or "None selected")
 
     # ── Cellpose ──────────────────────────────────────────────
 
     def _on_run_cellpose(self) -> None:
         if self._launcher is None:
             return
+
+        # Read channel from Session
+        channel_name = self.data_model.session.active_channel
+        if not channel_name:
+            self._show_status("Select a channel in the Data tab first")
+            return
+
         viewer_win = self._launcher._windows.get("viewer")
         if viewer_win is None or viewer_win.viewer is None:
             self._show_status("Open a dataset in the viewer first")
             return
 
-        active_layer = viewer_win.viewer.layers.selection.active
-        if active_layer is None or active_layer.__class__.__name__ != "Image":
-            image_layers = [
-                layer for layer in viewer_win.viewer.layers
-                if layer.__class__.__name__ == "Image"
-            ]
-            if not image_layers:
-                self._show_status("No image loaded in viewer")
-                return
-            active_layer = image_layers[0]
+        # Find the image layer matching the active channel
+        active_layer = None
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == "Image" and layer.name == channel_name:
+                active_layer = layer
+                break
+        if active_layer is None:
+            self._show_status(f"Channel '{channel_name}' not found in viewer")
+            return
 
         image = active_layer.data
         model_type = self._cp_model.currentText()
@@ -295,11 +295,19 @@ class SegmentationPanel(QWidget):
     # ── Load ROIs ─────────────────────────────────────────────
 
     def _get_image_shape(self):
+        """Get the spatial shape of the current dataset's image data."""
+        # Prefer Session → viewer layer for the active channel
+        channel_name = self.data_model.session.active_channel
         if self._launcher is None:
             return None
         viewer_win = self._launcher._windows.get("viewer")
         if viewer_win is None or viewer_win.viewer is None:
             return None
+        if channel_name:
+            for layer in viewer_win.viewer.layers:
+                if layer.__class__.__name__ == "Image" and layer.name == channel_name:
+                    return layer.data.shape[-2:]
+        # Fallback: first image layer
         for layer in viewer_win.viewer.layers:
             if layer.__class__.__name__ == "Image":
                 return layer.data.shape[-2:]
