@@ -32,6 +32,7 @@ class StateChange:
     filter: bool = False        # filtered_ids changed
     segmentation: bool = False  # active segmentation layer changed
     mask: bool = False          # active mask layer changed
+    channel: bool = False       # active channel changed
 
 
 class CellDataModel(QObject):
@@ -58,6 +59,7 @@ class CellDataModel(QObject):
             Event.ACTIVE_SEGMENTATION_CHANGED, self._on_segmentation_changed
         )
         self._session.subscribe(Event.ACTIVE_MASK_CHANGED, self._on_mask_changed)
+        self._session.subscribe(Event.ACTIVE_CHANNEL_CHANGED, self._on_channel_changed)
 
     @property
     def session(self) -> Session:
@@ -92,6 +94,10 @@ class CellDataModel(QObject):
     def _on_mask_changed(self) -> None:
         if not self._wiring_session:
             self.state_changed.emit(StateChange(mask=True))
+
+    def _on_channel_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(channel=True))
 
     # ── Read-only properties (delegate to Session) ──────────
 

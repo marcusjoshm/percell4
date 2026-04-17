@@ -50,7 +50,7 @@ class SegmentationPanel(QWidget):
         self.data_model.state_changed.connect(self._on_state_changed)
 
     def _on_state_changed(self, change) -> None:
-        if change.data:
+        if change.data or change.channel:
             self.update_channel_label()
 
     def _build_ui(self) -> None:

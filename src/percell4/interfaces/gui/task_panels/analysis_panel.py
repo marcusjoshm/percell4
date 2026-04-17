@@ -276,7 +276,7 @@ class AnalysisPanel(QWidget):
     def _on_state_changed(self, change) -> None:
         if change.filter:
             self._on_filter_state_changed()
-        if change.data:
+        if change.data or change.channel:
             self._update_channel_display()
 
     # ── Cell Filter ──────────────────────────────────────────
