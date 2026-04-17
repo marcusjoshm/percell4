@@ -8,15 +8,12 @@ real napari Viewer or QApplication needed for most paths.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from percell4.gui.multi_select import (
     MultiLabelSelectController,
     StagingBuffer,
 )
-
 
 # ── StagingBuffer ─────────────────────────────────────────────
 

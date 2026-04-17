@@ -123,6 +123,17 @@ class LauncherWindow(QMainWindow):
         quit_action.triggered.connect(QApplication.quit)
         file_menu.addAction(quit_action)
 
+        selection_menu = menu.addMenu("&Selection")
+
+        self._multi_select_action = QAction("&Multi-select...", self)
+        self._multi_select_action.setShortcut("M")
+        self._multi_select_action.setToolTip(
+            "Click labels in the viewer to build a selection, then "
+            "Ctrl+Return to commit (M)"
+        )
+        self._multi_select_action.triggered.connect(self._on_multi_select)
+        selection_menu.addAction(self._multi_select_action)
+
     # ── Central widget: sidebar + stacked content ─────────────
 
     def _create_central_widget(self) -> None:
@@ -622,6 +633,22 @@ class LauncherWindow(QMainWindow):
         if path:
             self._project_dir = path
             self.statusBar().showMessage(f"Opened project: {path}")
+
+    def _on_multi_select(self) -> None:
+        """Open the modal multi-label selection tool on the viewer."""
+        viewer_win = self.get_viewer_window()
+        if viewer_win is None:
+            self.statusBar().showMessage(
+                "Open a dataset and a Labels layer before multi-select"
+            )
+            return
+        viewer_win.show()
+        ok = viewer_win.launch_multi_select_tool(self)
+        if not ok:
+            self.statusBar().showMessage(
+                "Multi-select unavailable: no active labels layer or "
+                "another tool is running"
+            )
 
     def _on_import_dataset(self) -> None:
         from percell4.gui.compress_dialog import CompressDialog

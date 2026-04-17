@@ -37,7 +37,7 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
+from typing import Final, Protocol
 
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QKeySequence
@@ -53,14 +53,9 @@ from qtpy.QtWidgets import (
 
 from percell4.gui import theme
 
-if TYPE_CHECKING:
-    from percell4.gui.viewer import ViewerWindow
-    from percell4.interfaces.gui.main_window import LauncherWindow
-    from percell4.model import CellDataModel
-
 logger = logging.getLogger(__name__)
 
-LabelId: TypeAlias = int
+type LabelId = int
 
 _PAN_ZOOM: Final = "pan_zoom"
 _STAGED_COLOR: Final = (0.0, 0.9, 0.9, 0.6)  # cyan 0.6α
@@ -378,7 +373,9 @@ class MultiLabelSelectController:
 
         nav = QHBoxLayout()
         self._accept_button = QPushButton("Accept")
-        self._accept_button.setToolTip("Commit the staged set as the current selection (Ctrl+Return)")
+        self._accept_button.setToolTip(
+            "Commit the staged set as the current selection (Ctrl+Return)"
+        )
         self._accept_button.clicked.connect(self.accept)
         nav.addWidget(self._accept_button)
 
