@@ -9,7 +9,7 @@ when the launcher is retired.
 from __future__ import annotations
 
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QSettings, Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,7 +21,6 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSettings,
     QSpinBox,
     QVBoxLayout,
     QWidget,

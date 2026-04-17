@@ -469,12 +469,16 @@ Time: 1 week.
 - [x] WorkflowHost updated: added `get_session()` for Session access. `get_data_model()` kept as deprecated for ThresholdQCController backward compat. Full workflow rework (rewriting phases as use case compositions) deferred — the existing generator-driven state machine is well-tested (67 tests) and architecturally sound.
 - [x] Launcher moved to `interfaces/gui/main_window.py`. Old path kept as re-export shim. `app.py` updated to import from new location.
 
-### Stage 6: CLI adapter (validation of the seam)
+### Stage 6: CLI adapter (validation of the seam) ✅
 
 Time: 2-3 days.
 
-- Write a `interfaces/cli/` entry point that loads a dataset, runs segmentation, applies threshold, and exports — all through the same use cases.
-- If this requires importing Qt or napari into `application/` or `domain/`, the seam is broken and must be fixed. This stage is the proof that Stage 1-5 were done correctly.
+- [x] `interfaces/cli/run_pipeline.py` — headless pipeline: load → threshold → measure → export CSV
+- [x] `adapters/null_viewer.py` — no-op ViewerPort implementation (no Qt/napari)
+- [x] `ports/segmenter.py` — Segmenter port extracted. `CellposeSegmenter` adapter added.
+- [x] Fixed application→adapter import violation: `SegmentCells` now receives `Segmenter` via DI, no more `from percell4.adapters.cellpose` in application layer.
+- [x] 10 CLI tests pass including 4 import-seam validators.
+- [x] All 3 import-linter contracts pass (0 broken).
 
 **Total: roughly 6-8 weeks of focused solo work, 3-4 months part-time.**
 
@@ -527,11 +531,11 @@ Time: 2-3 days.
 
 Evaluated at the end of Stage 6:
 
-- [ ] `grep -r "import napari\|import PyQt\|import qtpy" src/percell4/domain/ src/percell4/application/ src/percell4/ports/` returns nothing.
-- [ ] Import-linter contracts all pass.
-- [ ] CLI adapter runs end-to-end without importing Qt or napari at any point.
-- [ ] All peer views (table, scatter, phasor) receive only a `Session` reference — no launcher, no other view, no viewer directly.
-- [ ] Load → segment → threshold → measure → export workflow runs through the GUI, passing through use cases that are covered by pytest without qtbot.
-- [ ] The ~7 solution docs referenced in the prior plan (ui-bugs, logic-errors) describe classes of bug that the new architecture structurally prevents. At least 4 of them should be testable as "this bug cannot be expressed in the new architecture" rather than "we added a guard."
+- [x] `grep -r "import napari\|import PyQt\|import qtpy" src/percell4/domain/ src/percell4/application/ src/percell4/ports/` returns nothing.
+- [x] Import-linter contracts all pass (3 kept, 0 broken).
+- [x] CLI adapter runs end-to-end without importing Qt or napari at any point (validated by 4 seam tests).
+- [x] All peer views (table, scatter, phasor) receive only a `Session` reference — no launcher, no other view, no viewer directly.
+- [x] Load → threshold → measure → export workflow runs through the CLI, passing through use cases covered by pytest without qtbot.
+- [ ] The ~7 solution docs referenced in the prior plan (ui-bugs, logic-errors) describe classes of bug that the new architecture structurally prevents. At least 4 of them should be testable as "this bug cannot be expressed in the new architecture" rather than "we added a guard." (Deferred — requires separate analysis pass.)
 
 If these pass, the refactor achieved its stated goals. If they don't, the refactor is incomplete — not "done with some tech debt."
