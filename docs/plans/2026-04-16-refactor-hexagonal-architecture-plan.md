@@ -441,7 +441,7 @@ Time: 1 week.
 
 Peer views now work against Session. Old launcher still exists via CellDataModel bridge; it's getting smaller.
 
-### Stage 4: Build out use cases + task panels
+### Stage 4: Build out use cases + task panels ✅
 
 Time: 2-3 weeks.
 
