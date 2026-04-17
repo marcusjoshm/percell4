@@ -266,8 +266,14 @@ class SegmentationPanel(QWidget):
             run_cellpose, image, model_type=model_type, diameter=diameter, gpu=gpu,
         )
         self._worker.finished.connect(self._on_cellpose_done)
-        self._worker.error.connect(lambda msg: self._show_status(f"Error: {msg}"))
+        self._worker.error.connect(self._on_cellpose_error)
         self._worker.start()
+
+    def _on_cellpose_error(self, err) -> None:
+        from percell4.gui.torch_error import handle_worker_error
+
+        if not handle_worker_error(self, err, context="Cellpose"):
+            self._show_status(f"Error: {err.exc_type}: {err.message}")
 
     def _on_cellpose_done(self, masks) -> None:
         from percell4.application.use_cases.segment_cells import SegmentCells

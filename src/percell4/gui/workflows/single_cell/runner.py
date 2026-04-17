@@ -457,17 +457,18 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                           event="done", message=msg)
                 on_complete(PhaseResult(success=True, message=msg))
 
-            def _on_worker_error(err: str):
+            def _on_worker_error(err):
                 self._active_worker = None
-                logger.error("segment worker error: %s", err)
+                message = f"{err.exc_type}: {err.message}"
+                logger.error("segment worker error: %s", message)
                 record_failure(
                     self._metadata,
                     dataset_name=entry.name,
                     phase_name="segment",
                     failure=DatasetFailure.SEGMENTATION_ERROR,
-                    message=err,
+                    message=message,
                 )
-                on_complete(PhaseResult(success=False, message=err))
+                on_complete(PhaseResult(success=False, message=message))
 
             worker.finished.connect(_on_worker_finished)
             worker.error.connect(_on_worker_error)

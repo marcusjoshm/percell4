@@ -294,8 +294,14 @@ class GroupedSegPanel(QWidget):
 
         self._worker = Worker(measure_cells, channel_image, seg_labels, metrics=[metric])
         self._worker.finished.connect(self._on_measure_done)
-        self._worker.error.connect(lambda msg: self._show_status(f"Measure error: {msg}"))
+        self._worker.error.connect(self._on_measure_error)
         self._worker.start()
+
+    def _on_measure_error(self, err) -> None:
+        from percell4.gui.torch_error import handle_worker_error
+
+        if not handle_worker_error(self, err, context="Measure"):
+            self._show_status(f"Measure error: {err.exc_type}: {err.message}")
 
     def _on_measure_done(self, new_df) -> None:
         p = self._pending
@@ -369,8 +375,14 @@ class GroupedSegPanel(QWidget):
             )
 
         self._worker.finished.connect(self._on_grouping_done)
-        self._worker.error.connect(lambda msg: self._show_status(f"Grouping error: {msg}"))
+        self._worker.error.connect(self._on_grouping_error)
         self._worker.start()
+
+    def _on_grouping_error(self, err) -> None:
+        from percell4.gui.torch_error import handle_worker_error
+
+        if not handle_worker_error(self, err, context="Grouping"):
+            self._show_status(f"Grouping error: {err.exc_type}: {err.message}")
 
     def _on_grouping_done(self, result) -> None:
         ctx = self._grouping_context
