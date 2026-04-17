@@ -121,3 +121,19 @@ def run_cellpose(
         )
 
     return np.asarray(masks, dtype=np.int32)
+
+
+class CellposeSegmenter:
+    """Segmenter port implementation backed by Cellpose.
+
+    Conforms to percell4.ports.segmenter.Segmenter protocol.
+    """
+
+    def run(
+        self,
+        image: NDArray,
+        model_type: str = "cyto3",
+        diameter: float | None = None,
+        gpu: bool = False,
+    ) -> NDArray[np.int32]:
+        return run_cellpose(image, model_type=model_type, diameter=diameter, gpu=gpu)

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from percell4.adapters.cellpose import run_cellpose
 from percell4.application.session import Session
 from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
@@ -15,6 +14,7 @@ from percell4.domain.segmentation.postprocess import (
     relabel_sequential,
 )
 from percell4.ports.dataset_repository import DatasetRepository
+from percell4.ports.segmenter import Segmenter
 
 
 @dataclass
@@ -40,9 +40,15 @@ class SegmentCells:
         worker.finished.connect(lambda masks: segment_uc.finalize(masks))
     """
 
-    def __init__(self, repo: DatasetRepository, session: Session) -> None:
+    def __init__(
+        self,
+        repo: DatasetRepository,
+        session: Session,
+        segmenter: Segmenter | None = None,
+    ) -> None:
         self._repo = repo
         self._session = session
+        self._segmenter = segmenter
 
     def run_inference(
         self,
@@ -51,11 +57,17 @@ class SegmentCells:
         diameter: float | None = None,
         gpu: bool = False,
     ) -> NDArray[np.int32]:
-        """Run Cellpose inference (synchronous, CPU-heavy).
+        """Run segmentation inference (synchronous, CPU-heavy).
 
-        Call from a worker thread. Returns raw masks.
+        Requires a Segmenter to be injected at construction.
+        Call from a worker thread in the GUI, or directly in the CLI.
         """
-        return run_cellpose(image, model_type=model_type, diameter=diameter, gpu=gpu)
+        if self._segmenter is None:
+            raise ValueError(
+                "No segmenter injected. Pass a Segmenter at construction "
+                "(e.g., CellposeSegmenter from adapters/cellpose.py)."
+            )
+        return self._segmenter.run(image, model_type=model_type, diameter=diameter, gpu=gpu)
 
     def finalize(
         self,
