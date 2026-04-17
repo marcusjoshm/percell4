@@ -583,8 +583,8 @@ class LauncherWindow(QMainWindow):
             self._update_active_channel_label()
             if hasattr(self, "_seg_panel"):
                 self._seg_panel.update_channel_label()
-            if hasattr(self, "_grouped_seg_panel"):
-                self._grouped_seg_panel.update_channels()
+            if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
+                self._analysis_panel._grouped_seg_panel.update_channels()
             # Update active segmentation/mask from napari layer selection
             self._sync_active_layers_from_viewer()
 
@@ -849,8 +849,8 @@ class LauncherWindow(QMainWindow):
         # Wire napari layer selection events
         self._wire_viewer_layer_selection()
         self._update_active_channel_label()
-        if hasattr(self, "_grouped_seg_panel"):
-            self._grouped_seg_panel.update_channels()
+        if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
+            self._analysis_panel._grouped_seg_panel.update_channels()
 
     def _update_data_tab_from_store(self) -> None:
         """Update the Data tab info label and dropdowns from the current store."""

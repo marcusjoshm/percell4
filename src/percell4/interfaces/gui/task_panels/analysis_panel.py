@@ -257,11 +257,27 @@ class AnalysisPanel(QWidget):
     def _show_window(self, name: str) -> None:
         self._show_window_cb(name)
 
+    def _update_channel_display(self) -> None:
+        """Sync the threshold channel label from the Session's active channel."""
+        ch = self.data_model.session.active_channel
+        self._thresh_channel_label.setText(ch or "None selected")
+        from percell4.gui import theme
+        if ch:
+            self._thresh_channel_label.setStyleSheet(
+                f"color: {theme.ACCENT}; font-weight: bold;"
+            )
+        else:
+            self._thresh_channel_label.setStyleSheet(
+                f"color: {theme.TEXT_MUTED};"
+            )
+
     # ── State change routing ─────────────────────────────────
 
     def _on_state_changed(self, change) -> None:
         if change.filter:
             self._on_filter_state_changed()
+        if change.data:
+            self._update_channel_display()
 
     # ── Cell Filter ──────────────────────────────────────────
 
