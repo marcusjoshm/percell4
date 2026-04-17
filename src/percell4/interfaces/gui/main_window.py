@@ -758,6 +758,9 @@ class LauncherWindow(QMainWindow):
 
     def _load_h5_into_viewer(self, h5_path: str) -> None:
         """Set the current dataset and load it into the viewer."""
+        from pathlib import Path as _Path
+
+        from percell4.domain.dataset import DatasetHandle
         from percell4.store import DatasetStore
 
         store = DatasetStore(h5_path)
@@ -769,8 +772,9 @@ class LauncherWindow(QMainWindow):
         self._current_store = store
         self._current_h5_path = h5_path
 
-        # Clear previous model state
-        self.data_model.clear()
+        # Update Session with DatasetHandle (drives channel combo + active_channel)
+        handle = DatasetHandle(path=_Path(h5_path), metadata=store.metadata)
+        self.data_model.session.set_dataset(handle)
 
         # Update Data tab info + dropdowns
         self._update_data_tab_from_store()

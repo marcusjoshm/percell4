@@ -128,17 +128,18 @@ class Session:
         self._dataset = handle
         self._active_segmentation = None
         self._active_mask = None
-        self._active_channel = None
         self._selection = frozenset()
         self._filter_ids = None
         self._measurements = pd.DataFrame()
         self._filtered_df_cache = None
-        self._emit(Event.DATASET_CHANGED)
-        # Auto-select first channel from metadata
+        # Auto-select first channel BEFORE emitting DATASET_CHANGED,
+        # so subscribers see the active channel already set.
         if handle is not None:
             ch_names = list(handle.metadata.get("channel_names", []))
-            if ch_names:
-                self.set_active_channel(ch_names[0])
+            self._active_channel = ch_names[0] if ch_names else None
+        else:
+            self._active_channel = None
+        self._emit(Event.DATASET_CHANGED)
 
     def set_selection(self, ids: frozenset[CellId]) -> None:
         if ids == self._selection:
