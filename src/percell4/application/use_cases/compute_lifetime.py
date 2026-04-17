@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from percell4.application.session import Session
 from percell4.domain.flim.phasor import phasor_to_lifetime
 from percell4.ports.dataset_repository import DatasetRepository
+from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 
 @dataclass
@@ -33,7 +34,7 @@ class ComputeLifetime:
     def execute(self, channel: str) -> LifetimeResult:
         handle = self._session.dataset
         if handle is None:
-            raise ValueError("No dataset loaded")
+            raise NoDatasetError("No dataset loaded")
 
         meta = handle.metadata
         freq = meta.get("flim_frequency_mhz", None)

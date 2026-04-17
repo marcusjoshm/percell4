@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from percell4.application.session import Session
 from percell4.ports.dataset_repository import DatasetRepository
 from percell4.ports.viewer import ViewerPort
+from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 
 @dataclass
@@ -57,7 +58,7 @@ class AcceptThreshold:
         """
         handle = self._session.dataset
         if handle is None:
-            raise ValueError("No dataset loaded")
+            raise NoDatasetError("No dataset loaded")
 
         mask = (image > threshold_value).astype(np.uint8)
         mask_name = f"{method}_{channel_name}"

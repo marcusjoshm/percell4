@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from percell4.domain.errors import NoDatasetError, NoSegmentationError
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -163,7 +165,7 @@ class TestMeasureCells:
         repo = FakeRepo()
         uc = MeasureCells(repo, session)
 
-        with pytest.raises(ValueError, match="No dataset loaded"):
+        with pytest.raises(NoDatasetError, match="No dataset loaded"):
             uc.execute(metrics=["area"])
 
     def test_no_segmentation_raises(self, session, sample_image):
@@ -171,7 +173,7 @@ class TestMeasureCells:
         repo.channel_images = {"GFP": sample_image}
         uc = MeasureCells(repo, session)
 
-        with pytest.raises(ValueError, match="No active segmentation"):
+        with pytest.raises(NoSegmentationError, match="No active segmentation"):
             uc.execute(metrics=["area"])
 
     def test_with_mask(self, session, sample_labels, sample_image):
@@ -252,5 +254,5 @@ class TestAcceptThreshold:
         viewer = FakeViewer()
         uc = AcceptThreshold(repo, viewer, session)
 
-        with pytest.raises(ValueError, match="No dataset loaded"):
+        with pytest.raises(NoDatasetError, match="No dataset loaded"):
             uc.execute(np.zeros((2, 2)), 0.5, "otsu", "GFP")

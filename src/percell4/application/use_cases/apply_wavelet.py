@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 
 from percell4.application.session import Session
 from percell4.ports.dataset_repository import DatasetRepository
+from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ class ApplyWavelet:
     def execute(self, channel: str, filter_level: int = 9) -> WaveletResult:
         handle = self._session.dataset
         if handle is None:
-            raise ValueError("No dataset loaded")
+            raise NoDatasetError("No dataset loaded")
 
         # Read phasor G/S maps
         try:

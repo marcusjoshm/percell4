@@ -151,12 +151,12 @@ class Session:
         """Replace the measurements DataFrame. Prunes stale filter/selection IDs."""
         self._measurements = df
         self._filtered_df_cache = None
-        if self._filter_ids is not None and "label" in df.columns:
+        if "label" in df.columns and (self._filter_ids is not None or self._selection):
             valid = frozenset(df["label"].tolist())
-            self._filter_ids = self._filter_ids & valid
-        if self._selection and "label" in df.columns:
-            valid = frozenset(df["label"].tolist())
-            self._selection = self._selection & valid
+            if self._filter_ids is not None:
+                self._filter_ids = self._filter_ids & valid
+            if self._selection:
+                self._selection = self._selection & valid
         self._emit(Event.MEASUREMENTS_UPDATED)
 
     def set_filter(self, ids: frozenset[CellId] | None) -> None:

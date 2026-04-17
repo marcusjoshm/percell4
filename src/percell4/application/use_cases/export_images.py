@@ -38,7 +38,7 @@ class ExportImages:
     def __init__(self, repo: DatasetRepository) -> None:
         self._repo = repo
 
-    def execute(self, handle, request: ExportRequest) -> ExportResult:
+    def execute(self, handle: "DatasetHandle", request: ExportRequest) -> ExportResult:
         import tifffile
 
         request.output_folder.mkdir(parents=True, exist_ok=True)

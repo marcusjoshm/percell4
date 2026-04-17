@@ -15,6 +15,7 @@ from percell4.domain.segmentation.postprocess import (
 )
 from percell4.ports.dataset_repository import DatasetRepository
 from percell4.ports.segmenter import Segmenter
+from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 
 @dataclass
@@ -80,7 +81,7 @@ class SegmentCells:
         """
         handle = self._session.dataset
         if handle is None:
-            raise ValueError("No dataset loaded")
+            raise NoDatasetError("No dataset loaded")
 
         labels, edge_removed = filter_edge_cells(raw_masks)
         labels, small_removed = filter_small_cells(labels, min_area=min_area)

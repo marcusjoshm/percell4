@@ -12,6 +12,7 @@ from scipy.ndimage import median_filter
 from percell4.application.session import Session
 from percell4.domain.flim.phasor import compute_phasor
 from percell4.ports.dataset_repository import DatasetRepository
+from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class ComputePhasor:
     def execute(self, channel: str, harmonic: int = 1) -> PhasorResult:
         handle = self._session.dataset
         if handle is None:
-            raise ValueError("No dataset loaded")
+            raise NoDatasetError("No dataset loaded")
 
         # Read decay data
         decay_path = f"decay/{channel}"

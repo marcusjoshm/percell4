@@ -10,6 +10,7 @@ import pandas as pd
 from percell4.application.session import Session
 from percell4.domain.measure.particle import analyze_particles, analyze_particles_detail
 from percell4.ports.dataset_repository import DatasetRepository
+from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 
 @dataclass
@@ -36,15 +37,15 @@ class AnalyzeParticles:
     def execute(self, min_area: int = 1) -> ParticleResult:
         handle = self._session.dataset
         if handle is None:
-            raise ValueError("No dataset loaded")
+            raise NoDatasetError("No dataset loaded")
 
         seg_name = self._session.active_segmentation
         if not seg_name:
-            raise ValueError("No active segmentation")
+            raise NoSegmentationError("No active segmentation")
 
         mask_name = self._session.active_mask
         if not mask_name:
-            raise ValueError("No active mask — apply a threshold first")
+            raise NoMaskError("No active mask — apply a threshold first")
 
         # Read data from repository
         images = self._repo.read_channel_images(handle)
