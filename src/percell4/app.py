@@ -19,7 +19,7 @@ def main() -> None:
     apply_theme(app)
 
     from percell4.application.session import Session
-    from percell4.gui.launcher import LauncherWindow
+    from percell4.interfaces.gui.main_window import LauncherWindow
     from percell4.model import CellDataModel
 
     session = Session()
