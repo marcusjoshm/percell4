@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from percell4.measure.grouper import GroupingResult
+from percell4.domain.measure.grouper import GroupingResult
 from percell4.store import DatasetStore
 from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
@@ -112,7 +112,7 @@ def fixture_store_with_labels(tmp_path: Path) -> DatasetStore:
 @pytest.mark.slow
 def test_segment_one_writes_cellpose_qc(fixture_store):
     """Real Cellpose run — marked slow so CI can skip it if needed."""
-    from percell4.segment.cellpose import build_cellpose_model
+    from percell4.adapters.cellpose import build_cellpose_model
 
     cfg = CellposeSettings(diameter=8.0, gpu=True, min_size=5)
     model = build_cellpose_model(gpu=True)

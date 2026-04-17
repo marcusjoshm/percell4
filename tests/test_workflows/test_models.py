@@ -68,7 +68,7 @@ def test_round_rejects_unknown_metric():
 
 
 def test_round_accepts_all_builtin_metrics():
-    from percell4.measure.metrics import BUILTIN_METRICS
+    from percell4.domain.measure.metrics import BUILTIN_METRICS
 
     for metric in BUILTIN_METRICS:
         _valid_round(metric=metric)

@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import tifffile
 
-from percell4.io.importer import import_dataset
-from percell4.io.models import TokenConfig
+from percell4.adapters.importer import import_dataset
+from percell4.domain.io.models import TokenConfig
 from percell4.store import DatasetStore
 
 

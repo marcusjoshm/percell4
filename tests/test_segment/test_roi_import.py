@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from percell4.segment.roi_import import import_cellpose_seg
+from percell4.adapters.roi_import import import_cellpose_seg
 
 
 def test_import_cellpose_seg(tmp_path):

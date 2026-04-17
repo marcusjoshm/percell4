@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from percell4.measure.metrics import (
+from percell4.domain.measure.metrics import (
     BUILTIN_METRICS,
     area,
     integrated_intensity,

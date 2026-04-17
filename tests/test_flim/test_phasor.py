@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from percell4.flim.phasor import (
+from percell4.domain.flim.phasor import (
     compute_phasor,
     measure_phasor_per_cell,
     phasor_roi_to_mask,

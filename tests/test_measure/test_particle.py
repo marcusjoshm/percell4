@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from percell4.measure.particle import analyze_particles
+from percell4.domain.measure.particle import analyze_particles
 
 
 def _make_test_data():

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from percell4.io.models import TokenConfig
-from percell4.io.scanner import FileScanner
+from percell4.domain.io.models import TokenConfig
+from percell4.domain.io.scanner import FileScanner
 
 
 @pytest.fixture

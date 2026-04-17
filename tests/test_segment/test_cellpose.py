@@ -12,13 +12,13 @@ import pytest
 
 def test_cellpose_importable():
     """Cellpose module can be imported without errors."""
-    from percell4.segment.cellpose import run_cellpose  # noqa: F401
+    from percell4.adapters.cellpose import run_cellpose  # noqa: F401
 
 
 @pytest.mark.slow
 def test_cellpose_runs_on_synthetic_image():
     """Run Cellpose on a small synthetic image (requires model download)."""
-    from percell4.segment.cellpose import run_cellpose
+    from percell4.adapters.cellpose import run_cellpose
 
     # Create a simple image with bright circles on dark background
     image = np.zeros((128, 128), dtype=np.float32)
