@@ -92,6 +92,9 @@ class Hdf5DatasetRepository:
     def read_labels(self, handle: DatasetHandle, name: str) -> NDArray[np.int32]:
         return self._store(handle).read_labels(name)
 
+    def write_labels(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
+        self._store(handle).write_labels(name, data)
+
     def list_labels(self, handle: DatasetHandle) -> list[str]:
         return self._store(handle).list_labels()
 

@@ -48,6 +48,12 @@ class LauncherWindow(QMainWindow):
         self.setWindowTitle("PerCell4")
         self.resize(700, 500)
 
+        # Use cases (constructed lazily since viewer adapter depends on viewer window)
+        from percell4.adapters.hdf5_store import Hdf5DatasetRepository
+
+        self._repo = Hdf5DatasetRepository()
+        self._use_cases_built = False
+
         # Window registry — all managed windows
         self._windows: dict[str, QWidget] = {}
 
@@ -1239,11 +1245,27 @@ class LauncherWindow(QMainWindow):
         self._refresh_management_combos()
 
     def _on_close_dataset(self) -> None:
-        viewer = self._windows.get("viewer")
-        if viewer is not None:
-            viewer.clear()
-            viewer.set_subtitle("")
-        self.data_model.clear()
+        from percell4.application.use_cases.close_dataset import CloseDataset
+        from percell4.adapters.napari_viewer import NapariViewerAdapter
+
+        viewer_win = self._windows.get("viewer")
+
+        # Delegate to use case (clears session + viewer)
+        try:
+            if viewer_win is not None:
+                viewer_adapter = NapariViewerAdapter(viewer_win)
+                uc = CloseDataset(viewer_adapter, self.data_model.session)
+                uc.execute()
+            else:
+                # No viewer open — just clear the session directly
+                self.data_model.session.clear()
+        except Exception as e:
+            self.statusBar().showMessage(f"Error closing dataset: {e}")
+            return
+
+        # Update launcher UI
+        if viewer_win is not None:
+            viewer_win.set_subtitle("")
         self._current_store = None
         self._current_h5_path = None
         if hasattr(self, "_info_label"):
@@ -1636,8 +1658,6 @@ class LauncherWindow(QMainWindow):
 
     def _on_threshold_accept(self) -> None:
         """Accept the current preview threshold and save the mask to HDF5."""
-        import numpy as np
-
         viewer_win = self._windows.get("viewer")
         if viewer_win is None or viewer_win.viewer is None:
             self.statusBar().showMessage("No preview to accept")
@@ -1651,8 +1671,6 @@ class LauncherWindow(QMainWindow):
 
         value = self._thresh_value_spin.value()
         method = self._thresh_method.currentText().lower()
-        mask = (image > value).astype(np.uint8)
-        mask_name = f"{method}_{channel_name}"
 
         # Remove preview and ROI layers
         for name in ("_threshold_preview", "_threshold_roi"):
@@ -1660,23 +1678,29 @@ class LauncherWindow(QMainWindow):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
 
-        # Write to store BEFORE adding layer — sync may fire during add_mask
-        store = getattr(self, "_current_store", None)
-        if store is not None:
-            store.write_mask(mask_name, mask)
+        try:
+            from percell4.application.use_cases.accept_threshold import AcceptThreshold
+            from percell4.adapters.napari_viewer import NapariViewerAdapter
 
-        viewer_win.add_mask(mask, name=mask_name)
-        self.data_model.set_active_mask(mask_name)
+            viewer_adapter = NapariViewerAdapter(viewer_win)
+            uc = AcceptThreshold(self._repo, viewer_adapter, self.data_model.session)
+            result = uc.execute(image, value, method, channel_name)
+        except ValueError as e:
+            self.statusBar().showMessage(str(e))
+            return
 
-        n_pos = int(mask.sum())
-        n_total = mask.size
-        pct = 100.0 * n_pos / n_total if n_total > 0 else 0
+        # Add mask layer to viewer (use case wrote to store + updated session)
+        viewer_win.add_mask(
+            (image > value).astype("uint8"), name=result.mask_name
+        )
+
+        pct = 100.0 * result.n_positive / result.n_total if result.n_total > 0 else 0
         self._thresh_result_label.setText(
-            f"Saved: {mask_name}\n"
-            f"Threshold: {value:.1f} | {n_pos:,} / {n_total:,} px ({pct:.1f}%)"
+            f"Saved: {result.mask_name}\n"
+            f"Threshold: {value:.1f} | {result.n_positive:,} / {result.n_total:,} px ({pct:.1f}%)"
         )
         self._thresh_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
-        self.statusBar().showMessage(f"Saved mask '{mask_name}' (threshold {value:.1f})")
+        self.statusBar().showMessage(f"Saved mask '{result.mask_name}' (threshold {value:.1f})")
 
         # Clean up working state
         self._thresh_working_image = None
@@ -1765,105 +1789,37 @@ class LauncherWindow(QMainWindow):
 
     def _on_measure_cells(self) -> None:
         """Measure per-cell metrics using active channel, segmentation, and mask."""
-        import numpy as np
-
-        # Show metric selection dialog
+        # UI: get metric selection from dialog
         selected_metrics = self._show_metric_config_dialog()
         if selected_metrics is None:
             return
 
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self.statusBar().showMessage("Open the viewer first")
+        if self.data_model.session.dataset is None:
+            self.statusBar().showMessage("No dataset loaded")
             return
-
-        # Get all image layers for multi-channel measurement
-        image_layers = {}
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Image":
-                image_layers[layer.name] = layer.data.astype(np.float32)
-
-        if not image_layers:
-            self.statusBar().showMessage("No image loaded")
-            return
-
-        # Get active segmentation labels
-        seg_name = self.data_model.active_segmentation
-        if not seg_name:
-            self.statusBar().showMessage("No active segmentation — select one in the Data tab")
-            return
-
-        labels = None
-        for layer in viewer_win.viewer.layers:
-            if layer.name == seg_name:
-                labels = np.asarray(layer.data, dtype=np.int32)
-                break
-
-        if labels is None:
-            self.statusBar().showMessage(f"Segmentation '{seg_name}' not found in viewer")
-            return
-
-        if labels.max() == 0:
-            self.statusBar().showMessage("Segmentation has no cells")
-            return
-
-        labels = self._apply_cell_filter(labels)
-        if labels is None:
-            return
-
-        # Get active mask (optional)
-        mask = None
-        mask_name = self.data_model.active_mask
-        if mask_name:
-            for layer in viewer_win.viewer.layers:
-                if layer.name == mask_name:
-                    mask = np.asarray(layer.data, dtype=np.uint8)
-                    break
 
         self.statusBar().showMessage("Measuring cells...")
 
         try:
-            is_multi_roi = mask is not None and mask.max() > 1
-            if is_multi_roi:
-                roi_names = self._get_phasor_roi_names()
-                if not roi_names:
-                    unique_labels = np.unique(mask[mask > 0])
-                    roi_names = {int(v): f"roi_{v}" for v in unique_labels}
+            from percell4.application.use_cases.measure_cells import MeasureCells
 
-                from percell4.measure.measurer import measure_multichannel_multi_roi
-
-                df = measure_multichannel_multi_roi(
-                    image_layers, labels, mask, roi_names,
-                    metrics=selected_metrics,
-                )
-            else:
-                from percell4.measure.measurer import measure_multichannel
-
-                df = measure_multichannel(
-                    image_layers, labels, mask=mask, metrics=selected_metrics,
-                )
+            roi_names = self._get_phasor_roi_names() or None
+            uc = MeasureCells(self._repo, self.data_model.session)
+            df = uc.execute(metrics=selected_metrics, roi_names=roi_names)
+        except ValueError as e:
+            self.statusBar().showMessage(str(e))
+            return
         except Exception as e:
             self.statusBar().showMessage(f"Measurement error: {e}")
             return
 
         n_cells = len(df)
         n_cols = len(df.columns)
-
-        # Merge any stored group columns back into the DataFrame
-        # (group columns are stored separately and would be lost on re-measurement)
-        store = getattr(self, "_current_store", None)
-        df = self._merge_group_columns(df, store)
-
-        # Populate the data model
-        self.data_model.set_measurements(df)
-
-        # Save to HDF5
-        if store is not None:
-            store.write_dataframe("measurements", df)
-
+        seg_name = self.data_model.active_segmentation
+        mask_name = self.data_model.active_mask
         mask_note = f" (mask: {mask_name})" if mask_name else ""
         self._meas_result_label.setText(
-            f"Measured {n_cells} cells across {len(image_layers)} channel(s)\n"
+            f"Measured {n_cells} cells across multiple channel(s)\n"
             f"{n_cols} columns | seg: {seg_name}{mask_note}"
         )
         self._meas_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
@@ -1873,104 +1829,33 @@ class LauncherWindow(QMainWindow):
 
     def _on_analyze_particles(self) -> None:
         """Analyze particles within each cell using the active mask."""
-        import numpy as np
-
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self.statusBar().showMessage("Open the viewer first")
-            return
-
-        # Collect ALL image layers (multi-channel, same pattern as _on_measure_cells)
-        image_layers: dict[str, np.ndarray] = {}
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Image":
-                image_layers[layer.name] = layer.data.astype(np.float32)
-
-        if not image_layers:
-            self.statusBar().showMessage("No image loaded")
-            return
-
-        # Get active segmentation labels
-        seg_name = self.data_model.active_segmentation
-        if not seg_name:
-            self.statusBar().showMessage("No active segmentation")
-            return
-
-        labels = None
-        for layer in viewer_win.viewer.layers:
-            if layer.name == seg_name:
-                labels = np.asarray(layer.data, dtype=np.int32)
-                break
-
-        if labels is None:
-            self.statusBar().showMessage(f"Segmentation '{seg_name}' not found")
-            return
-
-        labels = self._apply_cell_filter(labels)
-        if labels is None:
-            return
-
-        # Get active mask (required for particle analysis)
-        mask_name = self.data_model.active_mask
-        if not mask_name:
-            self.statusBar().showMessage(
-                "No active mask — apply a threshold first"
-            )
-            return
-
-        mask = None
-        for layer in viewer_win.viewer.layers:
-            if layer.name == mask_name:
-                mask = np.asarray(layer.data, dtype=np.uint8)
-                break
-
-        if mask is None:
-            self.statusBar().showMessage(f"Mask '{mask_name}' not found")
-            return
-
         min_area = self._particle_min_area.value()
         self.statusBar().showMessage("Analyzing particles...")
 
-        from percell4.measure.particle import analyze_particles, analyze_particles_detail
-
         try:
-            particle_df = analyze_particles(
-                image_layers, labels, mask, min_area=min_area
-            )
-            detail_df = analyze_particles_detail(
-                image_layers, labels, mask, min_area=min_area
-            )
+            from percell4.application.use_cases.analyze_particles import AnalyzeParticles
+
+            uc = AnalyzeParticles(self._repo, self.data_model.session)
+            result = uc.execute(min_area=min_area)
+        except ValueError as e:
+            self.statusBar().showMessage(str(e))
+            return
         except Exception as e:
             self.statusBar().showMessage(f"Particle analysis error: {e}")
             return
 
-        n_cells = len(particle_df)
-        total_particles = int(particle_df["particle_count"].sum()) if n_cells > 0 else 0
+        # Store detail DataFrame for export
+        self._last_particle_df = result.summary_df
+        self._last_particle_detail_df = result.detail_df
 
-        # Merge with existing measurements if available
-        current_df = self.data_model.df
-        if not current_df.empty and "label" in current_df.columns:
-            merged = current_df.merge(particle_df, on="label", how="left")
-            self.data_model.set_measurements(merged)
-        else:
-            self.data_model.set_measurements(particle_df)
-
-        # Save to HDF5
-        store = getattr(self, "_current_store", None)
-        if store is not None:
-            store.write_dataframe("measurements", self.data_model.df)
-
-        # Store both summary and detail DataFrames for export
-        self._last_particle_df = particle_df
-        self._last_particle_detail_df = detail_df
-
+        mask_name = self.data_model.session.active_mask or "unknown"
         self._particle_result_label.setText(
-            f"{total_particles} particles in {n_cells} cells\n"
+            f"{result.total_particles} particles in {result.n_cells} cells\n"
             f"mask: {mask_name} | min area: {min_area} px"
         )
         self._particle_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self.statusBar().showMessage(
-            f"Found {total_particles} particles across {n_cells} cells"
+            f"Found {result.total_particles} particles across {result.n_cells} cells"
         )
 
     def _on_export_particle_csv(self) -> None:
@@ -1993,12 +1878,7 @@ class LauncherWindow(QMainWindow):
         """Compute phasor G/S from TCSPC decay data for the active channel."""
         import numpy as np
 
-        store = getattr(self, "_current_store", None)
-        if store is None:
-            self.statusBar().showMessage("No dataset loaded")
-            return
-
-        # Determine active channel for FLIM
+        # Gather UI inputs: active channel from viewer
         viewer_win = self._windows.get("viewer")
         active_channel = None
         if viewer_win is not None and viewer_win.viewer is not None:
@@ -2010,99 +1890,53 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Select a channel in the viewer first")
             return
 
-        # Look for decay data for this channel
-        decay_path = f"decay/{active_channel}"
-        try:
-            decay = store.read_array(decay_path)
-        except KeyError:
-            # Try without channel prefix
-            try:
-                decay = store.read_array("decay")
-            except KeyError:
-                self.statusBar().showMessage(
-                    f"No TCSPC data found for '{active_channel}'. "
-                    "Import with FLIM enabled."
-                )
-                return
-
-        self.statusBar().showMessage(
-            f"Computing phasor for {active_channel}..."
-        )
-
         harmonic = int(self._phasor_harmonic.currentText())
+        self.statusBar().showMessage(f"Computing phasor for {active_channel}...")
 
-        from percell4.flim.phasor import compute_phasor
-
-        g_map, s_map = compute_phasor(decay, harmonic=harmonic)
-
-        # Zero out low-photon pixels (flimfret threshold_min default = 0)
-        intensity_sum = decay.sum(axis=-1).astype(np.float32)
-        low_signal = intensity_sum <= 0
-        g_map[low_signal] = 0.0
-        s_map[low_signal] = 0.0
-
-        # Apply per-channel calibration if available
-        meta = store.metadata
-        cal_phase = float(meta.get(f"flim_cal_phase_{active_channel}", 0.0))
-        cal_mod = float(meta.get(f"flim_cal_mod_{active_channel}", 1.0))
-
-        if cal_phase != 0.0 or cal_mod != 1.0:
-            # Apply calibration: Cartesian 2D rotation + scaling
-            # Matches flimfret/preprocessing.py formulation exactly
-            cos_phi = np.cos(cal_phase)
-            sin_phi = np.sin(cal_phase)
-            g_cal = (g_map * cal_mod * cos_phi - s_map * cal_mod * sin_phi)
-            s_cal = (g_map * cal_mod * sin_phi + s_map * cal_mod * cos_phi)
-            g_map = g_cal.astype(np.float32)
-            s_map = s_cal.astype(np.float32)
-
-        # Apply spatial median filter (1 pass, 3x3) — matches flimfret
-        # preprocessing.py Section 2.5. This smooths noisy single-photon
-        # pixels and produces a tighter phasor cloud.
-        from scipy.ndimage import median_filter
-
-        g_map = median_filter(g_map, size=3).astype(np.float32)
-        s_map = median_filter(s_map, size=3).astype(np.float32)
-        intensity_sum = median_filter(intensity_sum, size=3).astype(np.float32)
-
-        # Write phasor maps to store
-        store.write_array(
-            f"phasor/{active_channel}/g", g_map,
-            attrs={"dims": ["H", "W"], "channel": active_channel, "harmonic": harmonic},
-        )
-        store.write_array(
-            f"phasor/{active_channel}/s", s_map,
-            attrs={"dims": ["H", "W"], "channel": active_channel, "harmonic": harmonic},
-        )
-
-        # Get intensity for weighted histogram
+        # Delegate computation + store writes to use case
         try:
-            with store.open_read() as s:
-                intensity_data = s.read_array("intensity")
-            if intensity_data.ndim == 3:
-                ch_names = list(meta.get("channel_names", []))
-                if active_channel in ch_names:
-                    phasor_intensity = intensity_data[ch_names.index(active_channel)]
-                else:
-                    phasor_intensity = intensity_data[0]
-            else:
-                phasor_intensity = intensity_data
-        except KeyError:
-            phasor_intensity = None
+            from percell4.application.use_cases.compute_phasor import ComputePhasor
 
-        # Open and populate phasor plot (pass segmentation labels for cell filtering)
+            uc = ComputePhasor(self._repo, self.data_model.session)
+            result = uc.execute(channel=active_channel, harmonic=harmonic)
+        except ValueError as e:
+            self.statusBar().showMessage(str(e))
+            return
+        except Exception as e:
+            self.statusBar().showMessage(f"Phasor computation error: {e}")
+            return
+
+        # Read intensity for weighted histogram (UI concern, not use case)
+        handle = self.data_model.session.dataset
+        phasor_intensity = None
+        if handle is not None:
+            try:
+                intensity_data = self._repo.read_array(handle, "intensity")
+                meta = handle.metadata
+                if intensity_data.ndim == 3:
+                    ch_names = list(meta.get("channel_names", []))
+                    if active_channel in ch_names:
+                        phasor_intensity = intensity_data[ch_names.index(active_channel)]
+                    else:
+                        phasor_intensity = intensity_data[0]
+                else:
+                    phasor_intensity = intensity_data
+            except KeyError:
+                phasor_intensity = None
+
+        # Open and populate phasor plot
         seg_labels = self._get_active_seg_labels()
         self._show_window("phasor_plot")
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is not None:
             phasor_win.set_phasor_data(
-                g_map, s_map, intensity=phasor_intensity, labels=seg_labels,
+                result.g_map, result.s_map,
+                intensity=phasor_intensity, labels=seg_labels,
             )
 
-        n_valid = int(np.isfinite(g_map).sum())
-        freq = meta.get("flim_frequency_mhz", "unknown")
+        freq = handle.metadata.get("flim_frequency_mhz", "unknown") if handle else "unknown"
         self.statusBar().showMessage(
-            f"Phasor computed: {n_valid:,} valid pixels | "
+            f"Phasor computed: {result.n_valid:,} valid pixels | "
             f"channel: {active_channel} | harmonic: {harmonic} | freq: {freq} MHz"
         )
 
@@ -2110,12 +1944,7 @@ class LauncherWindow(QMainWindow):
         """Apply DTCWT wavelet denoising to the active channel's phasor data."""
         import numpy as np
 
-        store = getattr(self, "_current_store", None)
-        if store is None:
-            self.statusBar().showMessage("No dataset loaded")
-            return
-
-        # Get active channel
+        # Gather UI inputs: active channel from viewer
         viewer_win = self._windows.get("viewer")
         active_channel = None
         if viewer_win is not None and viewer_win.viewer is not None:
@@ -2127,67 +1956,30 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Select a channel in the viewer first")
             return
 
-        # Read phasor G/S maps (must compute phasor first)
-        try:
-            g_map = store.read_array(f"phasor/{active_channel}/g")
-            s_map = store.read_array(f"phasor/{active_channel}/s")
-        except KeyError:
-            self.statusBar().showMessage(
-                f"No phasor data for '{active_channel}'. "
-                "Compute Phasor first."
-            )
-            return
-
-        # Read intensity for the filter (sum of decay or stored intensity)
-        try:
-            with store.open_read() as s:
-                intensity_data = s.read_array("intensity")
-        except KeyError:
-            self.statusBar().showMessage("No intensity data in dataset")
-            return
-
-        # If multi-channel, extract the right channel
-        if intensity_data.ndim == 3:
-            meta = store.metadata
-            channel_names = list(meta.get("channel_names", []))
-            if active_channel in channel_names:
-                ch_idx = channel_names.index(active_channel)
-                intensity = intensity_data[ch_idx]
-            else:
-                intensity = intensity_data[0]
-        else:
-            intensity = intensity_data
-
         filter_level = self._wavelet_level.value()
-
-        # Get frequency for lifetime calculation
-        meta = store.metadata
-        freq = meta.get("flim_frequency_mhz", None)
-        omega = None
-        if freq and freq > 0:
-            omega = 2.0 * np.pi * freq  # rad/us
-
         self.statusBar().showMessage(
             f"Applying wavelet filter (level {filter_level}) to {active_channel}..."
         )
 
+        # Delegate computation + store writes to use case
         from qtpy.QtCore import Qt
         from qtpy.QtWidgets import QApplication
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            from percell4.flim.wavelet_filter import denoise_phasor
+            from percell4.application.use_cases.apply_wavelet import ApplyWavelet
 
-            result = denoise_phasor(
-                g_map, s_map, intensity.astype(np.float64),
-                filter_level=filter_level,
-                omega=omega,
-            )
+            uc = ApplyWavelet(self._repo, self.data_model.session)
+            result = uc.execute(channel=active_channel, filter_level=filter_level)
         except ImportError:
             QApplication.restoreOverrideCursor()
             self.statusBar().showMessage(
                 "dtcwt package required. Install: pip install 'percell4[flim]'"
             )
+            return
+        except ValueError as e:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().showMessage(str(e))
             return
         except Exception as e:
             QApplication.restoreOverrideCursor()
@@ -2196,53 +1988,51 @@ class LauncherWindow(QMainWindow):
 
         QApplication.restoreOverrideCursor()
 
-        # Store filtered results
-        g_filtered = result["G"]
-        s_filtered = result["S"]
+        # Read intensity for phasor plot display (UI concern)
+        handle = self.data_model.session.dataset
+        intensity = None
+        if handle is not None:
+            try:
+                intensity_data = self._repo.read_array(handle, "intensity")
+                if intensity_data.ndim == 3:
+                    ch_names = list(handle.metadata.get("channel_names", []))
+                    if active_channel in ch_names:
+                        intensity = intensity_data[ch_names.index(active_channel)]
+                    else:
+                        intensity = intensity_data[0]
+                else:
+                    intensity = intensity_data
+            except KeyError:
+                pass
 
-        store.write_array(
-            f"phasor/{active_channel}/g_filtered", g_filtered,
-            attrs={"dims": ["H", "W"], "channel": active_channel,
-                   "filter_level": filter_level},
-        )
-        store.write_array(
-            f"phasor/{active_channel}/s_filtered", s_filtered,
-            attrs={"dims": ["H", "W"], "channel": active_channel,
-                   "filter_level": filter_level},
-        )
+        # Read unfiltered phasor for overlay in phasor plot
+        g_unfiltered = s_unfiltered = None
+        if handle is not None:
+            try:
+                g_unfiltered = self._repo.read_array(handle, f"phasor/{active_channel}/g")
+                s_unfiltered = self._repo.read_array(handle, f"phasor/{active_channel}/s")
+            except KeyError:
+                pass
 
-        if result["T"] is not None:
-            store.write_array(
-                f"phasor/{active_channel}/lifetime_filtered", result["T"],
-                attrs={"dims": ["H", "W"], "channel": active_channel},
-            )
-
-        # Update phasor plot with filtered data (pass labels for cell filtering)
+        # Update phasor plot with filtered data
         seg_labels = self._get_active_seg_labels()
         phasor_win = self._windows.get("phasor_plot")
         if phasor_win is not None:
             phasor_win.set_phasor_data(
-                g_filtered, s_filtered,
-                intensity=intensity.astype(np.float32),
-                g_unfiltered=g_map, s_unfiltered=s_map,
+                result.g_filtered, result.s_filtered,
+                intensity=intensity.astype(np.float32) if intensity is not None else None,
+                g_unfiltered=g_unfiltered, s_unfiltered=s_unfiltered,
                 labels=seg_labels,
             )
 
-        n_valid = int(np.isfinite(g_filtered).sum())
         self.statusBar().showMessage(
             f"Wavelet filter applied: level {filter_level} | "
-            f"{n_valid:,} valid pixels | channel: {active_channel}"
+            f"{result.n_valid:,} valid pixels | channel: {active_channel}"
         )
 
     def _on_compute_lifetime(self) -> None:
         """Compute lifetime map from phasor data for the active channel."""
-        import numpy as np
-
-        store = getattr(self, "_current_store", None)
-        if store is None:
-            self.statusBar().showMessage("No dataset loaded")
-            return
-
+        # Gather UI inputs: active channel from viewer
         viewer_win = self._windows.get("viewer")
         active_channel = None
         if viewer_win is not None and viewer_win.viewer is not None:
@@ -2254,53 +2044,32 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("Select a channel in the viewer first")
             return
 
-        meta = store.metadata
-        freq = meta.get("flim_frequency_mhz", None)
-        if not freq or freq <= 0:
-            self.statusBar().showMessage("No laser frequency in metadata")
+        # Delegate computation + store writes to use case
+        try:
+            from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+            uc = ComputeLifetime(self._repo, self.data_model.session)
+            result = uc.execute(channel=active_channel)
+        except ValueError as e:
+            self.statusBar().showMessage(str(e))
+            return
+        except Exception as e:
+            self.statusBar().showMessage(f"Lifetime computation error: {e}")
             return
 
-        # Try filtered phasor first, fall back to unfiltered
-        try:
-            g = store.read_array(f"phasor/{active_channel}/g_filtered")
-            s = store.read_array(f"phasor/{active_channel}/s_filtered")
-            source = "filtered"
-        except KeyError:
-            try:
-                g = store.read_array(f"phasor/{active_channel}/g")
-                s = store.read_array(f"phasor/{active_channel}/s")
-                source = "unfiltered"
-            except KeyError:
-                self.statusBar().showMessage(
-                    f"No phasor data for '{active_channel}'. Compute Phasor first."
-                )
-                return
-
-        from percell4.flim.phasor import phasor_to_lifetime
-
-        lifetime = phasor_to_lifetime(g, s, frequency_mhz=freq)
-
-        # Store
-        store.write_array(
-            f"phasor/{active_channel}/lifetime", lifetime,
-            attrs={"dims": ["H", "W"], "channel": active_channel, "source": source},
-        )
-
-        # Add as a layer in the viewer
+        # Add lifetime layer to viewer
         if viewer_win is not None:
             viewer_win.viewer.add_image(
-                lifetime,
+                result.lifetime,
                 name=f"Lifetime ({active_channel})",
                 colormap="turbo",
                 blending="additive",
             )
 
-        valid = np.isfinite(lifetime)
-        if valid.any():
-            mean_tau = float(np.nanmean(lifetime[valid]))
+        if result.mean_tau is not None:
             self.statusBar().showMessage(
-                f"Lifetime ({source}): mean={mean_tau:.2f} ns | "
-                f"channel: {active_channel} | freq: {freq} MHz"
+                f"Lifetime ({result.source}): mean={result.mean_tau:.2f} ns | "
+                f"channel: {active_channel} | freq: {result.frequency_mhz} MHz"
             )
         else:
             self.statusBar().showMessage("Lifetime: no valid pixels")

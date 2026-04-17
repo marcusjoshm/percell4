@@ -40,6 +40,10 @@ class DatasetRepository(Protocol):
         """Read a segmentation label array by name."""
         ...
 
+    def write_labels(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
+        """Write a segmentation label array."""
+        ...
+
     def list_labels(self, handle: DatasetHandle) -> list[str]:
         """List all segmentation label names."""
         ...
