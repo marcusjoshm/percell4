@@ -386,11 +386,11 @@ Six stages. Staged so that each stage ends in a working state (the app may be ug
 
 Time: 1-2 days. No production code changes.
 
-- Write pytest characterization tests around the key behaviors (the "invariants" from the prior plan). These will survive into the new architecture as integration tests against use cases. Reuse existing `conftest.py` fixtures.
-- Do a launcher-method classification pass. For each of the 80 launcher methods, tag which layer it belongs in: domain / application / ports / adapters / interfaces. Output: a markdown table.
-- Set up `importlinter` with the contracts listed earlier. Initially, contracts will fail (because everything is in `gui/`); that's fine. The contracts tell you when migration is done.
+- [x] Write pytest characterization tests around the key behaviors (the "invariants" from the prior plan). These will survive into the new architecture as integration tests against use cases. Reuse existing `conftest.py` fixtures.
+- [x] Do a launcher-method classification pass. For each of the 80 launcher methods, tag which layer it belongs in: domain / application / ports / adapters / interfaces. Output: a markdown table.
+- [x] Set up `importlinter` with the contracts listed earlier. Initially, contracts will fail (because everything is in `gui/`); that's fine. The contracts tell you when migration is done.
 
-Deliverable: test suite + migration spreadsheet + failing lint config.
+Deliverable: test suite + migration spreadsheet + ~~failing~~ passing lint config (contracts pass because new packages are clean).
 
 ### Stage 1: Empty scaffolding + vertical slice (Load Dataset)
 
@@ -399,16 +399,16 @@ Time: 1 week.
 Goal: prove the architecture works end-to-end for the simplest real flow. If this fails, stop and re-plan.
 
 Steps:
-1. Create empty `domain/`, `application/`, `ports/`, `adapters/`, `interfaces/gui/` packages.
-2. Define `DatasetRepository` port in `ports/`.
-3. Define `ViewerPort` in `ports/` (initial minimum: `show_dataset`, `clear`, `close`).
-4. Port `store.py` into `adapters/hdf5_store.py` as the `DatasetRepository` implementation. No behavior changes — this is a rename + protocol conformance.
-5. Build the initial `Session` with `set_dataset` and `dataset_changed` event.
-6. Write the `LoadDataset` use case.
-7. Write `NapariViewerAdapter.show_dataset` — enough napari integration to display a loaded dataset.
-8. In `interfaces/gui/app.py`, wire a minimal composition root.
-9. In `interfaces/gui/main_window.py`, add a "Load Dataset" button that calls the use case. Nothing else.
-10. Delete nothing from the existing launcher yet. Run the new `app.py` as a separate entry point alongside the old launcher.
+1. [x] Create empty `domain/`, `application/`, `ports/`, `adapters/`, `interfaces/gui/` packages.
+2. [x] Define `DatasetRepository` port in `ports/`.
+3. [x] Define `ViewerPort` in `ports/` (initial minimum: `show_dataset`, `clear`, `close`).
+4. [x] Port `store.py` into `adapters/hdf5_store.py` as the `DatasetRepository` implementation. No behavior changes — this is a rename + protocol conformance.
+5. [x] Build the initial `Session` with `set_dataset` and `dataset_changed` event.
+6. [x] Write the `LoadDataset` use case.
+7. [x] Write `NapariViewerAdapter.show_dataset` — enough napari integration to display a loaded dataset.
+8. [x] In `interfaces/gui/app.py`, wire a minimal composition root.
+9. [x] In `interfaces/gui/main_window.py`, add a "Load Dataset" button that calls the use case. Nothing else.
+10. [x] Delete nothing from the existing launcher yet. Run the new `app.py` as a separate entry point alongside the old launcher.
 
 **Acceptance:** you can launch the new app, click "Load Dataset," and see it in napari. Tests pass. Import-linter passes for the three new files.
 
