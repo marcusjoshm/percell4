@@ -86,14 +86,13 @@ markers = [
 ]
 
 # ── Import-linter: hexagonal architecture contracts ──────────
-# These contracts enforce layer boundaries. They will FAIL until
-# migration is complete — that's intentional. Run: lint-imports
+# These contracts enforce layer boundaries. Run: lint-imports
 
-[importlinter]
+[tool.importlinter]
 root_packages = ["percell4"]
 include_external_packages = true
 
-[importlinter:contract:domain-is-pure]
+[[tool.importlinter.contracts]]
 name = "domain/ must not import Qt, napari, h5py, or infrastructure"
 type = "forbidden"
 source_modules = ["percell4.domain"]
@@ -107,7 +106,7 @@ forbidden_modules = [
     "percell4.application",
 ]
 
-[importlinter:contract:application-no-infrastructure]
+[[tool.importlinter.contracts]]
 name = "application/ must not import Qt, napari, or concrete adapters"
 type = "forbidden"
 source_modules = ["percell4.application"]
@@ -121,7 +120,7 @@ forbidden_modules = [
     "percell4.gui",
 ]
 
-[importlinter:contract:ports-are-abstract]
+[[tool.importlinter.contracts]]
 name = "ports/ must not import adapters, interfaces, or infrastructure"
 type = "forbidden"
 source_modules = ["percell4.ports"]
