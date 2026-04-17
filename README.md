@@ -85,6 +85,19 @@ Optional development dependencies (any shell, venv active):
 python -m pip install -e ".[dev]"
 ```
 
+#### Windows: PyTorch / Cellpose
+
+Cellpose segmentation depends on PyTorch. On Windows you need two things that the default `pip install` does not provide on its own:
+
+1. **Microsoft Visual C++ 2015–2022 x64 Redistributable, version 14.50 or newer.** Download from [`aka.ms/vs/17/release/vc_redist.x64.exe`](https://aka.ms/vs/17/release/vc_redist.x64.exe). PyTorch links against this runtime; missing or stale copies manifest as `OSError: [WinError 1114]` when `import torch` runs.
+2. **CPU-only torch unless you have an NVIDIA GPU.** The default PyPI wheel is the ~2.5 GB CUDA build; on a machine without a matching CUDA driver, its satellite DLLs fail to initialize and take `c10.dll` down with them. Install the CPU wheel explicitly:
+
+    ```powershell
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+    ```
+
+    The `--index-url` form is the only published CPU-only install path — there is no `torch[cpu]` extras syntax.
+
 ### Run the application
 
 After installation, from the activated environment:
@@ -121,7 +134,7 @@ Wheels appear under `dist/`.
 
 | Extra   | Purpose                                      |
 |---------|----------------------------------------------|
-| `gpu`   | GPU-accelerated Cellpose (`cellpose[gpu]`)   |
+| `gpu`   | GPU-accelerated Cellpose (`cellpose[gpu]`) — pulls CUDA-tagged torch; requires a matching NVIDIA driver. Unsupported on Windows lab machines without a GPU. |
 | `flim`  | Additional FLIM-related dependency (`dtcwt`) |
 | `imagej`| ROI I/O via `roifile`                        |
 | `all`   | `gpu`, `flim`, and `imagej`                  |
@@ -153,6 +166,7 @@ Bundled apps are large (scientific stack + napari). GPU/CUDA is not included in 
 - **PowerShell won't run `Activate.ps1`** — Use the Command Prompt steps with `activate.bat`, or set execution policy as in the PowerShell section above.
 - **`percell4-gui` is not recognized** — Activate the venv first; the script is `.venv\Scripts\percell4-gui.exe`. You can always run `python main.py` from the repo root with the venv active.
 - **Qt / napari import errors** — This project pins **PyQt5** and uses **qtpy**. Avoid installing a second Qt binding (e.g. PyQt6) into the same venv unless you know you need it. If both are present and imports break, try: `set QT_API=pyqt5` before launching (`cmd`) or `$env:QT_API="pyqt5"` (`PowerShell`).
+- **`OSError: [WinError 1114] ... c10.dll`** — PyTorch failed to initialize. Most common fixes, in order: (1) install the [MSVC 2015–2022 x64 Redistributable 14.50+](https://aka.ms/vs/17/release/vc_redist.x64.exe) and reboot; (2) reinstall CPU-only torch with `pip install --no-cache-dir --force-reinstall torch --index-url https://download.pytorch.org/whl/cpu`; (3) if you have `torch==2.9.0` specifically, downgrade — `pip install "torch<2.9" --index-url https://download.pytorch.org/whl/cpu` (known regression [pytorch#169429](https://github.com/pytorch/pytorch/issues/169429) with Qt import order). Full triage in `docs/plans/2026-04-17-fix-windows-torch-c10-dll-init-failure-plan.md`.
 - **Very long clone path** — If installs fail with path-related errors, clone the repo to a short path like `C:\src\percell4` or enable Windows long paths.
 
 ## License
