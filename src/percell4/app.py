@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import sys
 
+import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
+
 from qtpy.QtWidgets import QApplication
 
 

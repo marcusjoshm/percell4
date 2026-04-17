@@ -23,6 +23,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
 import numpy as np
 
 from percell4.adapters.hdf5_store import Hdf5DatasetRepository
