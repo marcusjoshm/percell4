@@ -119,13 +119,7 @@ class FlimPanel(QWidget):
         self._show_window_cb(name)
 
     def _get_active_channel(self) -> str | None:
-        viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
-            return None
-        active = viewer_win.viewer.layers.selection.active
-        if active is not None and active.__class__.__name__ == "Image":
-            return active.name
-        return None
+        return self.data_model.session.active_channel
 
     def _get_active_seg_labels(self):
         return self._get_active_seg_labels_cb()

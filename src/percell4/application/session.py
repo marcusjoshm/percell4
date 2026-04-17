@@ -13,7 +13,7 @@ from typing import Callable
 
 import pandas as pd
 
-from percell4.domain.dataset import CellId, DatasetHandle, LayerName
+from percell4.domain.dataset import CellId, ChannelName, DatasetHandle, LayerName
 
 
 class Event(Enum):
@@ -24,6 +24,7 @@ class Event(Enum):
     FILTER_CHANGED = auto()
     ACTIVE_SEGMENTATION_CHANGED = auto()
     ACTIVE_MASK_CHANGED = auto()
+    ACTIVE_CHANNEL_CHANGED = auto()
     MEASUREMENTS_UPDATED = auto()
 
 
@@ -45,6 +46,7 @@ class Session:
     _dataset: DatasetHandle | None = field(default=None, repr=False)
     _active_segmentation: LayerName | None = field(default=None, repr=False)
     _active_mask: LayerName | None = field(default=None, repr=False)
+    _active_channel: ChannelName | None = field(default=None, repr=False)
     _selection: frozenset[CellId] = field(default_factory=frozenset, repr=False)
     _filter_ids: frozenset[CellId] | None = field(default=None, repr=False)
     _measurements: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
@@ -93,6 +95,10 @@ class Session:
         return self._active_mask
 
     @property
+    def active_channel(self) -> ChannelName | None:
+        return self._active_channel
+
+    @property
     def df(self) -> pd.DataFrame:
         """Current per-cell measurements. Read-only — do not modify."""
         return self._measurements
@@ -122,11 +128,17 @@ class Session:
         self._dataset = handle
         self._active_segmentation = None
         self._active_mask = None
+        self._active_channel = None
         self._selection = frozenset()
         self._filter_ids = None
         self._measurements = pd.DataFrame()
         self._filtered_df_cache = None
         self._emit(Event.DATASET_CHANGED)
+        # Auto-select first channel from metadata
+        if handle is not None:
+            ch_names = list(handle.metadata.get("channel_names", []))
+            if ch_names:
+                self.set_active_channel(ch_names[0])
 
     def set_selection(self, ids: frozenset[CellId]) -> None:
         if ids == self._selection:
@@ -165,11 +177,18 @@ class Session:
         self._active_mask = name
         self._emit(Event.ACTIVE_MASK_CHANGED)
 
+    def set_active_channel(self, name: ChannelName | None) -> None:
+        if name == self._active_channel:
+            return
+        self._active_channel = name
+        self._emit(Event.ACTIVE_CHANNEL_CHANGED)
+
     def clear(self) -> None:
         """Reset all state. Called when closing a dataset."""
         self._dataset = None
         self._active_segmentation = None
         self._active_mask = None
+        self._active_channel = None
         self._selection = frozenset()
         self._filter_ids = None
         self._measurements = pd.DataFrame()

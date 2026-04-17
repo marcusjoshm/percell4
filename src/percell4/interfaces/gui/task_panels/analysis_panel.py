@@ -297,20 +297,27 @@ class AnalysisPanel(QWidget):
     # ── Whole Field Thresholding ─────────────────────────────
 
     def _on_threshold_preview(self) -> None:
+        # Read channel from Session (not viewer)
+        channel_name = self.data_model.session.active_channel
+        if not channel_name:
+            self._show_status("Select a channel in the Data tab first")
+            return
+
+        # Get the image data from the viewer layer (still need viewer for the array)
         viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             self._show_status("Open the viewer first")
             return
 
-        active = viewer_win.viewer.layers.selection.active
-        if active is None or active.__class__.__name__ != "Image":
-            for layer in viewer_win.viewer.layers:
-                if layer.__class__.__name__ == "Image":
-                    active = layer
-                    break
-            else:
-                self._show_status("No image loaded")
-                return
+        # Find the image layer matching the active channel
+        active = None
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == "Image" and layer.name == channel_name:
+                active = layer
+                break
+        if active is None:
+            self._show_status(f"Channel '{channel_name}' not found in viewer")
+            return
 
         from percell4.measure.thresholding import (
             THRESHOLD_METHODS,
@@ -318,7 +325,6 @@ class AnalysisPanel(QWidget):
         )
 
         image = active.data.astype(np.float32)
-        channel_name = active.name
 
         sigma = self._thresh_sigma.value()
         if sigma > 0:

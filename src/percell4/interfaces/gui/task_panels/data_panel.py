@@ -69,12 +69,12 @@ class DataPanel(QWidget):
 
         chan_row = QHBoxLayout()
         chan_row.addWidget(QLabel("Active Channel:"))
-        self._data_channel_label = QLabel("None selected")
-        self._data_channel_label.setStyleSheet(
-            f"color: {theme.ACCENT}; font-weight: bold;"
+        self._active_channel_combo = QComboBox()
+        self._active_channel_combo.setPlaceholderText("None")
+        self._active_channel_combo.currentTextChanged.connect(
+            self._on_active_channel_combo_changed
         )
-        chan_row.addWidget(self._data_channel_label)
-        chan_row.addStretch()
+        chan_row.addWidget(self._active_channel_combo)
         layers_layout.addLayout(chan_row)
 
         seg_row = QHBoxLayout()
@@ -168,6 +168,8 @@ class DataPanel(QWidget):
         if change.mask:
             name = self.data_model.active_mask
             self._on_model_active_mask_changed(name)
+        if change.data:
+            self._populate_channel_combo()
 
     # ── Active layer sync ────────────────────────────────────
 
@@ -178,6 +180,10 @@ class DataPanel(QWidget):
     def _on_active_mask_combo_changed(self, name: str) -> None:
         if name:
             self.data_model.set_active_mask(name)
+
+    def _on_active_channel_combo_changed(self, name: str) -> None:
+        if name:
+            self.data_model.session.set_active_channel(name)
 
     def _on_model_active_seg_changed(self, name: str) -> None:
         if name:
@@ -273,12 +279,18 @@ class DataPanel(QWidget):
         except Exception:
             pass
 
-    def update_channel_label(self, name: str | None = None) -> None:
-        """Update the active channel display."""
-        if name:
-            self._data_channel_label.setText(name)
-        else:
-            self._data_channel_label.setText("None selected")
+    def _populate_channel_combo(self) -> None:
+        """Populate the active channel dropdown from dataset metadata."""
+        self._active_channel_combo.blockSignals(True)
+        self._active_channel_combo.clear()
+        session = self.data_model.session
+        if session.dataset is not None:
+            ch_names = list(session.dataset.metadata.get("channel_names", []))
+            for name in ch_names:
+                self._active_channel_combo.addItem(name)
+            if session.active_channel:
+                self._active_channel_combo.setCurrentText(session.active_channel)
+        self._active_channel_combo.blockSignals(False)
 
     def clear_ui(self) -> None:
         """Reset all UI state (called on dataset close)."""
@@ -289,10 +301,12 @@ class DataPanel(QWidget):
         self._active_mask_combo.blockSignals(True)
         self._active_mask_combo.clear()
         self._active_mask_combo.blockSignals(False)
+        self._active_channel_combo.blockSignals(True)
+        self._active_channel_combo.clear()
+        self._active_channel_combo.blockSignals(False)
         self._mgmt_seg_combo.clear()
         self._mgmt_mask_combo.clear()
         self._mgmt_chan_combo.clear()
-        self._data_channel_label.setText("None selected")
 
     def _on_rename_layer(self, prefix: str) -> None:
         combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo

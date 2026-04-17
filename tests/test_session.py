@@ -179,6 +179,54 @@ class TestSessionActiveLayers:
         assert session.active_mask == "threshold"
 
 
+class TestSessionActiveChannel:
+    """Verify active channel tracking."""
+
+    def test_set_active_channel_emits_event(self):
+        session = Session()
+        events = []
+        session.subscribe(Event.ACTIVE_CHANNEL_CHANGED, lambda: events.append(1))
+        session.set_active_channel("GFP")
+        assert events == [1]
+        assert session.active_channel == "GFP"
+
+    def test_same_channel_no_event(self):
+        session = Session()
+        session.set_active_channel("GFP")
+        events = []
+        session.subscribe(Event.ACTIVE_CHANNEL_CHANGED, lambda: events.append(1))
+        session.set_active_channel("GFP")
+        assert events == []
+
+    def test_set_dataset_auto_selects_first_channel(self):
+        from pathlib import Path
+
+        session = Session()
+        handle = DatasetHandle(
+            path=Path("/tmp/test.h5"),
+            metadata={"channel_names": ["GFP", "DAPI"]},
+        )
+        session.set_dataset(handle)
+        assert session.active_channel == "GFP"
+
+    def test_set_dataset_no_channels_leaves_none(self):
+        from pathlib import Path
+
+        session = Session()
+        handle = DatasetHandle(
+            path=Path("/tmp/test.h5"),
+            metadata={},
+        )
+        session.set_dataset(handle)
+        assert session.active_channel is None
+
+    def test_clear_resets_channel(self):
+        session = Session()
+        session.set_active_channel("GFP")
+        session.clear()
+        assert session.active_channel is None
+
+
 class TestSessionMeasurements:
     """Verify measurements DataFrame support."""
 
