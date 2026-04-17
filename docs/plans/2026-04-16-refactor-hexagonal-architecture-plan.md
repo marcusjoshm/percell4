@@ -435,11 +435,11 @@ No behavior changes. Import-linter's `domain-is-pure` contract passes.
 
 Time: 1 week.
 
-- Expand Session with selection, filter, active-segmentation state and events.
-- Migrate `cell_table.py`, `scatter`, `phasor_plot.py`, `data_plot.py` into `interfaces/gui/peer_views/`. Each one: strip launcher references, receive Session, subscribe.
-- Migrate `CellDataModel`'s event responsibilities into the Session. `CellDataModel` disappears.
+- [x] Expand Session with selection, filter, active-segmentation state and events.
+- [x] Migrate `cell_table.py`, `phasor_plot.py`, `data_plot.py` into `interfaces/gui/peer_views/`. Each one: strip launcher references, receive Session, subscribe.
+- [x] Migrate `CellDataModel`'s event responsibilities into the Session. `CellDataModel` reduced to a thin Qt signal bridge (holds no state; deleted in Stage 5).
 
-Peer views now work against Session. Old launcher still exists; it's getting smaller.
+Peer views now work against Session. Old launcher still exists via CellDataModel bridge; it's getting smaller.
 
 ### Stage 4: Build out use cases + task panels
 
