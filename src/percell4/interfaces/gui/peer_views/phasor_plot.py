@@ -658,8 +658,11 @@ class PhasorPlotWindow(QMainWindow):
             if not w.phasor_roi.visible:
                 continue
             if w.cached_mask is None:
+                roi = w.phasor_roi
                 w.cached_mask = phasor_roi_to_mask(
-                    self._g_map, self._s_map, w.phasor_roi,
+                    self._g_map, self._s_map,
+                    center=roi.center, radii=roi.radii,
+                    angle_rad=np.radians(roi.angle_deg),
                 )
             binary = np.zeros(self._g_map.shape, dtype=np.uint8)
             binary[w.cached_mask] = 1
@@ -734,7 +737,10 @@ class PhasorPlotWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         for unsub in getattr(self, '_unsubs', []):
-            unsub()
+            try:
+                unsub()
+            except ValueError:
+                pass  # already unsubscribed
         self._save_geometry()
         self.hide()
         event.ignore()
