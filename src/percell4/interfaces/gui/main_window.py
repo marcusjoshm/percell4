@@ -884,21 +884,13 @@ class LauncherWindow(QMainWindow):
         self.statusBar().showMessage("Dataset closed")
 
     def _update_active_channel_label(self) -> None:
-        """Update channel labels in any panels that track the active layer."""
+        """Update channel label in the segmentation panel.
+
+        The Data tab's channel display is now a Session-backed QComboBox
+        (populated on dataset load), so it no longer needs pushing here.
+        """
         if hasattr(self, "_seg_panel"):
             self._seg_panel.update_channel_label()
-
-        # Get the active channel name from the viewer
-        channel_name = "None selected"
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is not None and viewer_win.viewer is not None:
-            active = viewer_win.viewer.layers.selection.active
-            if active is not None and active.__class__.__name__ == "Image":
-                channel_name = active.name
-
-        # Update channel labels in panels
-        if hasattr(self, "_data_panel"):
-            self._data_panel.update_channel_label(channel_name)
 
     def _sync_active_layers_from_viewer(self) -> None:
         """When user clicks a layer in napari, update the active seg/mask in the model."""
