@@ -893,26 +893,27 @@ external consumers appear.
 ### Functional requirements
 
 **Algorithm:**
-- [ ] `denoise_phasor_boe` exists with the exact `PhasorDenoiser`
+- [x] `denoise_phasor_boe` exists with the exact `PhasorDenoiser`
       Protocol signature
-- [ ] `dtcwt.Transform2d(biort='legall', qshift='qshift_a')` used in BOE
-- [ ] σ_g estimated from only level-1 ±45° bands (indices 1 and 4),
+- [x] `dtcwt.Transform2d(biort='legall', qshift='qshift_a')` used in BOE
+- [x] σ_g estimated from only level-1 ±45° bands (indices 1 and 4),
       MAD/0.6745
-- [ ] Local noise variance uses N=3 (7×7 window) with `mode='reflect'`
-- [ ] BiShrink uses the full formula with `(σ_n²−σ_g²)_+` term and
+- [x] Local noise variance uses N=3 (7×7 window) with `mode='reflect'`
+- [x] BiShrink uses the full formula with `(σ_n²−σ_g²)_+` term and
       outer positive part
-- [ ] Coarsest level L−1 unshrunk (unit-tested)
-- [ ] Input sanitization: NaN/Inf zeroed, negative intensity clamped,
+- [x] Coarsest level L−1 unshrunk (unit-tested)
+- [x] Input sanitization: NaN/Inf zeroed, negative intensity clamped,
       `min(H,W) < 2**filter_level` raises ValueError
-- [ ] dtcwt-internal odd-size padding cropped back after inverse
+- [x] dtcwt-internal odd-size padding cropped back after inverse
 
 **Dispatch:**
-- [ ] `wavelet.denoise_phasor(..., algorithm="boe_2021"|"jcb_2025")`
+- [x] `wavelet.denoise_phasor(..., algorithm="boe_2021"|"jcb_2025")`
       dispatches via `_FILTER_REGISTRY`
-- [ ] Unknown algorithm → `ValueError` with enumerated expected values
+- [x] Unknown algorithm → `ValueError` with enumerated expected values
 - [ ] `ApplyWavelet.execute(algorithm=...)` defaults to `"boe_2021"`
-- [ ] Missing dtcwt → `MissingOptionalDependencyError` (not bare
-      `ImportError`)
+      *(Phase 2)*
+- [ ] Missing dtcwt → `MissingOptionalDependencyError` at the use-case
+      boundary (error class added in Phase 1; wiring in Phase 2)
 
 **HDF5 provenance:**
 - [ ] `algorithm`, `biort`, `qshift`, `n_local_window`,
@@ -946,16 +947,15 @@ external consumers appear.
 
 ### Non-functional requirements
 
-- [ ] Unit tests cover each BOE filter component (Anscombe, LeGall
+- [x] Unit tests cover each BOE filter component (Anscombe, LeGall
       taps, band indices, σ_g, local variance, BiShrink, coarsest
       level, NaN sanitization, small-image guard)
-- [ ] Vectorized BiShrink matches scalar-loop reference within
+- [x] Vectorized BiShrink matches scalar-loop reference within
       numerical tolerance on a small fixture
 - [ ] **BOE filter runtime within 1.15× of current JCB filter** on a
-      1024×1024 input at `flevel=9` (enforced in
-      `test_wavelet_boe_perf.py`)
-- [ ] dtcwt import stays lazy
-- [ ] `from percell4 import _compat` at top of both filter modules
+      1024×1024 input at `flevel=9` (perf test deferred to Phase 2+)
+- [x] dtcwt import stays lazy
+- [x] `from percell4 import _compat` at top of both filter modules
 
 ### Quality gates
 
