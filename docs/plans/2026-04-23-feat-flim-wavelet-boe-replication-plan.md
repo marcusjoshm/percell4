@@ -937,14 +937,29 @@ external consumers appear.
 - [x] `MissingOptionalDependencyError` rendered as an actionable dialog
 
 **Comparison harness:**
-- [ ] `python -m percell4.interfaces.cli.bench_wavelet synthetic`
-      produces outputs
+- [x] `python -m percell4.interfaces.cli.bench_wavelet synthetic`
+      produces outputs (phasor_plots.png, g_maps.png,
+      mse_per_frequency.png, mse_curves.npz, metrics.json)
 - [ ] `python -m percell4.interfaces.cli.bench_wavelet real`
-      runs end-to-end on a provided `.h5`
-- [ ] Per-stage timings in `metrics.json`
-- [ ] dtcwt and percell4 versions in `metrics.json`
+      runs end-to-end on a provided `.h5` *(Phase 4 — needs a specific
+      high-frame dataset)*
+- [x] Per-stage timings in `metrics.json`
+- [x] dtcwt and percell4 versions in `metrics.json`
 - [ ] `--reference-frames` range validated against available frames
-      (clamp + warn, or error)
+      *(Phase 4 — part of the real-mode work)*
+
+**Phase 3 empirical findings (seed=0, 512×512, flevel=9, 500-frame
+reference):**
+
+| Metric | BOE | JCB | BOE/JCB |
+|---|---|---|---|
+| Whole-image G/S MSE | 3.0e-3 | 6.2e-3 | **0.48 ✓** (well inside ≤1.10×) |
+| High-freq G-MSE (≥0.25 c/px) | 2.1e-3 | 1.7e-3 | **1.22 ✗** (plan hypothesised ≤0.80×) |
+
+BOE is the clear whole-image winner but loses to JCB on high-frequency
+error. Opposite of the plan's hypothesis — warrants a proper writeup in
+Phase 4 on both synthetic and real data before setting a permanent
+default.
 
 ### Non-functional requirements
 
