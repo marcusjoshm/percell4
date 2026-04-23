@@ -910,30 +910,31 @@ external consumers appear.
 - [x] `wavelet.denoise_phasor(..., algorithm="boe_2021"|"jcb_2025")`
       dispatches via `_FILTER_REGISTRY`
 - [x] Unknown algorithm → `ValueError` with enumerated expected values
-- [ ] `ApplyWavelet.execute(algorithm=...)` defaults to `"boe_2021"`
-      *(Phase 2)*
-- [ ] Missing dtcwt → `MissingOptionalDependencyError` at the use-case
-      boundary (error class added in Phase 1; wiring in Phase 2)
+- [x] `ApplyWavelet.execute(algorithm=...)` defaults to `"boe_2021"`
+- [x] Missing dtcwt → `MissingOptionalDependencyError` at the use-case
+      boundary (raised by the dispatch registry; bubbles through
+      `ApplyWavelet.execute` for the GUI to render)
 
 **HDF5 provenance:**
-- [ ] `algorithm`, `biort`, `qshift`, `n_local_window`,
+- [x] `algorithm`, `biort`, `qshift`, `n_local_window`,
       `sigma_g_estimator`, `shrinkage`, `dtcwt_version`,
-      `percell4_version`, `algorithm_params_hash` attrs present on all
-      three filtered datasets
-- [ ] `omega_rad_per_ns` additionally present on `lifetime_filtered`
-- [ ] `store.write_arrays` used (single handle)
-- [ ] `filter_status` sentinel set before/after write
-- [ ] All three datasets' `algorithm` attrs agree (assertion)
-- [ ] Backward compat: old datasets without `algorithm` read as
+      `percell4_version` attrs present on all three filtered datasets
+      *(`algorithm_params_hash` deferred — low value; every attr is
+      already tested individually)*
+- [x] `omega_rad_per_ns` additionally present on `lifetime_filtered`
+- [x] `store.write_arrays` used (single handle)
+- [x] `filter_status` sentinel set on the phasor/{channel} group
+- [x] All three datasets' `algorithm` attrs agree (assertion)
+- [x] Backward compat: old datasets without `algorithm` read as
       `"jcb_2025"` via `read_wavelet_algorithm` helper
 
 **GUI:**
-- [ ] QComboBox shows "BOE" and "JCB" with tooltip citations
-- [ ] Default is "BOE"
-- [ ] Selection persisted via `QSettings("leelab", "percell4")`
-- [ ] Switch-warning dialog shown before overwriting different-algorithm
+- [x] QComboBox shows "BOE" and "JCB" with tooltip citations
+- [x] Default is "BOE"
+- [x] Selection persisted via `QSettings("leelab", "percell4")`
+- [x] Switch-warning dialog shown before overwriting different-algorithm
       result
-- [ ] `MissingOptionalDependencyError` rendered as an actionable dialog
+- [x] `MissingOptionalDependencyError` rendered as an actionable dialog
 
 **Comparison harness:**
 - [ ] `python -m percell4.interfaces.cli.bench_wavelet synthetic`
