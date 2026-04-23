@@ -9,20 +9,28 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QSettings
 from qtpy.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from percell4 import store_schema
+from percell4.domain.errors import MissingOptionalDependencyError
+from percell4.domain.flim.wavelet import ALGORITHM_CHOICES
 from percell4.gui import theme
 from percell4.model import CellDataModel
+
+_QSETTINGS_ORG = "leelab"
+_QSETTINGS_APP = "percell4"
+_QSETTINGS_KEY = "flim/wavelet_algorithm"
 
 
 class FlimPanel(QWidget):
@@ -88,6 +96,25 @@ class FlimPanel(QWidget):
         # ── Wavelet Filter ──
         wavelet_group = QGroupBox("Wavelet Filter")
         wavelet_layout = QVBoxLayout(wavelet_group)
+
+        algo_row = QHBoxLayout()
+        algo_row.addWidget(QLabel("Algorithm:"))
+        self._wavelet_algorithm = QComboBox()
+        for alg_id, label, tooltip in ALGORITHM_CHOICES:
+            self._wavelet_algorithm.addItem(label, userData=alg_id)
+            idx = self._wavelet_algorithm.count() - 1
+            self._wavelet_algorithm.setItemData(idx, tooltip, Qt.ToolTipRole)
+        # Restore last-used algorithm across sessions.
+        saved = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(
+            _QSETTINGS_KEY, "boe_2021"
+        )
+        restored = self._wavelet_algorithm.findData(saved)
+        self._wavelet_algorithm.setCurrentIndex(max(restored, 0))
+        self._wavelet_algorithm.currentIndexChanged.connect(
+            self._on_wavelet_algorithm_changed
+        )
+        algo_row.addWidget(self._wavelet_algorithm, stretch=1)
+        wavelet_layout.addLayout(algo_row)
 
         level_row = QHBoxLayout()
         level_row.addWidget(QLabel("Filter Level:"))
@@ -184,6 +211,53 @@ class FlimPanel(QWidget):
 
     # ── Wavelet Filter ───────────────────────────────────────
 
+    def _on_wavelet_algorithm_changed(self, _idx: int) -> None:
+        """Persist algorithm choice across sessions."""
+        alg_id = self._wavelet_algorithm.currentData()
+        if alg_id:
+            QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+                _QSETTINGS_KEY, alg_id
+            )
+
+    def _confirm_algorithm_switch(
+        self, channel: str, selected: str,
+    ) -> bool:
+        """If the channel already has filtered data from a different
+        algorithm, ask the user whether to overwrite. Returns True to
+        proceed, False to cancel. Returns True unconditionally when
+        there's no existing filtered data.
+        """
+        repo = self._get_repo()
+        handle = self.data_model.session.dataset
+        if repo is None or handle is None:
+            return True
+        g_path = store_schema.PHASOR_G_FILTERED.format(channel=channel)
+        try:
+            attrs = repo.read_array_attrs(handle, g_path)
+        except KeyError:
+            return True  # No existing filtered dataset.
+        existing = store_schema.read_wavelet_algorithm(attrs)
+        if existing == selected:
+            return True
+        selected_label = next(
+            (label for alg, label, _ in ALGORITHM_CHOICES if alg == selected),
+            selected,
+        )
+        existing_label = next(
+            (label for alg, label, _ in ALGORITHM_CHOICES if alg == existing),
+            existing,
+        )
+        reply = QMessageBox.warning(
+            self,
+            "Overwrite filtered result?",
+            f"Channel '{channel}' was last filtered with "
+            f"<b>{existing_label}</b>. Apply <b>{selected_label}</b>? "
+            f"The existing {existing_label} result will be discarded.",
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return reply == QMessageBox.Ok
+
     def _on_apply_wavelet(self) -> None:
         active_channel = self._get_active_channel()
         if active_channel is None:
@@ -191,8 +265,15 @@ class FlimPanel(QWidget):
             return
 
         filter_level = self._wavelet_level.value()
+        algorithm = self._wavelet_algorithm.currentData() or "boe_2021"
+
+        if not self._confirm_algorithm_switch(active_channel, algorithm):
+            self._show_status("Wavelet filter cancelled")
+            return
+
         self._show_status(
-            f"Applying wavelet filter (level {filter_level}) to {active_channel}..."
+            f"Applying {algorithm} wavelet filter (level {filter_level}) "
+            f"to {active_channel}..."
         )
 
         from qtpy.QtWidgets import QApplication
@@ -203,12 +284,21 @@ class FlimPanel(QWidget):
 
             repo = self._get_repo()
             uc = ApplyWavelet(repo, self.data_model.session)
-            result = uc.execute(channel=active_channel, filter_level=filter_level)
-        except ImportError:
-            QApplication.restoreOverrideCursor()
-            self._show_status(
-                "dtcwt package required. Install: pip install 'percell4[flim]'"
+            result = uc.execute(
+                channel=active_channel,
+                filter_level=filter_level,
+                algorithm=algorithm,
             )
+        except MissingOptionalDependencyError as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self,
+                "Optional dependency missing",
+                "Wavelet filtering requires the <code>dtcwt</code> package.\n\n"
+                "Install with:\n    pip install 'percell4[flim]'\n\n"
+                f"Details: {e}",
+            )
+            self._show_status("dtcwt not installed — see dialog for install hint")
             return
         except ValueError as e:
             QApplication.restoreOverrideCursor()
@@ -258,8 +348,9 @@ class FlimPanel(QWidget):
                 )
 
         self._show_status(
-            f"Wavelet filter applied: level {filter_level} | "
-            f"{result.n_valid:,} valid pixels | channel: {active_channel}"
+            f"Wavelet filter applied ({result.algorithm}): "
+            f"level {filter_level} | {result.n_valid:,} valid pixels | "
+            f"channel: {active_channel}"
         )
 
     # ── Lifetime ─────────────────────────────────────────────
