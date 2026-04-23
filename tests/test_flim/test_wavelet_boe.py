@@ -223,6 +223,66 @@ def test_bishrink_uniform_region_zeros_out_without_warnings():
         )
 
 
+def test_bishrink_vectorized_matches_scalar_reference():
+    """The single most important BiShrink test: the vectorized
+    implementation must agree pixelwise with a scalar reference loop
+    computing the same formula. Catches exactly the class of bug that
+    let the JCB port drift from its paper in the first place (a
+    too-clever vectorization that implements a different math than
+    intended).
+    """
+    rng = np.random.default_rng(42)
+    xfm, coeffs = _make_coeffs_from_array(rng.normal(size=(64, 64)),
+                                            n_levels=3)
+
+    # Take a snapshot before shrinkage so we can compare.
+    hp_before = [hp.copy() for hp in coeffs.highpasses]
+    sigma_n_sq_list = local_noise_variance(coeffs, n_local=DEFAULT_N_LOCAL)
+    sigma_g = 0.4  # arbitrary nonzero — exercises the full formula
+    sigma_g_sq = sigma_g ** 2
+
+    # Scalar reference: pixel-by-pixel implementation of the BOE
+    # formula from the plan. Intentionally naive and obviously correct.
+    expected = [hp.copy() for hp in hp_before]  # coarsest untouched
+    numer = np.sqrt(3.0) * sigma_g_sq
+    max_level = len(hp_before) - 1
+    for level in range(max_level):
+        hp_l = hp_before[level]
+        hp_parent = hp_before[level + 1]
+        h_l, w_l, nb = hp_l.shape
+        for band in range(nb):
+            phi_l = hp_l[:, :, band]
+            phi_parent_full = hp_parent[:, :, band]
+            sigma_n_sq_full = sigma_n_sq_list[level * 6 + band]
+            out = np.zeros_like(phi_l)
+            for y in range(h_l):
+                for x in range(w_l):
+                    pl = phi_l[y, x]
+                    pp = phi_parent_full[y // 2, x // 2]
+                    r_sq = abs(pl) ** 2 + abs(pp) ** 2
+                    d = max(sigma_n_sq_full[y, x] - sigma_g_sq, 0.0)
+                    denom = np.sqrt(r_sq * d)
+                    if denom > 0:
+                        factor = max(1.0 - numer / denom, 0.0)
+                    else:
+                        factor = 0.0
+                    out[y, x] = factor * pl
+            expected[level][:, :, band] = out
+
+    # Now run the vectorized version.
+    bishrink(coeffs, sigma_g=sigma_g, sigma_n_sq_list=sigma_n_sq_list)
+
+    for level in range(max_level):
+        np.testing.assert_allclose(
+            coeffs.highpasses[level], expected[level],
+            rtol=1e-10, atol=1e-12,
+            err_msg=f"Vectorized BiShrink diverges from scalar reference "
+                    f"at level {level}",
+        )
+    # Coarsest untouched.
+    np.testing.assert_array_equal(coeffs.highpasses[-1], expected[-1])
+
+
 def test_bishrink_coarsest_level_unshrunk():
     """Design choice: BOE filter preserves the coarsest-level DC band."""
     rng = np.random.default_rng(0)
