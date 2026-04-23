@@ -323,6 +323,167 @@ def run_synthetic(
     return metrics
 
 
+# ── Real-mode driver ──────────────────────────────────────────────────
+
+def _cluster_iqr(g: np.ndarray, s: np.ndarray) -> dict[str, float]:
+    """Interquartile range of (G, S) over intensity-weighted valid
+    pixels. Tighter cluster → lower IQR → better noise reduction.
+    Works with unfiltered NaN pixels (NaN entries are dropped)."""
+    g = np.asarray(g)
+    s = np.asarray(s)
+    mask = np.isfinite(g) & np.isfinite(s)
+    if not mask.any():
+        return {"g_iqr": float("inf"), "s_iqr": float("inf")}
+    g_iqr = float(np.percentile(g[mask], 75) - np.percentile(g[mask], 25))
+    s_iqr = float(np.percentile(s[mask], 75) - np.percentile(s[mask], 25))
+    return {"g_iqr": g_iqr, "s_iqr": s_iqr}
+
+
+def _render_real_plots(
+    out_dir: Path,
+    *,
+    g_noisy: np.ndarray, s_noisy: np.ndarray,
+    results: dict[str, dict[str, np.ndarray]],
+) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    pairs = [
+        ("Unfiltered", g_noisy, s_noisy),
+        ("JCB 2025", results["jcb_2025"]["g"], results["jcb_2025"]["s"]),
+        ("BOE 2021", results["boe_2021"]["g"], results["boe_2021"]["s"]),
+    ]
+
+    theta = np.linspace(0, np.pi, 200)
+    circle_g = 0.5 + 0.5 * np.cos(theta)
+    circle_s = 0.5 * np.sin(theta)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for ax, (title, g, s) in zip(axes, pairs):
+        g_f = np.nan_to_num(np.asarray(g).ravel())
+        s_f = np.nan_to_num(np.asarray(s).ravel())
+        ax.hexbin(g_f, s_f, gridsize=120, bins="log", cmap="magma",
+                   extent=(-0.05, 1.05, -0.05, 0.6))
+        ax.plot(circle_g, circle_s, "w--", lw=0.5)
+        ax.set_title(title)
+        ax.set_xlim(-0.05, 1.05)
+        ax.set_ylim(-0.05, 0.6)
+        ax.set_xlabel("G")
+        ax.set_ylabel("S")
+    fig.tight_layout()
+    fig.savefig(out_dir / "phasor_plots.png", dpi=140)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    g_ref = np.asarray(results["boe_2021"]["g"])
+    vmin = float(np.nanpercentile(g_ref, 2))
+    vmax = float(np.nanpercentile(g_ref, 98))
+    for ax, (title, g, _) in zip(axes, pairs):
+        im = ax.imshow(np.asarray(g), cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(title)
+        ax.axis("off")
+    fig.colorbar(im, ax=axes, shrink=0.7, label="G")
+    fig.savefig(out_dir / "g_maps.png", dpi=140)
+    plt.close(fig)
+
+
+def run_real(
+    out_dir: Path,
+    *,
+    h5_path: Path,
+    channel: str,
+    filter_level: int = 9,
+    skip_plots: bool = False,
+) -> dict[str, Any]:
+    """Run both wavelet filters on a real FLIM dataset and compare.
+
+    Reads ``phasor/{channel}/{g,s}`` and ``intensity`` out of ``h5_path``,
+    runs BOE and JCB with the given ``filter_level``, writes comparison
+    plots, and records runtime + phasor cluster tightness in
+    ``metrics.json``. No ground-truth MSE — real single-acquisition data
+    has no reference. The IQR of the phasor cluster on a
+    mostly-uniform-lifetime image is a decent proxy: tighter is better.
+    """
+    import h5py
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    timings: dict[str, float] = {}
+
+    with _timed("read_hdf5", timings), h5py.File(h5_path, "r") as f:
+        g_key = f"phasor/{channel}/g"
+        s_key = f"phasor/{channel}/s"
+        if g_key not in f or s_key not in f:
+            raise KeyError(
+                f"Expected {g_key} and {s_key} in {h5_path}. "
+                f"Channels available under phasor/: "
+                f"{list(f.get('phasor', {}).keys())}"
+            )
+        g_noisy = f[g_key][()]
+        s_noisy = f[s_key][()]
+        intensity_data = f["intensity"][()]
+        ch_names = list(f["metadata"].attrs.get("channel_names", []))
+        freq_mhz = float(f["metadata"].attrs.get("flim_frequency_mhz", 0.0))
+
+    if intensity_data.ndim == 3:
+        if channel in ch_names:
+            intensity = intensity_data[ch_names.index(channel)]
+        else:
+            intensity = intensity_data[0]
+    else:
+        intensity = intensity_data
+    intensity = intensity.astype(np.float64)
+    omega = 2.0 * np.pi * freq_mhz * 1e-3 if freq_mhz > 0 else None
+
+    logger.info("Running BOE + JCB on %s ch=%s (%s, flevel=%d)",
+                h5_path, channel, g_noisy.shape, filter_level)
+
+    results: dict[str, dict[str, np.ndarray]] = {}
+    for algo in ("boe_2021", "jcb_2025"):
+        with _timed(f"filter_{algo}", timings):
+            out = denoise_phasor(
+                g_noisy.astype(np.float64),
+                s_noisy.astype(np.float64),
+                intensity,
+                algorithm=algo,
+                filter_level=filter_level,
+                omega=omega,
+            )
+        results[algo] = {"g": out["G"], "s": out["S"]}
+
+    iqrs = {
+        "unfiltered": _cluster_iqr(g_noisy, s_noisy),
+        "boe_2021": _cluster_iqr(results["boe_2021"]["g"],
+                                   results["boe_2021"]["s"]),
+        "jcb_2025": _cluster_iqr(results["jcb_2025"]["g"],
+                                   results["jcb_2025"]["s"]),
+    }
+
+    metrics: dict[str, Any] = {
+        "mode": "real",
+        "h5_path": str(h5_path),
+        "channel": channel,
+        "shape": list(g_noisy.shape),
+        "filter_level": filter_level,
+        "freq_mhz": freq_mhz,
+        "timings_sec": timings,
+        "phasor_cluster_iqr": iqrs,
+        "versions": _collect_versions(),
+    }
+
+    with _timed("rendering", timings):
+        (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        if not skip_plots:
+            _render_real_plots(
+                out_dir,
+                g_noisy=g_noisy, s_noisy=s_noisy,
+                results=results,
+            )
+    return metrics
+
+
 # ── argparse ──────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -346,6 +507,17 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="DTCWT decomposition depth.")
     s.add_argument("--skip-plots", action="store_true",
                     help="Skip matplotlib rendering (metrics.json only).")
+
+    r = sub.add_parser("real",
+                        help="Compare filters on a real percell4 .h5 dataset.")
+    r.add_argument("--h5", type=Path, required=True,
+                    help="Path to a percell4 .h5 dataset.")
+    r.add_argument("--channel", type=str, required=True,
+                    help="Channel name (as stored under phasor/).")
+    r.add_argument("--out", type=Path, required=True,
+                    help="Output directory.")
+    r.add_argument("--filter-level", type=int, default=9)
+    r.add_argument("--skip-plots", action="store_true")
 
     return parser
 
@@ -375,6 +547,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nHigh-freq (≥0.25 c/px) G-MSE:")
         print(f"  BOE {hf['boe_2021']:.6e}  JCB {hf['jcb_2025']:.6e}  "
               f"ratio {hf['boe_over_jcb_ratio']:.2f}")
+        return 0
+
+    if args.mode == "real":
+        metrics = run_real(
+            args.out,
+            h5_path=args.h5,
+            channel=args.channel,
+            filter_level=args.filter_level,
+            skip_plots=args.skip_plots,
+        )
+        print(f"\nWrote {args.out}/")
+        print(f"Dataset: {metrics['h5_path']} channel={metrics['channel']}")
+        print(f"Shape: {metrics['shape']}  flevel={metrics['filter_level']}")
+        t = metrics["timings_sec"]
+        print(f"\nRuntime (seconds):")
+        print(f"  BOE filter: {t.get('filter_boe_2021', 0.0):.2f}")
+        print(f"  JCB filter: {t.get('filter_jcb_2025', 0.0):.2f}")
+        print(f"\nPhasor cluster IQR (tighter is better):")
+        for algo, iqr in metrics["phasor_cluster_iqr"].items():
+            print(f"  {algo:12s} G={iqr['g_iqr']:.4f}  S={iqr['s_iqr']:.4f}")
         return 0
 
     parser.print_help()
