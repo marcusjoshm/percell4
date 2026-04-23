@@ -23,3 +23,7 @@ class NoMaskError(PercellError):
 
 class NoChannelError(PercellError):
     """No active channel is set."""
+
+
+class MissingOptionalDependencyError(PercellError):
+    """An optional dependency (declared under a pip extra) is not installed."""
