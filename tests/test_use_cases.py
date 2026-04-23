@@ -48,6 +48,8 @@ class FakeRepo:
         self.written_measurements: pd.DataFrame | None = None
         self.written_masks: dict[str, np.ndarray] = {}
         self.written_arrays: dict[str, np.ndarray] = {}
+        self.written_attrs: dict[str, dict] = {}
+        self.group_attrs: dict[str, dict] = {}
         self.group_columns: pd.DataFrame | None = None
 
     def open(self, path):
@@ -86,11 +88,27 @@ class FakeRepo:
 
     def write_array(self, handle, path, data, attrs=None):
         self.written_arrays[path] = data
+        if attrs is not None:
+            self.written_attrs[path] = dict(attrs)
 
     def read_array(self, handle, path):
         if path not in self.written_arrays:
             raise KeyError(f"Array not found: {path}")
         return self.written_arrays[path]
+
+    def read_array_attrs(self, handle, path):
+        if path not in self.written_attrs and path not in self.group_attrs:
+            raise KeyError(f"Path not found: {path}")
+        if path in self.group_attrs:
+            return dict(self.group_attrs[path])
+        return dict(self.written_attrs[path])
+
+    def write_arrays(self, handle, items, group_attrs=None):
+        for item in items:
+            self.write_array(handle, item.path, item.array, attrs=item.attrs)
+        if group_attrs:
+            for path, attrs in group_attrs.items():
+                self.group_attrs.setdefault(path, {}).update(attrs)
 
     def read_group_columns(self, handle):
         return self.group_columns
@@ -256,3 +274,248 @@ class TestAcceptThreshold:
 
         with pytest.raises(NoDatasetError, match="No dataset loaded"):
             uc.execute(np.zeros((2, 2)), 0.5, "otsu", "GFP")
+
+
+# ── ApplyWavelet ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def wavelet_repo():
+    """Repo pre-populated with a fake phasor channel so ApplyWavelet's
+    inputs resolve without actually needing real data."""
+    repo = FakeRepo()
+    H = W = 64
+    repo.written_arrays["phasor/ch0/g"] = np.full((H, W), 0.45)
+    repo.written_arrays["phasor/ch0/s"] = np.full((H, W), 0.45)
+    repo.written_arrays["intensity"] = np.full((H, W), 25.0)
+    return repo
+
+
+@pytest.fixture
+def wavelet_session():
+    """Session with a DatasetHandle carrying FLIM metadata."""
+    s = Session()
+    handle = DatasetHandle(
+        path=Path("/tmp/test.h5"),
+        metadata={"flim_frequency_mhz": 80.0},
+    )
+    s.set_dataset(handle)
+    return s
+
+
+class TestApplyWavelet:
+    """Dispatch + provenance tests for the wavelet use case.
+
+    Monkeypatches the filter functions with sentinels so these tests
+    run without dtcwt and prove the dispatch wiring, not the algorithm.
+    """
+
+    def _sentinel_result(self, tag: str):
+        H = W = 64
+        return {
+            "G": np.full((H, W), 1.0 if tag == "boe" else 2.0, dtype=np.float32),
+            "S": np.full((H, W), 3.0 if tag == "boe" else 4.0, dtype=np.float32),
+            "T": np.full((H, W), 2.5, dtype=np.float32),
+            "GU": np.zeros((H, W), dtype=np.float32),
+            "SU": np.zeros((H, W), dtype=np.float32),
+            "TU": np.zeros((H, W), dtype=np.float32),
+            "filter_level": 9,
+        }
+
+    def test_boe_dispatch_invokes_boe_module(
+        self, wavelet_repo, wavelet_session, monkeypatch,
+    ):
+        """algorithm='boe_2021' → boe.denoise_phasor_boe is called."""
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        called = {"module": None}
+
+        def fake_boe(*a, **kw):
+            called["module"] = "boe"
+            return self._sentinel_result("boe")
+
+        def fake_jcb(*a, **kw):
+            called["module"] = "jcb"
+            return self._sentinel_result("jcb")
+
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.boe.denoise_phasor_boe", fake_boe)
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.jcb.denoise_phasor_jcb", fake_jcb)
+
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        result = uc.execute(channel="ch0", algorithm="boe_2021")
+
+        assert called["module"] == "boe"
+        assert result.algorithm == "boe_2021"
+        # Written G is the BOE sentinel (all-1 array).
+        assert np.allclose(wavelet_repo.written_arrays[
+            "phasor/ch0/g_filtered"], 1.0)
+
+    def test_jcb_dispatch_invokes_jcb_module(
+        self, wavelet_repo, wavelet_session, monkeypatch,
+    ):
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        called = {"module": None}
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.boe.denoise_phasor_boe",
+            lambda *a, **kw: (called.__setitem__("module", "boe"),
+                               self._sentinel_result("boe"))[1],
+        )
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.jcb.denoise_phasor_jcb",
+            lambda *a, **kw: (called.__setitem__("module", "jcb"),
+                               self._sentinel_result("jcb"))[1],
+        )
+
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        result = uc.execute(channel="ch0", algorithm="jcb_2025")
+
+        assert called["module"] == "jcb"
+        assert result.algorithm == "jcb_2025"
+        # Written G is the JCB sentinel (all-2 array).
+        assert np.allclose(wavelet_repo.written_arrays[
+            "phasor/ch0/g_filtered"], 2.0)
+
+    def test_default_algorithm_is_boe(
+        self, wavelet_repo, wavelet_session, monkeypatch,
+    ):
+        """No algorithm kwarg → uses boe_2021."""
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        called = {"module": None}
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.boe.denoise_phasor_boe",
+            lambda *a, **kw: (called.__setitem__("module", "boe"),
+                               self._sentinel_result("boe"))[1],
+        )
+
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        uc.execute(channel="ch0")
+
+        assert called["module"] == "boe"
+
+    def test_unknown_algorithm_raises_valueerror(
+        self, wavelet_repo, wavelet_session,
+    ):
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        with pytest.raises(ValueError, match="Unknown wavelet algorithm"):
+            uc.execute(channel="ch0", algorithm="bogus")
+
+    def test_writes_full_provenance_attrs(
+        self, wavelet_repo, wavelet_session, monkeypatch,
+    ):
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+        from percell4 import store_schema
+
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.boe.denoise_phasor_boe",
+            lambda *a, **kw: self._sentinel_result("boe"),
+        )
+
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        uc.execute(channel="ch0", algorithm="boe_2021", filter_level=9)
+
+        attrs = wavelet_repo.written_attrs["phasor/ch0/g_filtered"]
+        expected_keys = {
+            "dims", "channel", "filter_level",
+            "algorithm", "biort", "qshift", "n_local_window",
+            "sigma_g_estimator", "shrinkage",
+            "dtcwt_version", "percell4_version",
+        }
+        assert set(attrs) >= expected_keys, (
+            f"missing provenance attrs: {expected_keys - set(attrs)}"
+        )
+        assert attrs["algorithm"] == "boe_2021"
+        assert attrs["biort"] == "legall"
+        assert attrs["qshift"] == "qshift_a"
+        assert attrs["n_local_window"] == 3
+        assert attrs["sigma_g_estimator"] == "mad_level1_pm45"
+        assert attrs["shrinkage"] == "bishrink_full"
+        assert attrs["filter_level"] == 9
+
+    def test_lifetime_filtered_carries_omega(
+        self, wavelet_repo, wavelet_session, monkeypatch,
+    ):
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.boe.denoise_phasor_boe",
+            lambda *a, **kw: self._sentinel_result("boe"),
+        )
+
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        uc.execute(channel="ch0", algorithm="boe_2021")
+
+        attrs = wavelet_repo.written_attrs[
+            "phasor/ch0/lifetime_filtered"]
+        assert "omega_rad_per_ns" in attrs
+        assert attrs["omega_rad_per_ns"] == pytest.approx(
+            2 * np.pi * 80.0
+        )
+
+    def test_three_datasets_agree_on_algorithm(
+        self, wavelet_repo, wavelet_session, monkeypatch,
+    ):
+        """All three filtered datasets carry the same algorithm attr."""
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.boe.denoise_phasor_boe",
+            lambda *a, **kw: self._sentinel_result("boe"),
+        )
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        uc.execute(channel="ch0", algorithm="boe_2021")
+
+        for path in ("phasor/ch0/g_filtered",
+                     "phasor/ch0/s_filtered",
+                     "phasor/ch0/lifetime_filtered"):
+            assert wavelet_repo.written_attrs[path]["algorithm"] == "boe_2021"
+
+    def test_filter_status_sentinel_set_on_group(
+        self, wavelet_repo, wavelet_session, monkeypatch,
+    ):
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+        from percell4 import store_schema
+
+        monkeypatch.setattr(
+            "percell4.domain.flim.wavelet.boe.denoise_phasor_boe",
+            lambda *a, **kw: self._sentinel_result("boe"),
+        )
+
+        uc = ApplyWavelet(wavelet_repo, wavelet_session)
+        uc.execute(channel="ch0", algorithm="boe_2021")
+
+        group_attrs = wavelet_repo.group_attrs.get("phasor/ch0", {})
+        assert group_attrs.get(store_schema.FILTER_STATUS_ATTR) == (
+            store_schema.FILTER_STATUS_COMPLETE
+        )
+
+    def test_missing_algorithm_attr_defaults_to_jcb_2025(self):
+        """Backward compat: datasets written before this change lack
+        the algorithm attr; readers must treat them as jcb_2025."""
+        from percell4.store_schema import read_wavelet_algorithm
+
+        # No attr → legacy.
+        assert read_wavelet_algorithm({}) == "jcb_2025"
+        # Explicit attr wins.
+        assert read_wavelet_algorithm({"algorithm": "boe_2021"}) == "boe_2021"
+
+    def test_no_dataset_raises(self):
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        repo = FakeRepo()
+        uc = ApplyWavelet(repo, Session())
+        with pytest.raises(NoDatasetError):
+            uc.execute(channel="ch0")
+
+    def test_no_phasor_raises_value_error(self, wavelet_session):
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        repo = FakeRepo()  # empty, no phasor arrays
+        uc = ApplyWavelet(repo, wavelet_session)
+        with pytest.raises(ValueError, match="No phasor data"):
+            uc.execute(channel="ch0")
