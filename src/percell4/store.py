@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,21 @@ import h5py
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+
+@dataclass(frozen=True)
+class WriteItem:
+    """Bundle of ``path`` + ``array`` + ``attrs`` + ``is_decay`` for
+    :meth:`DatasetStore.write_arrays`.
+
+    Frozen so the caller can't accidentally mutate a queued write
+    between construction and the actual HDF5 transaction.
+    """
+
+    path: str
+    array: NDArray
+    attrs: dict[str, Any] | None = None
+    is_decay: bool = False
 
 # Chunk cache size for session reads (64 MB)
 _READ_CACHE_BYTES = 64 * 1024 * 1024
@@ -128,6 +144,63 @@ class DatasetStore:
                     f[hdf5_path].attrs[key] = val
         return array.size
 
+    def write_arrays(
+        self,
+        items: "list[WriteItem]",
+        group_attrs: "dict[str, dict[str, Any]] | None" = None,
+    ) -> int:
+        """Write multiple datasets under a single HDF5 file handle.
+
+        Collapses the crash-inconsistency window for multi-dataset
+        invariants (e.g. writing ``g_filtered``, ``s_filtered``, and
+        ``lifetime_filtered`` together — all three should agree on the
+        filter algorithm). Not atomic in the ACID sense — HDF5 has no
+        transactions — but the file is only opened once, so the window
+        between the first and last write shrinks from a handful of
+        seconds to a handful of milliseconds.
+
+        Parameters
+        ----------
+        items : list of WriteItem
+            Each item carries ``path``, ``array``, optional ``attrs``,
+            and an ``is_decay`` flag that drives the chunk/compression
+            choice.
+        group_attrs : dict, optional
+            Map of ``group_path → {attr_name: value}`` to set on HDF5
+            *groups* (not datasets) during the same open. Useful for
+            writing a ``filter_status`` sentinel on
+            ``phasor/{channel}`` that covers the whole group.
+
+        Returns
+        -------
+        int
+            Total elements written across all datasets.
+        """
+        total = 0
+        with h5py.File(self.path, "a") as f:
+            for item in items:
+                if item.path in f:
+                    del f[item.path]
+                chunks = _choose_chunks(item.array.shape,
+                                         is_decay=item.is_decay)
+                f.create_dataset(
+                    item.path,
+                    data=item.array,
+                    chunks=chunks,
+                    **_compression_kwargs(is_decay=item.is_decay),
+                )
+                if item.attrs:
+                    for key, val in item.attrs.items():
+                        f[item.path].attrs[key] = val
+                total += item.array.size
+
+            if group_attrs:
+                for group_path, attrs in group_attrs.items():
+                    grp = f.require_group(group_path)
+                    for key, val in attrs.items():
+                        grp.attrs[key] = val
+        return total
+
     def read_array(self, hdf5_path: str) -> NDArray:
         """Read a numpy array from the specified HDF5 path."""
         f = self._open_read()
@@ -135,6 +208,18 @@ class DatasetStore:
             if hdf5_path not in f:
                 raise KeyError(f"Dataset not found: {hdf5_path}")
             return f[hdf5_path][()]
+        finally:
+            self._close_if_not_session(f)
+
+    def read_array_attrs(self, hdf5_path: str) -> dict[str, Any]:
+        """Read the attrs of a dataset (or group) without reading the
+        data. Raises ``KeyError`` if the path is missing.
+        """
+        f = self._open_read()
+        try:
+            if hdf5_path not in f:
+                raise KeyError(f"Path not found: {hdf5_path}")
+            return dict(f[hdf5_path].attrs)
         finally:
             self._close_if_not_session(f)
 

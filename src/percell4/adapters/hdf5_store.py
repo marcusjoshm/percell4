@@ -146,6 +146,19 @@ class Hdf5DatasetRepository:
     def read_array(self, handle: DatasetHandle, path: str) -> NDArray:
         return self._store(handle).read_array(path)
 
+    def read_array_attrs(
+        self, handle: DatasetHandle, path: str,
+    ) -> dict[str, Any]:
+        return self._store(handle).read_array_attrs(path)
+
+    def write_arrays(
+        self,
+        handle: DatasetHandle,
+        items: list[Any],
+        group_attrs: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self._store(handle).write_arrays(items, group_attrs=group_attrs)
+
     # ── Groups ───────────────────────────────────────────────
 
     def read_group_columns(self, handle: DatasetHandle) -> pd.DataFrame | None:

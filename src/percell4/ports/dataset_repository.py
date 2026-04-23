@@ -88,6 +88,28 @@ class DatasetRepository(Protocol):
         """Read a numpy array from an arbitrary HDF5 path. Raises KeyError if missing."""
         ...
 
+    def read_array_attrs(
+        self, handle: DatasetHandle, path: str,
+    ) -> dict[str, Any]:
+        """Read the attrs of a dataset (or group) without loading data.
+        Raises KeyError if the path is missing."""
+        ...
+
+    def write_arrays(
+        self,
+        handle: DatasetHandle,
+        items: list[Any],
+        group_attrs: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        """Write multiple arrays under a single HDF5 file handle.
+
+        Collapses the crash-inconsistency window when several datasets
+        must be consistent with each other (e.g. the three phasor
+        filtered datasets agreeing on the filter algorithm). ``items``
+        is a list of :class:`percell4.store.WriteItem`.
+        """
+        ...
+
     # ── Groups (for stored group columns) ────────────────────
 
     def read_group_columns(self, handle: DatasetHandle) -> pd.DataFrame | None:
