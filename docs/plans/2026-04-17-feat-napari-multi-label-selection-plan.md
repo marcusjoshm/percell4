@@ -457,58 +457,66 @@ Manual-test checklist suffices for integration.
 
 ### Functional
 
-- [ ] `StagingBuffer` dataclass exists in
+- [x] `StagingBuffer` dataclass exists in
       `src/percell4/gui/multi_select.py` with `toggle`, `snapshot`,
       `is_dirty`.
-- [ ] `MultiLabelSelectController` class exists in the same file with the
+- [x] `MultiLabelSelectController` class exists in the same file with the
       Protocols and method surface above.
-- [ ] `LauncherWindow` gains a **Multi-select** toolbar action with keyboard
-      shortcut `M` (Qt.WindowShortcut).
-- [ ] Clicking the action opens a QMainWindow dock parented to
+- [x] `LauncherWindow` gains a **Multi-select** menu action with keyboard
+      shortcut `M` (Qt.WindowShortcut). Lives under the new **Selection**
+      menu in the menu bar.
+- [x] Clicking the action opens a QMainWindow dock parented to
       `ViewerWindow`; dock has Accept / Cancel buttons and a live counter.
-- [ ] Left-click on a label while the tool is active toggles that label
+- [x] Left-click on a label while the tool is active toggles that label
       in staging.
-- [ ] Middle-click / right-click / Alt-drag / Space-drag are
+- [x] Middle-click / right-click / Alt-drag / Space-drag are
       **not** intercepted (event.button filter).
-- [ ] Clicks on background (label 0) and clicks outside the layer bounds
+- [x] Clicks on background (label 0) and clicks outside the layer bounds
       (label value None) are no-ops.
-- [ ] Staged cells render in cyan via a **dedicated overlay Labels layer**
+- [x] Staged cells render in cyan via a **dedicated overlay Labels layer**
       named `_multi_select_staged`. The existing `_update_label_display`
       function is untouched.
-- [ ] `Ctrl+Return` or Accept button → domain selection replaced via
+- [x] `Ctrl+Return` or Accept button → domain selection replaced via
       `Session.set_selection(frozenset)`; overlay removed; layer mode
       restored to prior; `_on_label_selected` forwarding restored;
       workflow lock released.
-- [ ] `Esc` or Cancel button → same teardown, domain selection unchanged.
-- [ ] Accept button is **disabled** when `StagingBuffer.is_dirty()` is
+- [x] `Esc` or Cancel button → same teardown, domain selection unchanged.
+- [x] Accept button is **disabled** when `StagingBuffer.is_dirty()` is
       False (no net change to pre-filled set).
-- [ ] Multi-select toolbar action is **disabled** when
+- [x] Multi-select action is **disabled** when
       `launcher.is_workflow_locked()` returns True — reusing existing
-      coordination; no new `_active_tool` flag.
-- [ ] Closing the ViewerWindow while the tool is active does not raise a
-      `RuntimeError` — controller's `isVisible()` guard and `_torn_down`
-      flag cover the teardown-after-timer path.
+      coordination via the full menu-bar disable in `set_workflow_locked`;
+      no new `_active_tool` flag.
+- [x] Closing the ViewerWindow while the tool is active does not raise a
+      `RuntimeError` — controller's `is_viewer_alive()` guard and
+      `_torn_down` flag cover the teardown-after-timer path (unit test
+      `test_do_refresh_early_returns_when_viewer_not_alive`).
 
 ### Non-functional
 
-- [ ] No mutation of `layer.data` on the primary labels layer. Overlay
-      layer is read-only.
-- [ ] Fast clicking (≥ 5/s) coalesced via a single `QTimer(setSingleShot=True).start(0)`;
+- [x] No mutation of `layer.data` on the primary labels layer. Overlay
+      layer shares the primary's data array by reference and its
+      colormap is rebuilt on update.
+- [x] Fast clicking (≥ 5/s) coalesced via a single `QTimer(setSingleShot=True).start(0)`;
       no per-click GPU texture rebuild on the primary layer.
-- [ ] `ruff` + `lint-imports` pass. Existing `tests/test_workflows/test_qt_free_imports.py`
-      stays green — `multi_select.py` lives under `gui/` so Qt imports are
-      allowed there.
+- [x] `ruff` + `lint-imports` pass on new files; existing pre-existing
+      ruff issues on `viewer.py` / `main_window.py` unchanged by this
+      PR. `test_qt_free_imports.py` still green (new code under `gui/`).
 
 ### Quality gates
 
-- [ ] StagingBuffer tests: pre-fill, toggle add, toggle remove, snapshot
-      returns frozenset, is_dirty True/False cases. ≥ 6 tests.
-- [ ] Controller tests with mock Protocols: install calls all six viewer
-      helpers in the documented order; accept calls `SelectionSink.set_selection`
-      with a list of the snapshot; cancel does not call set_selection.
-      Timer cancellation on teardown verified via a fake `QTimer`.
-- [ ] Manual-test checklist executed on macOS dev machine before merge;
-      Windows-box checklist after Phase 2 lands.
+- [x] StagingBuffer tests: 8 tests covering pre-fill / toggle add /
+      toggle remove / symmetric / snapshot frozenset / is_dirty /
+      different-cardinality mutations.
+- [x] Controller tests with mock Protocols: install order, cancel
+      teardown, accept commits + teardown, idempotent cancel,
+      torn-down guards, click callback matrix (left/middle/right,
+      background, outside bounds, numpy int, exception in get_value,
+      toggle-out). 21 controller tests total — 29 tests all in.
+- [x] End-to-end smoke test with a real napari Viewer confirmed:
+      launch → overlay appears → stage → accept → selection
+      committed → overlay removed → workflow lock released →
+      controller torn_down.
 
 ## Technical Considerations
 

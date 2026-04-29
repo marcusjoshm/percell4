@@ -73,8 +73,11 @@ class ViewerWindow:
         self._qt_window = None
         self._color_index = 0
         self._is_originator = False
+        self._selected_label_forwarding_suspended = False
         self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
         self._hidden_mask_layers: dict[str, float] = {}  # {layer_name: original_opacity}
+        # Held so Qt doesn't GC the multi-select controller mid-session.
+        self._multi_select_controller = None
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -247,6 +250,11 @@ class ViewerWindow:
     def _on_label_selected(self, event) -> None:
         """Forward label selection to CellDataModel."""
         if self._is_originator:
+            return
+        if self._selected_label_forwarding_suspended:
+            # A modal tool (e.g. multi-select) owns label clicks. Don't
+            # wipe the current selection from napari's own pick handler
+            # while the tool is active.
             return
         try:
             source = event.source
@@ -425,3 +433,134 @@ class ViewerWindow:
         geom = QSettings("LeeLabPerCell4", "PerCell4").value("viewer/geometry")
         if geom and self._is_alive():
             self._qt_window.restoreGeometry(geom)
+
+    # ── Multi-select tool integration ──────────────────────────
+    #
+    # These methods satisfy the `StagedRenderer` Protocol in
+    # `percell4.gui.multi_select`. They are also used by any future
+    # modal viewer tool that wants an overlay layer + forwarding
+    # suspension pattern.
+
+    def is_viewer_alive(self) -> bool:
+        """Public alias for :meth:`_is_alive` — used by modal tools."""
+        return self._is_alive()
+
+    def active_labels_layer_or_none(self):
+        """Return the active Labels layer, or None if the viewer is
+        torn down or has no Labels layer matching the active
+        segmentation."""
+        if not self._is_alive():
+            return None
+        return self._get_active_labels_layer()
+
+    def suspend_selected_label_forwarding(self) -> None:
+        """Stop forwarding napari's ``selected_label`` events to the
+        model for the duration of a modal tool. Idempotent."""
+        self._selected_label_forwarding_suspended = True
+
+    def resume_selected_label_forwarding(self) -> None:
+        """Resume forwarding ``selected_label`` events. Idempotent."""
+        self._selected_label_forwarding_suspended = False
+
+    def add_staged_overlay(self, staged_ids) -> None:
+        """Add (or replace) a read-only Labels layer that renders only
+        ``staged_ids`` in cyan. Shares the primary layer's data by
+        reference — no copy."""
+        from napari.utils.colormaps import DirectLabelColormap
+
+        from percell4.gui.multi_select import (
+            _OVERLAY_LAYER_NAME,
+            _STAGED_COLOR,
+        )
+
+        if not self._is_alive() or self._viewer is None:
+            return
+        primary = self._get_active_labels_layer()
+        if primary is None:
+            return
+
+        color_dict = {0: "transparent", None: "transparent"}
+        for lid in staged_ids:
+            color_dict[int(lid)] = list(_STAGED_COLOR)
+        cmap = DirectLabelColormap(color_dict=color_dict)
+
+        if _OVERLAY_LAYER_NAME in self._viewer.layers:
+            overlay = self._viewer.layers[_OVERLAY_LAYER_NAME]
+            overlay.data = primary.data
+            overlay.colormap = cmap
+        else:
+            self._viewer.add_labels(
+                primary.data,
+                name=_OVERLAY_LAYER_NAME,
+                colormap=cmap,
+                opacity=0.6,
+                blending="translucent",
+                metadata={PERCELL_TYPE_KEY: "multi_select_staged"},
+            )
+            # Keep the primary labels layer as the active layer so
+            # mouse_drag_callbacks appended to it still fire on click.
+            try:
+                self._viewer.layers.selection.active = primary
+            except Exception:  # noqa: BLE001
+                logger.debug("could not restore active layer after overlay add")
+
+    def update_staged_overlay(self, staged_ids) -> None:
+        """Rebuild the overlay layer's colormap to render
+        ``staged_ids``. Called from the controller's coalesced
+        refresh timer. No-op if the overlay has been removed."""
+        from napari.utils.colormaps import DirectLabelColormap
+
+        from percell4.gui.multi_select import (
+            _OVERLAY_LAYER_NAME,
+            _STAGED_COLOR,
+        )
+
+        if not self._is_alive() or self._viewer is None:
+            return
+        if _OVERLAY_LAYER_NAME not in self._viewer.layers:
+            return
+        color_dict = {0: "transparent", None: "transparent"}
+        for lid in staged_ids:
+            color_dict[int(lid)] = list(_STAGED_COLOR)
+        overlay = self._viewer.layers[_OVERLAY_LAYER_NAME]
+        overlay.colormap = DirectLabelColormap(color_dict=color_dict)
+
+    def remove_staged_overlay(self) -> None:
+        """Remove the staging overlay layer. Idempotent."""
+        from percell4.gui.multi_select import _OVERLAY_LAYER_NAME
+
+        if not self._is_alive() or self._viewer is None:
+            return
+        if _OVERLAY_LAYER_NAME in self._viewer.layers:
+            del self._viewer.layers[_OVERLAY_LAYER_NAME]
+
+    def launch_multi_select_tool(self, launcher) -> bool:
+        """Open the modal multi-label selection tool.
+
+        Constructs a :class:`MultiLabelSelectController` and retains a
+        reference so Qt doesn't GC it mid-session. Returns False if
+        the tool could not be installed (no labels layer, workflow
+        already locked, viewer not alive).
+        """
+        from percell4.gui.multi_select import MultiLabelSelectController
+
+        self._ensure_viewer()
+        # Tear down any previous controller before opening a new one.
+        prev = self._multi_select_controller
+        if prev is not None:
+            try:
+                prev.cancel()
+            except Exception:  # noqa: BLE001
+                logger.debug("previous multi-select cancel raised", exc_info=True)
+            self._multi_select_controller = None
+
+        controller = MultiLabelSelectController(
+            viewer_win=self,
+            data_model=self.data_model,
+            launcher=launcher,
+        )
+        ok = controller.show()
+        if not ok:
+            return False
+        self._multi_select_controller = controller
+        return True
