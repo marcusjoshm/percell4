@@ -44,6 +44,7 @@ Heavy computation (Cellpose, etc.) runs in QThread workers to avoid freezing the
 - Archive brainstorms and planning docs immediately after implementation
 - Active docs contain ONLY what IS, not what WAS or MIGHT BE
 - Never allow contradictory architectural decisions to coexist in context
+- `docs/solutions/` indexes documented solutions to past bugs, architecture patterns, and conventions by category with YAML frontmatter (`module`, `tags`, `problem_type`) — relevant when implementing or debugging in documented areas
 
 ## Previous Versions
 
