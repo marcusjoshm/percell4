@@ -15,7 +15,9 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -252,6 +254,62 @@ class CompressDialog(QDialog):
 
         layout.addWidget(settings_group)
 
+        # ── FLIM .bin Parameters (auto-shown when .bin files detected) ──
+        self._flim_group = QGroupBox("FLIM .bin Parameters")
+        self._flim_group.setCheckable(True)
+        self._flim_group.setChecked(False)
+        self._flim_group.setToolTip(
+            "Parameters for raw binary TCSPC histogram (.bin) files.\n"
+            "Auto-enabled when .bin files are detected during discovery."
+        )
+        flim_layout = QFormLayout(self._flim_group)
+
+        self._flim_freq = QDoubleSpinBox()
+        self._flim_freq.setRange(0.1, 1000.0)
+        self._flim_freq.setValue(80.0)
+        self._flim_freq.setDecimals(1)
+        self._flim_freq.setSuffix(" MHz")
+        flim_layout.addRow("Laser frequency:", self._flim_freq)
+
+        self._bin_x = QSpinBox()
+        self._bin_x.setRange(1, 10000)
+        self._bin_x.setValue(512)
+        flim_layout.addRow("X dimension:", self._bin_x)
+
+        self._bin_y = QSpinBox()
+        self._bin_y.setRange(1, 10000)
+        self._bin_y.setValue(512)
+        flim_layout.addRow("Y dimension:", self._bin_y)
+
+        self._bin_t = QSpinBox()
+        self._bin_t.setRange(1, 4096)
+        self._bin_t.setValue(132)
+        flim_layout.addRow("Time bins:", self._bin_t)
+
+        self._bin_dtype = QComboBox()
+        self._bin_dtype.addItems(["uint32", "uint16", "float32", "uint8"])
+        flim_layout.addRow("Data type:", self._bin_dtype)
+
+        self._bin_dim_order = QComboBox()
+        self._bin_dim_order.addItems(["YXT", "XYT", "TYX"])
+        flim_layout.addRow("Dimension order:", self._bin_dim_order)
+
+        self._bin_header = QSpinBox()
+        self._bin_header.setRange(0, 10000)
+        self._bin_header.setValue(0)
+        self._bin_header.setSpecialValueText("Auto-detect")
+        flim_layout.addRow("Header bytes:", self._bin_header)
+
+        cal_label = QLabel("Per-channel calibration (phase / modulation):")
+        flim_layout.addRow(cal_label)
+        self._flim_cal_container = QVBoxLayout()
+        flim_layout.addRow(self._flim_cal_container)
+        self._channel_calibrations: dict[str, _CalibrationConfig] = {}
+
+        self._flim_group.toggled.connect(self._on_flim_group_toggled)
+        layout.addWidget(self._flim_group)
+        self._on_flim_group_toggled(False)
+
         # ── Token Patterns (collapsible) ──
         self._token_group = QGroupBox("Advanced: Token Patterns")
         self._token_group.setCheckable(True)
@@ -361,6 +419,28 @@ class CompressDialog(QDialog):
                 checked=ds.name in checked_names,
             )
 
+        flim_params: dict | None = None
+        if self._flim_group.isChecked():
+            channel_calibrations: dict[str, dict[str, float]] = {}
+            for ch_id, cal in self._channel_calibrations.items():
+                ch_name = f"ch{ch_id}" if ch_id else "ch0"
+                channel_calibrations[ch_name] = {
+                    "phase": cal.phase_spin.value(),
+                    "modulation": cal.mod_spin.value(),
+                }
+            flim_params = {
+                "frequency_mhz": self._flim_freq.value(),
+                "channel_calibrations": channel_calibrations,
+                "bin_dimensions": {
+                    "x_dim": self._bin_x.value(),
+                    "y_dim": self._bin_y.value(),
+                    "t_dim": self._bin_t.value(),
+                    "dtype": self._bin_dtype.currentText(),
+                    "dim_order": self._bin_dim_order.currentText(),
+                    "header_bytes": self._bin_header.value(),
+                },
+            }
+
         return CompressConfig(
             z_project_method=self._z_combo.currentText(),
             token_config=self._current_token_config(),
@@ -371,6 +451,7 @@ class CompressDialog(QDialog):
             gui_states=gui_states,
             layer_assignments=layer_assignments,
             dataset_name_overrides=dataset_name_overrides,
+            flim_params=flim_params,
         )
 
     # ------------------------------------------------------------------
@@ -420,6 +501,11 @@ class CompressDialog(QDialog):
     def _on_token_group_toggled(self, checked: bool) -> None:
         for child in self._token_group.findChildren(QWidget):
             if child is not self._token_group:
+                child.setVisible(checked)
+
+    def _on_flim_group_toggled(self, checked: bool) -> None:
+        for child in self._flim_group.findChildren(QWidget):
+            if child is not self._flim_group:
                 child.setVisible(checked)
 
     def _on_select_all_datasets(self) -> None:
@@ -564,6 +650,9 @@ class CompressDialog(QDialog):
         # ── Channels (manual mode panel) ──
         self._build_manual_channel_panel()
 
+        # ── FLIM per-channel calibration rows ──
+        self._build_calibration_panel()
+
         # ── Summary ──
         parts = []
         if self._all_tiles:
@@ -582,6 +671,15 @@ class CompressDialog(QDialog):
         # Auto-enable stitching if tiles detected
         if self._all_tiles and not self._stitch_check.isChecked():
             self._stitch_check.setChecked(True)
+
+        # Auto-enable FLIM section if any .bin files detected
+        has_bin = any(
+            f.path.suffix.lower() == ".bin"
+            for ds in self._datasets
+            for f in ds.files
+        )
+        if has_bin and not self._flim_group.isChecked():
+            self._flim_group.setChecked(True)
 
         self._update_compress_button()
 
@@ -622,6 +720,53 @@ class CompressDialog(QDialog):
                 checkbox=cb, name_edit=name_edit, type_combo=type_combo
             )
 
+    def _build_calibration_panel(self) -> None:
+        """Build per-channel phase/modulation widgets for FLIM calibration.
+
+        Mirrors the historical ImportDialog._discover_channels layout:
+        one QGroupBox per channel with "Phase:" + "Modulation:" form rows.
+        Calibration is applied as a Cartesian rotation in
+        ``compute_phasor`` using the values stored as
+        ``flim_cal_phase_<ch>`` / ``flim_cal_mod_<ch>`` HDF5 metadata —
+        the same convention flimfret/preprocessing.py uses for its
+        phi_cal / m_cal correction.
+        """
+        while self._flim_cal_container.count():
+            child = self._flim_cal_container.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self._channel_calibrations.clear()
+
+        if not self._all_channels:
+            return
+
+        for ch in self._all_channels:
+            ch_name = f"ch{ch}" if ch else "ch0"
+            group = QGroupBox(f"Channel {ch_name}")
+            form = QFormLayout(group)
+
+            phase_spin = QDoubleSpinBox()
+            phase_spin.setRange(-6.283, 6.283)
+            phase_spin.setValue(0.0)
+            phase_spin.setDecimals(4)
+            phase_spin.setSuffix(" rad")
+            form.addRow("Phase:", phase_spin)
+
+            mod_spin = QDoubleSpinBox()
+            mod_spin.setRange(0.0, 10.0)
+            mod_spin.setValue(1.0)
+            mod_spin.setDecimals(4)
+            form.addRow("Modulation:", mod_spin)
+
+            self._flim_cal_container.addWidget(group)
+            self._channel_calibrations[ch] = _CalibrationConfig(
+                phase_spin=phase_spin, mod_spin=mod_spin
+            )
+
+        # New widgets default to visible — re-apply collapsed state if the
+        # FLIM group is currently unchecked so they don't appear orphaned.
+        self._on_flim_group_toggled(self._flim_group.isChecked())
+
     def _update_compress_button(self) -> None:
         any_ds = any(
             self._ds_list.item(i).checkState() == Qt.Checked
@@ -655,6 +800,16 @@ class _ChannelConfig:
         self.checkbox = checkbox
         self.name_edit = name_edit
         self.type_combo = type_combo
+
+
+class _CalibrationConfig:
+    """Holds the FLIM phase/modulation widgets for a single channel."""
+
+    __slots__ = ("phase_spin", "mod_spin")
+
+    def __init__(self, phase_spin: QDoubleSpinBox, mod_spin: QDoubleSpinBox) -> None:
+        self.phase_spin = phase_spin
+        self.mod_spin = mod_spin
 
 
 def _sort_key(val: str) -> tuple[int, str]:

@@ -134,7 +134,10 @@ class DatasetStore:
         try:
             if hdf5_path not in f:
                 raise KeyError(f"Dataset not found: {hdf5_path}")
-            return f[hdf5_path][()]
+            obj = f[hdf5_path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{hdf5_path} is a group, not a dataset")
+            return obj[()]
         finally:
             self._close_if_not_session(f)
 
@@ -309,6 +312,37 @@ class DatasetStore:
                 raise ValueError(f"Target path already exists: {new_path}")
             f.move(old_path, new_path)
             return True
+
+    def rename_channel(self, old_name: str, new_name: str) -> None:
+        """Rename a channel across all per-channel paths and metadata attrs.
+
+        Moves ``/decay/<old>`` and ``/phasor/<old>`` groups, updates the
+        ``channel_names`` list, and renames per-channel FLIM calibration
+        attrs (``flim_cal_phase_<name>``, ``flim_cal_mod_<name>``). Silent
+        no-op for paths/attrs that don't exist.
+        """
+        if old_name == new_name:
+            return
+        with h5py.File(self.path, "a") as f:
+            for prefix in ("decay", "phasor"):
+                old_path = f"{prefix}/{old_name}"
+                new_path = f"{prefix}/{new_name}"
+                if old_path in f:
+                    if new_path in f:
+                        raise ValueError(f"Target path already exists: {new_path}")
+                    f.move(old_path, new_path)
+            if "metadata" in f:
+                attrs = f["metadata"].attrs
+                names = list(attrs.get("channel_names", []))
+                if old_name in names:
+                    names[names.index(old_name)] = new_name
+                    attrs["channel_names"] = names
+                for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
+                    old_key = f"{key_prefix}{old_name}"
+                    new_key = f"{key_prefix}{new_name}"
+                    if old_key in attrs:
+                        attrs[new_key] = attrs[old_key]
+                        del attrs[old_key]
 
     @staticmethod
     def create_atomic(

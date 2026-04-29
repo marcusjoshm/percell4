@@ -13,7 +13,7 @@ from pathlib import Path
 from percell4.domain.io.models import DatasetSpec, DiscoveredFile, ScanResult, TokenConfig
 from percell4.domain.io.scanner import FileScanner
 
-_TIFF_EXTENSIONS = {".tif", ".tiff"}
+_IMAGE_EXTENSIONS = {".tif", ".tiff", ".bin"}
 
 
 def discover_by_subdirectory(
@@ -39,16 +39,16 @@ def discover_by_subdirectory(
     if not child_dirs:
         return _scan_single(root, scanner, out)
 
-    # Check if root also has loose TIFFs alongside subdirectories
+    # Check if root also has loose images alongside subdirectories
     root_tiffs = [
         p
         for p in root.iterdir()
-        if p.is_file() and p.suffix.lower() in _TIFF_EXTENSIONS
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS
     ]
 
     datasets: list[DatasetSpec] = []
 
-    # Loose TIFFs in root become their own dataset
+    # Loose image files in root become their own dataset
     if root_tiffs:
         scan = scanner.scan(files=[str(f) for f in root_tiffs])
         if scan.files:

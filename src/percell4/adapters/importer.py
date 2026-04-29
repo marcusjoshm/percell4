@@ -72,11 +72,12 @@ def import_dataset(
     else:
         result = scanner.scan(path=source_dir)
 
-    # Also check for .bin TCSPC files
-    bin_files = sorted(source_dir.glob("*.bin"))
-
-    if not result.files and not bin_files:
+    if not result.files:
         raise ValueError(f"No image files found in {source_dir}")
+
+    bin_files = sorted(
+        f.path for f in result.files if f.path.suffix.lower() == ".bin"
+    )
 
     # Auto-enable FLIM if .bin files found and no flim_params provided
     if bin_files and flim_params is None:
@@ -90,11 +91,13 @@ def import_dataset(
             },
         }
 
-    # 2. Separate TCSPC files from intensity files
+    # 2. Separate TIFF intensity vs TCSPC TIFFs (.bin handled separately below)
     _progress(1, 5, "Organizing files...")
     tcspc_files = []
     intensity_files = []
     for f in result.files:
+        if f.path.suffix.lower() == ".bin":
+            continue
         stem = f.path.stem.upper()
         if "TCSPC" in stem:
             tcspc_files.append(f)
@@ -190,17 +193,42 @@ def import_dataset(
         bin_dims = flim_params.get("bin_dimensions", {})
         config = token_config or TokenConfig()
 
-        # Parse tokens from .bin filenames (same patterns as TIFFs)
+        # Build a lookup from each TIFF channel's "base stem" (the stem with
+        # the channel token stripped) to its channel key. A .bin file that
+        # carries no explicit channel token but whose stem matches a TIFF
+        # base stem is FLIM data for that TIFF channel — we want decay/<ch>
+        # to land on the same channel name, not a synthetic ``ch0``.
+        # Example: ``DA Halo 20uL 1.bin`` paired with ``DA Halo 20uL 1_ch00.tif``
+        #          → resolved to channel key ``"00"`` → ``decay/ch00``.
+        tiff_base_stems: dict[str, str] = {}
+        if config.channel:
+            for f in intensity_files:
+                ch_tok = f.tokens.get("channel", "")
+                if not ch_tok:
+                    continue
+                base = re.sub(config.channel, "", f.path.stem).strip("_- ")
+                if base:
+                    tiff_base_stems.setdefault(base, ch_tok)
+
+        # Parse tokens from .bin filenames (same patterns as TIFFs).
+        # Falls back to TIFF stem matching when no channel token is present.
         bin_by_channel: dict[str, dict[int, Path]] = defaultdict(dict)
         for bin_path in bin_files:
             stem = bin_path.stem
-            # Extract channel token
             ch = ""
             if config.channel:
                 m = re.search(config.channel, stem)
                 if m:
                     ch = m.group(1)
-            # Extract tile token
+            if not ch and tiff_base_stems:
+                # Match by base stem (.bin's full stem == TIFF base stem)
+                ch = tiff_base_stems.get(stem, "")
+                if not ch:
+                    # Or .bin stem prefix-matches a TIFF base stem
+                    for base, ch_tok in tiff_base_stems.items():
+                        if stem.startswith(base) or base.startswith(stem):
+                            ch = ch_tok
+                            break
             tile_idx = 0
             if config.tile:
                 m = re.search(config.tile, stem)
@@ -279,20 +307,23 @@ def import_dataset(
                 # during the streaming HDF5 write phase
                 del result_bin
 
-            # Stitch intensity tiles (small, ~35 MB per channel for 6x6 grid)
-            if use_tiling:
-                stitched_intensity = assemble_tiles(
-                    intensity_tiles,
-                    grid_rows=tile_config.grid_rows,
-                    grid_cols=tile_config.grid_cols,
-                    grid_type=tile_config.grid_type,
-                    order=tile_config.order,
-                )
-            else:
-                stitched_intensity = next(iter(intensity_tiles.values()))
-
-            channel_images.append(stitched_intensity.astype(np.float32))
-            channel_names.append(ch_name)
+            # Only synthesize an intensity channel from the .bin sum when
+            # there isn't already a TIFF-sourced intensity layer for this
+            # channel. Otherwise the TIFF intensity wins and the .bin is
+            # decay-only — no duplicate napari layer.
+            if ch_name not in channel_names:
+                if use_tiling:
+                    stitched_intensity = assemble_tiles(
+                        intensity_tiles,
+                        grid_rows=tile_config.grid_rows,
+                        grid_cols=tile_config.grid_cols,
+                        grid_type=tile_config.grid_type,
+                        order=tile_config.order,
+                    )
+                else:
+                    stitched_intensity = next(iter(intensity_tiles.values()))
+                channel_images.append(stitched_intensity.astype(np.float32))
+                channel_names.append(ch_name)
 
             # Store info for deferred decay write (tile-by-tile to HDF5)
             tcspc_data[ch_name] = {

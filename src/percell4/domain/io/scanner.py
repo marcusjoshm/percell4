@@ -1,7 +1,8 @@
 """File scanner for discovering and parsing microscopy image files.
 
-Walks a directory, identifies TIFF files, and extracts tokens (channel,
-timepoint, z-slice, tile) from filenames using regex patterns.
+Walks a directory, identifies TIFF and FLIM .bin files, and extracts
+tokens (channel, timepoint, z-slice, tile) from filenames using regex
+patterns.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from percell4.domain.io.models import DiscoveredFile, ScanResult, TokenConfig
 
-_TIFF_EXTENSIONS = {".tif", ".tiff"}
+_IMAGE_EXTENSIONS = {".tif", ".tiff", ".bin"}
 
 
 class FileScanner:
@@ -25,10 +26,12 @@ class FileScanner:
         path: str | Path | None = None,
         files: list[str | Path] | None = None,
     ) -> ScanResult:
-        """Scan a directory or explicit file list for TIFF images.
+        """Scan a directory or explicit file list for image files.
 
         Provide either ``path`` (directory to walk) or ``files`` (explicit
-        list of file paths), but not both.
+        list of file paths), but not both. Recognized extensions are
+        ``.tif``/``.tiff`` (intensity / TCSPC TIFFs) and ``.bin``
+        (raw FLIM TCSPC histograms).
         """
         if path is not None and files is not None:
             raise ValueError("Provide either path or files, not both")
@@ -36,11 +39,11 @@ class FileScanner:
             raise ValueError("Must provide either path or files")
 
         if files is not None:
-            tiff_paths = [Path(f) for f in files if Path(f).suffix.lower() in _TIFF_EXTENSIONS]
+            tiff_paths = [Path(f) for f in files if Path(f).suffix.lower() in _IMAGE_EXTENSIONS]
         else:
             tiff_paths = sorted(
                 p for p in Path(path).rglob("*")
-                if p.suffix.lower() in _TIFF_EXTENSIONS and not p.is_symlink()
+                if p.suffix.lower() in _IMAGE_EXTENSIONS and not p.is_symlink()
             )
 
         result = ScanResult()

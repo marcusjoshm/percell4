@@ -179,6 +179,7 @@ class CompressConfig:
     dataset_name_overrides: dict[str, str] = field(default_factory=dict)  # orig -> new
     datasets: list[DatasetSpec] = field(default_factory=list)
     gui_states: dict[str, DatasetGuiState] = field(default_factory=dict)
+    flim_params: dict | None = None  # passed through to import_dataset for .bin FLIM data
 
 
 @dataclass(frozen=True)
