@@ -102,6 +102,16 @@ s_cal = g * m * sin(phi) + s * m * cos(phi)
 
 **Fix:** `axis.enableAutoSIPrefix(False)` on both axes.
 
+### 11. Cross-Layer Alignment Hazard (Intensity vs. Decay)
+
+**Symptom:** Phasor and wavelet output looked broken in the add-layer / TCSPC append flow but correct in the compress flow on the same source `.bin` files. Per-pixel `(g, s)` values matched between flows; the histogram and filtered output diverged.
+
+**Root cause:** FLIM consumers (`apply_wavelet.py`, `flim_panel.py`, phasor plot's `np.histogram2d` weights) read intensity from `/intensity[ch_idx]` while `(g, s)` maps came from `/decay/<ch>`. When those two layers drifted out of spatial alignment (different stitch / rotation / append-only rewrite of `/decay`), the per-pixel multiplication `g * intensity` and the weighted histogram were misaligned and produced visually plausible but wrong output.
+
+**Fix:** At every FLIM analysis site, derive intensity from `decay.sum(axis=-1)` of the same `/decay/<ch>` being analyzed — by construction aligned with the `(g, s)` maps. Never read `/intensity[ch_idx]` for FLIM weighting.
+
+**Key lesson:** This is a Stage 7 prerequisite for everything else in this doc. The phasor math from stages 5-8 is correct only if the intensity term and the `(g, s)` term come from the same decay tensor. Storing them as separately-writable HDF5 layers is convenient but creates a silent alignment hazard. See [`flim-phasor-cross-layer-alignment-2026-04-29.md`](../logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md) for the full investigation, including all the wrong trails (rotation removal, calibration pre-fill, byte-identical writer refactor) that did NOT fix it.
+
 ## Prevention Patterns
 
 | Pattern | When to Apply |
@@ -115,6 +125,7 @@ s_cal = g * m * sin(phi) + s * m * cos(phi)
 | Copy exact algorithm, don't simplify | Wavelet filter or any signal processing |
 | Use `setRect` not `setTransform` for ImageItem | pyqtgraph histogram display |
 | Disable SI prefix on axes | Any plot with values 0-1 range |
+| Derive intensity from `decay.sum(axis=-1)`, not `/intensity[ch_idx]` | Any FLIM consumer that uses intensity to weight `(g, s)` (histogram, wavelet) |
 
 ## Reference: flimfret Pipeline (Ground Truth)
 

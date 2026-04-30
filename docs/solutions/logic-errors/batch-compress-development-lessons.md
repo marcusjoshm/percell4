@@ -162,3 +162,21 @@ elif layer_type == "Mask":
 ```
 
 All import paths (single TIFF, batch discovery, future sources) route through this helper, ensuring consistent dtype handling and HDF5 group placement.
+
+### Update 2026-04-29: TCSPC decay shares `write_decay_streaming`
+
+The same dispatch principle now extends to `/decay/<ch>` writes. `adapters/importer.py` exposes a shared `write_decay_streaming(h5_path, channel_name, tile_bins, bin_dims, ...)` helper. Both the compress flow and the add-layer (TCSPC append) flow route through it, producing byte-identical `/decay` layers from the same source `.bin` tiles + TileConfig — verified by synthetic harness (`np.array_equal == True`).
+
+This matters because Bug 3's "discovery scopes, processing consumes" rule has a structural twin at the consumer side: when a consumer (FLIM analysis) reads two HDF5 layers and uses them pointwise, the consumer must derive what it needs from one of those layers, not assume sibling alignment. See [`flim-phasor-cross-layer-alignment-2026-04-29.md`](flim-phasor-cross-layer-alignment-2026-04-29.md) — the multi-day phasor-debugging session where every plausible producer-side fix (dtype matching, stitch metadata persistence, byte-identical writer refactor) failed because the bug lived in three FLIM consumers reading `/intensity[ch_idx]` against `(g, s)` from `/decay/<ch>`.
+
+**Generalized rule:** Producer-side: one writer per layer type (Layer Write Dispatch). Consumer-side: derive aligned quantities from the array you're already reading; never read a sibling layer and assume it lines up.
+
+## Pattern: Matcher-Refactor Scoping Collapse (Three Occurrences)
+
+Three documented cases where a matcher / discovery refactor silently collapsed per-input scope:
+
+1. **Bug 3 above** (compress): pre-fix discovery built one combined token list across all datasets, so every `.h5` got the same channels.
+2. **`add-layer-flat-discovery-duplicate-import.md`**: flat-discovery refactor traversed all subdirectories under the picked root and matched every `.tif` once per dataset, producing duplicate channels.
+3. **2026-04-29 bin-only import regression**: the cross-format matcher refactor (extracting `match_bin_to_intensity` from importer.py) silently returned every `.bin` as `unmatched` when no TIFF intensity files were present, collapsing all bins under an empty channel key. Fixed by an explicit bin-only fallback that parses each `.bin`'s `_ch(\d+)` token directly. See [`flim-phasor-cross-layer-alignment-2026-04-29.md`](flim-phasor-cross-layer-alignment-2026-04-29.md) "Adjacent fixes" for details.
+
+**Pattern: matchers and discovery routines must defend their per-input scope explicitly.** When extracting matching logic into a pure helper, walk every code path that previously reached it (TIFF-only, bin-only, mixed, no-input) and confirm each still returns the correct per-scope result. A unit test for "bin-only with no TIFFs" would have caught the third occurrence; a unit test for "empty channel list" would have caught the second.

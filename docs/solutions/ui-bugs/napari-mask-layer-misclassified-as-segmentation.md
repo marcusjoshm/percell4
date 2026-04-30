@@ -137,6 +137,7 @@ self._active_seg_combo.blockSignals(False)
 |------|-----|--------------|
 | **Always use `add_mask()`/`add_labels()` wrappers** | They handle metadata tagging and idempotency | Never call `viewer.add_labels()` directly for masks or segmentations |
 | **Write store before adding layer** | Sync callback fires synchronously during layer add | In any `_on_*_applied` handler, call `store.write_*()` before `viewer_win.add_mask()` |
+| **Write store deletion before/with layer removal** | Mirror of the rule above — channels reappeared on reload because deletion only removed napari layers | In delete handlers, mutate `/intensity`, `/labels/<name>`, `/masks/<name>` (and any FLIM-derived groups like `/decay/<ch>`, `/phasor/<ch>`, `/provenance/decay/<ch>`) before / alongside `viewer.layers.remove(name)`. See [`flim-phasor-cross-layer-alignment-2026-04-29.md`](../logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md) for the channel-deletion adjacent fix. |
 | **Never assume unknown layers are segmentations** | The FALLBACK pattern is the core of this bug | Any layer not identified by metadata or store should be ignored |
 | **Block signals during combo repopulation** | Qt fires `currentTextChanged` during `clear()`/`addItem()` | Wrap `clear()` + `addItem()` loops with `blockSignals(True/False)` |
 | **Filter masks from segmentation lists** | HDF5 can have names under both `/labels/` and `/masks/` | Always compute `mask_set` and exclude from segmentation queries |
@@ -191,4 +192,5 @@ When adding a new type of Labels layer (tracking overlay, classification mask, e
 
 - [DirectLabelColormap rendering blocked by events](napari-direct-label-colormap-rendering-blocked-by-events.md) — Mask layer rendering and colormap assignment patterns
 - [PerCell4 phases 0-6 napari/Qt learnings](percell4-phases-0-6-napari-qt-learnings.md) — Layer lifecycle, signal timing, viewer recreation
+- [FLIM phasor cross-layer alignment](../logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md) — Extends "Write store before adding layer" to the deletion mirror, plus invalidating `/phasor/<ch>` whenever `/decay/<ch>` is rewritten so cached derived layers can't be displayed against fresh source.
 - [Selection filtering multi-ROI patterns](percell4-selection-filtering-multi-roi-patterns.md) — Signal coalescing, DirectLabelColormap usage, combo sync

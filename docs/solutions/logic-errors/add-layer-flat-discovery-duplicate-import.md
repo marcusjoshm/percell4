@@ -43,7 +43,7 @@ else:
 
 ## Prevention
 
-This is the second occurrence of this exact bug pattern (first in `compress_dialog.py`, now in `add_layer_dialog.py`). The general rule from Bug #3:
+This is the **second of three** occurrences of the matcher-refactor scoping-collapse pattern (a third occurrence on 2026-04-29 surfaced when the cross-format `match_bin_to_intensity` extraction silently collapsed bin-only imports under an empty channel key — see [`flim-phasor-cross-layer-alignment-2026-04-29.md`](flim-phasor-cross-layer-alignment-2026-04-29.md) "Adjacent fixes"). The general rule from Bug #3:
 
 > **Discovery produces scoped subsets. Processing must consume those subsets, not re-derive them from the shared parent directory.**
 
@@ -57,4 +57,5 @@ Any code consuming `DatasetSpec` should use `ds.files` as the primary data sourc
 
 ## Related
 
-- [batch-compress-development-lessons.md](batch-compress-development-lessons.md) — Bug #3 documents the identical root cause in the compress dialog
+- [batch-compress-development-lessons.md](batch-compress-development-lessons.md) — Bug #3 documents the identical root cause in the compress dialog; the "Pattern: Matcher-Refactor Scoping Collapse" section there now consolidates all three occurrences.
+- [flim-phasor-cross-layer-alignment-2026-04-29.md](flim-phasor-cross-layer-alignment-2026-04-29.md) — third occurrence (cross-format matcher extraction collapsing bin-only mode), plus a related but distinct cross-layer-alignment hazard at the consumer side.
