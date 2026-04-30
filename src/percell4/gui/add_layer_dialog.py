@@ -17,7 +17,9 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -44,14 +46,13 @@ from percell4.domain.io.cross_format import (
     match_bin_to_intensity,
 )
 from percell4.domain.io.models import (
-    ExplicitRule,
+    FlimConfig,
     TileConfig,
     TokenConfig,
 )
 from percell4.gui.tcspc_tab_state import (
     RULE_AUTO_BASE_STEM,
     RULE_AUTO_ZERO_PAD,
-    RULE_MANUAL,
     TcspcTabState,
 )
 
@@ -779,14 +780,22 @@ class AddLayerDialog(QDialog):
     def _build_tcspc_tab(self) -> QWidget:
         """Add TCSPC `.bin` files to the existing dataset's `/decay/<channel>`.
 
-        Discovers `.bin` files in a directory, matches them to intensity
-        channels via the chosen CrossFormatRule, lets the user override
-        per-row, then commits via the ``add_decay_to_dataset`` use case.
+        UI conforms to the Compress-TIFF-Datasets dialog conventions:
+        - "Tile Stitching" checkbox toggles a row of Rows / Cols / Pattern
+          / Start controls (raw-string values, same labels and widget shape
+          as compress_dialog so the user only learns the controls once).
+        - "FLIM .bin Parameters" QGroupBox carries laser frequency, X/Y/T
+          dims, dtype, dim order, header bytes, and per-channel
+          calibration (phase / modulation per existing TIFF channel).
+        - The mapping table is one row per existing TIFF channel showing
+          how many `.bin` tiles will stitch into it. `.bin` files are
+          always exported as individual tiles, so listing tiles
+          individually was noise.
         """
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        # Source directory
+        # ── Source directory ────────────────────────────────────────
         dir_row = QHBoxLayout()
         self._tcspc_dir_edit = QLineEdit()
         self._tcspc_dir_edit.setPlaceholderText(
@@ -798,7 +807,7 @@ class AddLayerDialog(QDialog):
         dir_row.addWidget(browse_btn)
         layout.addLayout(dir_row)
 
-        # Rule preset
+        # ── Cross-format rule preset ────────────────────────────────
         rule_row = QHBoxLayout()
         rule_row.addWidget(QLabel("Cross-format rule:"))
         self._tcspc_rule_combo = QComboBox()
@@ -806,13 +815,12 @@ class AddLayerDialog(QDialog):
             "Auto: zero-pad with offset", RULE_AUTO_ZERO_PAD
         )
         self._tcspc_rule_combo.addItem("Auto: base stem", RULE_AUTO_BASE_STEM)
-        self._tcspc_rule_combo.addItem("Manual mapping", RULE_MANUAL)
         self._tcspc_rule_combo.currentIndexChanged.connect(self._on_tcspc_rule_changed)
         rule_row.addWidget(self._tcspc_rule_combo)
         rule_row.addStretch()
         layout.addLayout(rule_row)
 
-        # ZeroPadOffset params
+        # ZeroPadOffset params (visible only when ZeroPad rule selected)
         params_row = QHBoxLayout()
         params_row.addWidget(QLabel("Pad width:"))
         self._tcspc_pad_spin = QSpinBox()
@@ -829,71 +837,113 @@ class AddLayerDialog(QDialog):
         self._tcspc_params_widget.setLayout(params_row)
         layout.addWidget(self._tcspc_params_widget)
 
-        # Tile-stitching configuration
-        # .bin files are always exported as individual tiles (per the user's
-        # microscope), so stitching is the common case — the default is the
-        # 1×1 single-tile fast path, but the user picks the actual grid here.
-        tile_group = QGroupBox("Tile stitching")
-        tile_layout = QVBoxLayout(tile_group)
+        # ── Tile Stitching (matches compress_dialog convention) ─────
+        self._tcspc_stitch_check = QCheckBox("Tile Stitching")
+        self._tcspc_stitch_check.toggled.connect(self._on_tcspc_stitch_toggled)
+        layout.addWidget(self._tcspc_stitch_check)
 
-        grid_row = QHBoxLayout()
-        grid_row.addWidget(QLabel("Grid:"))
-        self._tcspc_rows_spin = QSpinBox()
-        self._tcspc_rows_spin.setRange(1, 64)
-        self._tcspc_rows_spin.setValue(1)
-        self._tcspc_rows_spin.setSuffix(" rows")
-        grid_row.addWidget(self._tcspc_rows_spin)
-        grid_row.addWidget(QLabel("×"))
-        self._tcspc_cols_spin = QSpinBox()
-        self._tcspc_cols_spin.setRange(1, 64)
-        self._tcspc_cols_spin.setValue(1)
-        self._tcspc_cols_spin.setSuffix(" cols")
-        grid_row.addWidget(self._tcspc_cols_spin)
-        grid_row.addStretch()
-        tile_layout.addLayout(grid_row)
+        self._tcspc_stitch_widget = QWidget()
+        stitch_layout = QHBoxLayout(self._tcspc_stitch_widget)
+        stitch_layout.setContentsMargins(20, 0, 0, 0)
+        stitch_layout.addWidget(QLabel("Rows:"))
+        self._tcspc_stitch_rows = QSpinBox()
+        self._tcspc_stitch_rows.setRange(1, 100)
+        self._tcspc_stitch_rows.setValue(1)
+        stitch_layout.addWidget(self._tcspc_stitch_rows)
+        stitch_layout.addWidget(QLabel("Cols:"))
+        self._tcspc_stitch_cols = QSpinBox()
+        self._tcspc_stitch_cols.setRange(1, 100)
+        self._tcspc_stitch_cols.setValue(1)
+        stitch_layout.addWidget(self._tcspc_stitch_cols)
+        stitch_layout.addWidget(QLabel("Pattern:"))
+        self._tcspc_stitch_type = QComboBox()
+        self._tcspc_stitch_type.addItems(
+            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
+        )
+        stitch_layout.addWidget(self._tcspc_stitch_type)
+        stitch_layout.addWidget(QLabel("Start:"))
+        self._tcspc_stitch_order = QComboBox()
+        self._tcspc_stitch_order.addItems(
+            [
+                "right_down", "right_up", "left_down", "left_up",
+                "top_left", "top_right", "bottom_left", "bottom_right",
+            ]
+        )
+        stitch_layout.addWidget(self._tcspc_stitch_order)
+        stitch_layout.addStretch()
+        self._tcspc_stitch_widget.setVisible(False)
+        layout.addWidget(self._tcspc_stitch_widget)
 
-        pattern_row = QHBoxLayout()
-        pattern_row.addWidget(QLabel("Scan pattern:"))
-        self._tcspc_grid_type_combo = QComboBox()
-        for value, label in (
-            ("row_by_row", "Row by row"),
-            ("column_by_column", "Column by column"),
-            ("snake_by_row", "Snake by row"),
-            ("snake_by_column", "Snake by column"),
-        ):
-            self._tcspc_grid_type_combo.addItem(label, value)
-        pattern_row.addWidget(self._tcspc_grid_type_combo)
-        pattern_row.addWidget(QLabel("Origin/direction:"))
-        self._tcspc_order_combo = QComboBox()
-        for value, label in (
-            ("right_down", "Top-left, → then ↓"),
-            ("right_up", "Bottom-left, → then ↑"),
-            ("left_down", "Top-right, ← then ↓"),
-            ("left_up", "Bottom-right, ← then ↑"),
-        ):
-            self._tcspc_order_combo.addItem(label, value)
-        pattern_row.addWidget(self._tcspc_order_combo)
-        pattern_row.addStretch()
-        tile_layout.addLayout(pattern_row)
-
-        # Rotation — LASX rotates .bin tiles relative to .tiff intensity, so the
-        # stitched decay volume needs a post-stitch rotation in the (H, W) plane
-        # before append.
+        # ── Rotation (LASX vs TIFF orientation) ─────────────────────
         rot_row = QHBoxLayout()
         rot_row.addWidget(QLabel("Rotate stitched array:"))
         self._tcspc_rotation_combo = QComboBox()
-        # k counts as numpy.rot90's k argument: CCW rotation by k*90°.
         self._tcspc_rotation_combo.addItem("None", 0)
         self._tcspc_rotation_combo.addItem("90° CCW", 1)
         self._tcspc_rotation_combo.addItem("180°", 2)
         self._tcspc_rotation_combo.addItem("90° CW", 3)
         rot_row.addWidget(self._tcspc_rotation_combo)
         rot_row.addStretch()
-        tile_layout.addLayout(rot_row)
+        layout.addLayout(rot_row)
 
-        layout.addWidget(tile_group)
+        # ── FLIM .bin Parameters (matches compress_dialog convention) ──
+        self._tcspc_flim_group = QGroupBox("FLIM .bin Parameters")
+        self._tcspc_flim_group.setCheckable(True)
+        self._tcspc_flim_group.setChecked(False)
+        self._tcspc_flim_group.setToolTip(
+            "Parameters for raw binary TCSPC histogram (.bin) files.\n"
+            "Per-channel calibration is persisted to /metadata so phasor\n"
+            "computation can use it later."
+        )
+        flim_layout = QFormLayout(self._tcspc_flim_group)
 
-        # Scan + match button
+        self._tcspc_flim_freq = QDoubleSpinBox()
+        self._tcspc_flim_freq.setRange(0.1, 1000.0)
+        self._tcspc_flim_freq.setValue(80.0)
+        self._tcspc_flim_freq.setDecimals(1)
+        self._tcspc_flim_freq.setSuffix(" MHz")
+        flim_layout.addRow("Laser frequency:", self._tcspc_flim_freq)
+
+        self._tcspc_bin_x = QSpinBox()
+        self._tcspc_bin_x.setRange(1, 10000)
+        self._tcspc_bin_x.setValue(512)
+        flim_layout.addRow("X dimension:", self._tcspc_bin_x)
+
+        self._tcspc_bin_y = QSpinBox()
+        self._tcspc_bin_y.setRange(1, 10000)
+        self._tcspc_bin_y.setValue(512)
+        flim_layout.addRow("Y dimension:", self._tcspc_bin_y)
+
+        self._tcspc_bin_t = QSpinBox()
+        self._tcspc_bin_t.setRange(1, 4096)
+        self._tcspc_bin_t.setValue(132)
+        flim_layout.addRow("Time bins:", self._tcspc_bin_t)
+
+        self._tcspc_bin_dtype = QComboBox()
+        self._tcspc_bin_dtype.addItems(["uint32", "uint16", "float32", "uint8"])
+        flim_layout.addRow("Data type:", self._tcspc_bin_dtype)
+
+        self._tcspc_bin_dim_order = QComboBox()
+        self._tcspc_bin_dim_order.addItems(["YXT", "XYT", "TYX"])
+        flim_layout.addRow("Dimension order:", self._tcspc_bin_dim_order)
+
+        self._tcspc_bin_header = QSpinBox()
+        self._tcspc_bin_header.setRange(0, 10000)
+        self._tcspc_bin_header.setValue(0)
+        self._tcspc_bin_header.setSpecialValueText("Auto-detect")
+        flim_layout.addRow("Header bytes:", self._tcspc_bin_header)
+
+        cal_label = QLabel("Per-channel calibration (phase / modulation):")
+        flim_layout.addRow(cal_label)
+        self._tcspc_flim_cal_container = QVBoxLayout()
+        flim_layout.addRow(self._tcspc_flim_cal_container)
+        self._tcspc_channel_calibrations: dict[str, _TcspcCalibration] = {}
+
+        self._tcspc_flim_group.toggled.connect(self._on_tcspc_flim_group_toggled)
+        layout.addWidget(self._tcspc_flim_group)
+        self._on_tcspc_flim_group_toggled(False)
+
+        # ── Scan + match button ─────────────────────────────────────
         scan_row = QHBoxLayout()
         scan_btn = QPushButton("Scan && Match")
         scan_btn.clicked.connect(self._on_tcspc_scan)
@@ -901,20 +951,20 @@ class AddLayerDialog(QDialog):
         scan_row.addStretch()
         layout.addLayout(scan_row)
 
-        # Binding table
+        # ── Channel mapping table (one row per channel) ─────────────
         self._tcspc_table = QTableWidget(0, 4)
         self._tcspc_table.setHorizontalHeaderLabels(
-            ["BIN file", "Target channel", "Replace existing", "Status"]
+            ["Channel", "Matched .bin tiles", "Replace existing", "Status"]
         )
         self._tcspc_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Stretch
+            0, QHeaderView.ResizeToContents
         )
         self._tcspc_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeToContents
+            1, QHeaderView.Stretch
         )
         layout.addWidget(self._tcspc_table)
 
-        # Counter + accept
+        # ── Counter + accept ────────────────────────────────────────
         accept_row = QHBoxLayout()
         self._tcspc_counter = QLabel("No bin files scanned.")
         accept_row.addWidget(self._tcspc_counter)
@@ -945,6 +995,14 @@ class AddLayerDialog(QDialog):
         if self._tcspc_bin_files:
             self._tcspc_run_match()
 
+    def _on_tcspc_stitch_toggled(self, checked: bool) -> None:
+        self._tcspc_stitch_widget.setVisible(checked)
+
+    def _on_tcspc_flim_group_toggled(self, checked: bool) -> None:
+        for child in self._tcspc_flim_group.findChildren(QWidget):
+            if child is not self._tcspc_flim_group:
+                child.setVisible(checked)
+
     def _on_tcspc_scan(self) -> None:
         d = self._tcspc_dir_edit.text().strip()
         if not d:
@@ -967,6 +1025,8 @@ class AddLayerDialog(QDialog):
         intensity = self._tcspc_intensity_channels()
         existing_decay = self._store.list_groups("decay")
         self._tcspc_state.set_intensity(intensity, existing_decay)
+        # Rebuild calibration widgets to mirror existing channels
+        self._tcspc_rebuild_calibration_widgets([c.name for c in intensity])
 
         self._tcspc_run_match()
 
@@ -983,153 +1043,234 @@ class AddLayerDialog(QDialog):
             out.append(IntensityChannel(name=name, token=token, base_stem=base_stem))
         return out
 
+    def _tcspc_rebuild_calibration_widgets(self, channel_names: list[str]) -> None:
+        """Create one (phase, modulation) row per existing TIFF channel."""
+        # Clear any existing widgets
+        while self._tcspc_flim_cal_container.count():
+            item = self._tcspc_flim_cal_container.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._tcspc_channel_calibrations.clear()
+
+        for name in channel_names:
+            group = QGroupBox(f"Channel {name}")
+            form = QFormLayout(group)
+
+            phase_spin = QDoubleSpinBox()
+            phase_spin.setRange(-6.283, 6.283)
+            phase_spin.setValue(0.0)
+            phase_spin.setDecimals(4)
+            phase_spin.setSuffix(" rad")
+            form.addRow("Phase:", phase_spin)
+
+            mod_spin = QDoubleSpinBox()
+            mod_spin.setRange(0.0, 10.0)
+            mod_spin.setValue(1.0)
+            mod_spin.setDecimals(4)
+            form.addRow("Modulation:", mod_spin)
+
+            self._tcspc_flim_cal_container.addWidget(group)
+            self._tcspc_channel_calibrations[name] = _TcspcCalibration(
+                phase_spin=phase_spin, mod_spin=mod_spin
+            )
+
+        # Re-apply collapsed state so the new widgets honor the group's state
+        self._on_tcspc_flim_group_toggled(self._tcspc_flim_group.isChecked())
+
     def _tcspc_run_match(self) -> None:
         # Update state's pad/offset before building the rule
         self._tcspc_state.pad_width = self._tcspc_pad_spin.value()
         self._tcspc_state.offset = self._tcspc_offset_spin.value()
         rule = self._tcspc_state.build_selected_rule()
 
-        if not isinstance(rule, ExplicitRule):
-            result = match_bin_to_intensity(
-                self._tcspc_bin_files,
-                list(self._tcspc_state.intensity_channels),
-                rule,
-                TokenConfig(),
-            )
-            self._tcspc_state.apply_match(self._tcspc_bin_files, result)
-        else:
-            # Manual: empty the auto bindings — user fills in via the table
-            from percell4.domain.io.cross_format import MatchResult
-            self._tcspc_state.apply_match(
-                self._tcspc_bin_files, MatchResult(unmatched=tuple(self._tcspc_bin_files))
-            )
+        result = match_bin_to_intensity(
+            self._tcspc_bin_files,
+            list(self._tcspc_state.intensity_channels),
+            rule,
+            TokenConfig(),
+        )
+        self._tcspc_state.apply_match(self._tcspc_bin_files, result)
         self._tcspc_render_table()
 
+    def _tcspc_channel_groups(self) -> list[tuple[str, list[Path], bool, bool]]:
+        """Group rows by target channel name. Returns
+        ``(channel_name, [bin_paths], has_conflict, replace_checked)`` per
+        existing TIFF channel. Channels with zero matched bins still appear
+        (as 'no tiles assigned')."""
+        by_channel: dict[str, list[Path]] = {}
+        for ch in self._tcspc_state.intensity_channels:
+            by_channel[ch.name] = []
+        for row in self._tcspc_state.rows:
+            ch = row.effective_channel
+            if ch in by_channel:
+                by_channel[ch].append(row.bin_path)
+
+        out = []
+        for name, paths in by_channel.items():
+            has_conflict = name in self._tcspc_state.existing_decay_channels
+            # replace_checked is OR of any row's flag for that channel — at the
+            # channel-grouped UI we just track one checkbox per channel.
+            replace_checked = self._tcspc_replace_state.get(name, False)
+            out.append((name, paths, has_conflict, replace_checked))
+        return out
+
     def _tcspc_render_table(self) -> None:
+        # Initialize per-channel replace state map on first render
+        if not hasattr(self, "_tcspc_replace_state"):
+            self._tcspc_replace_state: dict[str, bool] = {}
+
+        groups = self._tcspc_channel_groups()
         self._tcspc_table.setRowCount(0)
-        channel_names = [c.name for c in self._tcspc_state.intensity_channels]
-        for row_idx, row in enumerate(self._tcspc_state.rows):
+        for row_idx, (name, paths, has_conflict, replace_checked) in enumerate(groups):
             self._tcspc_table.insertRow(row_idx)
-            # Col 0: bin filename
-            self._tcspc_table.setItem(
-                row_idx, 0, QTableWidgetItem(row.bin_path.name)
-            )
-            # Col 1: target channel combobox
-            combo = QComboBox()
-            combo.addItem("(unmapped)", None)
-            for n in channel_names:
-                combo.addItem(n, n)
-            current = row.effective_channel
-            if current is not None:
-                idx = combo.findData(current)
-                if idx >= 0:
-                    combo.setCurrentIndex(idx)
-            combo.currentIndexChanged.connect(
-                lambda _idx, p=row.bin_path, c=combo: self._on_tcspc_combo_changed(p, c)
-            )
-            self._tcspc_table.setCellWidget(row_idx, 1, combo)
+            # Col 0: channel name
+            self._tcspc_table.setItem(row_idx, 0, QTableWidgetItem(name))
+            # Col 1: matched-bin summary
+            if not paths:
+                summary = "no tiles assigned"
+            elif len(paths) == 1:
+                summary = f"1 tile: {paths[0].name}"
+            else:
+                summary = f"{len(paths)} tiles: {paths[0].name} … {paths[-1].name}"
+            self._tcspc_table.setItem(row_idx, 1, QTableWidgetItem(summary))
             # Col 2: replace checkbox (only when conflict)
-            if row.has_conflict:
+            if has_conflict:
                 cb = QCheckBox()
-                cb.setChecked(row.replace_checked)
+                cb.setChecked(replace_checked)
                 cb.stateChanged.connect(
-                    lambda state, p=row.bin_path: self._on_tcspc_replace_toggled(p, state)
+                    lambda state, ch=name: self._on_tcspc_channel_replace(ch, state)
                 )
                 self._tcspc_table.setCellWidget(row_idx, 2, cb)
             else:
                 self._tcspc_table.setItem(row_idx, 2, QTableWidgetItem("—"))
             # Col 3: status
-            status = self._tcspc_row_status(row)
+            status = self._tcspc_channel_status(name, paths, has_conflict, replace_checked)
             self._tcspc_table.setItem(row_idx, 3, QTableWidgetItem(status))
         # Counter + accept
-        counts = self._tcspc_count_summary()
-        self._tcspc_counter.setText(counts)
-        self._tcspc_accept_btn.setEnabled(self._tcspc_state.is_acceptable())
+        self._tcspc_counter.setText(self._tcspc_count_summary())
+        self._tcspc_accept_btn.setEnabled(self._tcspc_can_accept())
 
-    def _tcspc_row_status(self, row) -> str:
-        if row.is_unmapped and not row.candidates:
-            return "unmatched"
-        if row.is_ambiguous:
-            return f"ambiguous: {', '.join(row.candidates)}"
-        if row.has_conflict and not row.replace_checked:
+    def _tcspc_channel_status(
+        self, name: str, paths: list[Path], has_conflict: bool, replace_checked: bool,
+    ) -> str:
+        if not paths:
+            return "no tiles assigned (will skip)"
+        if has_conflict and not replace_checked:
             return "conflict (decay exists)"
-        if row.has_conflict and row.replace_checked:
+        if has_conflict and replace_checked:
             return "will REPLACE existing"
-        if row.is_overridden:
-            return "user-edited"
-        return "matched"
+        return f"{len(paths)} tile(s) ready"
 
     def _tcspc_count_summary(self) -> str:
-        n = len(self._tcspc_state.rows)
+        n_bins = len(self._tcspc_state.rows)
         unm = len(self._tcspc_state.unmatched_paths())
         amb = len(self._tcspc_state.ambiguous_paths())
-        conf = sum(1 for r in self._tcspc_state.rows if r.has_conflict)
-        parts = [f"{n} bin file(s)"]
+        n_channels_with_bins = sum(
+            1 for _, paths, *_ in self._tcspc_channel_groups() if paths
+        )
+        parts = [f"{n_bins} bin file(s) → {n_channels_with_bins} channel(s)"]
         if unm:
             parts.append(f"{unm} unmatched")
         if amb:
             parts.append(f"{amb} ambiguous")
-        if conf:
-            parts.append(f"{conf} conflict(s)")
         return " — ".join(parts)
 
-    def _on_tcspc_combo_changed(self, bin_path: Path, combo: QComboBox) -> None:
-        ch = combo.currentData()
-        self._tcspc_state.edit_row(bin_path, ch)
-        # Re-render to update status + accept-button state (cheap)
-        self._tcspc_render_table()
+    def _tcspc_can_accept(self) -> bool:
+        groups = self._tcspc_channel_groups()
+        any_assigned = any(paths for _, paths, *_ in groups)
+        if not any_assigned:
+            return False
+        # Every conflicting channel that has tiles assigned must have replace checked
+        for name, paths, has_conflict, replace_checked in groups:
+            if paths and has_conflict and not replace_checked:
+                return False
+        return True
 
-    def _on_tcspc_replace_toggled(self, bin_path: Path, state) -> None:
-        self._tcspc_state.set_replace(bin_path, bool(state))
+    def _on_tcspc_channel_replace(self, channel_name: str, state) -> None:
+        self._tcspc_replace_state[channel_name] = bool(state)
         self._tcspc_render_table()
 
     def _on_tcspc_accept(self) -> None:
-        from percell4.domain.io.models import FlimConfig as _FlimConfig
-        from percell4.domain.io.models import TileConfig as _TileConfig
-        rule = self._tcspc_build_commit_rule()
-        tile_config = _TileConfig(
-            grid_rows=self._tcspc_rows_spin.value(),
-            grid_cols=self._tcspc_cols_spin.value(),
-            grid_type=self._tcspc_grid_type_combo.currentData(),
-            order=self._tcspc_order_combo.currentData(),
-        )
+        rule = self._tcspc_state.build_selected_rule()
+        if self._tcspc_stitch_check.isChecked():
+            tile_config = TileConfig(
+                grid_rows=self._tcspc_stitch_rows.value(),
+                grid_cols=self._tcspc_stitch_cols.value(),
+                grid_type=self._tcspc_stitch_type.currentText(),
+                order=self._tcspc_stitch_order.currentText(),
+            )
+        else:
+            tile_config = TileConfig(grid_rows=1, grid_cols=1)
+        flim_config = self._tcspc_build_flim_config()
         rotate_k = int(self._tcspc_rotation_combo.currentData() or 0)
+        # Any conflict-row marked for replace forces force=True for that append
+        force = any(self._tcspc_replace_state.values()) if hasattr(
+            self, "_tcspc_replace_state"
+        ) else False
+
         try:
             report = add_decay_to_dataset(
                 h5_path=self._store.path,
                 source_dir=Path(self._tcspc_dir_edit.text()),
                 token_config=TokenConfig(),
                 tile_config=tile_config,
-                flim_config=_FlimConfig(),
+                flim_config=flim_config,
                 cross_format_rule=rule,
                 rotate_k=rotate_k,
-                force=self._tcspc_state.needs_force(),
+                force=force,
             )
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Append failed", str(e))
             return
+
+        # Persist FLIM calibration to /metadata if user enabled the group
+        if self._tcspc_flim_group.isChecked():
+            self._tcspc_persist_flim_metadata()
+
         self._tcspc_show_report(report)
 
-    def _tcspc_build_commit_rule(self):
-        """Build the rule sent to the use case, applying user overrides as ExplicitRule."""
-        overrides = self._tcspc_state.build_bindings_override()
-        base = self._tcspc_state.build_selected_rule()
-        if not overrides:
-            return base
-        # User edited at least one cell — express full table state as ExplicitRule
-        # so the commit lands exactly what's shown in the UI.
-        full_mapping: dict[str, str] = {}
-        for row in self._tcspc_state.rows:
-            ch = row.effective_channel
-            if ch is None:
-                continue
-            key = (
-                str(row.bin_path.resolve())
-                if row.bin_path.exists()
-                else str(row.bin_path)
-            )
-            full_mapping[key] = ch
-        return ExplicitRule(mapping=tuple(full_mapping.items()))
+    def _tcspc_build_flim_config(self) -> FlimConfig:
+        """Build a FlimConfig from the FLIM Parameters group state.
+
+        When the group is unchecked, returns FlimConfig() defaults.
+        """
+        if not self._tcspc_flim_group.isChecked():
+            return FlimConfig()
+        # Per-channel calibration as a tuple of (phase, modulation) pairs ordered
+        # by intensity channel order — matches FlimConfig.channel_calibrations.
+        cals = []
+        for ch in self._tcspc_state.intensity_channels:
+            cal = self._tcspc_channel_calibrations.get(ch.name)
+            if cal is not None:
+                cals.append((cal.phase_spin.value(), cal.mod_spin.value()))
+        return FlimConfig(
+            frequency_mhz=self._tcspc_flim_freq.value(),
+            channel_calibrations=tuple(cals),
+            bin_x=self._tcspc_bin_x.value(),
+            bin_y=self._tcspc_bin_y.value(),
+            bin_t=self._tcspc_bin_t.value(),
+            bin_dtype=self._tcspc_bin_dtype.currentText(),
+            bin_dim_order=self._tcspc_bin_dim_order.currentText(),
+            bin_header_bytes=self._tcspc_bin_header.value(),
+        )
+
+    def _tcspc_persist_flim_metadata(self) -> None:
+        """Write per-channel FLIM calibration + frequency to /metadata.
+
+        Uses the same attr keys as the rest of the app (``flim_cal_phase_<ch>``,
+        ``flim_cal_mod_<ch>``, ``flim_frequency_mhz``) so phasor computation
+        can pick them up later.
+        """
+        attrs = {"flim_frequency_mhz": float(self._tcspc_flim_freq.value())}
+        for ch_name, cal in self._tcspc_channel_calibrations.items():
+            attrs[f"flim_cal_phase_{ch_name}"] = float(cal.phase_spin.value())
+            attrs[f"flim_cal_mod_{ch_name}"] = float(cal.mod_spin.value())
+        try:
+            self._store.set_metadata(attrs)
+        except Exception:  # noqa: BLE001
+            # Metadata write is best-effort; the decay layers already landed
+            pass
 
     def _tcspc_show_report(self, report: AppendReport) -> None:
         if report.errors and not report.written:
@@ -1171,3 +1312,13 @@ def _sort_key(val: str) -> tuple[int, str]:
         return (0, str(int(val)).zfill(10))
     except ValueError:
         return (1, val)
+
+
+class _TcspcCalibration:
+    """Holds the FLIM phase/modulation widgets for one TCSPC-tab channel."""
+
+    __slots__ = ("phase_spin", "mod_spin")
+
+    def __init__(self, phase_spin: QDoubleSpinBox, mod_spin: QDoubleSpinBox) -> None:
+        self.phase_spin = phase_spin
+        self.mod_spin = mod_spin

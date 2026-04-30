@@ -133,3 +133,32 @@ def test_manual_preset_starts_with_no_auto_bindings():
     assert state.is_acceptable() is False
     state.edit_row(bins[0], "ch00")
     assert state.is_acceptable() is True
+
+
+# ── Channel-grouped rendering (UI-side, post-stitching redesign) ────────
+
+
+def test_channel_grouping_aggregates_bins_by_target():
+    """With stitching, the table is one row per existing TIFF channel;
+    multiple .bin tiles bound to the same channel show as a tile count,
+    not as N individual rows."""
+    state = TcspcTabState(preset=RULE_AUTO_ZERO_PAD, pad_width=2, offset=1)
+    state.set_intensity(_channels(("ch00", "00"), ("ch01", "01")), existing_decay=[])
+    # 4 tiles all resolving to ch00 (e.g., a 2x2 grid for one channel)
+    bins = [
+        Path("/data/exp_s1_ch1.bin"),
+        Path("/data/exp_s2_ch1.bin"),
+        Path("/data/exp_s3_ch1.bin"),
+        Path("/data/exp_s4_ch1.bin"),
+    ]
+    state.apply_match(bins, MatchResult(bindings=tuple(_matched(b, "ch00") for b in bins)))
+
+    # Group bins by effective channel — same logic the dialog renders from
+    grouped: dict[str, list[Path]] = {c.name: [] for c in state.intensity_channels}
+    for r in state.rows:
+        ch = r.effective_channel
+        if ch in grouped:
+            grouped[ch].append(r.bin_path)
+
+    assert len(grouped["ch00"]) == 4  # all 4 tiles assigned to one channel
+    assert len(grouped["ch01"]) == 0  # no tiles for the other channel
