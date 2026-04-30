@@ -239,16 +239,15 @@ def add_decay_to_dataset(
     # (H, W) plane by k*90° CCW with the T-axis preserved per pixel,
     # writes back. Runs only after every channel finished Phase 1, so
     # rotation always operates on the complete stitched output rather
-    # than on a partially-written or per-tile region. Also rotates the
-    # corresponding /intensity[ch_idx] slice when present, so napari
-    # display layers stay spatially aligned with their decay.
+    # than on a partially-written or per-tile region. ONLY /decay is
+    # rotated — never the user's existing /intensity channels (which may
+    # be TIFF source data that must not be modified by an append flow).
     if rotate_k:
         k = int(rotate_k) % 4
         for ch_name in list(written):
             progress(f"Rotating {ch_name} by {k * 90}° CCW")
             try:
                 _rotate_decay_in_place(h5_path, ch_name, k)
-                _rotate_intensity_slice_in_place(h5_path, ch_name, k)
             except Exception as e:  # noqa: BLE001
                 errors[ch_name] = (
                     errors.get(ch_name, "") + f" rotation failed: {e}"
@@ -299,51 +298,6 @@ def _write_provenance_attrs(h5_path, ch_name: str, prov: ProvenanceRecord) -> No
         grp = f.require_group(path)
         for key, val in prov.to_attrs().items():
             grp.attrs[key] = val
-
-
-def _rotate_intensity_slice_in_place(h5_path, ch_name: str, k: int) -> None:
-    """Rotate the /intensity slice corresponding to ``ch_name`` by k*90° CCW.
-
-    Keeps /intensity spatially aligned with /decay/<ch_name> after the
-    decay rotation. No-op when the channel isn't in
-    /metadata.channel_names or /intensity doesn't exist. Other channels'
-    slices are untouched — only the named channel's slice is rotated.
-    """
-    if k == 0:
-        return
-    import h5py
-    with h5py.File(h5_path, "a") as f:
-        if "intensity" not in f or "metadata" not in f:
-            return
-        names = list(f["metadata"].attrs.get("channel_names", []))
-        if ch_name not in names:
-            return
-        idx = names.index(ch_name)
-        intensity = f["intensity"][...]
-        if intensity.ndim != 3 or idx >= intensity.shape[0]:
-            return
-        # Rotate just this channel's slice; keep others untouched.
-        rotated_slice = np.rot90(intensity[idx], k=k, axes=(0, 1))
-        rotated_slice = np.ascontiguousarray(rotated_slice)
-        # The whole /intensity stack stays at the same (H, W) since k*90°
-        # of a square is also (H, W). For non-square images this would
-        # change shape — guard against that.
-        if rotated_slice.shape != intensity.shape[1:]:
-            # Shape mismatch: would force a stack rewrite at a new shape,
-            # which loses alignment with other channels. Skip silently.
-            return
-        intensity[idx] = rotated_slice
-        attrs = dict(f["intensity"].attrs)
-        del f["intensity"]
-        from percell4.store import _choose_chunks, _compression_kwargs
-        f.create_dataset(
-            "intensity",
-            data=intensity.astype(np.float32, copy=False),
-            chunks=_choose_chunks(intensity.shape, is_decay=False),
-            **_compression_kwargs(is_decay=False),
-        )
-        for kk, vv in attrs.items():
-            f["intensity"].attrs[kk] = vv
 
 
 def _rotate_decay_in_place(h5_path, ch_name: str, k: int) -> None:
