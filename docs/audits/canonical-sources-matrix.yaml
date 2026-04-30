@@ -638,8 +638,8 @@ cells:
 
   # ── gui/workflows/single_cell/config_dialog.py ──────────────────────
   "src/percell4/gui/workflows/single_cell/config_dialog.py.dialog-scroll-when-tall":
-    status: re_implements
-    evidence: "QScrollArea wrapper at lines 207-219 — independent re-implementation"
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.wrap_in_scroll + cap_to_screen (U4 of dialog-scroll-helper-rollout)"
     thread: dialog-scroll-helper-rollout
   "src/percell4/gui/workflows/single_cell/config_dialog.py.decay-write-path":
     status: n/a

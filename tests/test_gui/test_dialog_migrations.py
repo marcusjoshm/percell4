@@ -41,3 +41,19 @@ def test_compress_dialog_wraps_content_in_one_scroll_area(qtbot):
     scrolls = _scroll_areas(dlg)
     assert len(scrolls) == 1
     assert scrolls[0].widget().findChildren(QGroupBox)
+
+
+# ── U4: workflows/single_cell/config_dialog ──────────────────────────
+
+
+def test_workflow_config_dialog_wraps_content_in_one_scroll_area(qtbot):
+    from percell4.gui.workflows.single_cell.config_dialog import (
+        WorkflowConfigDialog,
+    )
+
+    dlg = WorkflowConfigDialog()
+    qtbot.addWidget(dlg)
+
+    scrolls = _scroll_areas(dlg)
+    assert len(scrolls) == 1
+    assert scrolls[0].widget().findChildren(QGroupBox)

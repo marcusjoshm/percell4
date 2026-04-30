@@ -12,7 +12,6 @@ applies_to:
   - "src/percell4/gui/workflows/**/config_dialog.py"
 duplicates_at:
   - {path: "src/percell4/gui/add_layer_dialog.py", note: "TWO scroll wrappers (Discover TIFFs tab line 172, TCSPC tab line 806) + screen-bounded resize (lines 71-77) — currently the most complete pattern"}
-  - {path: "src/percell4/gui/workflows/single_cell/config_dialog.py", note: "wraps content in QScrollArea (lines 207-219) — candidate canonical"}
   - {path: "src/percell4/gui/export_images_dialog.py", note: "DRIFT: no QScrollArea — checkbox lists for channels/segs/masks could overflow on small screens or many layers"}
 status: pre_canonical
 tags:

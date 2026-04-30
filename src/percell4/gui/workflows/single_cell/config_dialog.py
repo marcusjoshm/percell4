@@ -56,6 +56,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.domain.measure.metrics import BUILTIN_METRICS
+from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.store import DatasetStore
 from percell4.workflows.channels import ChannelSource, intersect_channels
 from percell4.workflows.models import (
@@ -190,6 +191,7 @@ class WorkflowConfigDialog(QDialog):
         self.setWindowTitle("Single-cell thresholding analysis workflow")
         self.setModal(True)
         self.resize(960, 720)
+        cap_to_screen(self)
 
         # State
         self._pending_datasets: list[_PendingDataset] = []
@@ -205,18 +207,9 @@ class WorkflowConfigDialog(QDialog):
     # ── UI construction ───────────────────────────────────────
 
     def _build_ui(self) -> None:
-        from qtpy.QtWidgets import QScrollArea
-
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-
-        # Wrap the content in a scroll area so the dialog is usable on
-        # smaller screens (the full layout can be quite tall with many
-        # rounds / columns).
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
 
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -230,8 +223,7 @@ class WorkflowConfigDialog(QDialog):
         layout.addWidget(self._build_output_group())
         layout.addStretch()
 
-        scroll.setWidget(content)
-        outer.addWidget(scroll, stretch=1)
+        outer.addWidget(wrap_in_scroll(content), stretch=1)
 
         # Dialog buttons — outside the scroll area so Start/Cancel
         # are always visible at the bottom.
