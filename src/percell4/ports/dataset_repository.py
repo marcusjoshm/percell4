@@ -88,6 +88,16 @@ class DatasetRepository(Protocol):
         """Read a numpy array from an arbitrary HDF5 path. Raises KeyError if missing."""
         ...
 
+    def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
+        """Read /metadata attrs FRESH from disk.
+
+        ``handle.metadata`` is a snapshot taken at open time and does NOT
+        reflect later writes. Consumers that need post-write metadata
+        (e.g., FLIM calibration values written by an in-session TCSPC
+        import) must call this method instead of reading the snapshot.
+        """
+        ...
+
     # ── Groups (for stored group columns) ────────────────────
 
     def read_group_columns(self, handle: DatasetHandle) -> pd.DataFrame | None:

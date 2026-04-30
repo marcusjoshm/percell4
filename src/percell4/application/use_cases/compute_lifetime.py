@@ -31,12 +31,24 @@ class ComputeLifetime:
         self._repo = repo
         self._session = session
 
+    def _read_fresh_metadata(self, handle) -> dict:
+        """Read /metadata fresh from disk, with snapshot fallback."""
+        reader = getattr(self._repo, "read_metadata", None)
+        if reader is not None:
+            try:
+                return reader(handle)
+            except Exception:
+                pass
+        return dict(handle.metadata)
+
     def execute(self, channel: str) -> LifetimeResult:
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
-        meta = handle.metadata
+        # Read /metadata fresh — handle.metadata is a snapshot that
+        # doesn't reflect in-session writes (e.g., TCSPC import).
+        meta = self._read_fresh_metadata(handle)
         freq = meta.get("flim_frequency_mhz", None)
         if not freq or freq <= 0:
             raise ValueError("No laser frequency in metadata")

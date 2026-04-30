@@ -39,6 +39,23 @@ class ComputePhasor:
         self._repo = repo
         self._session = session
 
+    def _read_fresh_metadata(self, handle) -> dict:
+        """Read /metadata attrs fresh from disk, with snapshot fallback.
+
+        Falls back to ``handle.metadata`` if the repository doesn't expose
+        ``read_metadata`` (e.g., older test stubs).
+        """
+        reader = getattr(self._repo, "read_metadata", None)
+        if reader is not None:
+            try:
+                return reader(handle)
+            except Exception:
+                logger.warning(
+                    "read_metadata failed; falling back to handle snapshot",
+                    exc_info=True,
+                )
+        return dict(handle.metadata)
+
     def execute(self, channel: str, harmonic: int = 1) -> PhasorResult:
         handle = self._session.dataset
         if handle is None:
@@ -65,8 +82,17 @@ class ComputePhasor:
         g_map[low_signal] = 0.0
         s_map[low_signal] = 0.0
 
-        # Apply per-channel calibration if available
-        meta = handle.metadata
+        # Apply per-channel calibration if available.
+        # Read /metadata FRESH from disk rather than from handle.metadata —
+        # handle.metadata is a snapshot taken when the dataset was opened
+        # via set_dataset. If TCSPC data was appended in this session,
+        # the import wrote flim_cal_phase_<ch> / flim_cal_mod_<ch> /
+        # flim_frequency_mhz to /metadata AFTER the snapshot, so the
+        # snapshot has stale defaults (phase=0, mod=1). Without a fresh
+        # read here, calibration is silently skipped and the resulting
+        # phasor is wildly off — looks "fixed" only after app restart
+        # because the new snapshot picks up the disk values.
+        meta = self._read_fresh_metadata(handle)
         cal_phase = float(meta.get(f"flim_cal_phase_{channel}", 0.0))
         cal_mod = float(meta.get(f"flim_cal_mod_{channel}", 1.0))
 

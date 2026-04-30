@@ -146,6 +146,10 @@ class Hdf5DatasetRepository:
     def read_array(self, handle: DatasetHandle, path: str) -> NDArray:
         return self._store(handle).read_array(path)
 
+    def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
+        """Read /metadata attrs fresh from disk (not the handle's snapshot)."""
+        return self._store(handle).metadata
+
     # ── Groups ───────────────────────────────────────────────
 
     def read_group_columns(self, handle: DatasetHandle) -> pd.DataFrame | None:

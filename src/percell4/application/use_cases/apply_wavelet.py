@@ -38,6 +38,16 @@ class ApplyWavelet:
         self._repo = repo
         self._session = session
 
+    def _read_fresh_metadata(self, handle) -> dict:
+        """Read /metadata fresh from disk, with snapshot fallback."""
+        reader = getattr(self._repo, "read_metadata", None)
+        if reader is not None:
+            try:
+                return reader(handle)
+            except Exception:
+                pass
+        return dict(handle.metadata)
+
     def execute(self, channel: str, filter_level: int = 9) -> WaveletResult:
         handle = self._session.dataset
         if handle is None:
@@ -69,8 +79,12 @@ class ApplyWavelet:
             )
         intensity = decay.sum(axis=-1).astype(np.float64)
 
-        # Get frequency for lifetime calculation
-        meta = handle.metadata
+        # Get frequency for lifetime calculation. Read /metadata fresh
+        # from disk — handle.metadata is a snapshot from set_dataset
+        # time and may not reflect flim_frequency_mhz if TCSPC data was
+        # imported in this session. See compute_phasor for the full
+        # explanation of this snapshot-staleness hazard.
+        meta = self._read_fresh_metadata(handle)
         freq = meta.get("flim_frequency_mhz", None)
         omega = None
         if freq and freq > 0:

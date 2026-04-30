@@ -49,6 +49,10 @@ class FakeRepo:
         self.written_masks: dict[str, np.ndarray] = {}
         self.written_arrays: dict[str, np.ndarray] = {}
         self.group_columns: pd.DataFrame | None = None
+        # In-memory '/metadata' attrs that read_metadata() returns. Tests
+        # can populate this AFTER set_dataset to simulate writes that
+        # happened post-snapshot (e.g., TCSPC import writing flim_cal_*).
+        self.disk_metadata: dict = {}
 
     def open(self, path):
         return DatasetHandle(path=path)
@@ -94,6 +98,9 @@ class FakeRepo:
 
     def read_group_columns(self, handle):
         return self.group_columns
+
+    def read_metadata(self, handle):
+        return dict(self.disk_metadata)
 
 
 # ── Fixtures ─────────────────────────────────────────────────
@@ -256,3 +263,105 @@ class TestAcceptThreshold:
 
         with pytest.raises(NoDatasetError, match="No dataset loaded"):
             uc.execute(np.zeros((2, 2)), 0.5, "otsu", "GFP")
+
+
+# ── ComputePhasor: fresh-metadata-on-disk regression ────────
+
+
+class TestComputePhasorFreshMetadata:
+    """ComputePhasor must read /metadata fresh from disk for calibration.
+
+    Regression for the in-session TCSPC import bug: handle.metadata is a
+    snapshot taken when set_dataset was called. If TCSPC import writes
+    flim_cal_phase_<ch> / flim_cal_mod_<ch> AFTER that snapshot, the
+    snapshot has stale defaults and calibration is silently skipped —
+    producing a wildly wrong phasor that "fixes itself" only after app
+    restart (which takes a fresh snapshot).
+    """
+
+    def _make_decay(self) -> np.ndarray:
+        """Synthetic 4x4 decay with one exponential per pixel."""
+        H, W, T = 4, 4, 64
+        t = np.arange(T, dtype=np.float32)
+        # Simple decay: exp(-t/tau) with tau=8
+        decay_curve = np.exp(-t / 8.0)
+        decay = np.broadcast_to(
+            decay_curve, (H, W, T)
+        ).astype(np.float32).copy()
+        return decay
+
+    def test_fresh_metadata_calibration_is_applied(self):
+        """Calibration written AFTER set_dataset must still apply."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        # Snapshot at set_dataset time has NO calibration:
+        handle = DatasetHandle(path=Path("/tmp/x.h5"), metadata={})
+        session.set_dataset(handle)
+
+        repo = FakeRepo()
+        repo.written_arrays["decay/ch0"] = self._make_decay()
+        # Simulate post-snapshot TCSPC import writing calibration:
+        repo.disk_metadata = {
+            "flim_cal_phase_ch0": 0.5,
+            "flim_cal_mod_ch0": 1.2,
+            "flim_frequency_mhz": 80.0,
+        }
+
+        # Run with snapshot-only (defaults) for comparison
+        uc_fresh = ComputePhasor(repo, session)
+        result_with_fresh = uc_fresh.execute(channel="ch0", harmonic=1)
+
+        # Now run a "stale snapshot" version: drop disk_metadata so
+        # read_metadata returns {} and the result reflects no calibration.
+        repo_stale = FakeRepo()
+        repo_stale.written_arrays["decay/ch0"] = self._make_decay()
+        repo_stale.disk_metadata = {}
+        # Reset session so the second compute starts fresh
+        session2 = Session()
+        session2.set_dataset(DatasetHandle(path=Path("/tmp/y.h5"), metadata={}))
+        uc_stale = ComputePhasor(repo_stale, session2)
+        result_no_cal = uc_stale.execute(channel="ch0", harmonic=1)
+
+        # Calibration with cal_phase=0.5, cal_mod=1.2 IS not the identity,
+        # so the two results must differ. If the use case ignored the
+        # fresh metadata (i.e., used handle.metadata snapshot only), they
+        # would be identical — that's the regression.
+        assert not np.allclose(result_with_fresh.g_map, result_no_cal.g_map)
+        assert not np.allclose(result_with_fresh.s_map, result_no_cal.s_map)
+
+    def test_falls_back_to_snapshot_when_repo_lacks_read_metadata(self):
+        """Old test stubs without read_metadata still work via fallback."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        # FakeRepo without read_metadata at all:
+        class MinimalRepo:
+            def __init__(self):
+                self.written_arrays = {"decay/ch0": self._make_decay()}
+
+            def _make_decay(self):
+                return np.broadcast_to(
+                    np.exp(-np.arange(64, dtype=np.float32) / 8.0),
+                    (4, 4, 64),
+                ).astype(np.float32).copy()
+
+            def read_array(self, handle, path):
+                if path not in self.written_arrays:
+                    raise KeyError(path)
+                return self.written_arrays[path]
+
+            def write_array(self, handle, path, data, attrs=None):
+                self.written_arrays[path] = data
+
+        session = Session()
+        # Snapshot has the calibration values directly
+        handle = DatasetHandle(
+            path=Path("/tmp/x.h5"),
+            metadata={"flim_cal_phase_ch0": 0.5, "flim_cal_mod_ch0": 1.2},
+        )
+        session.set_dataset(handle)
+        repo = MinimalRepo()
+        uc = ComputePhasor(repo, session)
+        # Should not raise; falls back to handle.metadata.
+        result = uc.execute(channel="ch0", harmonic=1)
+        assert result.g_map.shape == (4, 4)
