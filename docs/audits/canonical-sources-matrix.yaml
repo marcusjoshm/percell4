@@ -15,7 +15,7 @@ canonical_sources:
   - slug: dialog-scroll-when-tall
     solution_doc: docs/solutions/ui-bugs/dialog-scroll-when-tall.md
     canonical_file: src/percell4/gui/_dialog_utils.py
-    status: pre_canonical
+    status: canonical_clean
   - slug: decay-write-path
     solution_doc: docs/solutions/architecture-patterns/decay-write-path.md
     canonical_file: src/percell4/adapters/importer.py
@@ -1029,7 +1029,7 @@ threads:
     complexity: small
     rationale: |
       Five dialogs implement a re-implements/drift variant of the same pattern; one (export_images_dialog) drifts (no wrapper at all). The user has named this as repeat-instruction pain across the project's lifetime. Authoring the canonical helper + migrating five callsites is a single small thread (~4-6 commits). Closes one whole canonical-source column at once. Acceptance: every *Dialog.py either uses the helper or has a documented exemption test fixture.
-    status: proposed
+    status: closed
 
   - slug: append-flow-plan-consumption
     description: "Make add_decay_to_dataset accept a pre-discovered bin list (DiscoveredFile / explicit Path list) instead of an rglob source_dir; align the dialog to pass that plan; fix the third occurrence of the discovery-scopes-processing-consumes pattern."

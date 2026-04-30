@@ -2,10 +2,8 @@
 shared ``_dialog_utils.wrap_in_scroll`` helper or carries an explicit
 exemption with a one-line reason.
 
-Skipped until U7 of the dialog-scroll-helper-rollout thread (see
-``docs/plans/2026-04-30-refactor-dialog-scroll-helper-rollout-plan.md``).
-The plan migrates the five known dialogs in U2--U6 first; this test then
-guards against future drift.
+See ``docs/solutions/ui-bugs/dialog-scroll-when-tall.md`` for the
+convention.
 """
 
 from __future__ import annotations
@@ -44,7 +42,6 @@ def _calls_helper(source: str, helper: str) -> bool:
     return False
 
 
-@pytest.mark.skip(reason="enabled by U7 of dialog-scroll-helper-rollout")
 def test_every_dialog_uses_wrap_in_scroll_or_is_exempt():
     failures: list[str] = []
     for path in _iter_dialog_files():
