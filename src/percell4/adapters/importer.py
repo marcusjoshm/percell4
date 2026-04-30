@@ -251,10 +251,23 @@ def import_dataset(
             b.bin_path: token_for_channel.get(b.channel_name, "")
             for b in match_result.bindings
         }
+        # When there are no TIFF intensity files (bin-only import), the
+        # cross-format matcher has no targets — every bin falls into
+        # ``match_result.unmatched`` and ``bin_to_token`` is empty.
+        # Restore the pre-U1 behavior for that case: parse each bin's
+        # ``_ch(\d+)`` token directly so bins still split into per-channel
+        # buckets (ch00, ch01, …) rather than collapsing into a single
+        # empty-token bucket. This matches what the historical compress
+        # flow produced when only .bin files were imported.
+        bin_only_mode = not intensity_channels
         bin_by_channel: dict[str, dict[int, Path]] = defaultdict(dict)
         for bin_path in bin_files:
             stem = bin_path.stem
-            ch = bin_to_token.get(bin_path, "")
+            if bin_only_mode and config.channel:
+                m = re.search(config.channel, stem)
+                ch = m.group(1) if m else ""
+            else:
+                ch = bin_to_token.get(bin_path, "")
             tile_idx = 0
             if config.tile:
                 m = re.search(config.tile, stem)
