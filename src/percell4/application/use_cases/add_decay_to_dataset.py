@@ -70,6 +70,7 @@ def add_decay_to_dataset(
     cross_format_rule: CrossFormatRule,
     *,
     rotate_k: int = 0,
+    flip_axis: int | None = None,
     force: bool = False,
     progress_callback: Callable[[str], None] | None = None,
     intensity_channels: list[IntensityChannel] | None = None,
@@ -85,6 +86,12 @@ def add_decay_to_dataset(
     ``rotate_k`` lets the dialog correct that before append. ``k=0`` is no
     rotation; ``k=1`` is 90° CCW; ``k=2`` is 180°; ``k=3`` is 90° CW (= 270°
     CCW).
+
+    ``flip_axis`` mirrors the stitched decay volume along the given spatial
+    axis, applied AFTER rotation. ``None`` is no flip; ``0`` mirrors top
+    ↔ bottom (vertical flip / flipud); ``1`` mirrors left ↔ right
+    (horizontal flip / fliplr). T-axis untouched. Both rotation and flip
+    only touch /decay/<ch> — /intensity is never modified.
 
     ``intensity_channels`` lets the caller supply the IntensityChannel
     records directly, bypassing token derivation from the channel-name
@@ -253,6 +260,21 @@ def add_decay_to_dataset(
                     errors.get(ch_name, "") + f" rotation failed: {e}"
                 ).strip()
 
+    # ── Phase 2b: flip every fully-stitched (and possibly rotated) channel
+    # Mirror the (H, W) plane along the given axis (0 = vertical, 1 =
+    # horizontal). T-axis preserved. Applied after rotation so users can
+    # compose the two when their LASX export needs both. ONLY /decay
+    # — /intensity is never touched.
+    if flip_axis is not None:
+        for ch_name in list(written):
+            progress(f"Flipping {ch_name} along axis {flip_axis}")
+            try:
+                _flip_decay_in_place(h5_path, ch_name, int(flip_axis))
+            except Exception as e:  # noqa: BLE001
+                errors[ch_name] = (
+                    errors.get(ch_name, "") + f" flip failed: {e}"
+                ).strip()
+
     # ── Phase 3: write provenance for every successfully-stitched channel
     for ch_name in list(written):
         bindings = by_channel[ch_name]
@@ -298,6 +320,38 @@ def _write_provenance_attrs(h5_path, ch_name: str, prov: ProvenanceRecord) -> No
         grp = f.require_group(path)
         for key, val in prov.to_attrs().items():
             grp.attrs[key] = val
+
+
+def _flip_decay_in_place(h5_path, ch_name: str, axis: int) -> None:
+    """Flip /decay/<ch> along the given spatial axis (0 = H, 1 = W).
+
+    T-axis untouched; phasor histogram is flip-invariant. Also
+    invalidates any stale /phasor/<ch>.
+    """
+    if axis not in (0, 1):
+        return
+    import h5py
+    with h5py.File(h5_path, "a") as f:
+        path = f"decay/{ch_name}"
+        if path not in f:
+            return
+        arr = f[path][...]
+        arr = np.flip(arr, axis=axis)
+        arr = np.ascontiguousarray(arr)
+        attrs = dict(f[path].attrs)
+        del f[path]
+        phasor_path = f"phasor/{ch_name}"
+        if phasor_path in f:
+            del f[phasor_path]
+        from percell4.store import _choose_chunks, _compression_kwargs
+        f.create_dataset(
+            path,
+            data=arr.astype(np.float32, copy=False),
+            chunks=_choose_chunks(arr.shape, is_decay=True),
+            **_compression_kwargs(is_decay=True),
+        )
+        for k_, v in attrs.items():
+            f[path].attrs[k_] = v
 
 
 def _rotate_decay_in_place(h5_path, ch_name: str, k: int) -> None:

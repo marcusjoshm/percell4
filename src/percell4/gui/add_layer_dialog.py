@@ -873,14 +873,14 @@ class AddLayerDialog(QDialog):
         self._tcspc_stitch_widget.setVisible(False)
         layout.addWidget(self._tcspc_stitch_widget)
 
-        # ── Rotation (LASX vs TIFF orientation) ─────────────────────
-        # Rotates the stitched (H, W) plane of each /decay layer post-
-        # stitch. T-axis untouched, so per-pixel decay curves (and thus
-        # raw phasor) are preserved. The phasor plot's intensity-weighted
-        # histogram and the wavelet filter both derive intensity from
-        # /decay itself (see flim_panel.py and apply_wavelet.py), so the
-        # weighting is by-construction aligned and rotation is safe for
-        # FLIM analysis.
+        # ── Rotation + Flip (LASX vs TIFF orientation) ──────────────
+        # Both transforms apply to /decay/<ch> only (never /intensity).
+        # T-axis untouched in both cases, so per-pixel decay curves and
+        # the raw phasor histogram are preserved. Rotation runs first,
+        # then flip — when both are non-trivial the user can compose
+        # them. The phasor plot's intensity weighting derives from
+        # /decay itself (flim_panel.py, apply_wavelet.py), so these
+        # transforms are safe for FLIM analysis.
         rot_row = QHBoxLayout()
         rot_row.addWidget(QLabel("Rotate stitched array:"))
         self._tcspc_rotation_combo = QComboBox()
@@ -889,6 +889,14 @@ class AddLayerDialog(QDialog):
         self._tcspc_rotation_combo.addItem("180°", 2)
         self._tcspc_rotation_combo.addItem("90° CW", 3)
         rot_row.addWidget(self._tcspc_rotation_combo)
+        rot_row.addWidget(QLabel("Flip:"))
+        self._tcspc_flip_combo = QComboBox()
+        # ``None`` is no flip. axis=0 mirrors top↔bottom (np.flipud).
+        # axis=1 mirrors left↔right (np.fliplr).
+        self._tcspc_flip_combo.addItem("None", -1)
+        self._tcspc_flip_combo.addItem("Vertical (top ↔ bottom)", 0)
+        self._tcspc_flip_combo.addItem("Horizontal (left ↔ right)", 1)
+        rot_row.addWidget(self._tcspc_flip_combo)
         rot_row.addStretch()
         layout.addLayout(rot_row)
 
@@ -1428,6 +1436,12 @@ class AddLayerDialog(QDialog):
             tile_config = TileConfig(grid_rows=1, grid_cols=1)
         flim_config = self._tcspc_build_flim_config()
         rotate_k = int(self._tcspc_rotation_combo.currentData() or 0)
+        flip_axis_value = self._tcspc_flip_combo.currentData()
+        flip_axis = (
+            int(flip_axis_value)
+            if flip_axis_value is not None and int(flip_axis_value) in (0, 1)
+            else None
+        )
         # Any conflict-row marked for replace forces force=True for that append
         force = any(self._tcspc_replace_state.values()) if hasattr(
             self, "_tcspc_replace_state"
@@ -1448,6 +1462,7 @@ class AddLayerDialog(QDialog):
                 flim_config=flim_config,
                 cross_format_rule=rule,
                 rotate_k=rotate_k,
+                flip_axis=flip_axis,
                 force=force,
                 intensity_channels=intensity_channels,
             )

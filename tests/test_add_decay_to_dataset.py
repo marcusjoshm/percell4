@@ -295,6 +295,122 @@ def test_add_decay_without_intensity_channels_falls_back_to_metadata(
     assert report.written == ("ch00",)
 
 
+def test_add_decay_flip_axis_0_vertical(tmp_path, monkeypatch):
+    """flip_axis=0 mirrors the (H, W) plane top↔bottom (np.flipud)."""
+    def _patterned_read(path, **kwargs):
+        h, w, t = 4, 8, 2
+        arr = np.zeros((h, w, t), dtype=np.uint16)
+        for r in range(h):
+            arr[r, :, 0] = r + 1
+        return {"array": arr, "intensity": arr[..., 0].copy(),
+                "metadata": {"shape": (h, w, t)}}
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _patterned_read,
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _patterned_read,
+    )
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    add_decay_to_dataset(
+        h5_path=store.path, source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=4, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        flip_axis=0,
+    )
+    with h5py.File(store.path, "r") as f:
+        flipped = f["decay/ch00"][...]
+    assert flipped.shape == (4, 8, 2)
+    # Original row 0 (all 1s) should now be at LAST row position
+    assert (flipped[-1, :, 0] == 1).all()
+    assert (flipped[0, :, 0] == 4).all()
+
+
+def test_add_decay_flip_axis_1_horizontal(tmp_path, monkeypatch):
+    """flip_axis=1 mirrors the (H, W) plane left↔right (np.fliplr)."""
+    def _patterned_read(path, **kwargs):
+        h, w, t = 4, 8, 2
+        arr = np.zeros((h, w, t), dtype=np.uint16)
+        for c in range(w):
+            arr[:, c, 0] = c + 1
+        return {"array": arr, "intensity": arr[..., 0].copy(),
+                "metadata": {"shape": (h, w, t)}}
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _patterned_read,
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _patterned_read,
+    )
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    add_decay_to_dataset(
+        h5_path=store.path, source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=4, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        flip_axis=1,
+    )
+    with h5py.File(store.path, "r") as f:
+        flipped = f["decay/ch00"][...]
+    assert flipped.shape == (4, 8, 2)
+    # Original column 0 (all 1s) should now be at LAST column
+    assert (flipped[:, -1, 0] == 1).all()
+    assert (flipped[:, 0, 0] == 8).all()
+
+
+def test_add_decay_flip_axis_none_is_noop(tmp_path, mock_read_flim_bin):
+    """flip_axis=None leaves /decay unchanged."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    add_decay_to_dataset(
+        h5_path=store.path, source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        flip_axis=None,
+    )
+    with h5py.File(store.path, "r") as f:
+        assert f["decay/ch00"].shape == (8, 8, 4)
+
+
+def test_add_decay_rotate_then_flip_compose(tmp_path, mock_read_flim_bin):
+    """Rotation runs first, then flip — composes correctly."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    add_decay_to_dataset(
+        h5_path=store.path, source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        rotate_k=1,
+        flip_axis=0,
+    )
+    with h5py.File(store.path, "r") as f:
+        # 8x8x4 stays 8x8x4 under rotation+flip on a square
+        assert f["decay/ch00"].shape == (8, 8, 4)
+
+
 def test_add_decay_stitch_then_rotate_compose(tmp_path, mock_read_flim_bin):
     """2x2 tile stitch + 90° CCW rotation → 16x16 stitched, still square."""
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
