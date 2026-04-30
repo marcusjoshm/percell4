@@ -170,8 +170,12 @@ def add_decay_to_dataset(
     written: list[str] = []
     selected_rule_name = type(cross_format_rule).__name__
 
+    # ── Phase 1: stitch all tiles for every channel ─────────────────────
+    # Stream each channel's tiles into its /decay/<ch> dataset via the
+    # shared write_decay_streaming helper. No rotation applied yet —
+    # the entire stitched image is the input to Phase 2.
     for ch_name, bindings in by_channel.items():
-        progress(f"Reading {ch_name} ({len(bindings)} tile(s))")
+        progress(f"Stitching {ch_name} ({len(bindings)} tile(s))")
         try:
             # Build tile_idx → Path map (same logic compress uses)
             tile_to_path: dict[int, Path] = {}
@@ -224,18 +228,32 @@ def add_decay_to_dataset(
                 use_tiling=use_tiling,
             )
 
-            # Optional in-place rotation: re-read, rotate (H, W) plane, write back.
-            # T-axis preserved per pixel, so phasor histogram is invariant.
-            if rotate_k:
-                _rotate_decay_in_place(h5_path, ch_name, int(rotate_k) % 4)
-
         except Exception as e:  # noqa: BLE001
             errors[ch_name] = f"read/stitch failed: {e}"
             continue
 
         written.append(ch_name)
 
-        # Provenance — written through DatasetStore so its conventions apply
+    # ── Phase 2: rotate every fully-stitched channel image as a whole ───
+    # Reads /decay/<ch> (now a complete stitched image), rotates the
+    # (H, W) plane by k*90° CCW with the T-axis preserved per pixel,
+    # writes back. Runs only after every channel finished Phase 1, so
+    # rotation always operates on the complete stitched output rather
+    # than on a partially-written or per-tile region.
+    if rotate_k:
+        k = int(rotate_k) % 4
+        for ch_name in list(written):
+            progress(f"Rotating {ch_name} by {k * 90}° CCW")
+            try:
+                _rotate_decay_in_place(h5_path, ch_name, k)
+            except Exception as e:  # noqa: BLE001
+                errors[ch_name] = (
+                    errors.get(ch_name, "") + f" rotation failed: {e}"
+                ).strip()
+
+    # ── Phase 3: write provenance for every successfully-stitched channel
+    for ch_name in list(written):
+        bindings = by_channel[ch_name]
         first_binding = bindings[0]
         prov = ProvenanceRecord(
             source_path=str(first_binding.bin_path.resolve()),
