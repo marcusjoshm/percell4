@@ -152,18 +152,19 @@ class FlimPanel(QWidget):
         handle = self.data_model.session.dataset
         phasor_intensity = None
         if handle is not None:
+            # Intensity for the phasor plot's intensity-weighted histogram
+            # MUST be spatially aligned with g_map / s_map. Both g_map and
+            # s_map are computed from /decay/<channel>, so derive the
+            # intensity weights from /decay/<channel>.sum(axis=-1) too —
+            # NOT from the /intensity stack, which can drift out of
+            # alignment with /decay (different stitching, rotation,
+            # different acquisition source). Misaligned weights produce
+            # wildly wrong histograms even though the per-pixel (g, s)
+            # values are correct.
             try:
                 repo = self._get_repo()
-                intensity_data = repo.read_array(handle, "intensity")
-                meta = handle.metadata
-                if intensity_data.ndim == 3:
-                    ch_names = list(meta.get("channel_names", []))
-                    if active_channel in ch_names:
-                        phasor_intensity = intensity_data[ch_names.index(active_channel)]
-                    else:
-                        phasor_intensity = intensity_data[0]
-                else:
-                    phasor_intensity = intensity_data
+                decay = repo.read_array(handle, f"decay/{active_channel}")
+                phasor_intensity = decay.sum(axis=-1).astype(np.float32)
             except KeyError:
                 phasor_intensity = None
 
@@ -221,21 +222,17 @@ class FlimPanel(QWidget):
 
         QApplication.restoreOverrideCursor()
 
-        # Read intensity for phasor plot (UI concern)
+        # Intensity for the phasor plot's intensity-weighted histogram
+        # MUST be spatially aligned with g and s. Derive from
+        # /decay/<channel>.sum(axis=-1), NOT from the /intensity stack —
+        # see the corresponding comment in _on_compute_phasor for why.
         handle = self.data_model.session.dataset
         repo = self._get_repo()
         intensity = None
         if handle is not None and repo is not None:
             try:
-                intensity_data = repo.read_array(handle, "intensity")
-                if intensity_data.ndim == 3:
-                    ch_names = list(handle.metadata.get("channel_names", []))
-                    if active_channel in ch_names:
-                        intensity = intensity_data[ch_names.index(active_channel)]
-                    else:
-                        intensity = intensity_data[0]
-                else:
-                    intensity = intensity_data
+                decay = repo.read_array(handle, f"decay/{active_channel}")
+                intensity = decay.sum(axis=-1).astype(np.float32)
             except KeyError:
                 pass
 
