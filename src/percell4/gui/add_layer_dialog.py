@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -27,9 +28,34 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
+)
+
+from percell4.application.use_cases.add_decay_to_dataset import (
+    AppendReport,
+    add_decay_to_dataset,
+)
+from percell4.domain.io.cross_format import (
+    IntensityChannel,
+    match_bin_to_intensity,
+)
+from percell4.domain.io.models import (
+    BaseStemRule,
+    ExplicitRule,
+    FlimConfig,
+    TileConfig,
+    TokenConfig,
+    ZeroPadOffsetRule,
+)
+from percell4.gui.tcspc_tab_state import (
+    RULE_AUTO_BASE_STEM,
+    RULE_AUTO_ZERO_PAD,
+    RULE_MANUAL,
+    TcspcTabState,
 )
 
 
@@ -59,6 +85,7 @@ class AddLayerDialog(QDialog):
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_single_tiff_tab(), "Single TIFF")
         self._tabs.addTab(self._build_batch_tiff_tab(), "Discover TIFFs")
+        self._tabs.addTab(self._build_tcspc_tab(), "TCSPC (.bin)")
         self._tabs.addTab(self._build_roi_tab(), "ImageJ ROIs (.zip)")
         self._tabs.addTab(self._build_cellpose_tab(), "Cellpose (.npy)")
         layout.addWidget(self._tabs)
@@ -748,6 +775,311 @@ class AddLayerDialog(QDialog):
     def statusBar_msg(self, msg: str) -> None:
         if hasattr(self._launcher, "statusBar"):
             self._launcher.statusBar().showMessage(msg)
+
+    # ------------------------------------------------------------------
+    # Tab: TCSPC (.bin) append
+    # ------------------------------------------------------------------
+
+    def _build_tcspc_tab(self) -> QWidget:
+        """Add TCSPC `.bin` files to the existing dataset's `/decay/<channel>`.
+
+        Discovers `.bin` files in a directory, matches them to intensity
+        channels via the chosen CrossFormatRule, lets the user override
+        per-row, then commits via the ``add_decay_to_dataset`` use case.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Source directory
+        dir_row = QHBoxLayout()
+        self._tcspc_dir_edit = QLineEdit()
+        self._tcspc_dir_edit.setPlaceholderText(
+            "Source directory containing .bin files…"
+        )
+        dir_row.addWidget(self._tcspc_dir_edit)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._on_tcspc_browse)
+        dir_row.addWidget(browse_btn)
+        layout.addLayout(dir_row)
+
+        # Rule preset
+        rule_row = QHBoxLayout()
+        rule_row.addWidget(QLabel("Cross-format rule:"))
+        self._tcspc_rule_combo = QComboBox()
+        self._tcspc_rule_combo.addItem(
+            "Auto: zero-pad with offset", RULE_AUTO_ZERO_PAD
+        )
+        self._tcspc_rule_combo.addItem("Auto: base stem", RULE_AUTO_BASE_STEM)
+        self._tcspc_rule_combo.addItem("Manual mapping", RULE_MANUAL)
+        self._tcspc_rule_combo.currentIndexChanged.connect(self._on_tcspc_rule_changed)
+        rule_row.addWidget(self._tcspc_rule_combo)
+        rule_row.addStretch()
+        layout.addLayout(rule_row)
+
+        # ZeroPadOffset params
+        params_row = QHBoxLayout()
+        params_row.addWidget(QLabel("Pad width:"))
+        self._tcspc_pad_spin = QSpinBox()
+        self._tcspc_pad_spin.setRange(0, 6)
+        self._tcspc_pad_spin.setValue(2)
+        params_row.addWidget(self._tcspc_pad_spin)
+        params_row.addWidget(QLabel("Offset:"))
+        self._tcspc_offset_spin = QSpinBox()
+        self._tcspc_offset_spin.setRange(0, 10)
+        self._tcspc_offset_spin.setValue(1)
+        params_row.addWidget(self._tcspc_offset_spin)
+        params_row.addStretch()
+        self._tcspc_params_widget = QWidget()
+        self._tcspc_params_widget.setLayout(params_row)
+        layout.addWidget(self._tcspc_params_widget)
+
+        # Scan + match button
+        scan_row = QHBoxLayout()
+        scan_btn = QPushButton("Scan && Match")
+        scan_btn.clicked.connect(self._on_tcspc_scan)
+        scan_row.addWidget(scan_btn)
+        scan_row.addStretch()
+        layout.addLayout(scan_row)
+
+        # Binding table
+        self._tcspc_table = QTableWidget(0, 4)
+        self._tcspc_table.setHorizontalHeaderLabels(
+            ["BIN file", "Target channel", "Replace existing", "Status"]
+        )
+        self._tcspc_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._tcspc_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents
+        )
+        layout.addWidget(self._tcspc_table)
+
+        # Counter + accept
+        accept_row = QHBoxLayout()
+        self._tcspc_counter = QLabel("No bin files scanned.")
+        accept_row.addWidget(self._tcspc_counter)
+        accept_row.addStretch()
+        self._tcspc_accept_btn = QPushButton("Append decay layers")
+        self._tcspc_accept_btn.setEnabled(False)
+        self._tcspc_accept_btn.clicked.connect(self._on_tcspc_accept)
+        accept_row.addWidget(self._tcspc_accept_btn)
+        layout.addLayout(accept_row)
+
+        # State + cached bin paths
+        self._tcspc_state = TcspcTabState()
+        self._tcspc_bin_files: list[Path] = []
+
+        return widget
+
+    def _on_tcspc_browse(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Select .bin source directory")
+        if d:
+            self._tcspc_dir_edit.setText(d)
+
+    def _on_tcspc_rule_changed(self) -> None:
+        preset = self._tcspc_rule_combo.currentData()
+        # Hide pad/offset spins for non-zero-pad presets
+        self._tcspc_params_widget.setVisible(preset == RULE_AUTO_ZERO_PAD)
+        self._tcspc_state.preset = preset
+        # If a directory has already been scanned, re-run the match with the new rule
+        if self._tcspc_bin_files:
+            self._tcspc_run_match()
+
+    def _on_tcspc_scan(self) -> None:
+        d = self._tcspc_dir_edit.text().strip()
+        if not d:
+            self.statusBar_msg("Pick a directory first.")
+            return
+        source = Path(d)
+        if not source.is_dir():
+            self.statusBar_msg(f"Not a directory: {source}")
+            return
+        bins = sorted(p for p in source.rglob("*.bin") if p.is_file())
+        if not bins:
+            self._tcspc_bin_files = []
+            self._tcspc_table.setRowCount(0)
+            self._tcspc_counter.setText("No .bin files found.")
+            self._tcspc_accept_btn.setEnabled(False)
+            return
+        self._tcspc_bin_files = bins
+
+        # Build IntensityChannel records from store metadata (matches U3 logic)
+        intensity = self._tcspc_intensity_channels()
+        existing_decay = self._store.list_groups("decay")
+        self._tcspc_state.set_intensity(intensity, existing_decay)
+
+        self._tcspc_run_match()
+
+    def _tcspc_intensity_channels(self) -> list[IntensityChannel]:
+        meta = self._store.metadata
+        channel_names = list(meta.get("channel_names", []))
+        base_stems = list(meta.get("channel_base_stems", []))
+        out = []
+        for i, name in enumerate(channel_names):
+            import re
+            m = re.search(r"(\d+)$", name)
+            token = m.group(1) if m else ""
+            base_stem = base_stems[i] if i < len(base_stems) else None
+            out.append(IntensityChannel(name=name, token=token, base_stem=base_stem))
+        return out
+
+    def _tcspc_run_match(self) -> None:
+        # Update state's pad/offset before building the rule
+        self._tcspc_state.pad_width = self._tcspc_pad_spin.value()
+        self._tcspc_state.offset = self._tcspc_offset_spin.value()
+        rule = self._tcspc_state.build_selected_rule()
+
+        if not isinstance(rule, ExplicitRule):
+            result = match_bin_to_intensity(
+                self._tcspc_bin_files,
+                list(self._tcspc_state.intensity_channels),
+                rule,
+                TokenConfig(),
+            )
+            self._tcspc_state.apply_match(self._tcspc_bin_files, result)
+        else:
+            # Manual: empty the auto bindings — user fills in via the table
+            from percell4.domain.io.cross_format import MatchResult
+            self._tcspc_state.apply_match(
+                self._tcspc_bin_files, MatchResult(unmatched=tuple(self._tcspc_bin_files))
+            )
+        self._tcspc_render_table()
+
+    def _tcspc_render_table(self) -> None:
+        self._tcspc_table.setRowCount(0)
+        channel_names = [c.name for c in self._tcspc_state.intensity_channels]
+        for row_idx, row in enumerate(self._tcspc_state.rows):
+            self._tcspc_table.insertRow(row_idx)
+            # Col 0: bin filename
+            self._tcspc_table.setItem(
+                row_idx, 0, QTableWidgetItem(row.bin_path.name)
+            )
+            # Col 1: target channel combobox
+            combo = QComboBox()
+            combo.addItem("(unmapped)", None)
+            for n in channel_names:
+                combo.addItem(n, n)
+            current = row.effective_channel
+            if current is not None:
+                idx = combo.findData(current)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            combo.currentIndexChanged.connect(
+                lambda _idx, p=row.bin_path, c=combo: self._on_tcspc_combo_changed(p, c)
+            )
+            self._tcspc_table.setCellWidget(row_idx, 1, combo)
+            # Col 2: replace checkbox (only when conflict)
+            if row.has_conflict:
+                cb = QCheckBox()
+                cb.setChecked(row.replace_checked)
+                cb.stateChanged.connect(
+                    lambda state, p=row.bin_path: self._on_tcspc_replace_toggled(p, state)
+                )
+                self._tcspc_table.setCellWidget(row_idx, 2, cb)
+            else:
+                self._tcspc_table.setItem(row_idx, 2, QTableWidgetItem("—"))
+            # Col 3: status
+            status = self._tcspc_row_status(row)
+            self._tcspc_table.setItem(row_idx, 3, QTableWidgetItem(status))
+        # Counter + accept
+        counts = self._tcspc_count_summary()
+        self._tcspc_counter.setText(counts)
+        self._tcspc_accept_btn.setEnabled(self._tcspc_state.is_acceptable())
+
+    def _tcspc_row_status(self, row) -> str:
+        if row.is_unmapped and not row.candidates:
+            return "unmatched"
+        if row.is_ambiguous:
+            return f"ambiguous: {', '.join(row.candidates)}"
+        if row.has_conflict and not row.replace_checked:
+            return "conflict (decay exists)"
+        if row.has_conflict and row.replace_checked:
+            return "will REPLACE existing"
+        if row.is_overridden:
+            return "user-edited"
+        return "matched"
+
+    def _tcspc_count_summary(self) -> str:
+        n = len(self._tcspc_state.rows)
+        unm = len(self._tcspc_state.unmatched_paths())
+        amb = len(self._tcspc_state.ambiguous_paths())
+        conf = sum(1 for r in self._tcspc_state.rows if r.has_conflict)
+        parts = [f"{n} bin file(s)"]
+        if unm:
+            parts.append(f"{unm} unmatched")
+        if amb:
+            parts.append(f"{amb} ambiguous")
+        if conf:
+            parts.append(f"{conf} conflict(s)")
+        return " — ".join(parts)
+
+    def _on_tcspc_combo_changed(self, bin_path: Path, combo: QComboBox) -> None:
+        ch = combo.currentData()
+        self._tcspc_state.edit_row(bin_path, ch)
+        # Re-render to update status + accept-button state (cheap)
+        self._tcspc_render_table()
+
+    def _on_tcspc_replace_toggled(self, bin_path: Path, state) -> None:
+        self._tcspc_state.set_replace(bin_path, bool(state))
+        self._tcspc_render_table()
+
+    def _on_tcspc_accept(self) -> None:
+        from percell4.domain.io.models import FlimConfig as _FlimConfig
+        from percell4.domain.io.models import TileConfig as _TileConfig
+        rule = self._tcspc_build_commit_rule()
+        try:
+            report = add_decay_to_dataset(
+                h5_path=self._store.path,
+                source_dir=Path(self._tcspc_dir_edit.text()),
+                token_config=TokenConfig(),
+                tile_config=_TileConfig(grid_rows=1, grid_cols=1),
+                flim_config=_FlimConfig(),
+                cross_format_rule=rule,
+                force=self._tcspc_state.needs_force(),
+            )
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Append failed", str(e))
+            return
+        self._tcspc_show_report(report)
+
+    def _tcspc_build_commit_rule(self):
+        """Build the rule sent to the use case, applying user overrides as ExplicitRule."""
+        overrides = self._tcspc_state.build_bindings_override()
+        base = self._tcspc_state.build_selected_rule()
+        if not overrides:
+            return base
+        # User edited at least one cell — express full table state as ExplicitRule
+        # so the commit lands exactly what's shown in the UI.
+        full_mapping: dict[str, str] = {}
+        for row in self._tcspc_state.rows:
+            ch = row.effective_channel
+            if ch is None:
+                continue
+            key = (
+                str(row.bin_path.resolve())
+                if row.bin_path.exists()
+                else str(row.bin_path)
+            )
+            full_mapping[key] = ch
+        return ExplicitRule(mapping=tuple(full_mapping.items()))
+
+    def _tcspc_show_report(self, report: AppendReport) -> None:
+        if report.errors and not report.written:
+            QMessageBox.warning(
+                self,
+                "Append failed",
+                "No decay layers were written.\n\n"
+                + "\n".join(f"{k}: {v}" for k, v in report.errors.items()),
+            )
+            return
+        msg = f"Appended {len(report.written)} decay layer(s): {', '.join(report.written)}"
+        if report.errors:
+            msg += (
+                "\n\nFailures:\n"
+                + "\n".join(f"  {k}: {v}" for k, v in report.errors.items())
+            )
+        QMessageBox.information(self, "Append complete", msg)
+        self._refresh_viewer()
 
     # ------------------------------------------------------------------
     # Styling
