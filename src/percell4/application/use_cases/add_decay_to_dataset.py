@@ -71,6 +71,7 @@ def add_decay_to_dataset(
     rotate_k: int = 0,
     force: bool = False,
     progress_callback: Callable[[str], None] | None = None,
+    intensity_channels: list[IntensityChannel] | None = None,
 ) -> AppendReport:
     """Append .bin TCSPC layers to an existing .h5 dataset.
 
@@ -83,6 +84,13 @@ def add_decay_to_dataset(
     ``rotate_k`` lets the dialog correct that before append. ``k=0`` is no
     rotation; ``k=1`` is 90° CCW; ``k=2`` is 180°; ``k=3`` is 90° CW (= 270°
     CCW).
+
+    ``intensity_channels`` lets the caller supply the IntensityChannel
+    records directly, bypassing token derivation from the channel-name
+    digit suffix. Required when channels carry semantic names (e.g.,
+    ``CA-SiR``, ``mNG``) where the digit-suffix heuristic produces an
+    empty token and the matcher would have nothing to compare against.
+    The dialog passes its per-channel-token-override map this way.
     """
     h5_path = Path(h5_path)
     source_dir = Path(source_dir)
@@ -103,16 +111,20 @@ def add_decay_to_dataset(
             errors={"intensity": "no /intensity channels in dataset (channel_names empty)"}
         )
 
-    # Build IntensityChannel records — derive token + base_stem from channel name
+    # Build IntensityChannel records — caller-supplied list (from the
+    # dialog's per-channel token overrides) wins over digit-suffix
+    # derivation. Required when channels have semantic names like
+    # CA-SiR / mNG / mTQ2 that have no parseable token.
     progress("Reading existing intensity channels")
-    channel_base_stems = list(metadata.get("channel_base_stems", []))
-    intensity_channels: list[IntensityChannel] = []
-    for i, name in enumerate(channel_names):
-        token = _extract_channel_token(name, token_config) or ""
-        base_stem = channel_base_stems[i] if i < len(channel_base_stems) else None
-        intensity_channels.append(
-            IntensityChannel(name=name, token=token, base_stem=base_stem)
-        )
+    if intensity_channels is None:
+        channel_base_stems = list(metadata.get("channel_base_stems", []))
+        intensity_channels = []
+        for i, name in enumerate(channel_names):
+            token = _extract_channel_token(name, token_config) or ""
+            base_stem = channel_base_stems[i] if i < len(channel_base_stems) else None
+            intensity_channels.append(
+                IntensityChannel(name=name, token=token, base_stem=base_stem)
+            )
 
     # Match
     progress("Matching .bin files to intensity channels")

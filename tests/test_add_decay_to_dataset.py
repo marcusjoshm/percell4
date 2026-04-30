@@ -211,6 +211,75 @@ def test_add_decay_rotate_k_zero_is_noop(tmp_path, mock_read_flim_bin):
         assert f["decay/ch00"].shape == (8, 8, 4)
 
 
+def test_add_decay_uses_supplied_intensity_channels_with_overrides(
+    tmp_path, mock_read_flim_bin,
+):
+    """Caller passes IntensityChannel records → use case skips token
+    derivation from channel names.
+
+    Reproduces the dialog scenario: TIFF channels carry semantic names
+    ``CA-SiR``, ``mNG``, ``mTQ2`` (no parseable digit suffix). Without
+    overrides, the matcher would see token "" for every channel and
+    return zero bindings ("Appended 0 decay layer(s)"). With overrides,
+    channel ``CA-SiR`` ↔ token ``"00"`` ↔ ``_ch00.bin`` matches.
+    """
+    from percell4.domain.io.cross_format import IntensityChannel
+
+    store = DatasetStore(tmp_path / "experiment.h5")
+    store.create(metadata={"channel_names": ["CA-SiR", "mNG", "mTQ2"]})
+    intensity = np.zeros((3, 32, 32), dtype=np.uint16)
+    store.write_array("intensity", intensity, attrs={"dims": ["C", "H", "W"]})
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, [
+        "exp_s0_ch00.bin",
+        "exp_s0_ch01.bin",
+        "exp_s0_ch02.bin",
+    ])
+
+    # Dialog-style overrides: positional fallback seeded as "00"/"01"/"02"
+    overrides = [
+        IntensityChannel(name="CA-SiR", token="00"),
+        IntensityChannel(name="mNG", token="01"),
+        IntensityChannel(name="mTQ2", token="02"),
+    ]
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+        intensity_channels=overrides,
+    )
+
+    assert set(report.written) == {"CA-SiR", "mNG", "mTQ2"}
+    assert report.errors == {}
+
+
+def test_add_decay_without_intensity_channels_falls_back_to_metadata(
+    tmp_path, mock_read_flim_bin,
+):
+    """When intensity_channels is omitted, the use case still derives
+    from store.metadata['channel_names'] (back-compat for headless
+    callers and existing tests)."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+    )
+
+    assert report.written == ("ch00",)
+
+
 def test_add_decay_stitch_then_rotate_compose(tmp_path, mock_read_flim_bin):
     """2x2 tile stitch + 90° CCW rotation → 16x16 stitched, still square."""
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",))

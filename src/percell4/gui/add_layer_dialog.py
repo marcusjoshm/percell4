@@ -1353,6 +1353,12 @@ class AddLayerDialog(QDialog):
             self, "_tcspc_replace_state"
         ) else False
 
+        # Pass the user's per-channel token overrides (built into
+        # IntensityChannel records) so the use case doesn't re-derive
+        # tokens from semantic channel names. Without this, channels
+        # named ``CA-SiR`` / ``mNG`` / ``mTQ2`` would all get an empty
+        # token and the matcher would return zero bindings.
+        intensity_channels = list(self._tcspc_state.intensity_channels)
         try:
             report = add_decay_to_dataset(
                 h5_path=self._store.path,
@@ -1363,6 +1369,7 @@ class AddLayerDialog(QDialog):
                 cross_format_rule=rule,
                 rotate_k=rotate_k,
                 force=force,
+                intensity_channels=intensity_channels,
             )
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Append failed", str(e))
