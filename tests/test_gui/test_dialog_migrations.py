@@ -27,3 +27,17 @@ def test_import_dialog_wraps_content_in_one_scroll_area(qtbot):
     assert len(scrolls) == 1
     assert isinstance(scrolls[0].widget(), type(scrolls[0].widget()))
     assert scrolls[0].widget().findChildren(QGroupBox)
+
+
+# ── U3: compress_dialog ──────────────────────────────────────────────
+
+
+def test_compress_dialog_wraps_content_in_one_scroll_area(qtbot):
+    from percell4.gui.compress_dialog import CompressDialog
+
+    dlg = CompressDialog()
+    qtbot.addWidget(dlg)
+
+    scrolls = _scroll_areas(dlg)
+    assert len(scrolls) == 1
+    assert scrolls[0].widget().findChildren(QGroupBox)
