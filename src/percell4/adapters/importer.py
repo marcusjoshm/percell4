@@ -377,6 +377,18 @@ def import_dataset(
     if metadata:
         all_metadata.update(metadata)
 
+    # Persist the stitching configuration so subsequent add-layer flows on
+    # this dataset can replicate compress's tile placement byte-for-byte.
+    # Without this, the user has to remember the Pattern/Start they picked
+    # in the Compress dialog and re-enter them in the Add Layer dialog —
+    # any drift (e.g., snake_by_column vs row_by_row) puts decay tiles in
+    # different (h, w) positions and the spatial Filtered phasor diverges.
+    if tile_config is not None:
+        all_metadata["stitch_grid_rows"] = int(tile_config.grid_rows)
+        all_metadata["stitch_grid_cols"] = int(tile_config.grid_cols)
+        all_metadata["stitch_grid_type"] = str(tile_config.grid_type)
+        all_metadata["stitch_order"] = str(tile_config.order)
+
     # Add FLIM calibration to metadata
     if flim_params:
         all_metadata["has_flim"] = True

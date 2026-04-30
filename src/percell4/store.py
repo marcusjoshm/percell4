@@ -392,12 +392,18 @@ class DatasetStore:
                         raise LayerAlreadyExistsError(name)
 
         # Write each channel under one open handle with explicit flush+fsync
-        # between channels. Best-effort per-channel atomicity.
+        # between channels. Best-effort per-channel atomicity. Decay arrays
+        # are cast to float32 to match compress's storage format — phasor
+        # math runs in float64 either way, but matching dtype keeps disk
+        # layout consistent between the two import flows so downstream
+        # tools don't see a uint32-vs-float32 discrepancy.
         with h5py.File(self.path, "a") as f:
             for name, decay in layers.items():
                 path = f"decay/{name}"
                 if path in f:
                     del f[path]
+                if decay.dtype != np.float32:
+                    decay = decay.astype(np.float32, copy=False)
                 chunks = _choose_chunks(decay.shape, is_decay=True)
                 f.create_dataset(
                     path,

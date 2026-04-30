@@ -59,7 +59,9 @@ def test_append_creates_decay_and_provenance(tmp_path):
     with h5py.File(store.path, "r") as f:
         assert "decay/ch00" in f
         assert f["decay/ch00"].shape == (32, 32, 16)
-        assert f["decay/ch00"].dtype == np.uint16
+        # Decay is cast to float32 in the store boundary to match compress's
+        # storage format (see store.append_decay_layers docstring).
+        assert f["decay/ch00"].dtype == np.float32
         prov = f["provenance/decay/ch00"].attrs
         assert prov["source_path"] == "/abs/ch00.bin"
         assert prov["cross_format_rule"] == "ZeroPadOffsetRule"

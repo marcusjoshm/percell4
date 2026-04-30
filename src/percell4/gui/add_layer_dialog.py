@@ -1067,6 +1067,12 @@ class AddLayerDialog(QDialog):
         # 1, 10, 2.
         self._tcspc_available_bin_tokens = self._tcspc_discover_bin_tokens(bins)
 
+        # Pre-fill stitching widgets from /metadata if compress recorded
+        # the original TileConfig there — keeps add-layer's tile placement
+        # byte-identical to compress's. Falls back to compress's UI defaults
+        # when the metadata is absent (older .h5 files).
+        self._tcspc_seed_stitching_from_metadata()
+
         # Build IntensityChannel records from store metadata (matches U3 logic)
         intensity = self._tcspc_intensity_channels()
         existing_decay = self._store.list_groups("decay")
@@ -1075,6 +1081,49 @@ class AddLayerDialog(QDialog):
         self._tcspc_rebuild_calibration_widgets([c.name for c in intensity])
 
         self._tcspc_run_match()
+
+    def _tcspc_seed_stitching_from_metadata(self) -> None:
+        """Pre-fill the Tile Stitching controls from /metadata if present.
+
+        Compress writes ``stitch_grid_rows``, ``stitch_grid_cols``,
+        ``stitch_grid_type``, ``stitch_order`` to /metadata when it imports
+        with stitching. Reading those back here means picking ``Auto: zero
+        pad with offset`` and clicking Scan & Match against a compress-
+        produced .h5 will replicate the exact tile placement compress used,
+        so the resulting decay aligns with the existing intensity / mask /
+        labels and the spatial Filtered phasor matches.
+        """
+        meta = self._store.metadata
+        rows = meta.get("stitch_grid_rows")
+        cols = meta.get("stitch_grid_cols")
+        if rows is None or cols is None:
+            return
+        # Only enable the stitching checkbox when the dataset actually has
+        # a multi-tile grid; 1×1 means single-tile, no stitching needed.
+        try:
+            rows = int(rows)
+            cols = int(cols)
+        except (TypeError, ValueError):
+            return
+        if rows * cols <= 1:
+            return
+        self._tcspc_stitch_check.setChecked(True)
+        self._tcspc_stitch_rows.setValue(rows)
+        self._tcspc_stitch_cols.setValue(cols)
+        grid_type = meta.get("stitch_grid_type")
+        if grid_type:
+            idx = self._tcspc_stitch_type.findText(str(grid_type))
+            if idx >= 0:
+                self._tcspc_stitch_type.setCurrentIndex(idx)
+        order = meta.get("stitch_order")
+        if order:
+            idx = self._tcspc_stitch_order.findText(str(order))
+            if idx >= 0:
+                self._tcspc_stitch_order.setCurrentIndex(idx)
+        self.statusBar_msg(
+            f"Pre-filled stitching from dataset metadata: "
+            f"{rows}×{cols} {grid_type or ''} {order or ''}".strip()
+        )
 
     def _tcspc_discover_bin_tokens(self, bin_files: list[Path]) -> list[str]:
         """Return the distinct channel tokens parsed from .bin filenames.
