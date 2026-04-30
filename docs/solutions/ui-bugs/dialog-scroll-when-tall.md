@@ -5,7 +5,7 @@ category: ui-bugs
 module: percell4.gui
 problem_type: convention
 component: tooling
-canonical_source: TBD
+canonical_source: src/percell4/gui/_dialog_utils.py
 applies_to:
   - "src/percell4/gui/*Dialog.py"
   - "src/percell4/gui/*_dialog.py"

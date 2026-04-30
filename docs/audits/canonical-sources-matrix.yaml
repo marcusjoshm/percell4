@@ -14,7 +14,7 @@ audit_baseline:
 canonical_sources:
   - slug: dialog-scroll-when-tall
     solution_doc: docs/solutions/ui-bugs/dialog-scroll-when-tall.md
-    canonical_file: TBD
+    canonical_file: src/percell4/gui/_dialog_utils.py
     status: pre_canonical
   - slug: decay-write-path
     solution_doc: docs/solutions/architecture-patterns/decay-write-path.md
