@@ -596,6 +596,15 @@ class PhasorPlotWindow(QMainWindow):
         for w in self._roi_widgets:
             w.cached_mask = None
 
+        # Invalidate active-mask filter cache. Each compute_phasor call
+        # produces a new (g, s) frame; the cached mask flat may have
+        # been loaded against an earlier frame whose spatial alignment
+        # differs even when shapes match (rotation/flip applied to
+        # /decay between computes, channel switch, dataset switch).
+        # Forcing a re-read on next refresh keeps mask alignment correct.
+        self._active_mask_array = None
+        self._active_mask_flat = None
+
         if g_unfiltered is not None:
             self._g_map_unfiltered = g_unfiltered
             self._s_map_unfiltered = s_unfiltered

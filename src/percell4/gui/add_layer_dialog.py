@@ -1614,6 +1614,16 @@ class AddLayerDialog(QDialog):
         Uses the same attr keys as the rest of the app (``flim_cal_phase_<ch>``,
         ``flim_cal_mod_<ch>``, ``flim_frequency_mhz``) so phasor computation
         can pick them up later.
+
+        ALSO updates the in-memory ``Session.dataset.metadata`` snapshot
+        with the same attrs. The snapshot is captured at set_dataset
+        time and never re-read from disk during a session, and h5py /
+        HDF5 library-level caching across handles in the same process
+        can also return stale views of recent writes. Mutating the
+        snapshot dict in-place ensures consumers that read
+        ``handle.metadata`` directly (rather than via repo.read_metadata)
+        see the new calibration values immediately — no app restart and
+        no "run compute phasor twice" needed.
         """
         attrs = {"flim_frequency_mhz": float(self._tcspc_flim_freq.value())}
         for ch_name, cal in self._tcspc_channel_calibrations.items():
@@ -1623,6 +1633,16 @@ class AddLayerDialog(QDialog):
             self._store.set_metadata(attrs)
         except Exception:  # noqa: BLE001
             # Metadata write is best-effort; the decay layers already landed
+            pass
+
+        # Update the session's handle.metadata snapshot in-place so
+        # consumers that haven't been migrated to repo.read_metadata
+        # still get fresh values without an app restart.
+        try:
+            handle = self._data_model.session.dataset
+            if handle is not None:
+                handle.metadata.update(attrs)
+        except Exception:  # noqa: BLE001
             pass
 
     def _tcspc_show_report(self, report: AppendReport) -> None:
