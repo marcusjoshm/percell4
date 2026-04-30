@@ -102,6 +102,9 @@ class FakeRepo:
     def read_metadata(self, handle):
         return dict(self.disk_metadata)
 
+    def delete_path(self, handle, path):
+        return self.written_arrays.pop(path, None) is not None
+
 
 # ── Fixtures ─────────────────────────────────────────────────
 
@@ -364,4 +367,68 @@ class TestComputePhasorFreshMetadata:
         uc = ComputePhasor(repo, session)
         # Should not raise; falls back to handle.metadata.
         result = uc.execute(channel="ch0", harmonic=1)
+        assert result.g_map.shape == (4, 4)
+
+
+# ── ComputePhasor: invalidate stale wavelet output ───────────
+
+
+class TestComputePhasorInvalidatesWavelet:
+    """Recomputing the phasor must drop stale derived layers.
+
+    Regression for: after a TCSPC import, an early apply_wavelet run
+    captured uncalibrated (g, s) into g_filtered. A later compute_phasor
+    fixed /phasor/<ch>/g, /s but left g_filtered untouched — so toggling
+    'Filtered' in the phasor plot showed a stale wavelet view that
+    looked like an unmasked, broad distribution. The fix invalidates
+    g_filtered, s_filtered, and lifetime_filtered whenever (g, s) is
+    rewritten.
+    """
+
+    def test_recompute_drops_stale_filtered_layers(self):
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+
+        repo = FakeRepo()
+        # Synthetic decay
+        T = 64
+        decay = np.broadcast_to(
+            np.exp(-np.arange(T, dtype=np.float32) / 8.0), (4, 4, T),
+        ).astype(np.float32).copy()
+        repo.written_arrays["decay/ch0"] = decay
+        # Pre-populate stale derived layers (would happen after a prior
+        # apply_wavelet / compute_lifetime against earlier g/s):
+        repo.written_arrays["phasor/ch0/g_filtered"] = np.full((4, 4), 99.0)
+        repo.written_arrays["phasor/ch0/s_filtered"] = np.full((4, 4), 99.0)
+        repo.written_arrays["phasor/ch0/lifetime_filtered"] = np.full((4, 4), 99.0)
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1)
+
+        # Stale derived layers must be gone
+        assert "phasor/ch0/g_filtered" not in repo.written_arrays
+        assert "phasor/ch0/s_filtered" not in repo.written_arrays
+        assert "phasor/ch0/lifetime_filtered" not in repo.written_arrays
+        # Fresh (g, s) must be present
+        assert "phasor/ch0/g" in repo.written_arrays
+        assert "phasor/ch0/s" in repo.written_arrays
+
+    def test_recompute_succeeds_when_no_stale_layers_exist(self):
+        """First compute on a clean dataset doesn't error on absent layers."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/y.h5"), metadata={}))
+        repo = FakeRepo()
+        T = 64
+        decay = np.broadcast_to(
+            np.exp(-np.arange(T, dtype=np.float32) / 8.0), (4, 4, T),
+        ).astype(np.float32).copy()
+        repo.written_arrays["decay/ch0"] = decay
+
+        uc = ComputePhasor(repo, session)
+        result = uc.execute(channel="ch0", harmonic=1)
+
         assert result.g_map.shape == (4, 4)

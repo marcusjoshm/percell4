@@ -98,6 +98,16 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def delete_path(self, handle: DatasetHandle, path: str) -> bool:
+        """Delete an HDF5 dataset or group at ``path``. Returns True if deleted.
+
+        Used by use cases to invalidate downstream cached layers when
+        upstream data is rewritten (e.g., compute_phasor invalidating
+        ``/phasor/<ch>/g_filtered`` when ``/phasor/<ch>/g`` is rewritten,
+        so a stale wavelet view of old phasor doesn't survive).
+        """
+        ...
+
     # ── Groups (for stored group columns) ────────────────────
 
     def read_group_columns(self, handle: DatasetHandle) -> pd.DataFrame | None:

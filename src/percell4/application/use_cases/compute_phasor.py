@@ -118,6 +118,27 @@ class ComputePhasor:
             attrs={"dims": ["H", "W"], "channel": channel, "harmonic": harmonic},
         )
 
+        # Invalidate downstream wavelet output and lifetime maps. Each of
+        # these is derived from the (g, s) we just rewrote — leaving them
+        # in place lets a "Filtered" toggle display a stale wavelet result
+        # computed from the OLD (g, s). Concrete bug this fixes: after a
+        # TCSPC import, the first compute_phasor and the first
+        # apply_wavelet ran with stale calibration; a later compute_phasor
+        # corrected /phasor/<ch>/g, s but left g_filtered untouched, so
+        # toggling Filtered showed an apparently "wrong" mask-filtered
+        # phasor (Image #3 in the bug report) until the user restarted
+        # the app and didn't re-run wavelet.
+        for stale in ("g_filtered", "s_filtered", "lifetime_filtered"):
+            try:
+                deleter = getattr(self._repo, "delete_path", None)
+                if deleter is not None:
+                    deleter(handle, f"phasor/{channel}/{stale}")
+            except Exception:
+                logger.debug(
+                    "Failed to invalidate phasor/%s/%s; downstream may be stale",
+                    channel, stale, exc_info=True,
+                )
+
         n_valid = int(np.isfinite(g_map).sum())
         return PhasorResult(
             g_map=g_map, s_map=s_map,

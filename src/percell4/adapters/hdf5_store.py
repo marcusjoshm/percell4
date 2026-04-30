@@ -150,6 +150,9 @@ class Hdf5DatasetRepository:
         """Read /metadata attrs fresh from disk (not the handle's snapshot)."""
         return self._store(handle).metadata
 
+    def delete_path(self, handle: DatasetHandle, path: str) -> bool:
+        return self._store(handle).delete_item(path)
+
     # ── Groups ───────────────────────────────────────────────
 
     def read_group_columns(self, handle: DatasetHandle) -> pd.DataFrame | None:
