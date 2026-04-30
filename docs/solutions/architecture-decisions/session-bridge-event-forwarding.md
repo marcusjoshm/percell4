@@ -79,6 +79,8 @@ When adding a new event to Session:
 4. Add a `_on_*_changed` handler that emits `StateChange` with the new field
 5. Update all panel `_on_state_changed` methods that should respond
 
+**Companion rule (added 2026-04-30): `Session.set_*` methods that clear multiple slots must emit per-slot events, not just a coarse parent event.** `Session.set_dataset` originally emitted only `DATASET_CHANGED` while clearing `_active_mask`, `_active_segmentation`, `_filter_ids`, `_selection`. Peer views subscribed to `ACTIVE_MASK_CHANGED` (the phasor plot's mask filter) never heard the reset and held stale UI/cache across dataset switches. This is the same forwarding-failure rule applied to **state mutation** rather than **event introduction**: capture prior values, emit per-state events when slots actually changed. See [`../logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md`](../logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md) Vector 1 for the concrete fix.
+
 **Grep check after adding a Session event:**
 ```bash
 # Verify the bridge exists:
