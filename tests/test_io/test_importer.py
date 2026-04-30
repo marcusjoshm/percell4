@@ -127,6 +127,53 @@ def test_import_empty_dir_raises(tmp_path):
         import_dataset(src, h5_path)
 
 
+def test_import_bin_only_splits_channels_by_token(tmp_path):
+    """Regression test: importing only .bin files (no TIFFs) must still
+    split bins into per-channel buckets via their ``_ch(\\d+)`` tokens.
+
+    Pre-U1 behavior parsed each bin's channel token directly when no
+    TIFFs were present. The U1 refactor routed everything through
+    ``match_bin_to_intensity``, which returned no bindings when the
+    intensity-channel list was empty — collapsing every bin into a
+    single ``ch0`` decay layer and visually breaking the phasor.
+    """
+    src = tmp_path / "bin_only"
+    src.mkdir()
+    # 2 channels × 4 tiles = 8 bin files. Tiny dimensions to keep the
+    # test fast: 4×4×8 = 128 uint32 values per bin.
+    h, w, t = 4, 4, 8
+    for ch in range(2):
+        for tile in range(4):
+            arr = np.full((h, w, t), ch * 1000 + tile, dtype=np.uint32)
+            (src / f"sample_s{tile:02d}_ch{ch:02d}.bin").write_bytes(
+                arr.tobytes()
+            )
+
+    h5_path = tmp_path / "bin_only.h5"
+    flim_params = {
+        "frequency_mhz": 80.0,
+        "channel_calibrations": {},
+        "bin_dimensions": {
+            "x_dim": w, "y_dim": h, "t_dim": t,
+            "dtype": "uint32", "dim_order": "YXT", "header_bytes": 0,
+        },
+    }
+    from percell4.domain.io.models import TileConfig
+    n_ch = import_dataset(
+        src,
+        h5_path,
+        flim_params=flim_params,
+        tile_config=TileConfig(grid_rows=2, grid_cols=2),
+    )
+
+    # The store should have /decay/ch00 AND /decay/ch01 — NOT a single
+    # collapsed /decay/ch0 (the regression's symptom).
+    store = DatasetStore(h5_path)
+    decay_groups = store.list_groups("decay")
+    assert "ch00" in decay_groups, f"ch00 missing — got {decay_groups}"
+    assert "ch01" in decay_groups, f"ch01 missing — got {decay_groups}"
+
+
 def test_import_progress_callback(tmp_path):
     """Progress callback is called during import."""
     src = _create_tiff_dir(tmp_path, n_channels=1)

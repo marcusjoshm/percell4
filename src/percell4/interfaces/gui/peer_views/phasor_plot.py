@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Callable, Final
 
 import numpy as np
 import pyqtgraph as pg
@@ -35,6 +35,10 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.domain.flim.phasor_display import (
+    compute_valid_phasor_pixels,
+    mask_shape_matches,
+)
 
 COLOR_CYCLE: Final[tuple[str, ...]] = (
     "#3498db", "#e74c3c", "#2ecc71", "#f39c12",
@@ -111,9 +115,14 @@ class PhasorPlotWindow(QMainWindow):
     # list[tuple[str, ndarray, str]] — per-ROI (name, binary_mask, hex_color)
     mask_applied = Signal(object)
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        get_repo: Callable[[], Any] | None = None,
+    ) -> None:
         super().__init__()
         self._session = session
+        self._get_repo = get_repo
         self.setWindowTitle("PerCell4 — Phasor Plot")
         self.resize(850, 600)
 
@@ -125,6 +134,12 @@ class PhasorPlotWindow(QMainWindow):
         self._labels: np.ndarray | None = None
         self._labels_flat: np.ndarray | None = None
         self._total_valid_pixels: int = 0
+
+        # Active-mask filter state. Loaded lazily when the user enables
+        # the checkbox so we don't pay HDF5-read cost when the filter
+        # isn't engaged. Cleared when active_mask changes.
+        self._active_mask_array: np.ndarray | None = None
+        self._active_mask_flat: np.ndarray | None = None
 
         self._roi_widgets: list[_ROIWidget] = []
         self._selected_roi_index: int | None = None
@@ -146,7 +161,14 @@ class PhasorPlotWindow(QMainWindow):
         self._filter_timer.timeout.connect(self._refresh_histogram)
         self._unsubs = [
             self._session.subscribe(Event.FILTER_CHANGED, self._on_filter_changed),
+            self._session.subscribe(
+                Event.ACTIVE_MASK_CHANGED, self._on_active_mask_changed
+            ),
         ]
+        # Sync checkbox state for whatever mask is already active when the
+        # window is created (e.g., re-opening the phasor plot after a
+        # mask was set elsewhere).
+        self._on_active_mask_changed()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -172,7 +194,26 @@ class PhasorPlotWindow(QMainWindow):
         self._filtered_check.setEnabled(False)
         self._filtered_check.toggled.connect(self._on_filtered_toggled)
         controls.addWidget(self._filtered_check)
+
+        controls.addSpacing(16)
+        self._mask_filter_check = QCheckBox("Filter by active mask")
+        self._mask_filter_check.setEnabled(False)
+        self._mask_filter_check.setToolTip(
+            "Restrict the phasor histogram to pixels in the active mask. "
+            "Composes with the cell-selection filter via boolean AND."
+        )
+        self._mask_filter_check.toggled.connect(self._on_mask_filter_toggled)
+        controls.addWidget(self._mask_filter_check)
+
         controls.addStretch()
+
+        self._save_png_btn = QPushButton("Save Phasor .PNG")
+        self._save_png_btn.setToolTip(
+            "Save the current phasor plot as a PNG image."
+        )
+        self._save_png_btn.clicked.connect(self._on_save_png)
+        controls.addWidget(self._save_png_btn)
+
         left_layout.addLayout(controls)
 
         # Plot
@@ -482,6 +523,17 @@ class PhasorPlotWindow(QMainWindow):
             cell_mask = np.isin(self._labels, list(filtered_ids))
             mask[~cell_mask] = 0
 
+        # Restrict mask to active mask when the mask filter is engaged.
+        # Trigger lazy load via _load_active_mask_flat so the preview
+        # path works even if the histogram hasn't rendered yet.
+        self._load_active_mask_flat()
+        if (
+            self._mask_filter_check.isChecked()
+            and self._active_mask_array is not None
+            and self._active_mask_array.shape == mask.shape
+        ):
+            mask[self._active_mask_array == 0] = 0
+
         return mask
 
     def _update_preview(self) -> None:
@@ -544,6 +596,15 @@ class PhasorPlotWindow(QMainWindow):
         for w in self._roi_widgets:
             w.cached_mask = None
 
+        # Invalidate active-mask filter cache. Each compute_phasor call
+        # produces a new (g, s) frame; the cached mask flat may have
+        # been loaded against an earlier frame whose spatial alignment
+        # differs even when shapes match (rotation/flip applied to
+        # /decay between computes, channel switch, dataset switch).
+        # Forcing a re-read on next refresh keeps mask alignment correct.
+        self._active_mask_array = None
+        self._active_mask_flat = None
+
         if g_unfiltered is not None:
             self._g_map_unfiltered = g_unfiltered
             self._s_map_unfiltered = s_unfiltered
@@ -567,6 +628,75 @@ class PhasorPlotWindow(QMainWindow):
         """Handle filter changes — debounced histogram refresh."""
         self._filter_timer.start()
 
+    def _on_active_mask_changed(self) -> None:
+        """Update mask-filter checkbox enabled state when active_mask flips.
+
+        Drops any cached mask array so the next refresh re-loads from the
+        repo. Does not auto-engage the filter — the user must opt in via
+        the checkbox to avoid the feedback loop with phasor ROI's
+        "Apply Visible as Mask" (which itself sets active_mask).
+        """
+        active = self._session.active_mask
+        self._active_mask_array = None
+        self._active_mask_flat = None
+        if not active:
+            self._mask_filter_check.blockSignals(True)
+            self._mask_filter_check.setChecked(False)
+            self._mask_filter_check.blockSignals(False)
+            self._mask_filter_check.setEnabled(False)
+        else:
+            self._mask_filter_check.setEnabled(True)
+        # If the filter is currently engaged, refresh against the new mask
+        if self._mask_filter_check.isChecked():
+            self._refresh_histogram()
+
+    def _on_mask_filter_toggled(self, checked: bool) -> None:
+        """User toggled the 'Filter by active mask' checkbox."""
+        # Invalidate ROI caches so the combined mask reflects the new filter
+        for w in self._roi_widgets:
+            w.cached_mask = None
+        self._refresh_histogram()
+        self._preview_timer.start()
+
+    def _load_active_mask_flat(self) -> np.ndarray | None:
+        """Load and cache the active mask as a flat array, or return None.
+
+        Reads /masks/<active_mask> from the repo on demand. Returns None
+        when there is no active mask, no repo, no dataset, the mask
+        cannot be read, or the mask shape does not match the phasor
+        maps. Caches the loaded array so repeated histogram refreshes
+        don't re-read HDF5.
+        """
+        if not self._mask_filter_check.isChecked():
+            return None
+        if self._g_map is None:
+            return None
+
+        if self._active_mask_flat is not None:
+            return self._active_mask_flat
+
+        active = self._session.active_mask
+        if not active or self._get_repo is None:
+            return None
+        handle = self._session.dataset
+        if handle is None:
+            return None
+
+        try:
+            repo = self._get_repo()
+            mask = repo.read_mask(handle, active)
+        except (KeyError, OSError, ValueError):
+            return None
+
+        if not mask_shape_matches(mask, self._g_map):
+            self._active_mask_array = None
+            self._active_mask_flat = None
+            return None
+
+        self._active_mask_array = mask
+        self._active_mask_flat = mask.ravel()
+        return self._active_mask_flat
+
     def _refresh_histogram(self) -> None:
         """Render intensity-weighted 2D histogram."""
         if self._g_map is None or self._s_map is None:
@@ -576,19 +706,34 @@ class PhasorPlotWindow(QMainWindow):
         g_flat = g_display.ravel()
         s_flat = s_display.ravel()
 
-        valid = np.isfinite(g_flat) & np.isfinite(s_flat) & (g_flat != 0)
+        mask_flat = self._load_active_mask_flat()
+        # Surface a status message when the mask is configured but
+        # bypassed (shape mismatch / read failure). The checkbox stays
+        # checked so the user can fix the mismatch without re-toggling.
+        mask_bypassed = (
+            self._mask_filter_check.isChecked()
+            and self._session.active_mask
+            and mask_flat is None
+            and self._g_map is not None
+        )
 
-        # Apply cell-level filter if active
-        filtered_ids = self._session.filter_ids
-        if filtered_ids is not None and self._labels_flat is not None:
-            cell_mask = np.isin(self._labels_flat, list(filtered_ids))
-            valid = valid & cell_mask
+        valid = compute_valid_phasor_pixels(
+            g_flat, s_flat,
+            labels_flat=self._labels_flat,
+            filter_ids=self._session.filter_ids,
+            mask_flat=mask_flat,
+        )
 
         g_flat = g_flat[valid]
         s_flat = s_flat[valid]
 
         if len(g_flat) == 0:
-            self._status.showMessage("No valid phasor data")
+            if mask_bypassed:
+                self._status.showMessage(
+                    "No valid phasor data — mask shape mismatch, filter not applied"
+                )
+            else:
+                self._status.showMessage("No valid phasor data")
             return
 
         if self._intensity is not None:
@@ -637,7 +782,12 @@ class PhasorPlotWindow(QMainWindow):
         self._plot.getAxis("left").enableAutoSIPrefix(False)
 
         n_pixels = len(g_flat)
-        self._status.showMessage(f"Phasor: {n_pixels:,} valid pixels")
+        if mask_bypassed:
+            self._status.showMessage(
+                f"Phasor: {n_pixels:,} valid pixels — mask shape mismatch, filter not applied"
+            )
+        else:
+            self._status.showMessage(f"Phasor: {n_pixels:,} valid pixels")
 
     # ── Apply mask ────────────────────────────────────────────
 
@@ -675,6 +825,37 @@ class PhasorPlotWindow(QMainWindow):
         self.mask_applied.emit(roi_masks)
         names = ", ".join(name for name, _, _ in roi_masks)
         self._status.showMessage(f"Applied {len(roi_masks)} mask(s): {names}", 5000)
+
+    # ── Save plot as PNG ──────────────────────────────────────
+
+    def _on_save_png(self) -> None:
+        """Save the current phasor plot widget as a PNG image."""
+        if self._g_map is None:
+            self._status.showMessage("No phasor data to save", 3000)
+            return
+
+        default_name = "phasor.png"
+        handle = self._session.dataset
+        if handle is not None:
+            stem = handle.path.stem
+            channel = self._session.active_channel
+            default_name = f"{stem}_{channel}_phasor.png" if channel else f"{stem}_phasor.png"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Phasor PNG", default_name, "PNG Image (*.png)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path = f"{path}.png"
+
+        pixmap = self._plot.grab()
+        if not pixmap.save(path, "PNG"):
+            QMessageBox.warning(
+                self, "Save Error", f"Failed to save phasor PNG to:\n{path}"
+            )
+            return
+        self._status.showMessage(f"Saved phasor PNG: {path}", 4000)
 
     # ── Save / Load ROIs ──────────────────────────────────────
 

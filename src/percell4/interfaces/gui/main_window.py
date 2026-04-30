@@ -562,7 +562,7 @@ class LauncherWindow(QMainWindow):
             factories = {
                 "viewer": lambda: ViewerWindow(self.data_model),
                 "data_plot": lambda: DataPlotWindow(session),
-                "phasor_plot": lambda: PhasorPlotWindow(session),
+                "phasor_plot": lambda: PhasorPlotWindow(session, get_repo=lambda: self._repo),
                 "cell_table": lambda: CellTableWindow(session),
             }
             if key in factories:

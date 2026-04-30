@@ -14,9 +14,20 @@ from typing import Any
 
 import numpy as np
 
-from percell4.domain.io.assembler import assemble_channels, assemble_tiles, project_z
-from percell4.domain.io.models import ScanResult, TileConfig, TokenConfig
 from percell4.adapters.readers import read_tiff
+from percell4.domain.io.assembler import assemble_channels, assemble_tiles, project_z
+from percell4.domain.io.cross_format import (
+    IntensityChannel,
+    match_bin_to_intensity,
+)
+from percell4.domain.io.models import (
+    BaseStemRule,
+    CompositeRule,
+    ScanResult,
+    TileConfig,
+    TokenConfig,
+    ZeroPadOffsetRule,
+)
 from percell4.domain.io.scanner import FileScanner
 from percell4.project import ProjectIndex
 from percell4.store import DatasetStore
@@ -72,11 +83,12 @@ def import_dataset(
     else:
         result = scanner.scan(path=source_dir)
 
-    # Also check for .bin TCSPC files
-    bin_files = sorted(source_dir.glob("*.bin"))
-
-    if not result.files and not bin_files:
+    if not result.files:
         raise ValueError(f"No image files found in {source_dir}")
+
+    bin_files = sorted(
+        f.path for f in result.files if f.path.suffix.lower() == ".bin"
+    )
 
     # Auto-enable FLIM if .bin files found and no flim_params provided
     if bin_files and flim_params is None:
@@ -90,11 +102,13 @@ def import_dataset(
             },
         }
 
-    # 2. Separate TCSPC files from intensity files
+    # 2. Separate TIFF intensity vs TCSPC TIFFs (.bin handled separately below)
     _progress(1, 5, "Organizing files...")
     tcspc_files = []
     intensity_files = []
     for f in result.files:
+        if f.path.suffix.lower() == ".bin":
+            continue
         stem = f.path.stem.upper()
         if "TCSPC" in stem:
             tcspc_files.append(f)
@@ -190,17 +204,70 @@ def import_dataset(
         bin_dims = flim_params.get("bin_dimensions", {})
         config = token_config or TokenConfig()
 
-        # Parse tokens from .bin filenames (same patterns as TIFFs)
+        # Build IntensityChannel records (name, token, base_stem) — fed to the
+        # cross-format matcher. ``base_stem`` is the TIFF stem with the channel
+        # token stripped (used by BaseStemRule when a .bin carries no channel
+        # token, e.g. ``DA Halo 20uL 1.bin`` paired with ``DA Halo 20uL 1_ch00.tif``).
+        intensity_channels: list[IntensityChannel] = []
+        seen_tokens: set[str] = set()
+        if config.channel:
+            for f in intensity_files:
+                ch_tok = f.tokens.get("channel", "")
+                if not ch_tok or ch_tok in seen_tokens:
+                    continue
+                seen_tokens.add(ch_tok)
+                base = re.sub(config.channel, "", f.path.stem).strip("_- ") or None
+                intensity_channels.append(IntensityChannel(
+                    name=f"ch{ch_tok}",
+                    token=ch_tok,
+                    base_stem=base,
+                ))
+
+        # Match .bin files to intensity channels via the canonical pure-domain
+        # function. The default rule is a Composite that first tries
+        # ZeroPadOffsetRule(0, 0) — exact channel-token equality, the
+        # historical importer behavior — then falls back to BaseStemRule for
+        # .bin files that carry no channel token. The user-microscope case
+        # (TIFF ``_s00_ch00`` ↔ BIN ``s1_ch1`` with offset+1) is enabled by
+        # selecting ZeroPadOffsetRule(2, 1) from the dialog (U4); the importer
+        # default preserves byte-identical behavior with the pre-refactor block.
+        match_rule = CompositeRule(rules=(
+            ZeroPadOffsetRule(pad_width=0, offset=0),
+            BaseStemRule(),
+        ))
+        match_result = match_bin_to_intensity(
+            list(bin_files),
+            intensity_channels,
+            match_rule,
+            config,
+        )
+
+        # Convert MatchResult → bin_by_channel structure the streaming code
+        # expects below. Bin files that bound to a channel use the channel's
+        # token as the key; unmatched/ambiguous bins fall through with empty
+        # token (becoming /decay/ch0) — same fallback the historical code had.
+        token_for_channel = {c.name: c.token for c in intensity_channels}
+        bin_to_token = {
+            b.bin_path: token_for_channel.get(b.channel_name, "")
+            for b in match_result.bindings
+        }
+        # When there are no TIFF intensity files (bin-only import), the
+        # cross-format matcher has no targets — every bin falls into
+        # ``match_result.unmatched`` and ``bin_to_token`` is empty.
+        # Restore the pre-U1 behavior for that case: parse each bin's
+        # ``_ch(\d+)`` token directly so bins still split into per-channel
+        # buckets (ch00, ch01, …) rather than collapsing into a single
+        # empty-token bucket. This matches what the historical compress
+        # flow produced when only .bin files were imported.
+        bin_only_mode = not intensity_channels
         bin_by_channel: dict[str, dict[int, Path]] = defaultdict(dict)
         for bin_path in bin_files:
             stem = bin_path.stem
-            # Extract channel token
-            ch = ""
-            if config.channel:
+            if bin_only_mode and config.channel:
                 m = re.search(config.channel, stem)
-                if m:
-                    ch = m.group(1)
-            # Extract tile token
+                ch = m.group(1) if m else ""
+            else:
+                ch = bin_to_token.get(bin_path, "")
             tile_idx = 0
             if config.tile:
                 m = re.search(config.tile, stem)
@@ -279,20 +346,23 @@ def import_dataset(
                 # during the streaming HDF5 write phase
                 del result_bin
 
-            # Stitch intensity tiles (small, ~35 MB per channel for 6x6 grid)
-            if use_tiling:
-                stitched_intensity = assemble_tiles(
-                    intensity_tiles,
-                    grid_rows=tile_config.grid_rows,
-                    grid_cols=tile_config.grid_cols,
-                    grid_type=tile_config.grid_type,
-                    order=tile_config.order,
-                )
-            else:
-                stitched_intensity = next(iter(intensity_tiles.values()))
-
-            channel_images.append(stitched_intensity.astype(np.float32))
-            channel_names.append(ch_name)
+            # Only synthesize an intensity channel from the .bin sum when
+            # there isn't already a TIFF-sourced intensity layer for this
+            # channel. Otherwise the TIFF intensity wins and the .bin is
+            # decay-only — no duplicate napari layer.
+            if ch_name not in channel_names:
+                if use_tiling:
+                    stitched_intensity = assemble_tiles(
+                        intensity_tiles,
+                        grid_rows=tile_config.grid_rows,
+                        grid_cols=tile_config.grid_cols,
+                        grid_type=tile_config.grid_type,
+                        order=tile_config.order,
+                    )
+                else:
+                    stitched_intensity = next(iter(intensity_tiles.values()))
+                channel_images.append(stitched_intensity.astype(np.float32))
+                channel_names.append(ch_name)
 
             # Store info for deferred decay write (tile-by-tile to HDF5)
             tcspc_data[ch_name] = {
@@ -319,6 +389,18 @@ def import_dataset(
     }
     if metadata:
         all_metadata.update(metadata)
+
+    # Persist the stitching configuration so subsequent add-layer flows on
+    # this dataset can replicate compress's tile placement byte-for-byte.
+    # Without this, the user has to remember the Pattern/Start they picked
+    # in the Compress dialog and re-enter them in the Add Layer dialog —
+    # any drift (e.g., snake_by_column vs row_by_row) puts decay tiles in
+    # different (h, w) positions and the spatial Filtered phasor diverges.
+    if tile_config is not None:
+        all_metadata["stitch_grid_rows"] = int(tile_config.grid_rows)
+        all_metadata["stitch_grid_cols"] = int(tile_config.grid_cols)
+        all_metadata["stitch_grid_type"] = str(tile_config.grid_type)
+        all_metadata["stitch_order"] = str(tile_config.order)
 
     # Add FLIM calibration to metadata
     if flim_params:
@@ -356,17 +438,34 @@ def import_dataset(
         decay_path = f"decay/{ch_name}"
 
         if isinstance(decay_info, dict) and decay_info.get("_streaming"):
-            # Streaming write: read one .bin tile at a time, write to HDF5
+            # Streaming write delegated to the shared helper so that compress
+            # and the add-layer append flow take exactly the same code path
+            # for byte-identical output on identical inputs.
+            info = decay_info
+            write_decay_streaming(
+                h5_path=store.path,
+                channel_name=ch_name,
+                tile_bins=info["tile_bins"],
+                bin_dims=info["bin_dims"],
+                tile_h=info["tile_h"],
+                tile_w=info["tile_w"],
+                n_bins=info["n_bins"],
+                out_h=info["out_h"],
+                out_w=info["out_w"],
+                positions=info["positions"],
+                use_tiling=info["use_tiling"],
+            )
+            continue
+
+        # Legacy path retained for the (unused-in-practice) non-streaming
+        # case so the loop body stays a single shape.
+        if isinstance(decay_info, dict) and decay_info.get("_streaming"):
             import h5py
-
             from percell4.adapters.readers import read_flim_bin
-
             info = decay_info
             with h5py.File(store.path, "a") as f:
                 if decay_path in f:
                     del f[decay_path]
-
-                # Create dataset with full stitched dimensions
                 dset = f.create_dataset(
                     decay_path,
                     shape=(info["out_h"], info["out_w"], info["n_bins"]),
@@ -380,8 +479,6 @@ def import_dataset(
                 )
                 dset.attrs["dims"] = ["H", "W", "T"]
                 dset.attrs["channel"] = ch_name
-
-                # Write each tile directly to its region in the dataset
                 for tile_idx, bin_path in sorted(info["tile_bins"].items()):
                     tile_data = read_flim_bin(
                         bin_path,
@@ -392,7 +489,6 @@ def import_dataset(
                         dim_order=info["bin_dims"].get("dim_order", "YXT"),
                         header_bytes=info["bin_dims"].get("header_bytes", 0),
                     )["array"].astype(np.float32)
-
                     if info["use_tiling"] and tile_idx in info["positions"]:
                         row, col = info["positions"][tile_idx]
                         y0 = row * info["tile_h"]
@@ -493,3 +589,77 @@ def _tile_positions_from_config(
         tile_config.grid_type,
         tile_config.order,
     )
+
+
+def write_decay_streaming(
+    h5_path: str | Path,
+    channel_name: str,
+    tile_bins: dict[int, Path],
+    bin_dims: dict[str, Any],
+    tile_h: int,
+    tile_w: int,
+    n_bins: int,
+    out_h: int,
+    out_w: int,
+    positions: dict[int, tuple[int, int]],
+    use_tiling: bool,
+) -> None:
+    """Stream-write a TCSPC decay channel to ``/decay/<channel_name>`` in an
+    .h5 file, tile by tile.
+
+    Single source of truth for `.bin` decay writes — used by both the
+    initial-import (compress) flow and the append-via-add-layer flow so
+    that identical inputs (TileConfig + bin_dims + tile_bins) produce
+    byte-identical output. Mirrors what compress's importer used to do
+    inline.
+
+    Existing data at ``/decay/<channel_name>`` is overwritten — caller is
+    responsible for any conflict-checking (e.g.,
+    ``DatasetStore.append_decay_layers`` raises ``LayerAlreadyExists`` for
+    that, but this helper sits below that check by design — it's the
+    write primitive).
+    """
+    import h5py
+
+    from percell4.adapters.readers import read_flim_bin
+
+    decay_path = f"decay/{channel_name}"
+    with h5py.File(h5_path, "a") as f:
+        if decay_path in f:
+            del f[decay_path]
+        # Invalidate stale phasor for this channel — without this, the GUI
+        # phasor plot shows the OLD computed (g, s) maps even after the
+        # underlying /decay layer was overwritten, which looks like a
+        # broken import. compute_phasor must be re-run to refresh.
+        phasor_path = f"phasor/{channel_name}"
+        if phasor_path in f:
+            del f[phasor_path]
+        dset = f.create_dataset(
+            decay_path,
+            shape=(out_h, out_w, n_bins),
+            dtype=np.float32,
+            chunks=(min(64, tile_h), min(64, tile_w), n_bins),
+            compression="lzf",
+        )
+        dset.attrs["dims"] = ["H", "W", "T"]
+        dset.attrs["channel"] = channel_name
+
+        for tile_idx, bin_path in sorted(tile_bins.items()):
+            tile_data = read_flim_bin(
+                bin_path,
+                x_dim=bin_dims.get("x_dim", 512),
+                y_dim=bin_dims.get("y_dim", 512),
+                t_dim=bin_dims.get("t_dim", 132),
+                dtype=bin_dims.get("dtype", "float32"),
+                dim_order=bin_dims.get("dim_order", "YXT"),
+                header_bytes=bin_dims.get("header_bytes", 0),
+            )["array"].astype(np.float32)
+
+            if use_tiling and tile_idx in positions:
+                row, col = positions[tile_idx]
+                y0 = row * tile_h
+                x0 = col * tile_w
+                dset[y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
+            else:
+                dset[:, :, :] = tile_data
+            del tile_data

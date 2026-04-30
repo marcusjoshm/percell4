@@ -124,7 +124,21 @@ class Session:
     # ── Mutations ────────────────────────────────────────────
 
     def set_dataset(self, handle: DatasetHandle | None) -> None:
-        """Set the active dataset. Resets selection, filter, active layers, and measurements."""
+        """Set the active dataset. Resets selection, filter, active layers, and measurements.
+
+        Emits the relevant per-state events (ACTIVE_MASK_CHANGED,
+        ACTIVE_SEGMENTATION_CHANGED, FILTER_CHANGED, SELECTION_CHANGED)
+        when those slots actually changed, so peer views that subscribe
+        to those events (rather than DATASET_CHANGED) drop their stale
+        caches and UI state. Without this, e.g., the phasor plot's
+        "Filter by active mask" checkbox stays checked and pinned to the
+        previous dataset's mask after a dataset switch.
+        """
+        prev_segmentation = self._active_segmentation
+        prev_mask = self._active_mask
+        prev_filter = self._filter_ids
+        prev_selection = self._selection
+
         self._dataset = handle
         self._active_segmentation = None
         self._active_mask = None
@@ -139,7 +153,16 @@ class Session:
             self._active_channel = ch_names[0] if ch_names else None
         else:
             self._active_channel = None
+
         self._emit(Event.DATASET_CHANGED)
+        if prev_segmentation is not None:
+            self._emit(Event.ACTIVE_SEGMENTATION_CHANGED)
+        if prev_mask is not None:
+            self._emit(Event.ACTIVE_MASK_CHANGED)
+        if prev_filter is not None:
+            self._emit(Event.FILTER_CHANGED)
+        if prev_selection:
+            self._emit(Event.SELECTION_CHANGED)
 
     def set_selection(self, ids: frozenset[CellId]) -> None:
         if ids == self._selection:

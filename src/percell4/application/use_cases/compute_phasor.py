@@ -39,6 +39,23 @@ class ComputePhasor:
         self._repo = repo
         self._session = session
 
+    def _read_fresh_metadata(self, handle) -> dict:
+        """Read /metadata attrs fresh from disk, with snapshot fallback.
+
+        Falls back to ``handle.metadata`` if the repository doesn't expose
+        ``read_metadata`` (e.g., older test stubs).
+        """
+        reader = getattr(self._repo, "read_metadata", None)
+        if reader is not None:
+            try:
+                return reader(handle)
+            except Exception:
+                logger.warning(
+                    "read_metadata failed; falling back to handle snapshot",
+                    exc_info=True,
+                )
+        return dict(handle.metadata)
+
     def execute(self, channel: str, harmonic: int = 1) -> PhasorResult:
         handle = self._session.dataset
         if handle is None:
@@ -65,8 +82,17 @@ class ComputePhasor:
         g_map[low_signal] = 0.0
         s_map[low_signal] = 0.0
 
-        # Apply per-channel calibration if available
-        meta = handle.metadata
+        # Apply per-channel calibration if available.
+        # Read /metadata FRESH from disk rather than from handle.metadata —
+        # handle.metadata is a snapshot taken when the dataset was opened
+        # via set_dataset. If TCSPC data was appended in this session,
+        # the import wrote flim_cal_phase_<ch> / flim_cal_mod_<ch> /
+        # flim_frequency_mhz to /metadata AFTER the snapshot, so the
+        # snapshot has stale defaults (phase=0, mod=1). Without a fresh
+        # read here, calibration is silently skipped and the resulting
+        # phasor is wildly off — looks "fixed" only after app restart
+        # because the new snapshot picks up the disk values.
+        meta = self._read_fresh_metadata(handle)
         cal_phase = float(meta.get(f"flim_cal_phase_{channel}", 0.0))
         cal_mod = float(meta.get(f"flim_cal_mod_{channel}", 1.0))
 
@@ -91,6 +117,27 @@ class ComputePhasor:
             handle, f"phasor/{channel}/s", s_map,
             attrs={"dims": ["H", "W"], "channel": channel, "harmonic": harmonic},
         )
+
+        # Invalidate downstream wavelet output and lifetime maps. Each of
+        # these is derived from the (g, s) we just rewrote — leaving them
+        # in place lets a "Filtered" toggle display a stale wavelet result
+        # computed from the OLD (g, s). Concrete bug this fixes: after a
+        # TCSPC import, the first compute_phasor and the first
+        # apply_wavelet ran with stale calibration; a later compute_phasor
+        # corrected /phasor/<ch>/g, s but left g_filtered untouched, so
+        # toggling Filtered showed an apparently "wrong" mask-filtered
+        # phasor (Image #3 in the bug report) until the user restarted
+        # the app and didn't re-run wavelet.
+        for stale in ("g_filtered", "s_filtered", "lifetime_filtered"):
+            try:
+                deleter = getattr(self._repo, "delete_path", None)
+                if deleter is not None:
+                    deleter(handle, f"phasor/{channel}/{stale}")
+            except Exception:
+                logger.debug(
+                    "Failed to invalidate phasor/%s/%s; downstream may be stale",
+                    channel, stale, exc_info=True,
+                )
 
         n_valid = int(np.isfinite(g_map).sum())
         return PhasorResult(

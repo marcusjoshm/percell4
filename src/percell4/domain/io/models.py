@@ -122,6 +122,84 @@ class CompressMode(StrEnum):
 
 
 @dataclass(frozen=True)
+class ZeroPadOffsetRule:
+    """Match `.bin` channel tokens to TIFF channel tokens by re-padding and offsetting.
+
+    Use case: TIFFs use ``_ch00`` (zero-padded, 0-indexed) and `.bin` uses
+    ``_ch1`` (unpadded, 1-indexed). With ``pad_width=2, offset=1``:
+    bin token "1" → int 1 → minus offset → 0 → padded to width 2 → "00".
+    """
+
+    pad_width: int = 0
+    offset: int = 0
+
+
+@dataclass(frozen=True)
+class BaseStemRule:
+    """Match `.bin` files to TIFF channels by base-stem equality / prefix.
+
+    A TIFF ``Dataset_A_ch00.tif`` has base stem ``Dataset_A`` (channel token
+    stripped). A `.bin` whose stem equals or prefixes that base stem (in
+    either direction) binds to that channel. Ambiguous if multiple channels
+    match.
+    """
+
+
+@dataclass(frozen=True)
+class ExplicitRule:
+    """User-supplied bin-path → channel-name mapping.
+
+    Mapping keys are ``str(Path.resolve())`` — absolute, normalized paths.
+    Tuple-of-tuples to keep the dataclass hashable.
+    """
+
+    mapping: tuple[tuple[str, str], ...] = ()
+
+    def as_dict(self) -> dict[str, str]:
+        return dict(self.mapping)
+
+
+@dataclass(frozen=True)
+class CompositeRule:
+    """Try each sub-rule in order; first match wins; ambiguous propagates."""
+
+    rules: tuple = ()  # tuple of CrossFormatRule variants
+
+
+# Type alias — used in signatures, not at runtime.
+CrossFormatRule = ZeroPadOffsetRule | BaseStemRule | ExplicitRule | CompositeRule
+
+
+@dataclass(frozen=True)
+class ProvenanceRecord:
+    """Per-payload provenance written through the same boundary as the data.
+
+    All fields are str/bool so they round-trip cleanly as HDF5 attrs without
+    type ambiguity. ``match_evidence`` is a JSON-encoded payload (see
+    ``cross_format.MatchEvidence.to_dict``).
+    """
+
+    source_path: str
+    cross_format_rule: str  # in-memory class name: "ZeroPadOffsetRule" etc.
+    match_evidence: str  # JSON-encoded
+    manually_overridden: bool
+    importer_version: str
+    timestamp_utc: str
+    content_sha256: str
+
+    def to_attrs(self) -> dict:
+        return {
+            "source_path": self.source_path,
+            "cross_format_rule": self.cross_format_rule,
+            "match_evidence": self.match_evidence,
+            "manually_overridden": self.manually_overridden,
+            "importer_version": self.importer_version,
+            "timestamp_utc": self.timestamp_utc,
+            "content_sha256": self.content_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class FlimConfig:
     """FLIM calibration parameters for a dataset."""
 
@@ -179,6 +257,7 @@ class CompressConfig:
     dataset_name_overrides: dict[str, str] = field(default_factory=dict)  # orig -> new
     datasets: list[DatasetSpec] = field(default_factory=list)
     gui_states: dict[str, DatasetGuiState] = field(default_factory=dict)
+    flim_params: dict | None = None  # passed through to import_dataset for .bin FLIM data
 
 
 @dataclass(frozen=True)

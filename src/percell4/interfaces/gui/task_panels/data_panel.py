@@ -384,11 +384,29 @@ class DataPanel(QWidget):
 
         store = self._get_store()
         if store is not None:
-            meta = store.metadata
+            try:
+                store.rename_channel(old_name, new_name)
+            except ValueError as e:
+                self._show_status(f"Rename failed: {e}")
+                return
+
+        # Sync the in-memory handle metadata so use cases see the new name
+        # without requiring a dataset reload.
+        session = self.data_model.session
+        handle = session.dataset
+        if handle is not None:
+            meta = handle.metadata
             names = list(meta.get("channel_names", []))
             if old_name in names:
                 names[names.index(old_name)] = new_name
-                store.set_metadata({"channel_names": names})
+                meta["channel_names"] = names
+            for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
+                old_key = f"{key_prefix}{old_name}"
+                new_key = f"{key_prefix}{new_name}"
+                if old_key in meta:
+                    meta[new_key] = meta.pop(old_key)
+            if session.active_channel == old_name:
+                session.set_active_channel(new_name)
 
         viewer_win = self._get_viewer_win()
         if viewer_win is not None and viewer_win.viewer is not None:
@@ -408,12 +426,126 @@ class DataPanel(QWidget):
 
         reply = QMessageBox.question(
             self, "Confirm Delete",
-            f"Delete channel '{name}'? This cannot be undone.",
+            f"Permanently delete channel '{name}' and its FLIM data "
+            "(decay, phasor, calibration) from the .h5 file? "
+            "This cannot be undone.",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
+        session = self.data_model.session
+        store = self._get_store()
+        if store is None:
+            self._show_status("No dataset loaded")
+            return
+
+        # /metadata.channel_names is the canonical list, but napari can hold
+        # layers whose names don't appear there. Two ways this happens:
+        #   (1) ``<ch>_bin`` debug layers and other appended-after-import
+        #       layers that were tracked in channel_names at one point but
+        #       got partially cleaned (channel_names was rewritten without
+        #       updating /intensity, leaving extra slices on disk).
+        #   (2) /intensity has more slices than channel_names entries —
+        #       the launcher names them ``f"ch{i}"`` for i >= len(names),
+        #       which appear in napari but aren't in metadata.
+        # The user's intent in clicking Delete is "make this channel go
+        # away permanently" regardless of which case. We resolve the
+        # /intensity slice index from either the metadata position OR the
+        # ``ch<N>`` fallback name and slice the array accordingly.
+        import re
+        names = list(store.metadata.get("channel_names", []))
+        in_metadata = name in names
+
+        # Resolve the /intensity slice index for this layer name
+        slice_idx: int | None = None
+        if in_metadata:
+            slice_idx = names.index(name)
+        else:
+            m = re.fullmatch(r"ch(\d+)", name)
+            if m:
+                candidate = int(m.group(1))
+                # Valid orphan-slice index = past channel_names AND within
+                # intensity.shape[0]. We check the shape inside the
+                # try-block below.
+                slice_idx = candidate
+
+        try:
+            intensity = store.read_array("intensity")
+        except KeyError:
+            intensity = None
+
+        if intensity is not None and slice_idx is not None and intensity.ndim == 3:
+            if slice_idx < intensity.shape[0]:
+                if intensity.shape[0] <= 1:
+                    store.delete_item("intensity")
+                else:
+                    keep = [i for i in range(intensity.shape[0]) if i != slice_idx]
+                    new_intensity = intensity[keep, :, :]
+                    store.write_array(
+                        "intensity", new_intensity, attrs={"dims": ["C", "H", "W"]},
+                    )
+            else:
+                # Layer name suggested an index past the current /intensity.
+                # Nothing to slice on disk; the napari layer removal below
+                # still happens.
+                pass
+        elif intensity is not None and intensity.ndim == 2 and in_metadata:
+            # 2D — single-channel dataset, deletion empties it
+            store.delete_item("intensity")
+
+        # Update channel_names if the deleted layer was in metadata.
+        if in_metadata:
+            new_names = [n for n in names if n != name]
+            store.set_metadata({
+                "channel_names": new_names,
+                "n_channels": len(new_names),
+            })
+            handle = session.dataset
+            if handle is not None:
+                meta = handle.metadata
+                meta["channel_names"] = new_names
+                meta["n_channels"] = len(new_names)
+
+        # Drop derived FLIM artifacts for this channel — always attempt,
+        # because they may exist independently of channel_names (e.g., a
+        # stale ``/decay/<name>`` from an earlier import that left the
+        # /metadata stale).
+        for path in (
+            f"decay/{name}",
+            f"phasor/{name}",
+            f"provenance/decay/{name}",
+        ):
+            try:
+                store.delete_item(path)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Drop calibration metadata for this channel — always attempt.
+        try:
+            import h5py
+            with h5py.File(store.path, "a") as f:
+                if "metadata" in f:
+                    for k in (f"flim_cal_phase_{name}", f"flim_cal_mod_{name}"):
+                        if k in f["metadata"].attrs:
+                            del f["metadata"].attrs[k]
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Sync the in-memory handle metadata for FLIM keys regardless.
+        handle = session.dataset
+        if handle is not None:
+            meta = handle.metadata
+            for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
+                k = f"{key_prefix}{name}"
+                if k in meta:
+                    del meta[k]
+
+        # Clear active-channel selection if it pointed at the deleted one.
+        if session.active_channel == name:
+            session.set_active_channel(None)
+
+        # Remove the napari layer.
         viewer_win = self._get_viewer_win()
         if viewer_win is not None and viewer_win.viewer is not None:
             for layer in list(viewer_win.viewer.layers):
@@ -422,4 +554,11 @@ class DataPanel(QWidget):
                     break
 
         self.refresh_management_combos()
-        self._show_status(f"Deleted channel '{name}'")
+        self._populate_channel_combo()
+        if in_metadata:
+            self._show_status(f"Deleted channel '{name}' permanently")
+        else:
+            self._show_status(
+                f"Removed orphan layer '{name}' (was not in channel_names; "
+                "any associated decay / phasor / calibration also cleared)"
+            )

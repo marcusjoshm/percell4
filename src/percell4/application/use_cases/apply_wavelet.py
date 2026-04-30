@@ -38,6 +38,16 @@ class ApplyWavelet:
         self._repo = repo
         self._session = session
 
+    def _read_fresh_metadata(self, handle) -> dict:
+        """Read /metadata fresh from disk, with snapshot fallback."""
+        reader = getattr(self._repo, "read_metadata", None)
+        if reader is not None:
+            try:
+                return reader(handle)
+            except Exception:
+                pass
+        return dict(handle.metadata)
+
     def execute(self, channel: str, filter_level: int = 9) -> WaveletResult:
         handle = self._session.dataset
         if handle is None:
@@ -52,23 +62,29 @@ class ApplyWavelet:
                 f"No phasor data for '{channel}'. Compute Phasor first."
             )
 
-        # Read intensity
+        # Compute the per-pixel intensity from the decay layer itself —
+        # NOT from the /intensity stack. The wavelet filter does
+        # ``f_real = g * intensity`` (pointwise) and the same for s, so
+        # ``intensity`` MUST be spatially aligned with g and s. The /intensity
+        # stack can drift out of alignment when /decay is rewritten by a
+        # later add-layer pass (different stitching, rotation, or a
+        # different acquisition mode); using ``decay.sum(axis=-1)`` here
+        # makes the alignment guaranteed by construction. compute_phasor
+        # already follows the same pattern (compute_phasor.py:60).
         try:
-            intensity_data = self._repo.read_array(handle, "intensity")
+            decay = self._repo.read_array(handle, f"decay/{channel}")
         except KeyError:
-            raise ValueError("No intensity data in dataset")
+            raise ValueError(
+                f"No /decay/{channel} layer for wavelet filter intensity weighting."
+            )
+        intensity = decay.sum(axis=-1).astype(np.float64)
 
-        if intensity_data.ndim == 3:
-            channel_names = list(handle.metadata.get("channel_names", []))
-            if channel in channel_names:
-                intensity = intensity_data[channel_names.index(channel)]
-            else:
-                intensity = intensity_data[0]
-        else:
-            intensity = intensity_data
-
-        # Get frequency for lifetime calculation
-        meta = handle.metadata
+        # Get frequency for lifetime calculation. Read /metadata fresh
+        # from disk — handle.metadata is a snapshot from set_dataset
+        # time and may not reflect flim_frequency_mhz if TCSPC data was
+        # imported in this session. See compute_phasor for the full
+        # explanation of this snapshot-staleness hazard.
+        meta = self._read_fresh_metadata(handle)
         freq = meta.get("flim_frequency_mhz", None)
         omega = None
         if freq and freq > 0:
