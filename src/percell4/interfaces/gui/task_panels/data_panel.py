@@ -441,41 +441,66 @@ class DataPanel(QWidget):
             return
 
         # /metadata.channel_names is the canonical list, but napari can hold
-        # layers whose names don't appear there (e.g., debug ``<ch>_bin``
-        # layers that were appended ad-hoc, or stale layers from a previous
-        # session). The user's intent in clicking Delete is "make this
-        # channel go away" — so we ALWAYS strip the layer and any matching
-        # disk artifacts, even when the channel isn't in channel_names.
+        # layers whose names don't appear there. Two ways this happens:
+        #   (1) ``<ch>_bin`` debug layers and other appended-after-import
+        #       layers that were tracked in channel_names at one point but
+        #       got partially cleaned (channel_names was rewritten without
+        #       updating /intensity, leaving extra slices on disk).
+        #   (2) /intensity has more slices than channel_names entries —
+        #       the launcher names them ``f"ch{i}"`` for i >= len(names),
+        #       which appear in napari but aren't in metadata.
+        # The user's intent in clicking Delete is "make this channel go
+        # away permanently" regardless of which case. We resolve the
+        # /intensity slice index from either the metadata position OR the
+        # ``ch<N>`` fallback name and slice the array accordingly.
+        import re
         names = list(store.metadata.get("channel_names", []))
         in_metadata = name in names
-        idx = names.index(name) if in_metadata else None
 
+        # Resolve the /intensity slice index for this layer name
+        slice_idx: int | None = None
         if in_metadata:
-            try:
-                intensity = store.read_array("intensity")
-            except KeyError:
-                intensity = None
+            slice_idx = names.index(name)
+        else:
+            m = re.fullmatch(r"ch(\d+)", name)
+            if m:
+                candidate = int(m.group(1))
+                # Valid orphan-slice index = past channel_names AND within
+                # intensity.shape[0]. We check the shape inside the
+                # try-block below.
+                slice_idx = candidate
 
-            if intensity is not None:
-                if intensity.ndim == 3:
-                    if intensity.shape[0] <= 1:
-                        store.delete_item("intensity")
-                    else:
-                        keep = [i for i in range(intensity.shape[0]) if i != idx]
-                        new_intensity = intensity[keep, :, :]
-                        store.write_array(
-                            "intensity", new_intensity, attrs={"dims": ["C", "H", "W"]},
-                        )
-                else:
-                    # 2D — single-channel dataset, deletion empties it
+        try:
+            intensity = store.read_array("intensity")
+        except KeyError:
+            intensity = None
+
+        if intensity is not None and slice_idx is not None and intensity.ndim == 3:
+            if slice_idx < intensity.shape[0]:
+                if intensity.shape[0] <= 1:
                     store.delete_item("intensity")
+                else:
+                    keep = [i for i in range(intensity.shape[0]) if i != slice_idx]
+                    new_intensity = intensity[keep, :, :]
+                    store.write_array(
+                        "intensity", new_intensity, attrs={"dims": ["C", "H", "W"]},
+                    )
+            else:
+                # Layer name suggested an index past the current /intensity.
+                # Nothing to slice on disk; the napari layer removal below
+                # still happens.
+                pass
+        elif intensity is not None and intensity.ndim == 2 and in_metadata:
+            # 2D — single-channel dataset, deletion empties it
+            store.delete_item("intensity")
 
+        # Update channel_names if the deleted layer was in metadata.
+        if in_metadata:
             new_names = [n for n in names if n != name]
             store.set_metadata({
                 "channel_names": new_names,
                 "n_channels": len(new_names),
             })
-
             handle = session.dataset
             if handle is not None:
                 meta = handle.metadata
