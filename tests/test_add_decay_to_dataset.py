@@ -133,6 +133,107 @@ def test_add_decay_with_tile_stitching(tmp_path, mock_read_flim_bin):
         assert f["decay/ch00"].shape == (16, 16, 4)
 
 
+def test_add_decay_rotates_stitched_array(tmp_path, monkeypatch):
+    """rotate_k applies a 90°·k CCW rotation in the (H, W) plane post-stitch.
+
+    Uses a non-square, asymmetric synthetic decay so the rotation is
+    observable in both saved shape and content.
+    """
+    def _patterned_read(path, **kwargs):
+        h, w, t = 4, 8, 2
+        arr = np.zeros((h, w, t), dtype=np.uint16)
+        for r in range(h):
+            arr[r, :, 0] = r + 1  # row index encoded into time bin 0
+        return {
+            "array": arr,
+            "intensity": arr[..., 0].copy(),
+            "metadata": {"shape": (h, w, t)},
+        }
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _patterned_read,
+    )
+
+    # Without rotation: shape stays (H=4, W=8, T=2)
+    store0 = _h5_with_intensity(tmp_path / "norot", channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+    add_decay_to_dataset(
+        h5_path=store0.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=4, bin_t=2),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+    )
+    with h5py.File(store0.path, "r") as f:
+        assert f["decay/ch00"].shape == (4, 8, 2)
+
+    # With rotate_k=1 (90° CCW): (H=4, W=8, T=2) → (W=8, H=4, T=2)
+    store1 = _h5_with_intensity(tmp_path / "rot", channel_names=("ch00",))
+    add_decay_to_dataset(
+        h5_path=store1.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=4, bin_t=2),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        rotate_k=1,
+    )
+    with h5py.File(store1.path, "r") as f:
+        rotated = f["decay/ch00"][...]
+    assert rotated.shape == (8, 4, 2)
+    # 90° CCW: original row r=0 (all 1s) → rotated column 0 (all 1s).
+    # Original row r=3 (all 4s) → rotated column W-1-r = 4-1-3 = 0… wait,
+    # that maps the original top edge (row 0) to the rotated LEFT column,
+    # and the original bottom edge (row 3) to the rotated RIGHT column.
+    assert (rotated[:, 0, 0] == 1).all()
+    assert (rotated[:, -1, 0] == 4).all()
+
+
+def test_add_decay_rotate_k_zero_is_noop(tmp_path, mock_read_flim_bin):
+    """rotate_k=0 (default) leaves shape unchanged."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        rotate_k=0,
+    )
+
+    with h5py.File(store.path, "r") as f:
+        assert f["decay/ch00"].shape == (8, 8, 4)
+
+
+def test_add_decay_stitch_then_rotate_compose(tmp_path, mock_read_flim_bin):
+    """2x2 tile stitch + 90° CCW rotation → 16x16 stitched, still square."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, [
+        "exp_s1_ch1.bin", "exp_s2_ch1.bin", "exp_s3_ch1.bin", "exp_s4_ch1.bin",
+    ])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=2, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        rotate_k=1,
+    )
+
+    assert report.written == ("ch00",)
+    with h5py.File(store.path, "r") as f:
+        assert f["decay/ch00"].shape == (16, 16, 4)
+
+
 # ── Error paths ─────────────────────────────────────────────────────────
 
 

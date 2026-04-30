@@ -68,6 +68,7 @@ def add_decay_to_dataset(
     flim_config: FlimConfig,
     cross_format_rule: CrossFormatRule,
     *,
+    rotate_k: int = 0,
     force: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> AppendReport:
@@ -75,6 +76,13 @@ def add_decay_to_dataset(
 
     See module docstring for the full flow. Returns an ``AppendReport``;
     never raises on per-channel errors.
+
+    ``rotate_k`` rotates each stitched decay volume by ``k * 90°`` counter-
+    clockwise in the (H, W) plane (T-axis untouched). The microscope's LASX
+    export rotates ``.bin`` tiles relative to their matching ``.tiff`` —
+    ``rotate_k`` lets the dialog correct that before append. ``k=0`` is no
+    rotation; ``k=1`` is 90° CCW; ``k=2`` is 180°; ``k=3`` is 90° CW (= 270°
+    CCW).
     """
     h5_path = Path(h5_path)
     source_dir = Path(source_dir)
@@ -147,6 +155,12 @@ def add_decay_to_dataset(
         except Exception as e:  # noqa: BLE001
             errors[ch_name] = f"read/stitch failed: {e}"
             continue
+        if rotate_k:
+            # np.rot90 rotates the (axis0, axis1) plane CCW by k*90°. For a
+            # decay volume of shape (H, W, T), this rotates the spatial plane
+            # while leaving T untouched.
+            decay = np.rot90(decay, k=int(rotate_k) % 4, axes=(0, 1))
+            decay = np.ascontiguousarray(decay)  # rotation views are non-contiguous
         layers[ch_name] = decay
 
         # Use first binding for provenance source path + evidence; if multiple

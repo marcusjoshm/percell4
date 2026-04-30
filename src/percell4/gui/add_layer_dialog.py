@@ -829,6 +829,70 @@ class AddLayerDialog(QDialog):
         self._tcspc_params_widget.setLayout(params_row)
         layout.addWidget(self._tcspc_params_widget)
 
+        # Tile-stitching configuration
+        # .bin files are always exported as individual tiles (per the user's
+        # microscope), so stitching is the common case — the default is the
+        # 1×1 single-tile fast path, but the user picks the actual grid here.
+        tile_group = QGroupBox("Tile stitching")
+        tile_layout = QVBoxLayout(tile_group)
+
+        grid_row = QHBoxLayout()
+        grid_row.addWidget(QLabel("Grid:"))
+        self._tcspc_rows_spin = QSpinBox()
+        self._tcspc_rows_spin.setRange(1, 64)
+        self._tcspc_rows_spin.setValue(1)
+        self._tcspc_rows_spin.setSuffix(" rows")
+        grid_row.addWidget(self._tcspc_rows_spin)
+        grid_row.addWidget(QLabel("×"))
+        self._tcspc_cols_spin = QSpinBox()
+        self._tcspc_cols_spin.setRange(1, 64)
+        self._tcspc_cols_spin.setValue(1)
+        self._tcspc_cols_spin.setSuffix(" cols")
+        grid_row.addWidget(self._tcspc_cols_spin)
+        grid_row.addStretch()
+        tile_layout.addLayout(grid_row)
+
+        pattern_row = QHBoxLayout()
+        pattern_row.addWidget(QLabel("Scan pattern:"))
+        self._tcspc_grid_type_combo = QComboBox()
+        for value, label in (
+            ("row_by_row", "Row by row"),
+            ("column_by_column", "Column by column"),
+            ("snake_by_row", "Snake by row"),
+            ("snake_by_column", "Snake by column"),
+        ):
+            self._tcspc_grid_type_combo.addItem(label, value)
+        pattern_row.addWidget(self._tcspc_grid_type_combo)
+        pattern_row.addWidget(QLabel("Origin/direction:"))
+        self._tcspc_order_combo = QComboBox()
+        for value, label in (
+            ("right_down", "Top-left, → then ↓"),
+            ("right_up", "Bottom-left, → then ↑"),
+            ("left_down", "Top-right, ← then ↓"),
+            ("left_up", "Bottom-right, ← then ↑"),
+        ):
+            self._tcspc_order_combo.addItem(label, value)
+        pattern_row.addWidget(self._tcspc_order_combo)
+        pattern_row.addStretch()
+        tile_layout.addLayout(pattern_row)
+
+        # Rotation — LASX rotates .bin tiles relative to .tiff intensity, so the
+        # stitched decay volume needs a post-stitch rotation in the (H, W) plane
+        # before append.
+        rot_row = QHBoxLayout()
+        rot_row.addWidget(QLabel("Rotate stitched array:"))
+        self._tcspc_rotation_combo = QComboBox()
+        # k counts as numpy.rot90's k argument: CCW rotation by k*90°.
+        self._tcspc_rotation_combo.addItem("None", 0)
+        self._tcspc_rotation_combo.addItem("90° CCW", 1)
+        self._tcspc_rotation_combo.addItem("180°", 2)
+        self._tcspc_rotation_combo.addItem("90° CW", 3)
+        rot_row.addWidget(self._tcspc_rotation_combo)
+        rot_row.addStretch()
+        tile_layout.addLayout(rot_row)
+
+        layout.addWidget(tile_group)
+
         # Scan + match button
         scan_row = QHBoxLayout()
         scan_btn = QPushButton("Scan && Match")
@@ -1023,14 +1087,22 @@ class AddLayerDialog(QDialog):
         from percell4.domain.io.models import FlimConfig as _FlimConfig
         from percell4.domain.io.models import TileConfig as _TileConfig
         rule = self._tcspc_build_commit_rule()
+        tile_config = _TileConfig(
+            grid_rows=self._tcspc_rows_spin.value(),
+            grid_cols=self._tcspc_cols_spin.value(),
+            grid_type=self._tcspc_grid_type_combo.currentData(),
+            order=self._tcspc_order_combo.currentData(),
+        )
+        rotate_k = int(self._tcspc_rotation_combo.currentData() or 0)
         try:
             report = add_decay_to_dataset(
                 h5_path=self._store.path,
                 source_dir=Path(self._tcspc_dir_edit.text()),
                 token_config=TokenConfig(),
-                tile_config=_TileConfig(grid_rows=1, grid_cols=1),
+                tile_config=tile_config,
                 flim_config=_FlimConfig(),
                 cross_format_rule=rule,
+                rotate_k=rotate_k,
                 force=self._tcspc_state.needs_force(),
             )
         except Exception as e:  # noqa: BLE001
