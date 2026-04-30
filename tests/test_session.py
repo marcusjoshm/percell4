@@ -84,6 +84,58 @@ class TestSessionDataset:
         assert session.active_mask is None
         assert session.filter_ids is None
 
+    def test_set_dataset_emits_per_state_events_when_clearing(self):
+        """Switching datasets emits per-state events for slots that actually changed.
+
+        Regression: peer views (e.g., the phasor plot's mask filter) subscribe
+        to ACTIVE_MASK_CHANGED, not DATASET_CHANGED. Without these emits, a
+        cached mask from the previous dataset stays applied to the new
+        dataset's phasor data.
+        """
+        session = Session()
+        session._active_segmentation = "old_seg"
+        session._active_mask = "old_mask"
+        session._filter_ids = frozenset({1, 2})
+        session._selection = frozenset({1, 2, 3})
+
+        events = []
+        session.subscribe(
+            Event.ACTIVE_MASK_CHANGED, lambda: events.append("mask")
+        )
+        session.subscribe(
+            Event.ACTIVE_SEGMENTATION_CHANGED, lambda: events.append("seg")
+        )
+        session.subscribe(Event.FILTER_CHANGED, lambda: events.append("filter"))
+        session.subscribe(
+            Event.SELECTION_CHANGED, lambda: events.append("selection")
+        )
+
+        session.set_dataset(DatasetHandle(path="/tmp/test.h5"))
+
+        assert "mask" in events
+        assert "seg" in events
+        assert "filter" in events
+        assert "selection" in events
+
+    def test_set_dataset_no_spurious_events_when_already_clean(self):
+        """Switching datasets when nothing was set doesn't fire stale events."""
+        session = Session()
+        events = []
+        session.subscribe(
+            Event.ACTIVE_MASK_CHANGED, lambda: events.append("mask")
+        )
+        session.subscribe(
+            Event.ACTIVE_SEGMENTATION_CHANGED, lambda: events.append("seg")
+        )
+        session.subscribe(Event.FILTER_CHANGED, lambda: events.append("filter"))
+        session.subscribe(
+            Event.SELECTION_CHANGED, lambda: events.append("selection")
+        )
+
+        session.set_dataset(DatasetHandle(path="/tmp/test.h5"))
+
+        assert events == []  # Nothing was set, nothing changed
+
     def test_clear_resets_everything(self):
         session = Session()
         session.set_dataset(DatasetHandle(path="/tmp/test.h5"))
