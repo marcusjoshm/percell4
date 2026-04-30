@@ -1060,6 +1060,13 @@ class AddLayerDialog(QDialog):
             return
         self._tcspc_bin_files = bins
 
+        # Discover the set of distinct channel tokens actually present in
+        # the scanned .bin filenames — this becomes the dropdown options
+        # in the table's ".bin token" column. Sorted numerically when
+        # possible so "1", "2", "10" come out as 1, 2, 10 rather than
+        # 1, 10, 2.
+        self._tcspc_available_bin_tokens = self._tcspc_discover_bin_tokens(bins)
+
         # Build IntensityChannel records from store metadata (matches U3 logic)
         intensity = self._tcspc_intensity_channels()
         existing_decay = self._store.list_groups("decay")
@@ -1068,6 +1075,30 @@ class AddLayerDialog(QDialog):
         self._tcspc_rebuild_calibration_widgets([c.name for c in intensity])
 
         self._tcspc_run_match()
+
+    def _tcspc_discover_bin_tokens(self, bin_files: list[Path]) -> list[str]:
+        """Return the distinct channel tokens parsed from .bin filenames.
+
+        Uses the default ``TokenConfig`` channel pattern (``_ch(\\d+)``).
+        Tokens are de-duplicated and sorted numerically when possible.
+        """
+        import re
+        config = TokenConfig()
+        if not config.channel:
+            return []
+        tokens: set[str] = set()
+        for p in bin_files:
+            m = re.search(config.channel, p.stem)
+            if m:
+                tokens.add(m.group(1))
+
+        def _sort(t: str) -> tuple[int, str]:
+            try:
+                return (0, f"{int(t):020d}")
+            except ValueError:
+                return (1, t)
+
+        return sorted(tokens, key=_sort)
 
     def _tcspc_intensity_channels(self) -> list[IntensityChannel]:
         """Build IntensityChannel list, seeding the cross-format token.
@@ -1195,18 +1226,31 @@ class AddLayerDialog(QDialog):
             ch_item = QTableWidgetItem(name)
             ch_item.setFlags(ch_item.flags() & ~Qt.ItemIsEditable)
             self._tcspc_table.setItem(row_idx, 0, ch_item)
-            # Col 1: editable .bin token
+            # Col 1: .bin token dropdown — options are the distinct
+            # channel tokens actually present in the scanned .bin filenames
+            # (so the user picks from real values, not types blind).
             current_token = self._tcspc_channel_token_overrides.get(name, "")
-            token_edit = QLineEdit(current_token)
-            token_edit.setPlaceholderText("e.g., 1")
-            token_edit.setToolTip(
+            token_combo = QComboBox()
+            token_combo.addItem("(unmapped)", "")
+            available = getattr(self, "_tcspc_available_bin_tokens", []) or []
+            for tok in available:
+                token_combo.addItem(tok, tok)
+            # If the seeded current token isn't among the discovered ones
+            # (e.g., positional fallback before any tokens were present),
+            # add it as a hint so the user can see it was tried.
+            if current_token and current_token not in available:
+                token_combo.addItem(f"{current_token} (not in files)", current_token)
+            idx = token_combo.findData(current_token)
+            if idx >= 0:
+                token_combo.setCurrentIndex(idx)
+            token_combo.setToolTip(
                 f"Channel token in .bin filenames that maps to '{name}'.\n"
-                "After editing, press Enter (or click Scan & Match) to re-run."
+                "Options are the distinct tokens found in the scanned .bin files."
             )
-            token_edit.editingFinished.connect(
-                lambda ch=name, edit=token_edit: self._on_tcspc_token_edited(ch, edit)
+            token_combo.currentIndexChanged.connect(
+                lambda _i, ch=name, c=token_combo: self._on_tcspc_token_picked(ch, c)
             )
-            self._tcspc_table.setCellWidget(row_idx, 1, token_edit)
+            self._tcspc_table.setCellWidget(row_idx, 1, token_combo)
             # Col 2: matched-bin summary
             if not paths:
                 summary = "no tiles assigned"
@@ -1236,9 +1280,9 @@ class AddLayerDialog(QDialog):
         self._tcspc_counter.setText(self._tcspc_count_summary())
         self._tcspc_accept_btn.setEnabled(self._tcspc_can_accept())
 
-    def _on_tcspc_token_edited(self, channel_name: str, line_edit: QLineEdit) -> None:
-        """User edited the .bin-token cell — store the override + re-run match."""
-        new_token = line_edit.text().strip()
+    def _on_tcspc_token_picked(self, channel_name: str, combo: QComboBox) -> None:
+        """User picked a .bin token from the dropdown — store + re-run match."""
+        new_token = combo.currentData() or ""
         if not hasattr(self, "_tcspc_channel_token_overrides"):
             self._tcspc_channel_token_overrides = {}
         self._tcspc_channel_token_overrides[channel_name] = new_token
