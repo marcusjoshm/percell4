@@ -47,6 +47,12 @@ Heavy computation (Cellpose, etc.) runs in QThread workers to avoid freezing the
 - Never allow contradictory architectural decisions to coexist in context
 - `docs/solutions/` indexes documented solutions to past bugs, architecture patterns, and conventions by category with YAML frontmatter (`module`, `tags`, `problem_type`) — relevant when implementing or debugging in documented areas
 
+## Audit-driven retrieval (R15/R16)
+
+Before non-trivial edits in T1 modules (`src/percell4/domain/io/`, `src/percell4/adapters/`, `src/percell4/store.py`, `src/percell4/application/use_cases/`, all `src/percell4/gui/*Dialog.py`), invoke the `compound-engineering:ce-learnings-researcher` agent with the file paths in scope. Enriched `docs/solutions/` entries declare `applies_to` globs and `canonical_source` paths so prior canonical implementations are surfaced before logic gets re-invented. The audit's source of truth is `docs/audits/canonical-sources-matrix.yaml`; the original brainstorm at `docs/brainstorms/2026-04-29-io-principles-audit-and-remediation-brainstorm.md` defines T1 scope and the seven I/O principles.
+
+A `PreToolUse` hook (`.claude/settings.json` → `scripts/claude_code_hooks/check_learnings_retrieval.py`) prints a structured warning to stderr when an `Edit`/`Write`/`MultiEdit` targets a file with applicable canonical sources. The hook is warn-only; consult the surfaced learnings yourself, then proceed. Run `python3 scripts/learnings_applicability.py <path>` at any time to query the registry directly.
+
 ## Previous Versions
 
 Code from prior versions can be referenced for domain logic:
