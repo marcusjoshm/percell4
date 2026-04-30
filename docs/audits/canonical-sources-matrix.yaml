@@ -499,8 +499,8 @@ cells:
 
   # ── gui/import_dialog.py ────────────────────────────────────────────
   "src/percell4/gui/import_dialog.py.dialog-scroll-when-tall":
-    status: re_implements
-    evidence: "QScrollArea wrapper at lines 45-55 — independent re-implementation of the wrap-content idiom"
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.wrap_in_scroll + cap_to_screen (U2 of dialog-scroll-helper-rollout)"
     thread: dialog-scroll-helper-rollout
   "src/percell4/gui/import_dialog.py.decay-write-path":
     status: n/a
