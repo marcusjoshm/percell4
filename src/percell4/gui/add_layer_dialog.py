@@ -1425,6 +1425,7 @@ class AddLayerDialog(QDialog):
 
     def _tcspc_show_report(self, report: AppendReport) -> None:
         if report.errors and not report.written:
+            # Full failure — keep the dialog open so the user can fix and retry.
             QMessageBox.warning(
                 self,
                 "Append failed",
@@ -1432,6 +1433,10 @@ class AddLayerDialog(QDialog):
                 + "\n".join(f"{k}: {v}" for k, v in report.errors.items()),
             )
             return
+        # At least one decay layer landed — refresh the viewer, surface the
+        # outcome (including any partial failures), then close the dialog.
+        # Matches the convention of the other tabs (e.g., Single TIFF calls
+        # ``self.accept()`` after a successful import).
         msg = f"Appended {len(report.written)} decay layer(s): {', '.join(report.written)}"
         if report.errors:
             msg += (
@@ -1440,6 +1445,11 @@ class AddLayerDialog(QDialog):
             )
         QMessageBox.information(self, "Append complete", msg)
         self._refresh_viewer()
+        self.statusBar_msg(
+            f"Appended {len(report.written)} decay layer(s) to "
+            f"{self._store.path.name}"
+        )
+        self.accept()
 
     # ------------------------------------------------------------------
     # Styling
