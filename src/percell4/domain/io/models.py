@@ -171,6 +171,35 @@ CrossFormatRule = ZeroPadOffsetRule | BaseStemRule | ExplicitRule | CompositeRul
 
 
 @dataclass(frozen=True)
+class ProvenanceRecord:
+    """Per-payload provenance written through the same boundary as the data.
+
+    All fields are str/bool so they round-trip cleanly as HDF5 attrs without
+    type ambiguity. ``match_evidence`` is a JSON-encoded payload (see
+    ``cross_format.MatchEvidence.to_dict``).
+    """
+
+    source_path: str
+    cross_format_rule: str  # in-memory class name: "ZeroPadOffsetRule" etc.
+    match_evidence: str  # JSON-encoded
+    manually_overridden: bool
+    importer_version: str
+    timestamp_utc: str
+    content_sha256: str
+
+    def to_attrs(self) -> dict:
+        return {
+            "source_path": self.source_path,
+            "cross_format_rule": self.cross_format_rule,
+            "match_evidence": self.match_evidence,
+            "manually_overridden": self.manually_overridden,
+            "importer_version": self.importer_version,
+            "timestamp_utc": self.timestamp_utc,
+            "content_sha256": self.content_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class FlimConfig:
     """FLIM calibration parameters for a dataset."""
 

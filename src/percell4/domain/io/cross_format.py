@@ -22,6 +22,7 @@ how to surface them.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,44 @@ from percell4.domain.io.models import (
     TokenConfig,
     ZeroPadOffsetRule,
 )
+
+
+# ── Rule serialization (HDF5 attr round-trip) ──────────────────────────
+
+
+def _rule_to_dict(rule: CrossFormatRule) -> dict:
+    if isinstance(rule, ZeroPadOffsetRule):
+        return {"type": "ZeroPadOffsetRule", "pad_width": rule.pad_width, "offset": rule.offset}
+    if isinstance(rule, BaseStemRule):
+        return {"type": "BaseStemRule"}
+    if isinstance(rule, ExplicitRule):
+        return {"type": "ExplicitRule", "mapping": list(rule.mapping)}
+    if isinstance(rule, CompositeRule):
+        return {"type": "CompositeRule", "rules": [_rule_to_dict(r) for r in rule.rules]}
+    raise TypeError(f"unknown CrossFormatRule variant: {type(rule).__name__}")
+
+
+def _dict_to_rule(d: dict) -> CrossFormatRule:
+    t = d["type"]
+    if t == "ZeroPadOffsetRule":
+        return ZeroPadOffsetRule(pad_width=d["pad_width"], offset=d["offset"])
+    if t == "BaseStemRule":
+        return BaseStemRule()
+    if t == "ExplicitRule":
+        return ExplicitRule(mapping=tuple(tuple(pair) for pair in d.get("mapping", [])))
+    if t == "CompositeRule":
+        return CompositeRule(rules=tuple(_dict_to_rule(r) for r in d.get("rules", [])))
+    raise ValueError(f"unknown serialized rule type: {t!r}")
+
+
+def serialize_rule(rule: CrossFormatRule) -> str:
+    """Serialize a CrossFormatRule to a JSON string (for HDF5 attr storage)."""
+    return json.dumps(_rule_to_dict(rule))
+
+
+def deserialize_rule(s: str) -> CrossFormatRule:
+    """Deserialize a JSON string back into a CrossFormatRule. Inverse of serialize_rule."""
+    return _dict_to_rule(json.loads(s))
 
 
 @dataclass(frozen=True)

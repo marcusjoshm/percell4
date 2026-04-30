@@ -20,8 +20,23 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from percell4.domain.io.cross_format import deserialize_rule, serialize_rule
+from percell4.domain.io.models import (
+    CrossFormatRule,
+    ExplicitRule,
+    ProvenanceRecord,
+)
+
 # Chunk cache size for session reads (64 MB)
 _READ_CACHE_BYTES = 64 * 1024 * 1024
+
+
+class LayerAlreadyExists(Exception):
+    """Raised when a payload group already exists and force=False."""
+
+
+class CrossFormatRuleConflict(Exception):
+    """Raised when an append would persist a rule different from one already stored."""
 
 
 def _choose_chunks(shape: tuple[int, ...], is_decay: bool = False) -> tuple[int, ...]:
@@ -312,6 +327,102 @@ class DatasetStore:
                 raise ValueError(f"Target path already exists: {new_path}")
             f.move(old_path, new_path)
             return True
+
+    def append_decay_layers(
+        self,
+        layers: dict[str, NDArray],
+        provenance: dict[str, ProvenanceRecord],
+        cross_format_rule: CrossFormatRule | None = None,
+        force: bool = False,
+    ) -> int:
+        """Append per-channel TCSPC decay arrays to an existing dataset.
+
+        Single chokepoint for ``/decay/<channel_name>`` writes — paired with
+        a structured ``ProvenanceRecord`` per channel under
+        ``/provenance/decay/<channel_name>``. Raises ``LayerAlreadyExists`` if
+        any target ``/decay/<name>`` exists and ``force=False``.
+
+        ``cross_format_rule`` (when provided) is persisted to
+        ``/metadata.attrs[cross_format_rule]`` on first call. Subsequent calls
+        with the same rule are a no-op on the metadata; calls with a different
+        rule raise ``CrossFormatRuleConflict`` unless ``force=True``.
+        ``ExplicitRule`` is exempt from conflict checks — it represents a
+        per-binding override, not a base-rule change.
+
+        Per-channel atomicity is best-effort: each channel's decay write +
+        provenance write happen under one open file handle, with explicit
+        ``flush()`` + ``fsync()`` between channels. HDF5 power-loss safety is
+        not guaranteed (no journaling).
+        """
+        if set(layers.keys()) != set(provenance.keys()):
+            missing = set(layers.keys()) - set(provenance.keys())
+            extra = set(provenance.keys()) - set(layers.keys())
+            raise ValueError(
+                f"layers and provenance must agree on channel names — "
+                f"provenance missing: {sorted(missing)}, extra: {sorted(extra)}"
+            )
+
+        if not layers:
+            return 0
+
+        # Pre-flight: rule conflict check
+        if cross_format_rule is not None and not isinstance(cross_format_rule, ExplicitRule):
+            existing_serialized = self.metadata.get("cross_format_rule")
+            if existing_serialized is not None and not force:
+                existing = deserialize_rule(existing_serialized)
+                if existing != cross_format_rule:
+                    raise CrossFormatRuleConflict(
+                        f"persisted rule {existing!r} differs from {cross_format_rule!r}; "
+                        "use force=True to overwrite"
+                    )
+
+        # Pre-flight: existence check
+        if not force:
+            with h5py.File(self.path, "r") as f:
+                for name in layers:
+                    path = f"decay/{name}"
+                    if path in f:
+                        raise LayerAlreadyExists(name)
+
+        # Write each channel under one open handle with explicit flush+fsync
+        # between channels. Best-effort per-channel atomicity.
+        with h5py.File(self.path, "a") as f:
+            for name, decay in layers.items():
+                path = f"decay/{name}"
+                if path in f:
+                    del f[path]
+                chunks = _choose_chunks(decay.shape, is_decay=True)
+                f.create_dataset(
+                    path,
+                    data=decay,
+                    chunks=chunks,
+                    **_compression_kwargs(is_decay=True),
+                )
+                # Provenance group + attrs
+                prov_path = f"provenance/decay/{name}"
+                if prov_path in f:
+                    del f[prov_path]
+                grp = f.require_group(prov_path)
+                for key, val in provenance[name].to_attrs().items():
+                    grp.attrs[key] = val
+                # Best-effort flush + fsync between channels
+                f.flush()
+                try:
+                    fd = f.id.get_vfd_handle()
+                    if isinstance(fd, tuple):
+                        fd = fd[0]
+                    if isinstance(fd, int) and fd >= 0:
+                        os.fsync(fd)
+                except (AttributeError, OSError, ValueError):
+                    # Some VFDs don't expose a POSIX fd; flush() alone has to suffice.
+                    pass
+
+            # Persist the dropdown-level rule to /metadata
+            if cross_format_rule is not None and not isinstance(cross_format_rule, ExplicitRule):
+                grp = f.require_group("metadata")
+                grp.attrs["cross_format_rule"] = serialize_rule(cross_format_rule)
+
+        return len(layers)
 
     def rename_channel(self, old_name: str, new_name: str) -> None:
         """Rename a channel across all per-channel paths and metadata attrs.
