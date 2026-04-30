@@ -1486,7 +1486,12 @@ class AddLayerDialog(QDialog):
         # outcome (including any partial failures), then close the dialog.
         # Matches the convention of the other tabs (e.g., Single TIFF calls
         # ``self.accept()`` after a successful import).
-        msg = f"Appended {len(report.written)} decay layer(s): {', '.join(report.written)}"
+        msg = (
+            f"Appended {len(report.written)} decay layer(s): "
+            f"{', '.join(report.written)}\n\n"
+            "Existing phasor for these channels was invalidated — "
+            "re-run Compute Phasor to see updated results."
+        )
         if report.errors:
             msg += (
                 "\n\nFailures:\n"

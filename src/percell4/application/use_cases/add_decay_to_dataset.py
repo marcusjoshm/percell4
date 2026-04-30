@@ -286,6 +286,9 @@ def _rotate_decay_in_place(h5_path, ch_name: str, k: int) -> None:
     T-axis untouched — phasor histogram is invariant under this rotation,
     only the spatial layout changes (so napari overlays align with TIFF
     intensity when LASX rotated the .bin tiles).
+
+    Also invalidates any stale /phasor/<ch> so the GUI phasor view can't
+    show a cached computation made on the pre-rotation decay.
     """
     if k == 0:
         return
@@ -299,6 +302,10 @@ def _rotate_decay_in_place(h5_path, ch_name: str, k: int) -> None:
         arr = np.ascontiguousarray(arr)
         attrs = dict(f[path].attrs)
         del f[path]
+        # Invalidate stale phasor — must be re-computed against rotated decay
+        phasor_path = f"phasor/{ch_name}"
+        if phasor_path in f:
+            del f[phasor_path]
         from percell4.store import _choose_chunks, _compression_kwargs
         f.create_dataset(
             path,

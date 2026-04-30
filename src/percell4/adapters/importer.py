@@ -627,6 +627,13 @@ def write_decay_streaming(
     with h5py.File(h5_path, "a") as f:
         if decay_path in f:
             del f[decay_path]
+        # Invalidate stale phasor for this channel — without this, the GUI
+        # phasor plot shows the OLD computed (g, s) maps even after the
+        # underlying /decay layer was overwritten, which looks like a
+        # broken import. compute_phasor must be re-run to refresh.
+        phasor_path = f"phasor/{channel_name}"
+        if phasor_path in f:
+            del f[phasor_path]
         dset = f.create_dataset(
             decay_path,
             shape=(out_h, out_w, n_bins),
