@@ -979,15 +979,27 @@ class AddLayerDialog(QDialog):
         layout.addLayout(scan_row)
 
         # ── Channel mapping table (one row per channel) ─────────────
-        self._tcspc_table = QTableWidget(0, 4)
+        # Column 1 (.bin token) is editable: user types the channel token
+        # that .bin filenames carry for this TIFF channel. Editing this
+        # cell re-runs the match so the table refreshes immediately.
+        self._tcspc_table = QTableWidget(0, 5)
         self._tcspc_table.setHorizontalHeaderLabels(
-            ["Channel", "Matched .bin tiles", "Replace existing", "Status"]
+            [
+                "Channel",
+                ".bin token",
+                "Matched .bin tiles",
+                "Replace existing",
+                "Status",
+            ]
         )
         self._tcspc_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
         )
         self._tcspc_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
+            1, QHeaderView.ResizeToContents
+        )
+        self._tcspc_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Stretch
         )
         layout.addWidget(self._tcspc_table)
 
@@ -1058,14 +1070,42 @@ class AddLayerDialog(QDialog):
         self._tcspc_run_match()
 
     def _tcspc_intensity_channels(self) -> list[IntensityChannel]:
+        """Build IntensityChannel list, seeding the cross-format token.
+
+        TIFF channels with names like ``ch00`` / ``ch01`` carry the digit
+        suffix as their token. Channels with semantic names (``CA-SiR``,
+        ``mNG``, ``mTQ2``) have no digit suffix, so we fall back to per-
+        channel manual overrides stored in ``_tcspc_channel_token_overrides``
+        — populated by spinboxes the user fills in. As an initial guess
+        (so Auto: zero-pad with offset can succeed without manual setup
+        for the common ordered case), we seed the override map with the
+        channel's positional index so channel 0 gets bin token "1" under
+        offset=1, channel 1 gets bin token "2", etc.
+        """
         meta = self._store.metadata
         channel_names = list(meta.get("channel_names", []))
         base_stems = list(meta.get("channel_base_stems", []))
+        if not hasattr(self, "_tcspc_channel_token_overrides"):
+            self._tcspc_channel_token_overrides: dict[str, str] = {}
+
         out = []
         for i, name in enumerate(channel_names):
             import re
-            m = re.search(r"(\d+)$", name)
-            token = m.group(1) if m else ""
+            override = self._tcspc_channel_token_overrides.get(name)
+            if override is not None:
+                token = override
+            else:
+                m = re.search(r"(\d+)$", name)
+                if m:
+                    token = m.group(1)
+                else:
+                    # Seed: positional index zero-padded to the configured
+                    # pad_width — under ZeroPadOffsetRule(pad=2, off=1) this
+                    # makes ``CA-SiR`` (channel 0) match `_ch1.bin`,
+                    # ``mNG`` (channel 1) match `_ch2.bin`, and so on.
+                    pad = max(self._tcspc_pad_spin.value(), 1)
+                    token = f"{i:0{pad}d}"
+                self._tcspc_channel_token_overrides[name] = token
             base_stem = base_stems[i] if i < len(base_stems) else None
             out.append(IntensityChannel(name=name, token=token, base_stem=base_stem))
         return out
@@ -1151,32 +1191,65 @@ class AddLayerDialog(QDialog):
         self._tcspc_table.setRowCount(0)
         for row_idx, (name, paths, has_conflict, replace_checked) in enumerate(groups):
             self._tcspc_table.insertRow(row_idx)
-            # Col 0: channel name
-            self._tcspc_table.setItem(row_idx, 0, QTableWidgetItem(name))
-            # Col 1: matched-bin summary
+            # Col 0: channel name (read-only)
+            ch_item = QTableWidgetItem(name)
+            ch_item.setFlags(ch_item.flags() & ~Qt.ItemIsEditable)
+            self._tcspc_table.setItem(row_idx, 0, ch_item)
+            # Col 1: editable .bin token
+            current_token = self._tcspc_channel_token_overrides.get(name, "")
+            token_edit = QLineEdit(current_token)
+            token_edit.setPlaceholderText("e.g., 1")
+            token_edit.setToolTip(
+                f"Channel token in .bin filenames that maps to '{name}'.\n"
+                "After editing, press Enter (or click Scan & Match) to re-run."
+            )
+            token_edit.editingFinished.connect(
+                lambda ch=name, edit=token_edit: self._on_tcspc_token_edited(ch, edit)
+            )
+            self._tcspc_table.setCellWidget(row_idx, 1, token_edit)
+            # Col 2: matched-bin summary
             if not paths:
                 summary = "no tiles assigned"
             elif len(paths) == 1:
                 summary = f"1 tile: {paths[0].name}"
             else:
                 summary = f"{len(paths)} tiles: {paths[0].name} … {paths[-1].name}"
-            self._tcspc_table.setItem(row_idx, 1, QTableWidgetItem(summary))
-            # Col 2: replace checkbox (only when conflict)
+            self._tcspc_table.setItem(row_idx, 2, QTableWidgetItem(summary))
+            # Col 3: replace checkbox (only when conflict)
             if has_conflict:
                 cb = QCheckBox()
                 cb.setChecked(replace_checked)
                 cb.stateChanged.connect(
                     lambda state, ch=name: self._on_tcspc_channel_replace(ch, state)
                 )
-                self._tcspc_table.setCellWidget(row_idx, 2, cb)
+                self._tcspc_table.setCellWidget(row_idx, 3, cb)
             else:
-                self._tcspc_table.setItem(row_idx, 2, QTableWidgetItem("—"))
-            # Col 3: status
+                empty = QTableWidgetItem("—")
+                empty.setFlags(empty.flags() & ~Qt.ItemIsEditable)
+                self._tcspc_table.setItem(row_idx, 3, empty)
+            # Col 4: status
             status = self._tcspc_channel_status(name, paths, has_conflict, replace_checked)
-            self._tcspc_table.setItem(row_idx, 3, QTableWidgetItem(status))
+            status_item = QTableWidgetItem(status)
+            status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+            self._tcspc_table.setItem(row_idx, 4, status_item)
         # Counter + accept
         self._tcspc_counter.setText(self._tcspc_count_summary())
         self._tcspc_accept_btn.setEnabled(self._tcspc_can_accept())
+
+    def _on_tcspc_token_edited(self, channel_name: str, line_edit: QLineEdit) -> None:
+        """User edited the .bin-token cell — store the override + re-run match."""
+        new_token = line_edit.text().strip()
+        if not hasattr(self, "_tcspc_channel_token_overrides"):
+            self._tcspc_channel_token_overrides = {}
+        self._tcspc_channel_token_overrides[channel_name] = new_token
+        # Rebuild the IntensityChannel records with the new token, re-set on
+        # the state, then re-run the match. We deliberately do NOT rebuild
+        # calibration widgets here (channel set didn't change).
+        intensity = self._tcspc_intensity_channels()
+        existing_decay = self._store.list_groups("decay")
+        self._tcspc_state.set_intensity(intensity, existing_decay)
+        if self._tcspc_bin_files:
+            self._tcspc_run_match()
 
     def _tcspc_channel_status(
         self, name: str, paths: list[Path], has_conflict: bool, replace_checked: bool,
