@@ -438,17 +438,34 @@ def import_dataset(
         decay_path = f"decay/{ch_name}"
 
         if isinstance(decay_info, dict) and decay_info.get("_streaming"):
-            # Streaming write: read one .bin tile at a time, write to HDF5
+            # Streaming write delegated to the shared helper so that compress
+            # and the add-layer append flow take exactly the same code path
+            # for byte-identical output on identical inputs.
+            info = decay_info
+            write_decay_streaming(
+                h5_path=store.path,
+                channel_name=ch_name,
+                tile_bins=info["tile_bins"],
+                bin_dims=info["bin_dims"],
+                tile_h=info["tile_h"],
+                tile_w=info["tile_w"],
+                n_bins=info["n_bins"],
+                out_h=info["out_h"],
+                out_w=info["out_w"],
+                positions=info["positions"],
+                use_tiling=info["use_tiling"],
+            )
+            continue
+
+        # Legacy path retained for the (unused-in-practice) non-streaming
+        # case so the loop body stays a single shape.
+        if isinstance(decay_info, dict) and decay_info.get("_streaming"):
             import h5py
-
             from percell4.adapters.readers import read_flim_bin
-
             info = decay_info
             with h5py.File(store.path, "a") as f:
                 if decay_path in f:
                     del f[decay_path]
-
-                # Create dataset with full stitched dimensions
                 dset = f.create_dataset(
                     decay_path,
                     shape=(info["out_h"], info["out_w"], info["n_bins"]),
@@ -462,8 +479,6 @@ def import_dataset(
                 )
                 dset.attrs["dims"] = ["H", "W", "T"]
                 dset.attrs["channel"] = ch_name
-
-                # Write each tile directly to its region in the dataset
                 for tile_idx, bin_path in sorted(info["tile_bins"].items()):
                     tile_data = read_flim_bin(
                         bin_path,
@@ -474,7 +489,6 @@ def import_dataset(
                         dim_order=info["bin_dims"].get("dim_order", "YXT"),
                         header_bytes=info["bin_dims"].get("header_bytes", 0),
                     )["array"].astype(np.float32)
-
                     if info["use_tiling"] and tile_idx in info["positions"]:
                         row, col = info["positions"][tile_idx]
                         y0 = row * info["tile_h"]
@@ -575,3 +589,70 @@ def _tile_positions_from_config(
         tile_config.grid_type,
         tile_config.order,
     )
+
+
+def write_decay_streaming(
+    h5_path: str | Path,
+    channel_name: str,
+    tile_bins: dict[int, Path],
+    bin_dims: dict[str, Any],
+    tile_h: int,
+    tile_w: int,
+    n_bins: int,
+    out_h: int,
+    out_w: int,
+    positions: dict[int, tuple[int, int]],
+    use_tiling: bool,
+) -> None:
+    """Stream-write a TCSPC decay channel to ``/decay/<channel_name>`` in an
+    .h5 file, tile by tile.
+
+    Single source of truth for `.bin` decay writes — used by both the
+    initial-import (compress) flow and the append-via-add-layer flow so
+    that identical inputs (TileConfig + bin_dims + tile_bins) produce
+    byte-identical output. Mirrors what compress's importer used to do
+    inline.
+
+    Existing data at ``/decay/<channel_name>`` is overwritten — caller is
+    responsible for any conflict-checking (e.g.,
+    ``DatasetStore.append_decay_layers`` raises ``LayerAlreadyExists`` for
+    that, but this helper sits below that check by design — it's the
+    write primitive).
+    """
+    import h5py
+
+    from percell4.adapters.readers import read_flim_bin
+
+    decay_path = f"decay/{channel_name}"
+    with h5py.File(h5_path, "a") as f:
+        if decay_path in f:
+            del f[decay_path]
+        dset = f.create_dataset(
+            decay_path,
+            shape=(out_h, out_w, n_bins),
+            dtype=np.float32,
+            chunks=(min(64, tile_h), min(64, tile_w), n_bins),
+            compression="lzf",
+        )
+        dset.attrs["dims"] = ["H", "W", "T"]
+        dset.attrs["channel"] = channel_name
+
+        for tile_idx, bin_path in sorted(tile_bins.items()):
+            tile_data = read_flim_bin(
+                bin_path,
+                x_dim=bin_dims.get("x_dim", 512),
+                y_dim=bin_dims.get("y_dim", 512),
+                t_dim=bin_dims.get("t_dim", 132),
+                dtype=bin_dims.get("dtype", "float32"),
+                dim_order=bin_dims.get("dim_order", "YXT"),
+                header_bytes=bin_dims.get("header_bytes", 0),
+            )["array"].astype(np.float32)
+
+            if use_tiling and tile_idx in positions:
+                row, col = positions[tile_idx]
+                y0 = row * tile_h
+                x0 = col * tile_w
+                dset[y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
+            else:
+                dset[:, :, :] = tile_data
+            del tile_data

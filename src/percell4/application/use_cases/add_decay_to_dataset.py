@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from percell4 import __version__ as _percell4_version
+from percell4.adapters.importer import write_decay_streaming
 from percell4.adapters.readers import read_flim_bin
 from percell4.domain.io.assembler import _tile_positions
 from percell4.domain.io.cross_format import (
@@ -153,32 +154,90 @@ def add_decay_to_dataset(
     for binding in bindings_to_write:
         by_channel.setdefault(binding.channel_name, []).append(binding)
 
-    # Read + stitch + build provenance per channel
-    layers: dict[str, np.ndarray] = {}
-    provenance: dict[str, ProvenanceRecord] = {}
+    # Build the bin_dims dict the shared streaming helper expects (the
+    # exact same shape compress passes). This is the SOURCE OF TRUTH for
+    # how .bin tiles are read — no per-tile transformations beyond what
+    # read_flim_bin already does.
+    bin_dims = {
+        "x_dim": flim_config.bin_x or 512,
+        "y_dim": flim_config.bin_y or 512,
+        "t_dim": flim_config.bin_t or 132,
+        "dtype": flim_config.bin_dtype or "uint16",
+        "dim_order": flim_config.bin_dim_order or "YXT",
+        "header_bytes": flim_config.bin_header_bytes or 0,
+    }
+
+    written: list[str] = []
     selected_rule_name = type(cross_format_rule).__name__
 
     for ch_name, bindings in by_channel.items():
         progress(f"Reading {ch_name} ({len(bindings)} tile(s))")
         try:
-            decay = _read_and_stitch_decay(
-                bindings, tile_config, flim_config, token_config,
+            # Build tile_idx → Path map (same logic compress uses)
+            tile_to_path: dict[int, Path] = {}
+            for b in bindings:
+                idx = _extract_tile_index(b.bin_path.stem, token_config)
+                if idx is None:
+                    raise ValueError(
+                        f"tile token missing from {b.bin_path.name}; cannot stitch"
+                    )
+                tile_to_path[idx] = b.bin_path
+            # Normalize 1-based → 0-based
+            if tile_to_path:
+                min_idx = min(tile_to_path.keys())
+                if min_idx > 0:
+                    tile_to_path = {k - min_idx: v for k, v in tile_to_path.items()}
+
+            # Read first tile to determine dimensions (compress does the same)
+            first_path = next(iter(tile_to_path.values()))
+            first_result = read_flim_bin(first_path, **bin_dims)
+            tile_h, tile_w, n_bins = first_result["array"].shape
+            del first_result
+
+            use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
+            if use_tiling:
+                out_h = tile_config.grid_rows * tile_h
+                out_w = tile_config.grid_cols * tile_w
+                positions = _tile_positions(
+                    tile_config.grid_rows,
+                    tile_config.grid_cols,
+                    tile_config.grid_type,
+                    tile_config.order,
+                )
+            else:
+                out_h, out_w = tile_h, tile_w
+                positions = {0: (0, 0)}
+
+            # Delegate the actual decay write to the shared helper —
+            # compress and add-layer go through the SAME streaming write.
+            write_decay_streaming(
+                h5_path=h5_path,
+                channel_name=ch_name,
+                tile_bins=tile_to_path,
+                bin_dims=bin_dims,
+                tile_h=tile_h,
+                tile_w=tile_w,
+                n_bins=n_bins,
+                out_h=out_h,
+                out_w=out_w,
+                positions=positions,
+                use_tiling=use_tiling,
             )
+
+            # Optional in-place rotation: re-read, rotate (H, W) plane, write back.
+            # T-axis preserved per pixel, so phasor histogram is invariant.
+            if rotate_k:
+                _rotate_decay_in_place(h5_path, ch_name, int(rotate_k) % 4)
+
         except Exception as e:  # noqa: BLE001
             errors[ch_name] = f"read/stitch failed: {e}"
             continue
-        if rotate_k:
-            # np.rot90 rotates the (axis0, axis1) plane CCW by k*90°. For a
-            # decay volume of shape (H, W, T), this rotates the spatial plane
-            # while leaving T untouched.
-            decay = np.rot90(decay, k=int(rotate_k) % 4, axes=(0, 1))
-            decay = np.ascontiguousarray(decay)  # rotation views are non-contiguous
-        layers[ch_name] = decay
 
-        # Use first binding for provenance source path + evidence; if multiple
-        # tiles, we capture the first as the canonical "source" (rest implied).
+        written.append(ch_name)
+
+        # Provenance — written through DatasetStore so its conventions apply
         first_binding = bindings[0]
-        provenance[ch_name] = ProvenanceRecord(
+        prov = ProvenanceRecord(
             source_path=str(first_binding.bin_path.resolve()),
             cross_format_rule=selected_rule_name,
             match_evidence=json.dumps(first_binding.evidence.to_dict()),
@@ -187,28 +246,18 @@ def add_decay_to_dataset(
             timestamp_utc=datetime.now(UTC).isoformat(),
             content_sha256=_sha256_file(first_binding.bin_path),
         )
+        _write_provenance_attrs(h5_path, ch_name, prov)
 
-    # Append
-    if layers:
-        progress(f"Appending {len(layers)} decay layer(s) to {h5_path.name}")
+    # Persist cross_format_rule to /metadata so subsequent flows can read it
+    if written and cross_format_rule is not None and not isinstance(cross_format_rule, ExplicitRule):
+        from percell4.domain.io.cross_format import serialize_rule
         try:
-            store.append_decay_layers(
-                layers=layers,
-                provenance=provenance,
-                cross_format_rule=cross_format_rule,
-                force=force,
-            )
-        except Exception as e:  # noqa: BLE001
-            errors["append"] = str(e)
-            return AppendReport(
-                bindings=match_result.bindings,
-                unmatched=match_result.unmatched,
-                ambiguous=match_result.ambiguous,
-                errors=errors,
-            )
+            store.set_metadata({"cross_format_rule": serialize_rule(cross_format_rule)})
+        except Exception:  # noqa: BLE001
+            pass
 
     return AppendReport(
-        written=tuple(layers.keys()),
+        written=tuple(written),
         bindings=match_result.bindings,
         unmatched=match_result.unmatched,
         ambiguous=match_result.ambiguous,
@@ -217,6 +266,48 @@ def add_decay_to_dataset(
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
+
+
+def _write_provenance_attrs(h5_path, ch_name: str, prov: ProvenanceRecord) -> None:
+    """Write a ProvenanceRecord to ``/provenance/decay/<ch_name>`` attrs."""
+    import h5py
+    with h5py.File(h5_path, "a") as f:
+        path = f"provenance/decay/{ch_name}"
+        if path in f:
+            del f[path]
+        grp = f.require_group(path)
+        for key, val in prov.to_attrs().items():
+            grp.attrs[key] = val
+
+
+def _rotate_decay_in_place(h5_path, ch_name: str, k: int) -> None:
+    """Read /decay/<ch>, rotate the (H, W) plane by k*90° CCW, write back.
+
+    T-axis untouched — phasor histogram is invariant under this rotation,
+    only the spatial layout changes (so napari overlays align with TIFF
+    intensity when LASX rotated the .bin tiles).
+    """
+    if k == 0:
+        return
+    import h5py
+    with h5py.File(h5_path, "a") as f:
+        path = f"decay/{ch_name}"
+        if path not in f:
+            return
+        arr = f[path][...]
+        arr = np.rot90(arr, k=k, axes=(0, 1))
+        arr = np.ascontiguousarray(arr)
+        attrs = dict(f[path].attrs)
+        del f[path]
+        from percell4.store import _choose_chunks, _compression_kwargs
+        f.create_dataset(
+            path,
+            data=arr.astype(np.float32, copy=False),
+            chunks=_choose_chunks(arr.shape, is_decay=True),
+            **_compression_kwargs(is_decay=True),
+        )
+        for k_, v in attrs.items():
+            f[path].attrs[k_] = v
 
 
 def _extract_channel_token(name: str, token_config: TokenConfig) -> str | None:

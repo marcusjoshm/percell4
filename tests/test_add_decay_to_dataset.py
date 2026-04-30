@@ -46,7 +46,12 @@ def _make_bin_files(source_dir: Path, names_and_shapes):
 
 @pytest.fixture
 def mock_read_flim_bin(monkeypatch):
-    """Replace read_flim_bin with a deterministic synthetic reader."""
+    """Replace read_flim_bin with a deterministic synthetic reader.
+
+    Patches both the use-case's local binding AND the source module so
+    the shared ``write_decay_streaming`` helper (which imports
+    read_flim_bin lazily inside the function body) also picks up the fake.
+    """
     def _fake_read(path, **kwargs):
         # Return a fake decay (8, 8, 4) array — small for fast tests
         return {
@@ -56,6 +61,12 @@ def mock_read_flim_bin(monkeypatch):
         }
     monkeypatch.setattr(
         "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _fake_read,
+    )
+    # write_decay_streaming does ``from percell4.adapters.readers import read_flim_bin``
+    # inside its body — patch the source module to cover that binding too.
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
         _fake_read,
     )
     return _fake_read
@@ -151,6 +162,10 @@ def test_add_decay_rotates_stitched_array(tmp_path, monkeypatch):
         }
     monkeypatch.setattr(
         "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _patterned_read,
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
         _patterned_read,
     )
 
