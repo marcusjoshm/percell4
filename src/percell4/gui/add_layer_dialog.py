@@ -1156,7 +1156,22 @@ class AddLayerDialog(QDialog):
         return out
 
     def _tcspc_rebuild_calibration_widgets(self, channel_names: list[str]) -> None:
-        """Create one (phase, modulation) row per existing TIFF channel."""
+        """Create one (phase, modulation) row per existing TIFF channel.
+
+        Pre-fills phase / modulation spinboxes from existing
+        ``/metadata.flim_cal_phase_<channel>`` and
+        ``flim_cal_mod_<channel>`` if those attrs exist — critical for
+        the case where the file was previously imported with calibration
+        and the user is appending more decay. Without pre-filling, the
+        defaults (0.0 / 1.0) get persisted on Append and compute_phasor
+        skips the calibration step entirely (its guard is
+        ``if cal_phase != 0.0 or cal_mod != 1.0:``), producing an
+        uncalibrated phasor that looks broken even though the decay
+        bytes are correct.
+
+        Also auto-fills the laser frequency and auto-checks the FLIM
+        Parameters group when existing metadata indicates FLIM.
+        """
         # Clear any existing widgets
         while self._tcspc_flim_cal_container.count():
             item = self._tcspc_flim_cal_container.takeAt(0)
@@ -1165,27 +1180,58 @@ class AddLayerDialog(QDialog):
                 w.deleteLater()
         self._tcspc_channel_calibrations.clear()
 
+        meta = self._store.metadata
+
+        # Frequency
+        existing_freq = meta.get("flim_frequency_mhz")
+        if existing_freq is not None:
+            try:
+                self._tcspc_flim_freq.setValue(float(existing_freq))
+            except (TypeError, ValueError):
+                pass
+
+        any_flim_meta_present = (
+            existing_freq is not None
+            or any(k.startswith("flim_cal_") for k in meta)
+        )
+
         for name in channel_names:
             group = QGroupBox(f"Channel {name}")
             form = QFormLayout(group)
 
             phase_spin = QDoubleSpinBox()
             phase_spin.setRange(-6.283, 6.283)
-            phase_spin.setValue(0.0)
             phase_spin.setDecimals(4)
             phase_spin.setSuffix(" rad")
+            existing_phase = meta.get(f"flim_cal_phase_{name}")
+            try:
+                phase_spin.setValue(float(existing_phase) if existing_phase is not None else 0.0)
+            except (TypeError, ValueError):
+                phase_spin.setValue(0.0)
             form.addRow("Phase:", phase_spin)
 
             mod_spin = QDoubleSpinBox()
             mod_spin.setRange(0.0, 10.0)
-            mod_spin.setValue(1.0)
             mod_spin.setDecimals(4)
+            existing_mod = meta.get(f"flim_cal_mod_{name}")
+            try:
+                mod_spin.setValue(float(existing_mod) if existing_mod is not None else 1.0)
+            except (TypeError, ValueError):
+                mod_spin.setValue(1.0)
             form.addRow("Modulation:", mod_spin)
 
             self._tcspc_flim_cal_container.addWidget(group)
             self._tcspc_channel_calibrations[name] = _TcspcCalibration(
                 phase_spin=phase_spin, mod_spin=mod_spin
             )
+
+        # Auto-check the FLIM Parameters group when the dataset already has
+        # FLIM metadata. This means persistence is ON by default for these
+        # datasets — if the user clicks Append without touching calibration,
+        # the existing values get re-written verbatim instead of being
+        # silently replaced by 0.0 / 1.0 defaults.
+        if any_flim_meta_present and not self._tcspc_flim_group.isChecked():
+            self._tcspc_flim_group.setChecked(True)
 
         # Re-apply collapsed state so the new widgets honor the group's state
         self._on_tcspc_flim_group_toggled(self._tcspc_flim_group.isChecked())
@@ -1386,8 +1432,19 @@ class AddLayerDialog(QDialog):
             QMessageBox.critical(self, "Append failed", str(e))
             return
 
-        # Persist FLIM calibration to /metadata if user enabled the group
-        if self._tcspc_flim_group.isChecked():
+        # Always persist FLIM calibration whenever any channel has a
+        # non-default value (phase != 0.0 OR modulation != 1.0). This
+        # guards against the case where the FLIM group is collapsed but
+        # the spinboxes still hold the values pre-filled from existing
+        # metadata — without this, a click-Append-without-touching-FLIM
+        # would not refresh the metadata at all, but if calibration was
+        # previously written under a different channel-name spelling
+        # those keys would stay stale.
+        has_real_cal = any(
+            cal.phase_spin.value() != 0.0 or cal.mod_spin.value() != 1.0
+            for cal in self._tcspc_channel_calibrations.values()
+        )
+        if self._tcspc_flim_group.isChecked() or has_real_cal:
             self._tcspc_persist_flim_metadata()
 
         self._tcspc_show_report(report)
