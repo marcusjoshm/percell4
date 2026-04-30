@@ -68,7 +68,17 @@ class AddLayerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add Layer to Dataset")
         self.setMinimumWidth(700)
-        self.resize(750, 550)
+        # Cap the dialog height to a fraction of the screen so it never
+        # exceeds the screen in any direction; per-tab scroll areas (TCSPC,
+        # Discover TIFFs) handle content that overflows.
+        self.resize(800, 700)
+        if parent is not None and hasattr(parent, "screen"):
+            try:
+                screen_geom = parent.screen().availableGeometry()
+                self.setMaximumHeight(int(screen_geom.height() * 0.9))
+                self.setMaximumWidth(int(screen_geom.width() * 0.9))
+            except Exception:  # noqa: BLE001
+                pass
 
         self._store = store
         self._data_model = data_model
@@ -791,8 +801,25 @@ class AddLayerDialog(QDialog):
           how many `.bin` tiles will stitch into it. `.bin` files are
           always exported as individual tiles, so listing tiles
           individually was noise.
+
+        The whole tab is wrapped in a QScrollArea — same pattern as
+        ``_build_batch_tiff_tab`` — because the FLIM Parameters group
+        with per-channel calibration grows past the dialog height once
+        an experiment has 3+ channels.
         """
+        from qtpy.QtWidgets import QScrollArea
+
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        outer.addWidget(scroll)
+
         widget = QWidget()
+        scroll.setWidget(widget)
         layout = QVBoxLayout(widget)
 
         # ── Source directory ────────────────────────────────────────
@@ -979,7 +1006,7 @@ class AddLayerDialog(QDialog):
         self._tcspc_state = TcspcTabState()
         self._tcspc_bin_files: list[Path] = []
 
-        return widget
+        return tab
 
     def _on_tcspc_browse(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select .bin source directory")
