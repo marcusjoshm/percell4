@@ -435,17 +435,16 @@ class DataPanel(QWidget):
             return
 
         session = self.data_model.session
-        if session.dataset is None:
+        store = self._get_store()
+        if store is None:
             self._show_status("No dataset loaded")
             return
-        store = session.dataset
 
         # Read /metadata.channel_names + /intensity, drop the channel,
         # write back. This is the durable part — without these store
         # writes the deletion only removed the napari layer and the
         # channel came back on reload.
-        meta = dict(store.metadata)
-        names = list(meta.get("channel_names", []))
+        names = list(store.metadata.get("channel_names", []))
         if name not in names:
             self._show_status(f"Channel '{name}' not in metadata; nothing to delete")
             return
@@ -460,7 +459,6 @@ class DataPanel(QWidget):
         if intensity is not None:
             if intensity.ndim == 3:
                 if intensity.shape[0] <= 1:
-                    # Last channel — remove /intensity entirely
                     store.delete_item("intensity")
                 else:
                     keep = [i for i in range(intensity.shape[0]) if i != idx]
@@ -502,6 +500,19 @@ class DataPanel(QWidget):
             "channel_names": new_names,
             "n_channels": len(new_names),
         })
+
+        # Sync the in-memory handle metadata (matches _on_rename_channel
+        # pattern) so use cases see the new channel list without requiring
+        # a dataset reload.
+        handle = session.dataset
+        if handle is not None:
+            meta = handle.metadata
+            meta["channel_names"] = new_names
+            meta["n_channels"] = len(new_names)
+            for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
+                k = f"{key_prefix}{name}"
+                if k in meta:
+                    del meta[k]
 
         # Clear active-channel selection if it pointed at the deleted one.
         if session.active_channel == name:
