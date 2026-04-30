@@ -10,8 +10,7 @@ applies_to:
   - "src/percell4/gui/*Dialog.py"
   - "src/percell4/gui/*_dialog.py"
   - "src/percell4/gui/workflows/**/config_dialog.py"
-duplicates_at:
-  - {path: "src/percell4/gui/export_images_dialog.py", note: "DRIFT: no QScrollArea — checkbox lists for channels/segs/masks could overflow on small screens or many layers"}
+duplicates_at: []
 status: pre_canonical
 tags:
   - qt
