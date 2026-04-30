@@ -206,6 +206,14 @@ class PhasorPlotWindow(QMainWindow):
         controls.addWidget(self._mask_filter_check)
 
         controls.addStretch()
+
+        self._save_png_btn = QPushButton("Save Phasor .PNG")
+        self._save_png_btn.setToolTip(
+            "Save the current phasor plot as a PNG image."
+        )
+        self._save_png_btn.clicked.connect(self._on_save_png)
+        controls.addWidget(self._save_png_btn)
+
         left_layout.addLayout(controls)
 
         # Plot
@@ -808,6 +816,37 @@ class PhasorPlotWindow(QMainWindow):
         self.mask_applied.emit(roi_masks)
         names = ", ".join(name for name, _, _ in roi_masks)
         self._status.showMessage(f"Applied {len(roi_masks)} mask(s): {names}", 5000)
+
+    # ── Save plot as PNG ──────────────────────────────────────
+
+    def _on_save_png(self) -> None:
+        """Save the current phasor plot widget as a PNG image."""
+        if self._g_map is None:
+            self._status.showMessage("No phasor data to save", 3000)
+            return
+
+        default_name = "phasor.png"
+        handle = self._session.dataset
+        if handle is not None:
+            stem = handle.path.stem
+            channel = self._session.active_channel
+            default_name = f"{stem}_{channel}_phasor.png" if channel else f"{stem}_phasor.png"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Phasor PNG", default_name, "PNG Image (*.png)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path = f"{path}.png"
+
+        pixmap = self._plot.grab()
+        if not pixmap.save(path, "PNG"):
+            QMessageBox.warning(
+                self, "Save Error", f"Failed to save phasor PNG to:\n{path}"
+            )
+            return
+        self._status.showMessage(f"Saved phasor PNG: {path}", 4000)
 
     # ── Save / Load ROIs ──────────────────────────────────────
 
