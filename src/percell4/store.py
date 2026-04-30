@@ -31,12 +31,19 @@ from percell4.domain.io.models import (
 _READ_CACHE_BYTES = 64 * 1024 * 1024
 
 
-class LayerAlreadyExists(Exception):
+class LayerAlreadyExistsError(Exception):
     """Raised when a payload group already exists and force=False."""
 
 
-class CrossFormatRuleConflict(Exception):
+class CrossFormatRuleConflictError(Exception):
     """Raised when an append would persist a rule different from one already stored."""
+
+
+# Backwards-compat aliases — the names without the Error suffix were used in
+# the first round of tests. Keep them around so callers writing
+# ``from percell4.store import LayerAlreadyExists`` still work.
+LayerAlreadyExists = LayerAlreadyExistsError
+CrossFormatRuleConflict = CrossFormatRuleConflictError
 
 
 def _choose_chunks(shape: tuple[int, ...], is_decay: bool = False) -> tuple[int, ...]:
@@ -371,7 +378,7 @@ class DatasetStore:
             if existing_serialized is not None and not force:
                 existing = deserialize_rule(existing_serialized)
                 if existing != cross_format_rule:
-                    raise CrossFormatRuleConflict(
+                    raise CrossFormatRuleConflictError(
                         f"persisted rule {existing!r} differs from {cross_format_rule!r}; "
                         "use force=True to overwrite"
                     )
@@ -382,7 +389,7 @@ class DatasetStore:
                 for name in layers:
                     path = f"decay/{name}"
                     if path in f:
-                        raise LayerAlreadyExists(name)
+                        raise LayerAlreadyExistsError(name)
 
         # Write each channel under one open handle with explicit flush+fsync
         # between channels. Best-effort per-channel atomicity.

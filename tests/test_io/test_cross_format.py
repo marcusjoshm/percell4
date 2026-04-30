@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from percell4.domain.io.cross_format import (
-    BindingResult,
     IntensityChannel,
     MatchEvidence,
     MatchResult,

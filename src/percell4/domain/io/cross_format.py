@@ -36,7 +36,6 @@ from percell4.domain.io.models import (
     ZeroPadOffsetRule,
 )
 
-
 # ── Rule serialization (HDF5 attr round-trip) ──────────────────────────
 
 

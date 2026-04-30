@@ -19,13 +19,11 @@ from percell4.domain.io.cross_format import (
     MatchResult,
 )
 from percell4.domain.io.models import (
-    BaseStemRule,
     CompositeRule,
     ExplicitRule,
     ZeroPadOffsetRule,
 )
 from percell4.gui.tcspc_tab_state import (
-    RULE_AUTO_BASE_STEM,
     RULE_AUTO_ZERO_PAD,
     RULE_MANUAL,
     TcspcTabState,

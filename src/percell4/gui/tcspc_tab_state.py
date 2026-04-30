@@ -30,7 +30,6 @@ from percell4.domain.io.models import (
     ZeroPadOffsetRule,
 )
 
-
 # ── Built-in rule presets the dropdown exposes ──────────────────────────
 
 RULE_AUTO_ZERO_PAD = "auto_zero_pad_offset"
@@ -134,7 +133,6 @@ class TcspcTabState:
         new_rows: list[TcspcRow] = []
         match_by_path = {b.bin_path: b.channel_name for b in result.bindings}
         ambig_by_path = {p: candidates for p, candidates in result.ambiguous}
-        unmatched_set = set(result.unmatched)
         for bin_path in bin_files:
             auto = match_by_path.get(bin_path)
             candidates = ambig_by_path.get(bin_path, ())
@@ -212,7 +210,12 @@ class TcspcTabState:
         out: dict[str, str] = {}
         for row in self.rows:
             if row.is_overridden and row.user_channel is not None:
-                out[str(row.bin_path.resolve()) if row.bin_path.exists() else str(row.bin_path)] = row.user_channel
+                key = (
+                    str(row.bin_path.resolve())
+                    if row.bin_path.exists()
+                    else str(row.bin_path)
+                )
+                out[key] = row.user_channel
         return out
 
     def needs_force(self) -> bool:

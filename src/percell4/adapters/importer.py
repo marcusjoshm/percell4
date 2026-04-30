@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from percell4.adapters.readers import read_tiff
 from percell4.domain.io.assembler import assemble_channels, assemble_tiles, project_z
 from percell4.domain.io.cross_format import (
     IntensityChannel,
@@ -27,7 +28,6 @@ from percell4.domain.io.models import (
     TokenConfig,
     ZeroPadOffsetRule,
 )
-from percell4.adapters.readers import read_tiff
 from percell4.domain.io.scanner import FileScanner
 from percell4.project import ProjectIndex
 from percell4.store import DatasetStore

@@ -68,7 +68,7 @@ def test_add_decay_single_channel_zero_pad_offset(tmp_path, mock_read_flim_bin):
     """One .bin matched to one TIFF channel via ZeroPadOffsetRule(2,1)."""
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, ["exp_s0_ch1.bin"])  # token "1" → "00"
+    _make_bin_files(source, ["exp_s0_ch1.bin"])  # token "1" → "00"
 
     report = add_decay_to_dataset(
         h5_path=store.path,
@@ -93,7 +93,7 @@ def test_add_decay_two_channels_default_composite_rule(tmp_path, mock_read_flim_
     """Two .bin files matched via default CompositeRule(ZeroPadOffset(2,1), BaseStem)."""
     store = _h5_with_intensity(tmp_path)
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, ["exp_s0_ch1.bin", "exp_s0_ch2.bin"])
+    _make_bin_files(source, ["exp_s0_ch1.bin", "exp_s0_ch2.bin"])
 
     report = add_decay_to_dataset(
         h5_path=store.path,
@@ -114,7 +114,7 @@ def test_add_decay_with_tile_stitching(tmp_path, mock_read_flim_bin):
     """4 tiles per channel are stitched into 16x16x4 output."""
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, [
+    _make_bin_files(source, [
         "exp_s1_ch1.bin", "exp_s2_ch1.bin", "exp_s3_ch1.bin", "exp_s4_ch1.bin",
     ])
 
@@ -141,7 +141,7 @@ def test_add_decay_no_intensity_returns_error(tmp_path, mock_read_flim_bin):
     store = DatasetStore(tmp_path / "empty.h5")
     store.create()  # no /intensity, no channel_names
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, ["exp_s0_ch1.bin"])
+    _make_bin_files(source, ["exp_s0_ch1.bin"])
 
     report = add_decay_to_dataset(
         h5_path=store.path,
@@ -177,9 +177,9 @@ def test_add_decay_no_bin_files_returns_error(tmp_path, mock_read_flim_bin):
 
 def test_add_decay_ambiguous_no_explicit_returns_early(tmp_path, mock_read_flim_bin):
     """Ambiguous matches surface in report and nothing is written."""
-    store = _h5_with_intensity(tmp_path, channel_names=("ch00", "ch01"))
+    _h5_with_intensity(tmp_path, channel_names=("ch00", "ch01"))
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, ["Dataset.bin"])  # no token, ambiguous via stem
+    _make_bin_files(source, ["Dataset.bin"])  # no token, ambiguous via stem
 
     # Use BaseStemRule alone — both channels have base_stem set to be ambiguous
     # (caller sets up DiscoveredFile.tokens to seed both with prefix-matching stems)
@@ -222,7 +222,7 @@ def test_add_decay_pre_flight_existing_without_force(tmp_path, mock_read_flim_bi
     """When /decay/<name> already exists, pre-flight surfaces it without writing anything else."""
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, ["exp_s0_ch1.bin"])
+    _make_bin_files(source, ["exp_s0_ch1.bin"])
 
     # First run lands ch00
     add_decay_to_dataset(
@@ -271,7 +271,7 @@ def test_add_decay_records_provenance(tmp_path, mock_read_flim_bin):
     """Provenance attrs include source_path, rule type, sha256, etc."""
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, ["exp_s0_ch1.bin"])
+    _make_bin_files(source, ["exp_s0_ch1.bin"])
 
     add_decay_to_dataset(
         h5_path=store.path,
@@ -296,7 +296,7 @@ def test_add_decay_progress_callback_called(tmp_path, mock_read_flim_bin):
     """progress_callback receives status messages."""
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
     source = tmp_path / "bin"
-    bins = _make_bin_files(source, ["exp_s0_ch1.bin"])
+    _make_bin_files(source, ["exp_s0_ch1.bin"])
     messages: list[str] = []
 
     add_decay_to_dataset(

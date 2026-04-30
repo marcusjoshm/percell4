@@ -44,12 +44,9 @@ from percell4.domain.io.cross_format import (
     match_bin_to_intensity,
 )
 from percell4.domain.io.models import (
-    BaseStemRule,
     ExplicitRule,
-    FlimConfig,
     TileConfig,
     TokenConfig,
-    ZeroPadOffsetRule,
 )
 from percell4.gui.tcspc_tab_state import (
     RULE_AUTO_BASE_STEM,
@@ -366,7 +363,7 @@ class AddLayerDialog(QDialog):
         self._batch_source_edit.setText(path)
         self._run_batch_discovery()
 
-    def _batch_token_config(self) -> "TokenConfig":
+    def _batch_token_config(self) -> TokenConfig:
         from percell4.domain.io.models import TokenConfig
         return TokenConfig(
             channel=self._batch_tok_channel.text().strip() or None,
@@ -491,7 +488,6 @@ class AddLayerDialog(QDialog):
         if not hasattr(self, "_batch_datasets"):
             return
 
-        from percell4.domain.io.models import TileConfig, TokenConfig
 
         # Gather selected datasets
         selected_ds_names: set[str] = set()
