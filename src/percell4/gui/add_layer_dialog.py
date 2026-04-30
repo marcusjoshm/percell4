@@ -885,6 +885,22 @@ class AddLayerDialog(QDialog):
         rot_row.addStretch()
         layout.addLayout(rot_row)
 
+        # ── Debug: write .bin-derived intensity as napari layers ────
+        # Off by default — when checked, after Append the dialog computes
+        # the per-pixel sum over T for each /decay/<ch> just written and
+        # appends it to /intensity as a new channel "<ch>_bin". The user
+        # can then visually overlay it against the existing TIFF intensity
+        # to check spatial alignment / verify the stitch matches compress.
+        self._tcspc_debug_intensity_check = QCheckBox(
+            "Debug: also write .bin-derived intensity as napari layer(s)"
+        )
+        self._tcspc_debug_intensity_check.setToolTip(
+            "Adds <channel>_bin layers to /intensity for visual comparison "
+            "against the existing channel layer. Off by default — turn on "
+            "when troubleshooting an apparent stitch mismatch."
+        )
+        layout.addWidget(self._tcspc_debug_intensity_check)
+
         # ── FLIM .bin Parameters (matches compress_dialog convention) ──
         self._tcspc_flim_group = QGroupBox("FLIM .bin Parameters")
         self._tcspc_flim_group.setCheckable(True)
@@ -1447,7 +1463,103 @@ class AddLayerDialog(QDialog):
         if self._tcspc_flim_group.isChecked() or has_real_cal:
             self._tcspc_persist_flim_metadata()
 
+        # Debug: append .bin-derived intensity layers if requested
+        if (
+            report.written
+            and self._tcspc_debug_intensity_check.isChecked()
+        ):
+            try:
+                self._tcspc_write_bin_intensity_debug_layers(list(report.written))
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Debug intensity write failed",
+                    f"Decay layers were appended successfully, but the debug "
+                    f"intensity layers could not be written: {e}",
+                )
+
         self._tcspc_show_report(report)
+
+    def _tcspc_write_bin_intensity_debug_layers(self, channel_names: list[str]) -> None:
+        """For each appended decay channel, compute the per-pixel sum over T
+        and append it to /intensity as a new channel ``<channel>_bin``.
+
+        Writes nothing if the resulting intensity image would have a
+        different (H, W) shape than the existing /intensity (e.g., the
+        user appended decay at a different stitched size). Updates
+        /metadata.channel_names so napari renders the new channel
+        alongside the existing ones.
+        """
+        import h5py
+        decay_intensities: dict[str, np.ndarray] = {}
+        with h5py.File(self._store.path, "r") as f:
+            for ch in channel_names:
+                ds = f.get(f"decay/{ch}")
+                if ds is None:
+                    continue
+                # Sum over T axis — produces (H, W) float32. For very large
+                # decays (5GB+), sum tile-by-tile via h5py chunk iteration
+                # would be cheaper, but a one-shot sum is simplest and the
+                # debug toggle is opt-in so a brief peak-memory spike is OK.
+                arr = ds[...].astype(np.float64).sum(axis=-1).astype(np.float32)
+                decay_intensities[ch] = arr
+
+        if not decay_intensities:
+            return
+
+        # Read existing /intensity to know its (H, W) and (C, …) shape
+        try:
+            existing = self._store.read_array("intensity")
+        except KeyError:
+            existing = None
+        meta = self._store.metadata
+        existing_names = list(meta.get("channel_names", []))
+
+        if existing is not None and existing.ndim == 3:
+            existing_h, existing_w = existing.shape[1], existing.shape[2]
+        elif existing is not None and existing.ndim == 2:
+            existing_h, existing_w = existing.shape
+            existing = existing[np.newaxis, :, :]  # promote to (1, H, W)
+        else:
+            existing_h = existing_w = None
+
+        kept: dict[str, np.ndarray] = {}
+        skipped: list[str] = []
+        for ch, arr in decay_intensities.items():
+            if existing_h is not None and arr.shape != (existing_h, existing_w):
+                skipped.append(f"{ch} ({arr.shape} vs intensity {(existing_h, existing_w)})")
+                continue
+            kept[ch] = arr
+
+        if not kept:
+            self.statusBar_msg(
+                f"Skipped debug intensity write — shape mismatch: {', '.join(skipped)}"
+            )
+            return
+
+        # Stack: existing channels followed by the new <ch>_bin channels
+        new_arrays = list(kept.values())
+        new_names = [f"{ch}_bin" for ch in kept.keys()]
+        if existing is None:
+            stacked = np.stack(new_arrays, axis=0).astype(np.float32)
+            all_names = new_names
+        else:
+            stacked = np.concatenate(
+                [existing, np.stack(new_arrays, axis=0)], axis=0
+            ).astype(np.float32)
+            all_names = existing_names + new_names
+
+        self._store.write_array(
+            "intensity", stacked, attrs={"dims": ["C", "H", "W"]}
+        )
+        self._store.set_metadata({
+            "channel_names": all_names,
+            "n_channels": len(all_names),
+        })
+        msg = f"Wrote debug intensity layers: {', '.join(new_names)}"
+        if skipped:
+            msg += f" (skipped due to shape mismatch: {', '.join(skipped)})"
+        self.statusBar_msg(msg)
 
     def _tcspc_build_flim_config(self) -> FlimConfig:
         """Build a FlimConfig from the FLIM Parameters group state.
