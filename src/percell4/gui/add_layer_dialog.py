@@ -50,11 +50,7 @@ from percell4.domain.io.models import (
     TileConfig,
     TokenConfig,
 )
-from percell4.gui.tcspc_tab_state import (
-    RULE_AUTO_BASE_STEM,
-    RULE_AUTO_ZERO_PAD,
-    TcspcTabState,
-)
+from percell4.gui.tcspc_tab_state import TcspcTabState
 
 
 class AddLayerDialog(QDialog):
@@ -834,35 +830,11 @@ class AddLayerDialog(QDialog):
         dir_row.addWidget(browse_btn)
         layout.addLayout(dir_row)
 
-        # ── Cross-format rule preset ────────────────────────────────
-        rule_row = QHBoxLayout()
-        rule_row.addWidget(QLabel("Cross-format rule:"))
-        self._tcspc_rule_combo = QComboBox()
-        self._tcspc_rule_combo.addItem(
-            "Auto: zero-pad with offset", RULE_AUTO_ZERO_PAD
-        )
-        self._tcspc_rule_combo.addItem("Auto: base stem", RULE_AUTO_BASE_STEM)
-        self._tcspc_rule_combo.currentIndexChanged.connect(self._on_tcspc_rule_changed)
-        rule_row.addWidget(self._tcspc_rule_combo)
-        rule_row.addStretch()
-        layout.addLayout(rule_row)
-
-        # ZeroPadOffset params (visible only when ZeroPad rule selected)
-        params_row = QHBoxLayout()
-        params_row.addWidget(QLabel("Pad width:"))
-        self._tcspc_pad_spin = QSpinBox()
-        self._tcspc_pad_spin.setRange(0, 6)
-        self._tcspc_pad_spin.setValue(2)
-        params_row.addWidget(self._tcspc_pad_spin)
-        params_row.addWidget(QLabel("Offset:"))
-        self._tcspc_offset_spin = QSpinBox()
-        self._tcspc_offset_spin.setRange(0, 10)
-        self._tcspc_offset_spin.setValue(1)
-        params_row.addWidget(self._tcspc_offset_spin)
-        params_row.addStretch()
-        self._tcspc_params_widget = QWidget()
-        self._tcspc_params_widget.setLayout(params_row)
-        layout.addWidget(self._tcspc_params_widget)
+        # Token matching is direct equality between the channel's token
+        # (set per-row in the table dropdown) and the .bin filename's
+        # ``_ch(\\d+)`` token. No padding/offset transformation — if your
+        # channel and bin token strings don't match exactly, fix the
+        # filenames or pick a different token from the dropdown.
 
         # ── Tile Stitching (matches compress_dialog convention) ─────
         self._tcspc_stitch_check = QCheckBox("Tile Stitching")
@@ -1025,15 +997,6 @@ class AddLayerDialog(QDialog):
         if d:
             self._tcspc_dir_edit.setText(d)
 
-    def _on_tcspc_rule_changed(self) -> None:
-        preset = self._tcspc_rule_combo.currentData()
-        # Hide pad/offset spins for non-zero-pad presets
-        self._tcspc_params_widget.setVisible(preset == RULE_AUTO_ZERO_PAD)
-        self._tcspc_state.preset = preset
-        # If a directory has already been scanned, re-run the match with the new rule
-        if self._tcspc_bin_files:
-            self._tcspc_run_match()
-
     def _on_tcspc_stitch_toggled(self, checked: bool) -> None:
         self._tcspc_stitch_widget.setVisible(checked)
 
@@ -1152,21 +1115,25 @@ class AddLayerDialog(QDialog):
     def _tcspc_intensity_channels(self) -> list[IntensityChannel]:
         """Build IntensityChannel list, seeding the cross-format token.
 
-        TIFF channels with names like ``ch00`` / ``ch01`` carry the digit
-        suffix as their token. Channels with semantic names (``CA-SiR``,
-        ``mNG``, ``mTQ2``) have no digit suffix, so we fall back to per-
-        channel manual overrides stored in ``_tcspc_channel_token_overrides``
-        — populated by spinboxes the user fills in. As an initial guess
-        (so Auto: zero-pad with offset can succeed without manual setup
-        for the common ordered case), we seed the override map with the
-        channel's positional index so channel 0 gets bin token "1" under
-        offset=1, channel 1 gets bin token "2", etc.
+        Direct token equality only — no pad/offset transformation. Seeding
+        order:
+
+        1. User override stored in ``_tcspc_channel_token_overrides`` (set
+           when the user picks from the table's dropdown).
+        2. Positional pick from the actually-discovered tokens —
+           ``available[i]`` for the i-th channel. This makes the common
+           case (3 channels, .bin files with 3 tokens like ``00 / 01 /
+           02``) match correctly without any manual setup.
+        3. Channel name's digit suffix as a final fallback (covers the
+           ``ch00`` / ``ch01`` / ``ch02`` channel-name convention).
+        4. Empty string if nothing else applies — user picks via dropdown.
         """
         meta = self._store.metadata
         channel_names = list(meta.get("channel_names", []))
         base_stems = list(meta.get("channel_base_stems", []))
         if not hasattr(self, "_tcspc_channel_token_overrides"):
             self._tcspc_channel_token_overrides: dict[str, str] = {}
+        available = getattr(self, "_tcspc_available_bin_tokens", []) or []
 
         out = []
         for i, name in enumerate(channel_names):
@@ -1175,16 +1142,14 @@ class AddLayerDialog(QDialog):
             if override is not None:
                 token = override
             else:
-                m = re.search(r"(\d+)$", name)
-                if m:
-                    token = m.group(1)
+                # Positional pick from discovered tokens — most reliable
+                # for the typical case where N .bin tokens align 1:1 with
+                # N intensity channels.
+                if i < len(available):
+                    token = available[i]
                 else:
-                    # Seed: positional index zero-padded to the configured
-                    # pad_width — under ZeroPadOffsetRule(pad=2, off=1) this
-                    # makes ``CA-SiR`` (channel 0) match `_ch1.bin`,
-                    # ``mNG`` (channel 1) match `_ch2.bin`, and so on.
-                    pad = max(self._tcspc_pad_spin.value(), 1)
-                    token = f"{i:0{pad}d}"
+                    m = re.search(r"(\d+)$", name)
+                    token = m.group(1) if m else ""
                 self._tcspc_channel_token_overrides[name] = token
             base_stem = base_stems[i] if i < len(base_stems) else None
             out.append(IntensityChannel(name=name, token=token, base_stem=base_stem))
@@ -1226,11 +1191,8 @@ class AddLayerDialog(QDialog):
         self._on_tcspc_flim_group_toggled(self._tcspc_flim_group.isChecked())
 
     def _tcspc_run_match(self) -> None:
-        # Update state's pad/offset before building the rule
-        self._tcspc_state.pad_width = self._tcspc_pad_spin.value()
-        self._tcspc_state.offset = self._tcspc_offset_spin.value()
+        # Direct token equality + base-stem fallback. No pad/offset.
         rule = self._tcspc_state.build_selected_rule()
-
         result = match_bin_to_intensity(
             self._tcspc_bin_files,
             list(self._tcspc_state.intensity_channels),

@@ -37,33 +37,30 @@ def _matched(bin_path: Path, channel_name: str) -> BindingResult:
     )
 
 
-# ── Rule preset construction ────────────────────────────────────────────
+# ── Rule construction ───────────────────────────────────────────────────
+# After removing pad/offset logic, the only matching rule is direct token
+# equality (ZeroPadOffsetRule(0, 0)) plus a base-stem fallback. The preset
+# constants are retained as compatibility aliases but all map to the same
+# rule.
 
 
-def test_preset_zero_pad_offset_builds_composite():
-    """RULE_AUTO_ZERO_PAD → CompositeRule(ZeroPadOffsetRule(2,1), BaseStemRule)."""
-    rule = build_rule_from_preset(RULE_AUTO_ZERO_PAD, pad_width=2, offset=1)
+def test_build_rule_returns_direct_equality_composite():
+    """build_rule_from_preset always returns direct-equality + base-stem."""
+    rule = build_rule_from_preset()
     assert isinstance(rule, CompositeRule)
     assert len(rule.rules) == 2
-    assert rule.rules[0] == ZeroPadOffsetRule(pad_width=2, offset=1)
+    assert rule.rules[0] == ZeroPadOffsetRule(pad_width=0, offset=0)
     assert isinstance(rule.rules[1], BaseStemRule)
 
 
-def test_preset_zero_pad_offset_with_custom_params():
-    """Custom pad/offset gets passed through."""
-    rule = build_rule_from_preset(RULE_AUTO_ZERO_PAD, pad_width=3, offset=0)
-    assert rule.rules[0] == ZeroPadOffsetRule(pad_width=3, offset=0)
-
-
-def test_preset_base_stem_returns_base_stem_rule():
-    rule = build_rule_from_preset(RULE_AUTO_BASE_STEM)
-    assert isinstance(rule, BaseStemRule)
-
-
-def test_preset_manual_returns_empty_explicit_rule():
-    rule = build_rule_from_preset(RULE_MANUAL)
-    assert isinstance(rule, ExplicitRule)
-    assert rule.mapping == ()
+def test_preset_constants_are_aliased_to_same_rule():
+    """RULE_AUTO_ZERO_PAD / RULE_AUTO_BASE_STEM / RULE_MANUAL all build
+    the same direct-equality rule (back-compat for callers that still
+    import the constants)."""
+    a = build_rule_from_preset(RULE_AUTO_ZERO_PAD)
+    b = build_rule_from_preset(RULE_AUTO_BASE_STEM)
+    c = build_rule_from_preset(RULE_MANUAL)
+    assert a == b == c
 
 
 # ── State.apply_match ───────────────────────────────────────────────────
@@ -232,11 +229,11 @@ def test_user_edit_to_different_channel_is_override():
 # ── Commit-time outputs ────────────────────────────────────────────────
 
 
-def test_build_selected_rule_uses_current_preset():
-    state = TcspcTabState(preset=RULE_AUTO_ZERO_PAD, pad_width=2, offset=1)
+def test_build_selected_rule_returns_direct_equality():
+    state = TcspcTabState()
     rule = state.build_selected_rule()
     assert isinstance(rule, CompositeRule)
-    assert rule.rules[0] == ZeroPadOffsetRule(pad_width=2, offset=1)
+    assert rule.rules[0] == ZeroPadOffsetRule(pad_width=0, offset=0)
 
 
 def test_build_bindings_override_only_user_edits():

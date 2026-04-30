@@ -26,37 +26,28 @@ from percell4.domain.io.models import (
     BaseStemRule,
     CompositeRule,
     CrossFormatRule,
-    ExplicitRule,
     ZeroPadOffsetRule,
 )
 
-# ── Built-in rule presets the dropdown exposes ──────────────────────────
 
-RULE_AUTO_ZERO_PAD = "auto_zero_pad_offset"
-RULE_AUTO_BASE_STEM = "auto_base_stem"
-RULE_MANUAL = "manual"
+# Kept for backwards-compatibility with test imports — no longer wired to UI.
+RULE_AUTO_ZERO_PAD = "direct_token_match"
+RULE_AUTO_BASE_STEM = "direct_token_match"
+RULE_MANUAL = "direct_token_match"
 
 
-def build_rule_from_preset(
-    preset: str, pad_width: int = 2, offset: int = 1,
-) -> CrossFormatRule:
-    """Build the CrossFormatRule for a dropdown preset.
-
-    The user microscope's defaults (``pad_width=2, offset=1``) match the
-    preset's name; spinboxes in the dialog let the user override.
+def build_rule_from_preset(preset: str = "direct_token_match", **_) -> CrossFormatRule:
+    """The dialog now uses one matching rule: direct token equality, with
+    base-stem fallback for .bin files that carry no channel token. The
+    pad/offset transformation logic was removed at user request — easier
+    to rename .bin files than to troubleshoot off-by-one seeding errors.
+    Per-channel token overrides via the dropdown handle the remaining
+    edge cases (e.g., semantic channel names like ``CA-SiR``).
     """
-    if preset == RULE_AUTO_ZERO_PAD:
-        return CompositeRule(rules=(
-            ZeroPadOffsetRule(pad_width=pad_width, offset=offset),
-            BaseStemRule(),
-        ))
-    if preset == RULE_AUTO_BASE_STEM:
-        return BaseStemRule()
-    if preset == RULE_MANUAL:
-        # Manual mode starts with no automatic bindings — the table is empty
-        # initially and every cell is user-assigned.
-        return ExplicitRule(mapping=())
-    raise ValueError(f"unknown preset: {preset!r}")
+    return CompositeRule(rules=(
+        ZeroPadOffsetRule(pad_width=0, offset=0),  # direct equality
+        BaseStemRule(),
+    ))
 
 
 # ── Per-row state ───────────────────────────────────────────────────────
@@ -106,10 +97,11 @@ class TcspcTabState:
 
     intensity_channels: tuple[IntensityChannel, ...] = ()
     existing_decay_channels: frozenset[str] = frozenset()
-    preset: str = RULE_AUTO_ZERO_PAD
-    pad_width: int = 2
-    offset: int = 1
     rows: list[TcspcRow] = field(default_factory=list)
+    # Kept for backwards-compatibility with older tests; not used by the UI.
+    preset: str = "direct_token_match"
+    pad_width: int = 0
+    offset: int = 0
 
     # ── Loading ─────────────────────────────────────────────────────────
 
@@ -201,9 +193,9 @@ class TcspcTabState:
     # ── Commit-time outputs ─────────────────────────────────────────────
 
     def build_selected_rule(self) -> CrossFormatRule:
-        return build_rule_from_preset(
-            self.preset, pad_width=self.pad_width, offset=self.offset
-        )
+        # Always direct token equality + base-stem fallback. Pad/offset
+        # transformation was removed at user request.
+        return build_rule_from_preset()
 
     def build_bindings_override(self) -> dict[str, str]:
         """Return the {bin_path_str: channel_name} mapping for cells the user edited."""

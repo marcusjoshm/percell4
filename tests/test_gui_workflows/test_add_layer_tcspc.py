@@ -42,12 +42,12 @@ def _matched(bin_path: Path, channel_name: str) -> BindingResult:
     )
 
 
-def test_full_auto_flow_commits_selected_rule():
-    """User picks Auto: zero-pad, every row matches, no overrides → commit rule
-    is the selected CompositeRule, bindings_override is empty."""
-    state = TcspcTabState(preset=RULE_AUTO_ZERO_PAD, pad_width=2, offset=1)
+def test_full_auto_flow_commits_direct_equality_rule():
+    """All rows matched, no overrides → commit rule is direct-equality
+    + base-stem fallback, bindings_override is empty."""
+    state = TcspcTabState()
     state.set_intensity(_channels(("ch00", "00"), ("ch01", "01")), existing_decay=[])
-    bins = [Path("/data/x_s0_ch1.bin"), Path("/data/y_s0_ch2.bin")]
+    bins = [Path("/data/x_s0_ch00.bin"), Path("/data/y_s0_ch01.bin")]
     state.apply_match(bins, MatchResult(bindings=(
         _matched(bins[0], "ch00"),
         _matched(bins[1], "ch01"),
@@ -57,16 +57,15 @@ def test_full_auto_flow_commits_selected_rule():
     assert state.build_bindings_override() == {}
     rule = state.build_selected_rule()
     assert isinstance(rule, CompositeRule)
-    assert rule.rules[0] == ZeroPadOffsetRule(pad_width=2, offset=1)
+    assert rule.rules[0] == ZeroPadOffsetRule(pad_width=0, offset=0)
 
 
 def test_user_override_flips_to_explicit_rule_for_commit():
-    """User edits one row → simulates the dialog's _tcspc_build_commit_rule
-    behavior: full table state becomes an ExplicitRule. Provenance still
-    records the user-selected base rule (CompositeRule) at the dataset
-    level — it's the per-binding ExplicitRule that's passed to
-    add_decay_to_dataset."""
-    state = TcspcTabState(preset=RULE_AUTO_ZERO_PAD, pad_width=2, offset=1)
+    """User edits one row → simulates the dialog's commit-time behavior:
+    full table state becomes an ExplicitRule mapping. The base
+    direct-equality rule still drives initial matching; ExplicitRule
+    just carries the manual override at commit time."""
+    state = TcspcTabState()
     state.set_intensity(_channels(("ch00", "00"), ("ch01", "01")), existing_decay=[])
     bins = [Path("/data/x.bin"), Path("/data/y.bin")]
     state.apply_match(bins, MatchResult(bindings=(
