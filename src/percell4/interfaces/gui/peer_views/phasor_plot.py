@@ -759,7 +759,7 @@ class PhasorPlotWindow(QMainWindow):
         self._hist_item = pg.ImageItem()
         self._plot.addItem(self._hist_item)
 
-        cmap = pg.colormap.get("CET-R4")
+        cmap = pg.colormap.get("nipy_spectral", source="matplotlib")
         if cmap is None:
             cmap = pg.colormap.get("viridis")
         self._hist_item.setImage(hist_display)

@@ -27,6 +27,7 @@ dependencies = [
     "PyQt5>=5.15",
     "qtpy>=2.4",
     "pyqtgraph>=0.13,<0.15",
+    "matplotlib>=3.8",
 
     # Data storage
     "h5py>=3.10,<4",

@@ -13,7 +13,7 @@ Single-cell microscopy analysis software. The core value proposition is tracking
 - **Data storage:** HDF5 via h5py — single `.h5` file per experiment (images, labels, phasor maps, measurements)
 - **Data model:** pandas DataFrames for per-cell measurements (no database)
 - **Segmentation:** Cellpose
-- **Plotting:** pyqtgraph (Qt-native, fast scatter/ROI)
+- **Plotting:** pyqtgraph (Qt-native, fast scatter/ROI); matplotlib is a dep solely as a colormap source for pyqtgraph (e.g. `nipy_spectral` on the phasor histogram)
 - **Image I/O:** tifffile, sdtfile (Becker&Hickl)
 - **Image processing:** scikit-image, scipy, numpy
 
@@ -26,8 +26,9 @@ source .venv/bin/activate
 # Run the app
 python main.py
 
-# Install new dependencies
-pip install <package> && pip freeze > requirements.txt
+# Install new dependencies — add to pyproject.toml [project.dependencies],
+# then reinstall the package (deps live in pyproject.toml, not requirements.txt)
+pip install -e ".[dev]"
 ```
 
 ## Architecture
