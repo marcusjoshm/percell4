@@ -49,5 +49,6 @@ Thumbs.db
 .Rdata
 .Rproj.user/
 
-# Claude
-.claude/
+# Claude — ignore everything except the project-scoped settings.json
+.claude/*
+!.claude/settings.json
