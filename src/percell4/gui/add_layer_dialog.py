@@ -873,17 +873,15 @@ class AddLayerDialog(QDialog):
         self._tcspc_stitch_widget.setVisible(False)
         layout.addWidget(self._tcspc_stitch_widget)
 
-        # ── Rotation (LASX vs TIFF orientation) ─────────────────────
-        rot_row = QHBoxLayout()
-        rot_row.addWidget(QLabel("Rotate stitched array:"))
-        self._tcspc_rotation_combo = QComboBox()
-        self._tcspc_rotation_combo.addItem("None", 0)
-        self._tcspc_rotation_combo.addItem("90° CCW", 1)
-        self._tcspc_rotation_combo.addItem("180°", 2)
-        self._tcspc_rotation_combo.addItem("90° CW", 3)
-        rot_row.addWidget(self._tcspc_rotation_combo)
-        rot_row.addStretch()
-        layout.addLayout(rot_row)
+        # NOTE: rotation control was removed. Rotating /decay corrupts
+        # phasor analysis: compute_phasor applies a 3x3 spatial median
+        # filter (and the GUI wavelet/Filtered toggle adds more spatial
+        # smoothing) — both are location-dependent, so a rotated /decay
+        # produces a different post-filter (g, s) distribution from the
+        # unrotated source even though raw per-pixel decay is preserved.
+        # If you need decay to align visually with TIFF intensity in
+        # napari, rotate the napari layer in the viewer (display-only),
+        # not the underlying /decay bytes.
 
         # ── Debug: write .bin-derived intensity as napari layers ────
         # Off by default — when checked, after Append the dialog computes
@@ -1420,7 +1418,7 @@ class AddLayerDialog(QDialog):
         else:
             tile_config = TileConfig(grid_rows=1, grid_cols=1)
         flim_config = self._tcspc_build_flim_config()
-        rotate_k = int(self._tcspc_rotation_combo.currentData() or 0)
+        rotate_k = 0  # Rotation removed — see _build_tcspc_tab note.
         # Any conflict-row marked for replace forces force=True for that append
         force = any(self._tcspc_replace_state.values()) if hasattr(
             self, "_tcspc_replace_state"
