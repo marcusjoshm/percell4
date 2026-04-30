@@ -532,10 +532,9 @@ cells:
 
   # ── gui/add_layer_dialog.py ─────────────────────────────────────────
   "src/percell4/gui/add_layer_dialog.py.dialog-scroll-when-tall":
-    status: re_implements
-    evidence: "TWO QScrollArea wrappers (lines 172-184 batch tab; 806-820 TCSPC tab) AND the screen-bound resize at lines 71-77 — currently most complete pattern"
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.cap_to_screen + per-tab wrap_in_scroll (Discover TIFFs and TCSPC tabs); donor of the canonical helper (U5 of dialog-scroll-helper-rollout)"
     thread: dialog-scroll-helper-rollout
-    notes: "The screen-bound resize is unique to this file; promote into the canonical helper."
   "src/percell4/gui/add_layer_dialog.py.decay-write-path":
     status: consumes_canonical
     evidence: "Calls add_decay_to_dataset use case at line 1457; doesn't write decay directly"

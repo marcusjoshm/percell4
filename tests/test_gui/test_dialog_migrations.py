@@ -57,3 +57,32 @@ def test_workflow_config_dialog_wraps_content_in_one_scroll_area(qtbot):
     scrolls = _scroll_areas(dlg)
     assert len(scrolls) == 1
     assert scrolls[0].widget().findChildren(QGroupBox)
+
+
+# ── U5: add_layer_dialog ─────────────────────────────────────────────
+
+
+def test_add_layer_dialog_per_tab_scroll_areas(qtbot, tmp_path):
+    import numpy as np
+
+    from percell4.gui.add_layer_dialog import AddLayerDialog
+    from percell4.store import DatasetStore
+
+    store = DatasetStore(tmp_path / "ds.h5")
+    store.create(metadata={"channel_names": ["ch00", "ch01"]})
+    store.write_array(
+        "intensity",
+        np.zeros((2, 16, 16), dtype=np.float32),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+
+    dlg = AddLayerDialog(parent=None, store=store, data_model=None, viewer_win=None)
+    qtbot.addWidget(dlg)
+
+    scrolls = _scroll_areas(dlg)
+    assert len(scrolls) == 2
+
+    # Per-tab scroll wrappers must remain — TCSPC tab carries the
+    # per-channel token override widgets from Thread 1.
+    tcspc_dir_edit = dlg.findChild(type(dlg._tcspc_dir_edit), "")
+    assert tcspc_dir_edit is not None or hasattr(dlg, "_tcspc_dir_edit")

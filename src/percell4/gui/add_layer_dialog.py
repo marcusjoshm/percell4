@@ -41,6 +41,7 @@ from percell4.application.use_cases.add_decay_to_dataset import (
     AppendReport,
     add_decay_to_dataset,
 )
+from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.domain.io.cross_format import (
     IntensityChannel,
     match_bin_to_intensity,
@@ -64,17 +65,8 @@ class AddLayerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add Layer to Dataset")
         self.setMinimumWidth(700)
-        # Cap the dialog height to a fraction of the screen so it never
-        # exceeds the screen in any direction; per-tab scroll areas (TCSPC,
-        # Discover TIFFs) handle content that overflows.
         self.resize(800, 700)
-        if parent is not None and hasattr(parent, "screen"):
-            try:
-                screen_geom = parent.screen().availableGeometry()
-                self.setMaximumHeight(int(screen_geom.height() * 0.9))
-                self.setMaximumWidth(int(screen_geom.width() * 0.9))
-            except Exception:  # noqa: BLE001
-                pass
+        cap_to_screen(self)
 
         self._store = store
         self._data_model = data_model
@@ -169,19 +161,12 @@ class AddLayerDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build_batch_tiff_tab(self) -> QWidget:
-        from qtpy.QtWidgets import QScrollArea
-
         tab = QWidget()
         outer = QVBoxLayout(tab)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        outer.addWidget(scroll)
-
         content = QWidget()
         layout = QVBoxLayout(content)
-        scroll.setWidget(content)
+        outer.addWidget(wrap_in_scroll(content))
 
         # ── Source ──
         src_row = QHBoxLayout()
@@ -803,20 +788,13 @@ class AddLayerDialog(QDialog):
         with per-channel calibration grows past the dialog height once
         an experiment has 3+ channels.
         """
-        from qtpy.QtWidgets import QScrollArea
-
         tab = QWidget()
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        outer.addWidget(scroll)
-
         widget = QWidget()
-        scroll.setWidget(widget)
         layout = QVBoxLayout(widget)
+        outer.addWidget(wrap_in_scroll(widget))
 
         # ── Source directory ────────────────────────────────────────
         dir_row = QHBoxLayout()
