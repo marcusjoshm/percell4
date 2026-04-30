@@ -122,6 +122,55 @@ class CompressMode(StrEnum):
 
 
 @dataclass(frozen=True)
+class ZeroPadOffsetRule:
+    """Match `.bin` channel tokens to TIFF channel tokens by re-padding and offsetting.
+
+    Use case: TIFFs use ``_ch00`` (zero-padded, 0-indexed) and `.bin` uses
+    ``_ch1`` (unpadded, 1-indexed). With ``pad_width=2, offset=1``:
+    bin token "1" → int 1 → minus offset → 0 → padded to width 2 → "00".
+    """
+
+    pad_width: int = 0
+    offset: int = 0
+
+
+@dataclass(frozen=True)
+class BaseStemRule:
+    """Match `.bin` files to TIFF channels by base-stem equality / prefix.
+
+    A TIFF ``Dataset_A_ch00.tif`` has base stem ``Dataset_A`` (channel token
+    stripped). A `.bin` whose stem equals or prefixes that base stem (in
+    either direction) binds to that channel. Ambiguous if multiple channels
+    match.
+    """
+
+
+@dataclass(frozen=True)
+class ExplicitRule:
+    """User-supplied bin-path → channel-name mapping.
+
+    Mapping keys are ``str(Path.resolve())`` — absolute, normalized paths.
+    Tuple-of-tuples to keep the dataclass hashable.
+    """
+
+    mapping: tuple[tuple[str, str], ...] = ()
+
+    def as_dict(self) -> dict[str, str]:
+        return dict(self.mapping)
+
+
+@dataclass(frozen=True)
+class CompositeRule:
+    """Try each sub-rule in order; first match wins; ambiguous propagates."""
+
+    rules: tuple = ()  # tuple of CrossFormatRule variants
+
+
+# Type alias — used in signatures, not at runtime.
+CrossFormatRule = ZeroPadOffsetRule | BaseStemRule | ExplicitRule | CompositeRule
+
+
+@dataclass(frozen=True)
 class FlimConfig:
     """FLIM calibration parameters for a dataset."""
 

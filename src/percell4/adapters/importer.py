@@ -15,7 +15,18 @@ from typing import Any
 import numpy as np
 
 from percell4.domain.io.assembler import assemble_channels, assemble_tiles, project_z
-from percell4.domain.io.models import ScanResult, TileConfig, TokenConfig
+from percell4.domain.io.cross_format import (
+    IntensityChannel,
+    match_bin_to_intensity,
+)
+from percell4.domain.io.models import (
+    BaseStemRule,
+    CompositeRule,
+    ScanResult,
+    TileConfig,
+    TokenConfig,
+    ZeroPadOffsetRule,
+)
 from percell4.adapters.readers import read_tiff
 from percell4.domain.io.scanner import FileScanner
 from percell4.project import ProjectIndex
@@ -193,42 +204,57 @@ def import_dataset(
         bin_dims = flim_params.get("bin_dimensions", {})
         config = token_config or TokenConfig()
 
-        # Build a lookup from each TIFF channel's "base stem" (the stem with
-        # the channel token stripped) to its channel key. A .bin file that
-        # carries no explicit channel token but whose stem matches a TIFF
-        # base stem is FLIM data for that TIFF channel — we want decay/<ch>
-        # to land on the same channel name, not a synthetic ``ch0``.
-        # Example: ``DA Halo 20uL 1.bin`` paired with ``DA Halo 20uL 1_ch00.tif``
-        #          → resolved to channel key ``"00"`` → ``decay/ch00``.
-        tiff_base_stems: dict[str, str] = {}
+        # Build IntensityChannel records (name, token, base_stem) — fed to the
+        # cross-format matcher. ``base_stem`` is the TIFF stem with the channel
+        # token stripped (used by BaseStemRule when a .bin carries no channel
+        # token, e.g. ``DA Halo 20uL 1.bin`` paired with ``DA Halo 20uL 1_ch00.tif``).
+        intensity_channels: list[IntensityChannel] = []
+        seen_tokens: set[str] = set()
         if config.channel:
             for f in intensity_files:
                 ch_tok = f.tokens.get("channel", "")
-                if not ch_tok:
+                if not ch_tok or ch_tok in seen_tokens:
                     continue
-                base = re.sub(config.channel, "", f.path.stem).strip("_- ")
-                if base:
-                    tiff_base_stems.setdefault(base, ch_tok)
+                seen_tokens.add(ch_tok)
+                base = re.sub(config.channel, "", f.path.stem).strip("_- ") or None
+                intensity_channels.append(IntensityChannel(
+                    name=f"ch{ch_tok}",
+                    token=ch_tok,
+                    base_stem=base,
+                ))
 
-        # Parse tokens from .bin filenames (same patterns as TIFFs).
-        # Falls back to TIFF stem matching when no channel token is present.
+        # Match .bin files to intensity channels via the canonical pure-domain
+        # function. The default rule is a Composite that first tries
+        # ZeroPadOffsetRule(0, 0) — exact channel-token equality, the
+        # historical importer behavior — then falls back to BaseStemRule for
+        # .bin files that carry no channel token. The user-microscope case
+        # (TIFF ``_s00_ch00`` ↔ BIN ``s1_ch1`` with offset+1) is enabled by
+        # selecting ZeroPadOffsetRule(2, 1) from the dialog (U4); the importer
+        # default preserves byte-identical behavior with the pre-refactor block.
+        match_rule = CompositeRule(rules=(
+            ZeroPadOffsetRule(pad_width=0, offset=0),
+            BaseStemRule(),
+        ))
+        match_result = match_bin_to_intensity(
+            list(bin_files),
+            intensity_channels,
+            match_rule,
+            config,
+        )
+
+        # Convert MatchResult → bin_by_channel structure the streaming code
+        # expects below. Bin files that bound to a channel use the channel's
+        # token as the key; unmatched/ambiguous bins fall through with empty
+        # token (becoming /decay/ch0) — same fallback the historical code had.
+        token_for_channel = {c.name: c.token for c in intensity_channels}
+        bin_to_token = {
+            b.bin_path: token_for_channel.get(b.channel_name, "")
+            for b in match_result.bindings
+        }
         bin_by_channel: dict[str, dict[int, Path]] = defaultdict(dict)
         for bin_path in bin_files:
             stem = bin_path.stem
-            ch = ""
-            if config.channel:
-                m = re.search(config.channel, stem)
-                if m:
-                    ch = m.group(1)
-            if not ch and tiff_base_stems:
-                # Match by base stem (.bin's full stem == TIFF base stem)
-                ch = tiff_base_stems.get(stem, "")
-                if not ch:
-                    # Or .bin stem prefix-matches a TIFF base stem
-                    for base, ch_tok in tiff_base_stems.items():
-                        if stem.startswith(base) or base.startswith(stem):
-                            ch = ch_tok
-                            break
+            ch = bin_to_token.get(bin_path, "")
             tile_idx = 0
             if config.tile:
                 m = re.search(config.tile, stem)
