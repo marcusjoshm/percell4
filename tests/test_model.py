@@ -51,7 +51,12 @@ def test_set_selection_empty(model, qtbot):
 
 
 def test_clear_resets_state(model, qtbot):
-    """clear() empties DataFrame, clears selection, emits state_changed."""
+    """clear() empties DataFrame, clears selection, emits state_changed.
+
+    Emits a coarse DATASET_CHANGED (data=True, selection=True, filter=True,
+    segmentation=True, mask=True) plus three list-empty events
+    (channel_list, segmentation_list, mask_list) so combos clear cleanly.
+    """
     df = pd.DataFrame({"label": [1, 2], "area": [100, 200]})
     model.set_measurements(df)
     model.set_selection([1])
@@ -63,9 +68,11 @@ def test_clear_resets_state(model, qtbot):
 
     assert model.df.empty
     assert model.selected_ids == []
-    assert len(changes) == 1
-    assert changes[0].data is True
-    assert changes[0].selection is True
+    # One coarse dataset change carrying data + selection, plus three list events
+    assert any(c.data and c.selection for c in changes)
+    assert any(c.channel_list for c in changes)
+    assert any(c.segmentation_list for c in changes)
+    assert any(c.mask_list for c in changes)
 
 
 def test_df_is_read_only_reference(model):
@@ -201,7 +208,12 @@ def test_set_active_mask_no_emit_when_unchanged(model):
 
 
 def test_clear_emits_state_changed(model):
-    """clear() emits exactly one state_changed with all flags True."""
+    """clear() emits a coarse DATASET_CHANGED plus three empty list events.
+
+    The coarse change carries data/selection/filter/segmentation/mask.
+    The three list events let combos clear cleanly when the dataset
+    closes.
+    """
     df = pd.DataFrame({"label": [1], "area": [100]})
     model.set_measurements(df)
     model.set_selection([1])
@@ -211,13 +223,14 @@ def test_clear_emits_state_changed(model):
     changes = _capture_state_changes(model)
     model.clear()
 
-    assert len(changes) == 1
-    sc = changes[0]
-    assert sc.data is True
-    assert sc.selection is True
-    assert sc.filter is True
-    assert sc.segmentation is True
-    assert sc.mask is True
+    coarse = next(
+        (c for c in changes if c.data and c.selection and c.filter
+         and c.segmentation and c.mask), None
+    )
+    assert coarse is not None
+    assert any(c.channel_list for c in changes)
+    assert any(c.segmentation_list for c in changes)
+    assert any(c.mask_list for c in changes)
 
 
 def test_state_changed_emits_exactly_once_per_set_selection(model):

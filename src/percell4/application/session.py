@@ -127,40 +127,47 @@ class Session:
     # ── Mutations ────────────────────────────────────────────
 
     def set_dataset(self, handle: DatasetHandle | None) -> None:
-        """Set the active dataset. Resets selection, filter, active layers, and measurements.
+        """Set the active dataset. Resets selection, filter, and measurements;
+        auto-selects first available channel/segmentation/mask.
 
-        Emits the relevant per-state events (ACTIVE_MASK_CHANGED,
-        ACTIVE_SEGMENTATION_CHANGED, FILTER_CHANGED, SELECTION_CHANGED)
-        when those slots actually changed, so peer views that subscribe
-        to those events (rather than DATASET_CHANGED) drop their stale
-        caches and UI state. Without this, e.g., the phasor plot's
-        "Filter by active mask" checkbox stays checked and pinned to the
-        previous dataset's mask after a dataset switch.
+        Emit ordering: DATASET_CHANGED, then the three list events
+        (CHANNEL_LIST_CHANGED, SEGMENTATION_LIST_CHANGED, MASK_LIST_CHANGED)
+        so subscribers re-list before they look up the new active values,
+        then per-slot ACTIVE_*_CHANGED for slots whose value transitioned
+        (covers both prev-non-None-now-None and prev-None-now-auto-selected).
         """
+        prev_channel = self._active_channel
         prev_segmentation = self._active_segmentation
         prev_mask = self._active_mask
         prev_filter = self._filter_ids
         prev_selection = self._selection
 
         self._dataset = handle
-        self._active_segmentation = None
-        self._active_mask = None
         self._selection = frozenset()
         self._filter_ids = None
         self._measurements = pd.DataFrame()
         self._filtered_df_cache = None
-        # Auto-select first channel BEFORE emitting DATASET_CHANGED,
-        # so subscribers see the active channel already set.
         if handle is not None:
             ch_names = list(handle.metadata.get("channel_names", []))
+            seg_names = list(handle.metadata.get("segmentation_names", []))
+            mask_names = list(handle.metadata.get("mask_names", []))
             self._active_channel = ch_names[0] if ch_names else None
+            self._active_segmentation = seg_names[0] if seg_names else None
+            self._active_mask = mask_names[0] if mask_names else None
         else:
             self._active_channel = None
+            self._active_segmentation = None
+            self._active_mask = None
 
         self._emit(Event.DATASET_CHANGED)
-        if prev_segmentation is not None:
+        self._emit(Event.CHANNEL_LIST_CHANGED)
+        self._emit(Event.SEGMENTATION_LIST_CHANGED)
+        self._emit(Event.MASK_LIST_CHANGED)
+        if prev_channel != self._active_channel:
+            self._emit(Event.ACTIVE_CHANNEL_CHANGED)
+        if prev_segmentation != self._active_segmentation:
             self._emit(Event.ACTIVE_SEGMENTATION_CHANGED)
-        if prev_mask is not None:
+        if prev_mask != self._active_mask:
             self._emit(Event.ACTIVE_MASK_CHANGED)
         if prev_filter is not None:
             self._emit(Event.FILTER_CHANGED)
@@ -221,3 +228,6 @@ class Session:
         self._measurements = pd.DataFrame()
         self._filtered_df_cache = None
         self._emit(Event.DATASET_CHANGED)
+        self._emit(Event.CHANNEL_LIST_CHANGED)
+        self._emit(Event.SEGMENTATION_LIST_CHANGED)
+        self._emit(Event.MASK_LIST_CHANGED)
