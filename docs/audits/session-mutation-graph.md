@@ -254,3 +254,40 @@ session selection fields. The mutation graph is then I1-clean.
 After all three land, every entry in the per-field tables above has class
 in {Selector, Creator, Lifecycle handler}. The "I1 violations" column in
 the summary table is zero across the board.
+
+## Resource-list inventory updates (added 2026-05-01)
+
+Beyond the five selection fields tracked above, the dataset-lifecycle
+plan introduces a sixth axis: the *inventory* of available channels /
+segmentations / masks. Three new Session events
+(`CHANNEL_LIST_CHANGED`, `SEGMENTATION_LIST_CHANGED`, `MASK_LIST_CHANGED`)
+fire whenever the inventory changes within the current dataset.
+
+The central API is `Session.refresh_resource_lists(*, channel_names,
+segmentation_names, mask_names)`. Each kwarg that is non-None replaces
+the corresponding entry in `DatasetHandle.metadata` and emits the
+matching list event. Creators call this between writing the resource
+and calling `set_active_*`, so subscribers re-list before they look up
+the just-written name.
+
+Inventory writers (each fires the matching list event):
+
+| Caller | File:line | Kind | Trigger |
+|---|---|---|---|
+| `Session.set_dataset` | `application/session.py:set_dataset` | all three | dataset load (always fires all three with new inventory) |
+| `Session.clear` | `application/session.py:clear` | all three | dataset close (fires all three with empty inventory) |
+| `SegmentCellsUseCase.finalize` | `application/use_cases/segment_cells.py:94-99` | segmentation | Cellpose finalize |
+| `AcceptThresholdUseCase` | `application/use_cases/accept_threshold.py:66-72` | mask | threshold accept |
+| `add_layer_dialog._write_layer` | `gui/add_layer_dialog.py:_write_layer` | per-kind | TIFF tab Channel/Segmentation/Mask write |
+| `add_layer_dialog` ROI tab | `gui/add_layer_dialog.py:633-640` | segmentation | ROI .json import |
+| `add_layer_dialog` cellpose tab | `gui/add_layer_dialog.py:697-704` | segmentation | `_seg.npy` import |
+| `ThresholdQCController` accept | `gui/threshold_qc.py:756-765` | mask | grouped-threshold final accept |
+| `LauncherWindow._on_phasor_mask_applied` | `interfaces/gui/main_window.py:1063-1069` | mask | Apply Phasor Mask |
+| `DataPanel._on_rename_channel` | `interfaces/gui/task_panels/data_panel.py` | channel | channel rename (Creator-cleanup) |
+| `DataPanel._on_delete_channel` | `interfaces/gui/task_panels/data_panel.py` | channel | channel delete (Creator-cleanup) |
+
+After this inventory, every Creator that mutates the available-resource
+list fires the appropriate list event. The Data tab combos and any
+peer-view that subscribes re-list immediately without an app restart
+(closes Anchor Bug C3 from
+`docs/brainstorms/2026-05-01-dataset-lifecycle-and-resource-list-events-requirements.md`).

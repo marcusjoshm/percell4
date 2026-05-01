@@ -216,6 +216,28 @@ and from Patterns 3 and 5 of
 | `ViewerWindow._on_state_changed` (`gui/viewer.py:274-279`) | Currently handles `change.filter` and `change.selection` only. U10 extends with `change.mask` and `change.segmentation` branches as part of the session → napari one-way push (R8). | **U10** (not a Bug A fix — listed for traceability.) |
 | All other subscribers | Rebind correctly today. | None |
 
+## Resource-list events (added 2026-05-01 by the dataset-lifecycle plan)
+
+The Session event surface gained three list events
+(`CHANNEL_LIST_CHANGED`, `SEGMENTATION_LIST_CHANGED`, `MASK_LIST_CHANGED`)
+that fire whenever the inventory of available channels / segmentations
+/ masks changes within the current dataset. They are distinct from the
+selection events: list events fire when *which ones exist* changes,
+selection events fire when *which one is selected* changes.
+
+Subscribers that re-list combo items (DataPanel) or invalidate
+per-dataset caches (PhasorPlotWindow / DataPlotWindow / CellTableWindow)
+must respond to the relevant list events. The `CellDataModel` bridge
+re-emits each as a `StateChange.{channel_list,segmentation_list,mask_list}`
+flag.
+
+| Subscriber | Channel | Reads | Responds to list events | Currently correct? |
+|---|---|---|---|---|
+| `DataPanel._on_state_changed` (`task_panels/data_panel.py:164-186`) | `state_changed` | active_*, channel_names, segmentation_names, mask_names | `channel_list` → `_populate_channel_combo` + `refresh_management_combos`; `segmentation_list` → `_refresh_seg_combos`; `mask_list` → `_refresh_mask_combos`. List handlers run before the active-* branches so subscribers re-list before they look up the just-written name. | Yes (post-U4 of dataset-lifecycle plan) |
+| `PhasorPlotWindow._on_dataset_changed` (`peer_views/phasor_plot.py`) | `Session.subscribe(DATASET_CHANGED)` | active_mask, G/S maps, intensity, ROIs | Per-dataset caches invalidate on `DATASET_CHANGED`; the list events themselves are not directly consumed (the dataset event subsumes them). Re-derives checkbox state from current active_mask at the end so the prev_mask == new_mask case (overlapping name across datasets) still re-enables the filter. | Yes (post-U5 of dataset-lifecycle plan) |
+| `DataPlotWindow._on_data_changed` / `CellTableWindow._on_data_changed` (`peer_views/data_plot.py`, `peer_views/cell_table.py`) | `Session.subscribe(DATASET_CHANGED, MEASUREMENTS_UPDATED)` | session.df | Both already reset content from the now-empty session.df after `set_dataset`. Not directly consuming list events. | Yes (characterized post-U6) |
+| Future per-module Selector dropdowns | `state_changed` (planned) | active_* + the relevant resource list | Will need to subscribe to the kind's list event for the same combo-refresh contract DataPanel implements. Not added in this iteration (deferred per OQ-3). | n/a |
+
 ## Cross-references
 
 - 5-vector HDF5 staleness compound:
