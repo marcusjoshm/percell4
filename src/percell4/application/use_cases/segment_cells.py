@@ -92,6 +92,11 @@ class SegmentCells:
 
         # Store-before-viewer: write to HDF5 first
         self._repo.write_labels(handle, seg_name, labels)
+        # Refresh inventory before auto-selecting so subscribers re-list
+        # the combos before they look up the just-written name.
+        mask_set = set(self._repo.list_masks(handle))
+        seg_names = [n for n in self._repo.list_labels(handle) if n not in mask_set]
+        self._session.refresh_resource_lists(segmentation_names=seg_names)
         self._session.set_active_segmentation(seg_name)
 
         return SegmentationResult(

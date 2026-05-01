@@ -1061,6 +1061,10 @@ class LauncherWindow(QMainWindow):
             last_name = roi_name
 
         if last_name:
+            if store is not None:
+                self.data_model.session.refresh_resource_lists(
+                    mask_names=store.list_masks(),
+                )
             self.data_model.set_active_mask(last_name)
 
     # ── Analysis + FLIM handlers moved to task panels ──────

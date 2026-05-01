@@ -634,6 +634,9 @@ class AddLayerDialog(QDialog):
             self._store.write_labels(name, labels)
             if self._viewer_win is not None:
                 self._viewer_win.add_labels(labels, name=name)
+            mask_set = set(self._store.list_masks())
+            seg_names = [n for n in self._store.list_labels() if n not in mask_set]
+            self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
             self._data_model.set_active_segmentation(name)
             self.statusBar_msg(f"Imported {n_cells} ROIs as '{name}'")
             self.accept()
@@ -697,6 +700,9 @@ class AddLayerDialog(QDialog):
             self._store.write_labels(name, labels)
             if self._viewer_win is not None:
                 self._viewer_win.add_labels(labels, name=name)
+            mask_set = set(self._store.list_masks())
+            seg_names = [n for n in self._store.list_labels() if n not in mask_set]
+            self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
             self._data_model.set_active_segmentation(name)
             self.statusBar_msg(f"Imported {n_cells} cells as '{name}'")
             self.accept()
@@ -708,7 +714,8 @@ class AddLayerDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _write_layer(self, name: str, layer_type: str, array: np.ndarray) -> None:
-        """Write an array to the store as the specified layer type."""
+        """Write an array to the store as the specified layer type and
+        notify subscribers of the inventory change."""
         if layer_type == "Channel":
             array = array.astype(np.float32)
             try:
@@ -737,11 +744,19 @@ class AddLayerDialog(QDialog):
                     "channel_names": [name],
                     "n_channels": 1,
                 })
+            new_channel_names = list(self._store.metadata.get("channel_names", []))
+            self._data_model.session.refresh_resource_lists(channel_names=new_channel_names)
         elif layer_type == "Segmentation":
             self._store.write_labels(name, array)
+            mask_set = set(self._store.list_masks())
+            seg_names = [n for n in self._store.list_labels() if n not in mask_set]
+            self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
         elif layer_type == "Mask":
             binary = (array > 0).astype(np.uint8)
             self._store.write_mask(name, binary)
+            self._data_model.session.refresh_resource_lists(
+                mask_names=self._store.list_masks(),
+            )
 
     def _refresh_viewer(self) -> None:
         """Refresh the viewer and data tab from the store."""

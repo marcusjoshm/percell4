@@ -255,11 +255,15 @@ class DataPanel(QWidget):
     def _on_model_active_seg_changed(self, name: str) -> None:
         """Sync the Active Segmentation combo to the session's active value.
 
-        Items list is owned by the list-event handler (_refresh_seg_combos);
-        this method only sets currentText. Handles None by clearing the text.
+        Items list is normally owned by the list-event handler
+        (_refresh_seg_combos). The addItem fallback covers in-memory-only
+        Creators (e.g., Create Empty Labels) whose resource is not on disk
+        and therefore not in store.list_labels().
         """
         self._active_seg_combo.blockSignals(True)
-        if name and self._active_seg_combo.findText(name) >= 0:
+        if name:
+            if self._active_seg_combo.findText(name) < 0:
+                self._active_seg_combo.addItem(name)
             self._active_seg_combo.setCurrentText(name)
         else:
             self._active_seg_combo.setCurrentText("")
@@ -269,7 +273,9 @@ class DataPanel(QWidget):
     def _on_model_active_mask_changed(self, name: str) -> None:
         """Sync the Active Mask combo to the session's active value."""
         self._active_mask_combo.blockSignals(True)
-        if name and self._active_mask_combo.findText(name) >= 0:
+        if name:
+            if self._active_mask_combo.findText(name) < 0:
+                self._active_mask_combo.addItem(name)
             self._active_mask_combo.setCurrentText(name)
         else:
             self._active_mask_combo.setCurrentText("")
@@ -451,12 +457,12 @@ class DataPanel(QWidget):
             names = list(meta.get("channel_names", []))
             if old_name in names:
                 names[names.index(old_name)] = new_name
-                meta["channel_names"] = names
             for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
                 old_key = f"{key_prefix}{old_name}"
                 new_key = f"{key_prefix}{new_name}"
                 if old_key in meta:
                     meta[new_key] = meta.pop(old_key)
+            session.refresh_resource_lists(channel_names=names)
             if session.active_channel == old_name:
                 session.set_active_channel(new_name)
 
@@ -592,6 +598,13 @@ class DataPanel(QWidget):
                 k = f"{key_prefix}{name}"
                 if k in meta:
                     del meta[k]
+
+        # Notify subscribers that the channel inventory changed (R4).
+        cur_handle = session.dataset
+        if cur_handle is not None:
+            session.refresh_resource_lists(
+                channel_names=list(cur_handle.metadata.get("channel_names", [])),
+            )
 
         # Clear active-channel selection if it pointed at the deleted one.
         if session.active_channel == name:

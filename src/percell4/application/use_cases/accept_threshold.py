@@ -66,7 +66,11 @@ class AcceptThreshold:
         # Store-before-layer: write to HDF5 first
         self._repo.write_mask(handle, mask_name, mask)
 
-        # Update session
+        # Refresh inventory before auto-selecting so subscribers re-list
+        # the mask combos before they look up the just-written name.
+        self._session.refresh_resource_lists(
+            mask_names=self._repo.list_masks(handle),
+        )
         self._session.set_active_mask(mask_name)
 
         n_positive = int(mask.sum())

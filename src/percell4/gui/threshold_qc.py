@@ -757,6 +757,10 @@ class ThresholdQCController(QObject):
         viewer = self._viewer_win.viewer
         if viewer is not None:
             self._viewer_win.add_mask(combined, name=self._mask_name)
+            if self._store is not None:
+                self._data_model.session.refresh_resource_lists(
+                    mask_names=self._store.list_masks(),
+                )
             self._data_model.set_active_mask(self._mask_name)
 
         n_accepted = sum(1 for gs in self._groups if gs.status == GroupStatus.ACCEPTED)
