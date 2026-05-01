@@ -287,3 +287,40 @@ def test_filtered_df_cache_invalidated_by_set_measurements(model):
     assert model.is_filtered is True
     assert model.filtered_ids == {2}
     assert len(model.filtered_df) == 1
+
+
+class TestStateChangeListFlags:
+    """Verify the three list-event flags bridge through CellDataModel."""
+
+    def test_channel_list_event_emits_state_change_flag(self, model, qtbot):
+        from percell4.application.session import Event
+        changes = []
+        model.state_changed.connect(lambda sc: changes.append(sc))
+        with qtbot.waitSignal(model.state_changed, timeout=1000):
+            model._session._emit(Event.CHANNEL_LIST_CHANGED)
+        assert any(c.channel_list and not c.segmentation_list and not c.mask_list
+                   for c in changes)
+
+    def test_segmentation_list_event_emits_state_change_flag(self, model, qtbot):
+        from percell4.application.session import Event
+        changes = []
+        model.state_changed.connect(lambda sc: changes.append(sc))
+        with qtbot.waitSignal(model.state_changed, timeout=1000):
+            model._session._emit(Event.SEGMENTATION_LIST_CHANGED)
+        assert any(c.segmentation_list and not c.channel_list and not c.mask_list
+                   for c in changes)
+
+    def test_mask_list_event_emits_state_change_flag(self, model, qtbot):
+        from percell4.application.session import Event
+        changes = []
+        model.state_changed.connect(lambda sc: changes.append(sc))
+        with qtbot.waitSignal(model.state_changed, timeout=1000):
+            model._session._emit(Event.MASK_LIST_CHANGED)
+        assert any(c.mask_list and not c.channel_list and not c.segmentation_list
+                   for c in changes)
+
+    def test_state_change_default_flags_false(self):
+        sc = StateChange()
+        assert sc.channel_list is False
+        assert sc.segmentation_list is False
+        assert sc.mask_list is False

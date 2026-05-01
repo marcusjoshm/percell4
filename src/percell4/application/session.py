@@ -26,6 +26,9 @@ class Event(Enum):
     ACTIVE_MASK_CHANGED = auto()
     ACTIVE_CHANNEL_CHANGED = auto()
     MEASUREMENTS_UPDATED = auto()
+    CHANNEL_LIST_CHANGED = auto()
+    SEGMENTATION_LIST_CHANGED = auto()
+    MASK_LIST_CHANGED = auto()
 
 
 # Callback type: no arguments, no return value

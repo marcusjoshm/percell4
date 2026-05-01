@@ -342,3 +342,38 @@ class TestSessionMeasurements:
         session.set_measurements(pd.DataFrame({"label": [1]}))
         session.clear()
         assert session.df.empty
+
+
+class TestSessionListEvents:
+    """Verify the three resource-list events plumb through correctly."""
+
+    def test_channel_list_event_subscribable(self):
+        session = Session()
+        calls = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: calls.append(1))
+        session._emit(Event.CHANNEL_LIST_CHANGED)
+        assert calls == [1]
+
+    def test_segmentation_list_event_subscribable(self):
+        session = Session()
+        calls = []
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: calls.append(1))
+        session._emit(Event.SEGMENTATION_LIST_CHANGED)
+        assert calls == [1]
+
+    def test_mask_list_event_subscribable(self):
+        session = Session()
+        calls = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: calls.append(1))
+        session._emit(Event.MASK_LIST_CHANGED)
+        assert calls == [1]
+
+    def test_list_events_independent_of_active_events(self):
+        session = Session()
+        list_calls = []
+        active_calls = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: list_calls.append(1))
+        session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: active_calls.append(1))
+        session._emit(Event.MASK_LIST_CHANGED)
+        assert list_calls == [1]
+        assert active_calls == []
