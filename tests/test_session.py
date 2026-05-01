@@ -506,3 +506,66 @@ class TestSessionAutoSelect:
         session.subscribe(Event.MASK_LIST_CHANGED, lambda: list_events.append("mask"))
         session.clear()
         assert list_events == ["ch", "seg", "mask"]
+
+
+class TestSessionRefreshResourceLists:
+    """Verify Session.refresh_resource_lists() API (R2)."""
+
+    def test_no_dataset_is_noop(self):
+        session = Session()
+        events = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: events.append(1))
+        session.refresh_resource_lists(mask_names=["new_mask"])
+        assert events == []
+
+    def test_updates_metadata_and_fires_event(self):
+        session = Session()
+        handle = DatasetHandle(
+            path="/tmp/x.h5",
+            metadata={"channel_names": ["ch1"], "mask_names": []},
+        )
+        session.set_dataset(handle)
+        events = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: events.append(1))
+        session.refresh_resource_lists(mask_names=["SG_mask"])
+        assert events == [1]
+        assert session.dataset.metadata["mask_names"] == ["SG_mask"]
+
+    def test_only_specified_kinds_fire(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={}))
+        ch_events = []
+        seg_events = []
+        mask_events = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: ch_events.append(1))
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: seg_events.append(1))
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: mask_events.append(1))
+        session.refresh_resource_lists(mask_names=["m1"])
+        assert ch_events == []
+        assert seg_events == []
+        assert mask_events == [1]
+
+    def test_three_kinds_at_once(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={}))
+        events = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: events.append("ch"))
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: events.append("seg"))
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: events.append("mask"))
+        session.refresh_resource_lists(
+            channel_names=["c1"], segmentation_names=["s1"], mask_names=["m1"]
+        )
+        assert events == ["ch", "seg", "mask"]
+        assert session.dataset.metadata["channel_names"] == ["c1"]
+        assert session.dataset.metadata["segmentation_names"] == ["s1"]
+        assert session.dataset.metadata["mask_names"] == ["m1"]
+
+    def test_none_means_skip(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(
+            path="/tmp/x.h5",
+            metadata={"mask_names": ["original"]},
+        ))
+        session.refresh_resource_lists(channel_names=["c1"])
+        # mask_names unchanged
+        assert session.dataset.metadata["mask_names"] == ["original"]

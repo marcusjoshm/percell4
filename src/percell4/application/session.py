@@ -217,6 +217,36 @@ class Session:
         self._active_channel = name
         self._emit(Event.ACTIVE_CHANNEL_CHANGED)
 
+    def refresh_resource_lists(
+        self,
+        *,
+        channel_names: list[str] | None = None,
+        segmentation_names: list[str] | None = None,
+        mask_names: list[str] | None = None,
+    ) -> None:
+        """Update the dataset's resource inventory and emit list events.
+
+        Called by Creators after writing a new channel / segmentation / mask
+        so subscribers (combos, peer-view caches) can re-list. Each kwarg
+        that is non-None replaces the corresponding entry in the current
+        DatasetHandle.metadata and fires the matching list event. None
+        means "skip this kind."
+
+        No-op when no dataset is loaded.
+        """
+        if self._dataset is None:
+            return
+        md = self._dataset.metadata
+        if channel_names is not None:
+            md["channel_names"] = list(channel_names)
+            self._emit(Event.CHANNEL_LIST_CHANGED)
+        if segmentation_names is not None:
+            md["segmentation_names"] = list(segmentation_names)
+            self._emit(Event.SEGMENTATION_LIST_CHANGED)
+        if mask_names is not None:
+            md["mask_names"] = list(mask_names)
+            self._emit(Event.MASK_LIST_CHANGED)
+
     def clear(self) -> None:
         """Reset all state. Called when closing a dataset."""
         self._dataset = None
