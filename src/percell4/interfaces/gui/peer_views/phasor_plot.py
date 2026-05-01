@@ -689,6 +689,14 @@ class PhasorPlotWindow(QMainWindow):
             self._hist_item = None
         self._status.showMessage("No phasor computed")
 
+        # Re-derive checkbox state from current session.active_mask. When
+        # both the old and new dataset have the same mask name (e.g.,
+        # "SG_mask" in both), Session.set_dataset suppresses the
+        # ACTIVE_MASK_CHANGED event because prev_mask == new_mask. But the
+        # underlying mask data is from a different dataset, so the
+        # checkbox must still re-enable.
+        self._on_active_mask_changed()
+
     def _on_active_mask_changed(self) -> None:
         """Update mask-filter checkbox enabled state when active_mask flips.
 
