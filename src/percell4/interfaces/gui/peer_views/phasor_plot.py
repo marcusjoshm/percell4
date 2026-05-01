@@ -357,8 +357,10 @@ class PhasorPlotWindow(QMainWindow):
             w.cached_mask = None
         self._selected_roi_index = None
         self._colormap_dirty = True
-        self._session.set_active_mask(None)
         self._refresh_roi_list()
+        self._on_roi_list_selection(self._roi_list.currentRow())
+        if not self._roi_widgets:
+            self._refresh_histogram()
         self._preview_timer.start()
 
     def _create_roi_widget(self, phasor_roi: PhasorROI) -> None:
@@ -402,6 +404,15 @@ class PhasorPlotWindow(QMainWindow):
         """User selected a different ROI in the list."""
         if row < 0 or row >= len(self._roi_widgets):
             self._selected_roi_index = None
+            self._name_edit.blockSignals(True)
+            self._name_edit.setText("")
+            self._name_edit.blockSignals(False)
+            self._angle_spin.blockSignals(True)
+            self._angle_spin.setValue(0)
+            self._angle_spin.blockSignals(False)
+            self._vis_check.blockSignals(True)
+            self._vis_check.setChecked(False)
+            self._vis_check.blockSignals(False)
             return
         self._selected_roi_index = row
         roi = self._roi_widgets[row].phasor_roi
