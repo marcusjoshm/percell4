@@ -39,6 +39,18 @@ Key pattern: `CellDataModel` holds a pandas DataFrame (one row per cell) and emi
 
 Heavy computation (Cellpose, etc.) runs in QThread workers to avoid freezing the UI.
 
+## GUI state ownership
+
+Every interactive UI element is exactly one of three classes:
+
+- **Selector** — its purpose is to let the user pick a session field. Reads and writes `session.active_*` / `filter_ids` / `selection`. Does not write new resources.
+- **Creator** — writes a new channel/segmentation/mask/measurement resource into the dataset and auto-selects it. Reads and writes session.
+- **Action** — does something else. Reads session, never writes it.
+
+The five session selection fields — `active_channel`, `active_segmentation`, `active_mask`, `filter_ids`, `selection` — may be mutated only by Selectors and Creators. napari → session is forbidden for layer-list selection events; session → napari is a one-way controlled push from `ViewerWindow._on_state_changed`. Keystrokes that conflict with napari natives bind on the level above the conflict in napari's keymap chain (e.g., `M` → `Labels.bind_key`, not `viewer.bind_key`).
+
+Living artifacts in `docs/audits/`: `gui-element-classification.yaml`, `session-mutation-graph.md`, `subscriber-rebind-matrix.md`, `keystroke-binding-audit.md`.
+
 ## Documentation Rules
 
 - Per-module CLAUDE.md files describe current state only — never plans, never history

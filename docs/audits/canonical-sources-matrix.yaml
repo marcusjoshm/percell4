@@ -52,6 +52,18 @@ canonical_sources:
     solution_doc: docs/solutions/ui-bugs/napari-mask-layer-misclassified-as-segmentation.md
     canonical_file: src/percell4/store.py
     status: canonical_clean
+  - slug: gui-action-contract-exhaustiveness
+    solution_doc: docs/solutions/architecture-patterns/gui-action-contract-exhaustiveness.md
+    canonical_file: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    status: pre_canonical
+  - slug: keystroke-binding-on-napari-viewer
+    solution_doc: docs/solutions/architecture-patterns/keystroke-binding-on-napari-viewer.md
+    canonical_file: src/percell4/gui/viewer.py
+    status: pre_canonical
+  - slug: session-to-napari-one-way-push
+    solution_doc: docs/solutions/architecture-patterns/session-to-napari-one-way-push.md
+    canonical_file: src/percell4/gui/viewer.py
+    status: pre_canonical
 
 # ── T1 file scope ──────────────────────────────────────────────────────
 # R2 path corrections applied:

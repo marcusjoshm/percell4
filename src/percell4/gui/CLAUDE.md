@@ -1,41 +1,46 @@
 # src/percell4/gui/
 
-Qt GUI for PerCell4. All windows share a single `CellDataModel` and react to
-its `state_changed` signal.
+Qt + napari support for PerCell4. The launcher and standalone peer-view
+windows live under `interfaces/gui/`; this subpackage holds the napari
+viewer adapter, dialogs, segmentation panels, and the Qt driver for batch
+workflows. All components share a single `CellDataModel` and react to its
+`state_changed` signal.
 
-## Windows
+## Viewer
 
-- `launcher.py` — `LauncherWindow`. The hub: sidebar of categories, stacked
-  content area, status bar. Creates and manages every other window. Owns
-  dataset loading, measurement runs, filter controls, export actions, and
-  plugin launching. Large (~2.5k lines) — a deliberate god object for now.
-  Structurally conforms to `percell4.workflows.host.WorkflowHost` — see the
-  "Batch workflow host API" section near the bottom of the file for the
-  public surface batch runners rely on (`set_workflow_locked`,
-  `close_child_windows`, `restore_child_windows`, etc.).
-- `viewer.py` — `ViewerWindow` wraps a `napari.Viewer`. Renders the
+- `viewer.py` — `ViewerWindow` wraps `napari.Viewer`. Renders the
   selection + filter highlighting via `DirectLabelColormap` (single code
-  path handling all four combinations of filter/selection state).
-- `data_plot.py` — `DataPlotWindow`. pyqtgraph scatter plot with X/Y axis
-  dropdowns, two-layer rendering (background + highlights), click/shift-drag
-  selection.
-- `cell_table.py` — `CellTableWindow`. `QTableView` backed by
-  `PandasTableModel` + `FilterableProxyModel` for row-level filtering.
-- `phasor_plot.py` — `PhasorPlotWindow`. 2D phasor histogram (pyqtgraph
-  ImageItem) with draggable ellipse ROIs, debounced mask preview pushed
-  into the napari viewer, and "Apply as Mask" commit action.
+  path handling all four combinations of filter/selection state). Hosts
+  the session → napari one-way push (`_on_state_changed` extends to
+  `change.mask` / `change.segmentation` via `_find_layer_by_name_and_type`,
+  guarded by `_is_originator`). Owns the `multi_select_requested` Qt signal
+  and the process-wide `Labels.bind_key("M")` registration plus per-Labels-
+  layer-instance binding (because napari's `action_manager` re-binds
+  `napari:new_label` at every layer add).
 
-## Dialogs and panels
+## Dialogs
 
 - `add_layer_dialog.py` — add existing layers from the HDF5 file to the
-  current dataset (flat or per-dataset discovery).
+  current dataset (flat or per-dataset discovery; TIFF / batch / TCSPC /
+  ROI / cellpose tabs).
 - `import_dialog.py` — TIFF → HDF5 import wizard with token config.
 - `compress_dialog.py` — batch TIFF dataset compression (multi-dataset
   discovery, progress).
 - `export_images_dialog.py` — export TIFF layers from the current dataset.
-- `segmentation_panel.py` — Cellpose run controls, inline in launcher.
+
+## Inline panels
+
+- `segmentation_panel.py` — Cellpose run controls and manual-edit UX.
+  Creator path: `Create Empty Labels` writes `"manual"` segmentation and
+  auto-selects.
 - `grouped_seg_panel.py` + `threshold_qc.py` — grouped-segmentation flow:
   cluster cells by a metric, interactively QC thresholds per group.
+  Threshold-QC accept is a Creator: writes the grouped-thresh mask and
+  auto-selects.
+- `multi_select.py` — modal multi-label selection tool
+  (`MultiLabelSelectController`, `StagingBuffer`, dock-window-scoped
+  Ctrl+Return / Ctrl+Enter / Esc). The keystroke that *opens* the tool
+  is `M`, bound on `Labels` keymaps from `viewer.py`.
 
 ## Infrastructure
 
@@ -43,6 +48,8 @@ its `state_changed` signal.
   `ACCENT`, etc.) and the global Fusion-style stylesheet. Every GUI file
   imports constants from here; no hardcoded hex colors elsewhere.
 - `workers.py` — `QThread` workers for Cellpose and other long-running ops.
+- `tcspc_tab_state.py` — TCSPC import tab state.
+- `_dialog_utils.py`, `torch_error.py` — small shared utilities.
 
 ## Subpackages
 
