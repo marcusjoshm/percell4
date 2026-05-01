@@ -164,6 +164,7 @@ class PhasorPlotWindow(QMainWindow):
             self._session.subscribe(
                 Event.ACTIVE_MASK_CHANGED, self._on_active_mask_changed
             ),
+            self._session.subscribe(Event.DATASET_CHANGED, self._on_dataset_changed),
         ]
         # Sync checkbox state for whatever mask is already active when the
         # window is created (e.g., re-opening the phasor plot after a
@@ -357,8 +358,10 @@ class PhasorPlotWindow(QMainWindow):
             w.cached_mask = None
         self._selected_roi_index = None
         self._colormap_dirty = True
-        self._session.set_active_mask(None)
         self._refresh_roi_list()
+        self._on_roi_list_selection(self._roi_list.currentRow())
+        if not self._roi_widgets:
+            self._refresh_histogram()
         self._preview_timer.start()
 
     def _create_roi_widget(self, phasor_roi: PhasorROI) -> None:
@@ -402,6 +405,15 @@ class PhasorPlotWindow(QMainWindow):
         """User selected a different ROI in the list."""
         if row < 0 or row >= len(self._roi_widgets):
             self._selected_roi_index = None
+            self._name_edit.blockSignals(True)
+            self._name_edit.setText("")
+            self._name_edit.blockSignals(False)
+            self._angle_spin.blockSignals(True)
+            self._angle_spin.setValue(0)
+            self._angle_spin.blockSignals(False)
+            self._vis_check.blockSignals(True)
+            self._vis_check.setChecked(False)
+            self._vis_check.blockSignals(False)
             return
         self._selected_roi_index = row
         roi = self._roi_widgets[row].phasor_roi
@@ -627,6 +639,63 @@ class PhasorPlotWindow(QMainWindow):
     def _on_filter_changed(self) -> None:
         """Handle filter changes — debounced histogram refresh."""
         self._filter_timer.start()
+
+    def _on_dataset_changed(self) -> None:
+        """Reset per-dataset caches and ROIs when the active dataset switches.
+
+        ROIs are spatial regions on a specific dataset's phasor coordinate
+        space; carrying them across loads has no user-validated semantics
+        (per the dataset-lifecycle plan's OQ-1). All per-dataset caches
+        invalidate; checkboxes reset; the histogram re-derives from the
+        next compute_phasor call.
+        """
+        # Tear down ROI graphics
+        for widget in list(self._roi_widgets):
+            self._plot.removeItem(widget.roi)
+            self._plot.removeItem(widget.curve)
+        self._roi_widgets.clear()
+        self._selected_roi_index = None
+        self._colormap_dirty = True
+        self._preview_colormap = None
+        self._refresh_roi_list()
+        self._on_roi_list_selection(-1)  # clears Selected ROI panel widgets
+
+        # Invalidate per-dataset coordinate maps and intensity caches
+        self._g_map = None
+        self._s_map = None
+        self._g_map_unfiltered = None
+        self._s_map_unfiltered = None
+        self._intensity = None
+        self._labels = None
+        self._labels_flat = None
+        self._total_valid_pixels = 0
+        self._active_mask_array = None
+        self._active_mask_flat = None
+
+        # Reset checkbox states. _on_active_mask_changed will re-enable
+        # the mask-filter checkbox if the new dataset auto-selected a mask.
+        self._filtered_check.blockSignals(True)
+        self._filtered_check.setChecked(False)
+        self._filtered_check.setEnabled(False)
+        self._filtered_check.blockSignals(False)
+        self._mask_filter_check.blockSignals(True)
+        self._mask_filter_check.setChecked(False)
+        self._mask_filter_check.blockSignals(False)
+        self._mask_filter_check.setEnabled(False)
+
+        # Clear the histogram and reset the status bar to the no-data state
+        if self._hist_item is not None:
+            self._plot.removeItem(self._hist_item)
+            self._hist_item = None
+        self._status.showMessage("No phasor computed")
+
+        # Re-derive checkbox state from current session.active_mask. When
+        # both the old and new dataset have the same mask name (e.g.,
+        # "SG_mask" in both), Session.set_dataset suppresses the
+        # ACTIVE_MASK_CHANGED event because prev_mask == new_mask. But the
+        # underlying mask data is from a different dataset, so the
+        # checkbox must still re-enable.
+        self._on_active_mask_changed()
 
     def _on_active_mask_changed(self) -> None:
         """Update mask-filter checkbox enabled state when active_mask flips.

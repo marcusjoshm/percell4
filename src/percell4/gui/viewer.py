@@ -7,8 +7,9 @@ colormaps, opacity, blending, editing tools, and dims slider.
 from __future__ import annotations
 
 import logging
+import weakref
 
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import QObject, QSettings, Signal
 
 from percell4.model import CellDataModel
 
@@ -42,6 +43,114 @@ CHANNEL_COLORMAPS = {
 _COLOR_CYCLE = ["green", "magenta", "cyan", "yellow", "red", "blue"]
 
 
+# ── Module-level registry for the napari `M` keymap handler ────────
+#
+# napari's `Labels.bind_key("M", ...)` rewrites `Labels.class_keymap`
+# process-wide; the handler receives the Labels instance, not the
+# `ViewerWindow` that owns it. We keep a WeakSet of live ViewerWindows
+# and pick the one whose napari Viewer contains the firing Labels layer.
+# A WeakSet — not a dict — so closed-then-GC'd ViewerWindows drop out
+# without bookkeeping. Resolution is O(N_viewers); the launcher creates
+# one ViewerWindow, so N is effectively 1.
+_VIEWER_WINDOWS: "weakref.WeakSet[ViewerWindow]" = weakref.WeakSet()
+# Subscribers (typically LauncherWindow) interested in `M` events.
+# Each is a callable taking the originating `ViewerWindow`.
+# Stored as a list of weak method refs so a closed launcher drops out.
+_M_SUBSCRIBERS: list[weakref.WeakMethod] = []
+_M_BIND_KEY_REGISTERED = False
+
+
+def subscribe_multi_select_requested(slot) -> None:
+    """Register `slot` (a bound method) to run on every `M` keystroke.
+
+    Use this from `LauncherWindow.__init__` — it survives the test
+    fixture's direct ``launcher._windows["viewer"] = viewer_win`` shim
+    that bypasses the lazy viewer-construction wiring.
+    """
+    _prune_dead_subscribers()
+    ref = weakref.WeakMethod(slot)
+    _M_SUBSCRIBERS.append(ref)
+
+
+def _prune_dead_subscribers() -> None:
+    _M_SUBSCRIBERS[:] = [r for r in _M_SUBSCRIBERS if r() is not None]
+
+
+def _dispatch_multi_select_for_viewer(vw: "ViewerWindow") -> None:
+    """Emit the `multi_select_requested` signal and run module-level
+    subscribers. Shared by the Labels-active and viewer-level paths.
+
+    Subscribers whose underlying QObject has been deleted on the C++
+    side (zombie WeakMethod target) are caught and dropped; this
+    matters across pytest cases that build and tear down LauncherWindow
+    instances within the same process."""
+    vw.multi_select_requested.emit()
+    _prune_dead_subscribers()
+    dead: list[weakref.WeakMethod] = []
+    for ref in list(_M_SUBSCRIBERS):
+        slot = ref()
+        if slot is None:
+            continue
+        try:
+            slot()
+        except RuntimeError:
+            dead.append(ref)
+    for ref in dead:
+        try:
+            _M_SUBSCRIBERS.remove(ref)
+        except ValueError:
+            pass
+
+
+def _on_m_keystroke_labels(layer):
+    """Napari `Labels.class_keymap['M']` handler — fires when a Labels
+    layer is the active layer. Walks `_VIEWER_WINDOWS` to find the
+    owning ViewerWindow.
+
+    Always claims the keystroke (returns None) so napari's native
+    `new_label` action never fires while PerCell4 owns the embed.
+    """
+    for vw in list(_VIEWER_WINDOWS):
+        viewer = vw._viewer
+        if viewer is None:
+            continue
+        try:
+            if layer in viewer.layers:
+                _dispatch_multi_select_for_viewer(vw)
+                return
+        except Exception:  # noqa: BLE001
+            logger.debug("error checking layers for M (labels)", exc_info=True)
+
+
+def _on_m_keystroke_viewer(viewer):
+    """Napari `Viewer.class_keymap['M']` handler — fires when no Labels
+    layer is active (image-only scene, or no layers at all). Required
+    so the no-labels-layer precondition surfaces a per-cause status
+    message instead of silently consuming the keystroke."""
+    for vw in list(_VIEWER_WINDOWS):
+        if vw._viewer is viewer:
+            _dispatch_multi_select_for_viewer(vw)
+            return
+
+
+def _register_m_bind_key_once() -> None:
+    """Register the `M` handlers on `Labels.class_keymap` and
+    `Viewer.class_keymap` exactly once per process.
+
+    Two bindings because napari's keymap chain only consults the active
+    layer's class_keymap; the viewer-level binding picks up the
+    no-labels-layer case where Labels.class_keymap is never visited."""
+    global _M_BIND_KEY_REGISTERED
+    if _M_BIND_KEY_REGISTERED:
+        return
+    from napari import Viewer
+    from napari.layers import Labels
+
+    Labels.bind_key("M", _on_m_keystroke_labels, overwrite=True)
+    Viewer.bind_key("M", _on_m_keystroke_viewer, overwrite=True)
+    _M_BIND_KEY_REGISTERED = True
+
+
 def _colormap_for_channel(name: str, color_index: int = 0) -> tuple[str, int]:
     """Auto-detect colormap from channel name, or cycle through distinct colors.
 
@@ -56,7 +165,7 @@ def _colormap_for_channel(name: str, color_index: int = 0) -> tuple[str, int]:
     return color, color_index + 1
 
 
-class ViewerWindow:
+class ViewerWindow(QObject):
     """Wraps napari's own window for image viewing.
 
     Napari's built-in UI is fully available: layer list, layer controls
@@ -67,7 +176,15 @@ class ViewerWindow:
     If the user closes the napari window, it is recreated on the next show().
     """
 
+    # Emitted when the user presses `M` on the napari canvas. The
+    # launcher subscribes and runs its `_on_multi_select` slot. Bound
+    # via `Labels.bind_key`, which beats napari's native `new_label`
+    # action because `Labels.class_keymap` is checked before any
+    # viewer-level keymap.
+    multi_select_requested = Signal()
+
     def __init__(self, data_model: CellDataModel) -> None:
+        super().__init__()
         self.data_model = data_model
         self._viewer = None
         self._qt_window = None
@@ -78,6 +195,7 @@ class ViewerWindow:
         self._hidden_mask_layers: dict[str, float] = {}  # {layer_name: original_opacity}
         # Held so Qt doesn't GC the multi-select controller mid-session.
         self._multi_select_controller = None
+        _VIEWER_WINDOWS.add(self)
 
     def _is_alive(self) -> bool:
         """Check if the napari Qt window still exists (not deleted by Qt)."""
@@ -100,6 +218,11 @@ class ViewerWindow:
         self._qt_window = None
 
         import napari
+
+        # Install the process-wide `M` handler before any napari Viewer
+        # exists so `Labels.class_keymap` already wins over the native
+        # new_label action by the time a Labels layer is added.
+        _register_m_bind_key_once()
 
         self._viewer = napari.Viewer(
             title="PerCell4 — Viewer",
@@ -246,6 +369,13 @@ class ViewerWindow:
         layer = event.value
         if isinstance(layer, napari.layers.Labels):
             layer.events.selected_label.connect(self._on_label_selected)
+            # Bind `M` per-instance so it beats both `Labels.class_keymap`
+            # (which napari's action_manager hijacks back to `new_label`
+            # whenever a Labels layer is registered) and `viewer.keymap`.
+            # Per the napari keymap chain `[user_keymap, layer.keymap,
+            # layer.class_keymap, viewer.keymap, viewer.class_keymap]`,
+            # the per-instance `keymap` wins.
+            layer.bind_key("M", _on_m_keystroke_labels, overwrite=True)
 
     def _on_label_selected(self, event) -> None:
         """Forward label selection to CellDataModel."""
@@ -277,6 +407,60 @@ class ViewerWindow:
             return
         if change.filter or change.selection:
             self._update_label_display()
+        if change.mask:
+            self._push_active_layer_to_napari(
+                self.data_model.session.active_mask, LAYER_TYPE_MASK
+            )
+        if change.segmentation:
+            self._push_active_layer_to_napari(
+                self.data_model.session.active_segmentation,
+                LAYER_TYPE_SEGMENTATION,
+            )
+
+    def _push_active_layer_to_napari(
+        self, layer_name: str | None, percell_type: str
+    ) -> None:
+        """Reflect a session active_mask/active_segmentation write into napari.
+
+        Sets ``viewer.layers.selection.active`` to the layer matching
+        ``layer_name`` and ``percell_type``. No-op if the viewer is torn down,
+        the name is empty, or no matching layer exists. Guarded by
+        ``_is_originator`` so the napari side-effect cannot loop back into
+        session via any future bidirectional wiring.
+        """
+        if not self._is_alive() or self._viewer is None:
+            return
+        if not layer_name:
+            return
+        layer = self._find_layer_by_name_and_type(layer_name, percell_type)
+        if layer is None:
+            logger.debug(
+                "no napari layer matches name=%r percell_type=%r",
+                layer_name,
+                percell_type,
+            )
+            return
+        self._is_originator = True
+        try:
+            self._viewer.layers.selection.active = layer
+        finally:
+            self._is_originator = False
+
+    def _find_layer_by_name_and_type(self, name: str, percell_type: str):
+        """Find a Labels layer whose ``name`` and ``metadata[PERCELL_TYPE_KEY]``
+        match the requested values. Returns the layer or ``None``."""
+        import napari
+
+        if self._viewer is None:
+            return None
+        for layer in self._viewer.layers:
+            if not isinstance(layer, napari.layers.Labels):
+                continue
+            if layer.name != name:
+                continue
+            if layer.metadata.get(PERCELL_TYPE_KEY) == percell_type:
+                return layer
+        return None
 
     def _update_label_display(self) -> None:
         """Update labels layer display based on current selection and filter.
@@ -534,17 +718,29 @@ class ViewerWindow:
         if _OVERLAY_LAYER_NAME in self._viewer.layers:
             del self._viewer.layers[_OVERLAY_LAYER_NAME]
 
-    def launch_multi_select_tool(self, launcher) -> bool:
+    def launch_multi_select_tool(self, launcher) -> str:
         """Open the modal multi-label selection tool.
 
         Constructs a :class:`MultiLabelSelectController` and retains a
-        reference so Qt doesn't GC it mid-session. Returns False if
-        the tool could not be installed (no labels layer, workflow
-        already locked, viewer not alive).
+        reference so Qt doesn't GC it mid-session.
+
+        Returns a per-cause result string:
+          - ``"ok"`` — controller installed and shown.
+          - ``"viewer_not_alive"`` — napari Qt window is gone.
+          - ``"workflow_locked"`` — another batch tool owns the lock.
+          - ``"no_labels_layer"`` — no Labels layer matches the active
+            segmentation (or there is none at all).
         """
         from percell4.gui.multi_select import MultiLabelSelectController
 
         self._ensure_viewer()
+        if not self.is_viewer_alive():
+            return "viewer_not_alive"
+        if getattr(launcher, "is_workflow_locked", False):
+            return "workflow_locked"
+        if self.active_labels_layer_or_none() is None:
+            return "no_labels_layer"
+
         # Tear down any previous controller before opening a new one.
         prev = self._multi_select_controller
         if prev is not None:
@@ -561,6 +757,8 @@ class ViewerWindow:
         )
         ok = controller.show()
         if not ok:
-            return False
+            # Preconditions passed above but the controller's own show
+            # check refused — surface a generic reason for resilience.
+            return "viewer_not_alive"
         self._multi_select_controller = controller
-        return True
+        return "ok"

@@ -22,6 +22,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.domain.io.models import TileConfig, TokenConfig
+from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 
 
 class ImportDialog(QDialog):
@@ -37,23 +38,17 @@ class ImportDialog(QDialog):
         self.setWindowTitle("Import Dataset")
         self.setMinimumWidth(500)
         self.resize(500, 500)
+        cap_to_screen(self)
         self._project_dir = project_dir
 
         self._build_ui()
 
     def _build_ui(self) -> None:
-        from qtpy.QtWidgets import QScrollArea
-
         outer_layout = QVBoxLayout(self)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        outer_layout.addWidget(scroll)
-
         content = QWidget()
-        scroll.setWidget(content)
         layout = QVBoxLayout(content)
+        outer_layout.addWidget(wrap_in_scroll(content))
 
         # ── Source directory ──────────────────────────────────
         src_group = QGroupBox("Source")

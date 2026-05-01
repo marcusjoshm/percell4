@@ -16,7 +16,10 @@ from qtpy.QtWidgets import (
     QLineEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
+
+from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 
 
 class ExportImagesDialog(QDialog):
@@ -31,6 +34,7 @@ class ExportImagesDialog(QDialog):
         self.setWindowTitle("Export Images")
         self.setMinimumWidth(450)
         self.resize(500, 500)
+        cap_to_screen(self)
 
         self._store = store
         self._channel_checks: list[tuple[QCheckBox, str, int]] = []
@@ -40,7 +44,11 @@ class ExportImagesDialog(QDialog):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        outer.addWidget(wrap_in_scroll(content))
 
         # Output folder
         folder_row = QHBoxLayout()

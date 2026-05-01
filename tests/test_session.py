@@ -342,3 +342,230 @@ class TestSessionMeasurements:
         session.set_measurements(pd.DataFrame({"label": [1]}))
         session.clear()
         assert session.df.empty
+
+
+class TestSessionListEvents:
+    """Verify the three resource-list events plumb through correctly."""
+
+    def test_channel_list_event_subscribable(self):
+        session = Session()
+        calls = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: calls.append(1))
+        session._emit(Event.CHANNEL_LIST_CHANGED)
+        assert calls == [1]
+
+    def test_segmentation_list_event_subscribable(self):
+        session = Session()
+        calls = []
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: calls.append(1))
+        session._emit(Event.SEGMENTATION_LIST_CHANGED)
+        assert calls == [1]
+
+    def test_mask_list_event_subscribable(self):
+        session = Session()
+        calls = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: calls.append(1))
+        session._emit(Event.MASK_LIST_CHANGED)
+        assert calls == [1]
+
+    def test_list_events_independent_of_active_events(self):
+        session = Session()
+        list_calls = []
+        active_calls = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: list_calls.append(1))
+        session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: active_calls.append(1))
+        session._emit(Event.MASK_LIST_CHANGED)
+        assert list_calls == [1]
+        assert active_calls == []
+
+
+class TestSessionAutoSelect:
+    """Verify set_dataset auto-selects first available channel/seg/mask (R3)."""
+
+    def test_auto_selects_all_three_slots(self):
+        session = Session()
+        handle = DatasetHandle(
+            path="/tmp/x.h5",
+            metadata={
+                "channel_names": ["mNG", "CA-SiR"],
+                "segmentation_names": ["cellpose", "manual"],
+                "mask_names": ["SG_mask"],
+            },
+        )
+        session.set_dataset(handle)
+        assert session.active_channel == "mNG"
+        assert session.active_segmentation == "cellpose"
+        assert session.active_mask == "SG_mask"
+
+    def test_empty_segmentation_list_yields_none(self):
+        session = Session()
+        handle = DatasetHandle(
+            path="/tmp/x.h5",
+            metadata={
+                "channel_names": ["mNG"],
+                "segmentation_names": [],
+                "mask_names": ["SG_mask"],
+            },
+        )
+        session.set_dataset(handle)
+        assert session.active_segmentation is None
+        assert session.active_mask == "SG_mask"
+
+    def test_empty_mask_list_yields_none(self):
+        session = Session()
+        handle = DatasetHandle(
+            path="/tmp/x.h5",
+            metadata={
+                "channel_names": ["mNG"],
+                "segmentation_names": ["cellpose"],
+                "mask_names": [],
+            },
+        )
+        session.set_dataset(handle)
+        assert session.active_mask is None
+        assert session.active_segmentation == "cellpose"
+
+    def test_missing_keys_treated_as_empty_no_exception(self):
+        session = Session()
+        handle = DatasetHandle(path="/tmp/x.h5", metadata={"channel_names": ["mNG"]})
+        session.set_dataset(handle)
+        assert session.active_channel == "mNG"
+        assert session.active_segmentation is None
+        assert session.active_mask is None
+
+    def test_set_dataset_emits_three_list_events(self):
+        session = Session()
+        list_events = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: list_events.append("ch"))
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: list_events.append("seg"))
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: list_events.append("mask"))
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={}))
+        assert list_events == ["ch", "seg", "mask"]
+
+    def test_set_dataset_none_emits_three_list_events(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={
+            "channel_names": ["mNG"], "segmentation_names": ["cellpose"],
+            "mask_names": ["SG_mask"],
+        }))
+        list_events = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: list_events.append("ch"))
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: list_events.append("seg"))
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: list_events.append("mask"))
+        session.set_dataset(None)
+        assert list_events == ["ch", "seg", "mask"]
+        assert session.active_channel is None
+        assert session.active_segmentation is None
+        assert session.active_mask is None
+
+    def test_active_changed_fires_on_none_to_value_transition(self):
+        """The C2 fix: ACTIVE_*_CHANGED must fire when prev was None and new is auto-selected."""
+        session = Session()
+        events = []
+        session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: events.append("mask"))
+        # No prior dataset, _active_mask starts at None, new is "SG_mask"
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={
+            "channel_names": ["mNG"], "mask_names": ["SG_mask"],
+        }))
+        assert events == ["mask"]
+
+    def test_active_changed_fires_on_value_to_none_transition(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={
+            "channel_names": ["mNG"], "mask_names": ["SG_mask"],
+        }))
+        events = []
+        session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: events.append("mask"))
+        session.set_dataset(DatasetHandle(path="/tmp/y.h5", metadata={
+            "channel_names": ["mNG"], "mask_names": [],
+        }))
+        assert events == ["mask"]
+
+    def test_active_changed_does_not_fire_when_value_unchanged(self):
+        """If both datasets have mask 'SG_mask', no spurious ACTIVE_MASK_CHANGED."""
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={
+            "channel_names": ["mNG"], "mask_names": ["SG_mask"],
+        }))
+        events = []
+        session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: events.append("mask"))
+        # Second dataset: same mask name first
+        session.set_dataset(DatasetHandle(path="/tmp/y.h5", metadata={
+            "channel_names": ["mNG"], "mask_names": ["SG_mask"],
+        }))
+        assert events == []  # name unchanged
+
+    def test_clear_emits_three_list_events(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={
+            "channel_names": ["mNG"], "mask_names": ["SG_mask"],
+        }))
+        list_events = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: list_events.append("ch"))
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: list_events.append("seg"))
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: list_events.append("mask"))
+        session.clear()
+        assert list_events == ["ch", "seg", "mask"]
+
+
+class TestSessionRefreshResourceLists:
+    """Verify Session.refresh_resource_lists() API (R2)."""
+
+    def test_no_dataset_is_noop(self):
+        session = Session()
+        events = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: events.append(1))
+        session.refresh_resource_lists(mask_names=["new_mask"])
+        assert events == []
+
+    def test_updates_metadata_and_fires_event(self):
+        session = Session()
+        handle = DatasetHandle(
+            path="/tmp/x.h5",
+            metadata={"channel_names": ["ch1"], "mask_names": []},
+        )
+        session.set_dataset(handle)
+        events = []
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: events.append(1))
+        session.refresh_resource_lists(mask_names=["SG_mask"])
+        assert events == [1]
+        assert session.dataset.metadata["mask_names"] == ["SG_mask"]
+
+    def test_only_specified_kinds_fire(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={}))
+        ch_events = []
+        seg_events = []
+        mask_events = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: ch_events.append(1))
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: seg_events.append(1))
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: mask_events.append(1))
+        session.refresh_resource_lists(mask_names=["m1"])
+        assert ch_events == []
+        assert seg_events == []
+        assert mask_events == [1]
+
+    def test_three_kinds_at_once(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5", metadata={}))
+        events = []
+        session.subscribe(Event.CHANNEL_LIST_CHANGED, lambda: events.append("ch"))
+        session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: events.append("seg"))
+        session.subscribe(Event.MASK_LIST_CHANGED, lambda: events.append("mask"))
+        session.refresh_resource_lists(
+            channel_names=["c1"], segmentation_names=["s1"], mask_names=["m1"]
+        )
+        assert events == ["ch", "seg", "mask"]
+        assert session.dataset.metadata["channel_names"] == ["c1"]
+        assert session.dataset.metadata["segmentation_names"] == ["s1"]
+        assert session.dataset.metadata["mask_names"] == ["m1"]
+
+    def test_none_means_skip(self):
+        session = Session()
+        session.set_dataset(DatasetHandle(
+            path="/tmp/x.h5",
+            metadata={"mask_names": ["original"]},
+        ))
+        session.refresh_resource_lists(channel_names=["c1"])
+        # mask_names unchanged
+        assert session.dataset.metadata["mask_names"] == ["original"]

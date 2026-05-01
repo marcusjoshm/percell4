@@ -26,12 +26,12 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.domain.io.models import (
     CompressConfig,
     DatasetGuiState,
@@ -56,6 +56,7 @@ class CompressDialog(QDialog):
         self.setWindowTitle("Compress TIFF Dataset")
         self.setMinimumWidth(750)
         self.resize(800, 700)
+        cap_to_screen(self)
         self._project_dir = project_dir
 
         self._datasets: list[DatasetSpec] = []
@@ -77,14 +78,9 @@ class CompressDialog(QDialog):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        outer.addWidget(scroll)
-
         content = QWidget()
-        scroll.setWidget(content)
         layout = QVBoxLayout(content)
+        outer.addWidget(wrap_in_scroll(content))
 
         # ── Source ──
         src_group = QGroupBox("Source")

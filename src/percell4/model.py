@@ -27,12 +27,15 @@ class StateChange:
     all relevant changes in a defined order within a single handler call.
     """
 
-    data: bool = False          # DataFrame was replaced
-    selection: bool = False     # selected_ids changed
-    filter: bool = False        # filtered_ids changed
-    segmentation: bool = False  # active segmentation layer changed
-    mask: bool = False          # active mask layer changed
-    channel: bool = False       # active channel changed
+    data: bool = False               # DataFrame was replaced
+    selection: bool = False          # selected_ids changed
+    filter: bool = False             # filtered_ids changed
+    segmentation: bool = False       # active segmentation layer changed
+    mask: bool = False               # active mask layer changed
+    channel: bool = False            # active channel changed
+    channel_list: bool = False       # available channels list changed
+    segmentation_list: bool = False  # available segmentations list changed
+    mask_list: bool = False          # available masks list changed
 
 
 class CellDataModel(QObject):
@@ -60,6 +63,13 @@ class CellDataModel(QObject):
         )
         self._session.subscribe(Event.ACTIVE_MASK_CHANGED, self._on_mask_changed)
         self._session.subscribe(Event.ACTIVE_CHANNEL_CHANGED, self._on_channel_changed)
+        self._session.subscribe(
+            Event.CHANNEL_LIST_CHANGED, self._on_channel_list_changed
+        )
+        self._session.subscribe(
+            Event.SEGMENTATION_LIST_CHANGED, self._on_segmentation_list_changed
+        )
+        self._session.subscribe(Event.MASK_LIST_CHANGED, self._on_mask_list_changed)
 
     @property
     def session(self) -> Session:
@@ -98,6 +108,18 @@ class CellDataModel(QObject):
     def _on_channel_changed(self) -> None:
         if not self._wiring_session:
             self.state_changed.emit(StateChange(channel=True))
+
+    def _on_channel_list_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(channel_list=True))
+
+    def _on_segmentation_list_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(segmentation_list=True))
+
+    def _on_mask_list_changed(self) -> None:
+        if not self._wiring_session:
+            self.state_changed.emit(StateChange(mask_list=True))
 
     # ── Read-only properties (delegate to Session) ──────────
 

@@ -72,6 +72,16 @@ class LauncherWindow(QMainWindow):
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
 
+        # Subscribe to napari-bound `M` keystrokes. The viewer's
+        # `multi_select_requested` signal is connected lazily in
+        # `_get_or_create_window`, but tests (and any other code path
+        # that injects a ViewerWindow into `_windows` directly) bypass
+        # that wiring — the module-level subscriber is the resilient
+        # path.
+        from percell4.gui.viewer import subscribe_multi_select_requested
+
+        subscribe_multi_select_requested(self._on_multi_select)
+
         # Launcher-specific overrides (sidebar, menubar, statusbar)
         from percell4.gui import theme
 
@@ -126,7 +136,10 @@ class LauncherWindow(QMainWindow):
         selection_menu = menu.addMenu("&Selection")
 
         self._multi_select_action = QAction("&Multi-select...", self)
-        self._multi_select_action.setShortcut("M")
+        # `M` is bound via napari's `Labels.class_keymap` (in
+        # `percell4.gui.viewer._on_m_keystroke`), not on the launcher
+        # window — a window-scoped QAction shortcut would be shadowed by
+        # napari's own `Labels` keymap.
         self._multi_select_action.setToolTip(
             "Click labels in the viewer to build a selection, then "
             "Ctrl+Return to commit (M)"
@@ -572,6 +585,11 @@ class LauncherWindow(QMainWindow):
                 if key == "phasor_plot":
                     window.preview_mask_ready.connect(self._on_phasor_preview)
                     window.mask_applied.connect(self._on_phasor_mask_applied)
+                # The viewer's `multi_select_requested` signal is
+                # available for any callers that want a per-instance
+                # subscription; the launcher itself receives `M`
+                # events via the module-level subscriber registered in
+                # `__init__` so this connect is not strictly needed.
         return self._windows.get(key)
 
     def _wire_viewer_layer_selection(self) -> None:
@@ -596,8 +614,6 @@ class LauncherWindow(QMainWindow):
                 self._seg_panel.update_channel_label()
             if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
                 self._analysis_panel._grouped_seg_panel.update_channels()
-            # Update active segmentation/mask from napari layer selection
-            self._sync_active_layers_from_viewer()
 
         viewer_win.viewer.layers.selection.events.active.connect(
             _on_layer_selection_changed
@@ -635,20 +651,29 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage(f"Opened project: {path}")
 
     def _on_multi_select(self) -> None:
-        """Open the modal multi-label selection tool on the viewer."""
+        """Open the modal multi-label selection tool on the viewer.
+
+        Per-cause feedback (Invariant I4): the status bar identifies
+        which precondition refused the open, not just a generic refusal.
+        """
         viewer_win = self.get_viewer_window()
         if viewer_win is None:
             self.statusBar().showMessage(
-                "Open a dataset and a Labels layer before multi-select"
+                "Multi-select unavailable: viewer not ready"
             )
             return
         viewer_win.show()
-        ok = viewer_win.launch_multi_select_tool(self)
-        if not ok:
-            self.statusBar().showMessage(
-                "Multi-select unavailable: no active labels layer or "
-                "another tool is running"
-            )
+        result = viewer_win.launch_multi_select_tool(self)
+        if result == "ok":
+            return
+        messages = {
+            "no_labels_layer": "Multi-select unavailable: no labels layer",
+            "workflow_locked": "Multi-select unavailable: another tool is running",
+            "viewer_not_alive": "Multi-select unavailable: viewer not ready",
+        }
+        self.statusBar().showMessage(
+            messages.get(result, "Multi-select unavailable")
+        )
 
     def _on_import_dataset(self) -> None:
         from percell4.gui.compress_dialog import CompressDialog
@@ -787,6 +812,7 @@ class LauncherWindow(QMainWindow):
         """Set the current dataset and load it into the viewer."""
         from pathlib import Path as _Path
 
+        from percell4.adapters.hdf5_store import _build_handle_metadata
         from percell4.domain.dataset import DatasetHandle
         from percell4.store import DatasetStore
 
@@ -800,7 +826,7 @@ class LauncherWindow(QMainWindow):
         self._current_h5_path = h5_path
 
         # Update Session with DatasetHandle (drives channel combo + active_channel)
-        handle = DatasetHandle(path=_Path(h5_path), metadata=store.metadata)
+        handle = DatasetHandle(path=_Path(h5_path), metadata=_build_handle_metadata(store))
         self.data_model.session.set_dataset(handle)
 
         # Update Data tab info + dropdowns
@@ -923,51 +949,6 @@ class LauncherWindow(QMainWindow):
         """
         pass
 
-    def _sync_active_layers_from_viewer(self) -> None:
-        """When user clicks a layer in napari, update the active seg/mask in the model."""
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            return
-
-        active = viewer_win.viewer.layers.selection.active
-        if active is None:
-            return
-
-        import napari
-        if not isinstance(active, napari.layers.Labels):
-            return
-
-        name = active.name
-
-        # 1. Check layer metadata first (fastest, survives renames)
-        from percell4.gui.viewer import PERCELL_TYPE_KEY, LAYER_TYPE_MASK, LAYER_TYPE_SEGMENTATION
-        percell_type = active.metadata.get(PERCELL_TYPE_KEY)
-        if percell_type == LAYER_TYPE_MASK:
-            logger.debug("_sync_active_layers: metadata → set_active_mask(%r)", name)
-            self.data_model.set_active_mask(name)
-            return
-        if percell_type == LAYER_TYPE_SEGMENTATION:
-            logger.debug("_sync_active_layers: metadata → set_active_segmentation(%r)", name)
-            self.data_model.set_active_segmentation(name)
-            return
-
-        # 2. Fall back to store lookup for untagged layers
-        store = getattr(self, "_current_store", None)
-        if store is not None:
-            mask_names = store.list_masks()
-            label_names = store.list_labels()
-            if name in mask_names:
-                logger.debug("_sync_active_layers: store → set_active_mask(%r)", name)
-                self.data_model.set_active_mask(name)
-                return
-            if name in label_names:
-                logger.debug("_sync_active_layers: store → set_active_segmentation(%r)", name)
-                self.data_model.set_active_segmentation(name)
-                return
-
-        # 3. Unknown layer — do nothing (safe default)
-        logger.debug("_sync_active_layers: unknown layer %r, ignoring", name)
-
     def _apply_cell_filter(self, labels: np.ndarray) -> np.ndarray | None:
         """Zero out non-filtered cells in the labels array.
 
@@ -1080,6 +1061,10 @@ class LauncherWindow(QMainWindow):
             last_name = roi_name
 
         if last_name:
+            if store is not None:
+                self.data_model.session.refresh_resource_lists(
+                    mask_names=store.list_masks(),
+                )
             self.data_model.set_active_mask(last_name)
 
     # ── Analysis + FLIM handlers moved to task panels ──────

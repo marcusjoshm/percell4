@@ -39,6 +39,18 @@ Key pattern: `CellDataModel` holds a pandas DataFrame (one row per cell) and emi
 
 Heavy computation (Cellpose, etc.) runs in QThread workers to avoid freezing the UI.
 
+## GUI state ownership
+
+Every interactive UI element is exactly one of three classes:
+
+- **Selector** — its purpose is to let the user pick a session field. Reads and writes `session.active_*` / `filter_ids` / `selection`. Does not write new resources.
+- **Creator** — writes a new channel/segmentation/mask/measurement resource into the dataset and auto-selects it. Reads and writes session.
+- **Action** — does something else. Reads session, never writes it.
+
+The five session selection fields — `active_channel`, `active_segmentation`, `active_mask`, `filter_ids`, `selection` — may be mutated only by Selectors and Creators. napari → session is forbidden for layer-list selection events; session → napari is a one-way controlled push from `ViewerWindow._on_state_changed`. Keystrokes that conflict with napari natives bind on the level above the conflict in napari's keymap chain (e.g., `M` → `Labels.bind_key`, not `viewer.bind_key`).
+
+Living artifacts in `docs/audits/`: `gui-element-classification.yaml`, `session-mutation-graph.md`, `subscriber-rebind-matrix.md`, `keystroke-binding-audit.md`.
+
 ## Documentation Rules
 
 - Per-module CLAUDE.md files describe current state only — never plans, never history
@@ -46,6 +58,12 @@ Heavy computation (Cellpose, etc.) runs in QThread workers to avoid freezing the
 - Active docs contain ONLY what IS, not what WAS or MIGHT BE
 - Never allow contradictory architectural decisions to coexist in context
 - `docs/solutions/` indexes documented solutions to past bugs, architecture patterns, and conventions by category with YAML frontmatter (`module`, `tags`, `problem_type`) — relevant when implementing or debugging in documented areas
+
+## Audit-driven retrieval (R15/R16)
+
+Before non-trivial edits in T1 modules (`src/percell4/domain/io/`, `src/percell4/adapters/`, `src/percell4/store.py`, `src/percell4/application/use_cases/`, all `src/percell4/gui/*Dialog.py`), invoke the `compound-engineering:ce-learnings-researcher` agent with the file paths in scope. Enriched `docs/solutions/` entries declare `applies_to` globs and `canonical_source` paths so prior canonical implementations are surfaced before logic gets re-invented. The audit's source of truth is `docs/audits/canonical-sources-matrix.yaml`; the original brainstorm at `docs/brainstorms/2026-04-29-io-principles-audit-and-remediation-brainstorm.md` defines T1 scope and the seven I/O principles.
+
+A `PreToolUse` hook (`.claude/settings.json` → `scripts/claude_code_hooks/check_learnings_retrieval.py`) prints a structured warning to stderr when an `Edit`/`Write`/`MultiEdit` targets a file with applicable canonical sources. The hook is warn-only; consult the surfaced learnings yourself, then proceed. Run `python3 scripts/learnings_applicability.py <path>` at any time to query the registry directly.
 
 ## Previous Versions
 

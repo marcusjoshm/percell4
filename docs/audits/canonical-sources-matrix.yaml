@@ -1,0 +1,1106 @@
+schema_version: 1
+audit_baseline:
+  ref: HEAD
+  commit: f7eface8879b1eb04cbf87d8c774707334e4d6c9
+  date: 2026-04-30
+
+# ── Canonical-source columns ──────────────────────────────────────────
+# 10 seed canonical sources from the brainstorm. Mining docs/solutions/ surfaced
+# no additional candidates beyond the seeds for this v1 audit pass — the
+# remaining solution docs are bug-specific (NumPy compat, ROI/mask APIs, theme
+# refactor) rather than naming a canonical implementation that other modules
+# should consume. Authored 4 new docs/solutions/ entries as part of this pass:
+# 1, 2, 3, 7.
+canonical_sources:
+  - slug: dialog-scroll-when-tall
+    solution_doc: docs/solutions/ui-bugs/dialog-scroll-when-tall.md
+    canonical_file: src/percell4/gui/_dialog_utils.py
+    status: canonical_clean
+  - slug: decay-write-path
+    solution_doc: docs/solutions/architecture-patterns/decay-write-path.md
+    canonical_file: src/percell4/adapters/importer.py
+    status: canonical_clean
+  - slug: channel-deletion-permanence
+    solution_doc: docs/solutions/architecture-patterns/channel-deletion-permanence.md
+    canonical_file: src/percell4/interfaces/gui/task_panels/data_panel.py
+    status: pre_canonical
+  - slug: session-state-event-emission
+    solution_doc: docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md
+    canonical_file: src/percell4/application/session.py
+    status: canonical_clean
+  - slug: derived-layer-staleness-invalidation
+    solution_doc: docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md
+    canonical_file: src/percell4/application/use_cases/compute_phasor.py
+    status: canonical_clean
+  - slug: fresh-metadata-read-in-use-cases
+    solution_doc: docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md
+    canonical_file: src/percell4/application/use_cases/compute_phasor.py
+    status: canonical_clean
+  - slug: atomic-write-contract
+    solution_doc: docs/solutions/architecture-patterns/atomic-write-contract.md
+    canonical_file: src/percell4/store.py
+    status: pre_canonical
+  - slug: discovery-scopes-processing-consumes
+    solution_doc: docs/solutions/logic-errors/batch-compress-development-lessons.md
+    canonical_file: src/percell4/domain/io/discovery.py
+    status: has_drift
+  - slug: cross-format-token-matching
+    solution_doc: TBD
+    canonical_file: src/percell4/domain/io/cross_format.py
+    status: canonical_clean
+  - slug: one-payload-type-per-h5-group
+    solution_doc: docs/solutions/ui-bugs/napari-mask-layer-misclassified-as-segmentation.md
+    canonical_file: src/percell4/store.py
+    status: canonical_clean
+  - slug: gui-action-contract-exhaustiveness
+    solution_doc: docs/solutions/architecture-patterns/gui-action-contract-exhaustiveness.md
+    canonical_file: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    status: pre_canonical
+  - slug: keystroke-binding-on-napari-viewer
+    solution_doc: docs/solutions/architecture-patterns/keystroke-binding-on-napari-viewer.md
+    canonical_file: src/percell4/gui/viewer.py
+    status: pre_canonical
+  - slug: session-to-napari-one-way-push
+    solution_doc: docs/solutions/architecture-patterns/session-to-napari-one-way-push.md
+    canonical_file: src/percell4/gui/viewer.py
+    status: pre_canonical
+
+# ── T1 file scope ──────────────────────────────────────────────────────
+# R2 path corrections applied:
+#   - Brainstorm referenced src/percell4/application/use_cases/import_dataset.py — does not exist.
+#     Actual: src/percell4/adapters/importer.py::import_dataset (function in adapter, no use case wrapper).
+#   - Brainstorm referenced src/percell4/application/use_cases/batch_compress.py — does not exist.
+#     Actual: orchestration lives in src/percell4/interfaces/gui/main_window.py::_run_batch_compress.
+#   - tests/test_io/test_*import* — tests/test_io/test_importer.py exists; no tests/test_use_cases/test_*import*.
+t1_files:
+  - src/percell4/domain/io/cross_format.py
+  - src/percell4/domain/io/discovery.py
+  - src/percell4/domain/io/scanner.py
+  - src/percell4/domain/io/assembler.py
+  - src/percell4/domain/io/models.py
+  - src/percell4/adapters/importer.py
+  - src/percell4/adapters/readers.py
+  - src/percell4/adapters/hdf5_store.py
+  - src/percell4/store.py
+  - src/percell4/application/use_cases/export_images.py
+  - src/percell4/application/use_cases/compute_phasor.py
+  - src/percell4/application/use_cases/add_decay_to_dataset.py
+  - src/percell4/gui/import_dialog.py
+  - src/percell4/gui/add_layer_dialog.py
+  - src/percell4/gui/compress_dialog.py
+  - src/percell4/gui/export_images_dialog.py
+  - src/percell4/gui/workflows/single_cell/config_dialog.py
+  - tests/test_io/test_importer.py
+  - tests/test_io/test_cross_format.py
+  - tests/test_io/test_store_append.py
+  - tests/test_io/test_assembler.py
+  - tests/test_io/test_scanner.py
+  - tests/test_io/test_readers.py
+  - tests/test_add_decay_to_dataset.py
+  - tests/test_store.py
+  - tests/test_gui_workflows/test_add_layer_tcspc.py
+  - tests/test_gui_workflows/test_config_dialog.py
+
+# ── Cells ─────────────────────────────────────────────────────────────
+# Key format: "<file>.<canonical-source-slug>"
+# Cells that don't apply are marked n/a with a one-line reason.
+cells:
+  # ── domain/io/cross_format.py ────────────────────────────────────────
+  "src/percell4/domain/io/cross_format.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "pure-domain module, no Qt"
+  "src/percell4/domain/io/cross_format.py.decay-write-path":
+    status: n/a
+    evidence: "pure-domain matcher, never opens HDF5"
+  "src/percell4/domain/io/cross_format.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion concerns"
+  "src/percell4/domain/io/cross_format.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/domain/io/cross_format.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no on-disk writes"
+  "src/percell4/domain/io/cross_format.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "not a use case"
+  "src/percell4/domain/io/cross_format.py.atomic-write-contract":
+    status: n/a
+    evidence: "no file writes"
+  "src/percell4/domain/io/cross_format.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "matcher takes pre-discovered bin_files list; never derives from a directory"
+  "src/percell4/domain/io/cross_format.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "match_bin_to_intensity (lines 146-165) IS the canonical implementation; CompositeRule/ZeroPadOffsetRule/BaseStemRule/ExplicitRule dispatch; serialization helpers"
+    notes: "This file IS the canonical source for slug 9."
+  "src/percell4/domain/io/cross_format.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── domain/io/discovery.py ───────────────────────────────────────────
+  "src/percell4/domain/io/discovery.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "pure-domain module"
+  "src/percell4/domain/io/discovery.py.decay-write-path":
+    status: n/a
+    evidence: "discovery only — no decay writes"
+  "src/percell4/domain/io/discovery.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/domain/io/discovery.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/domain/io/discovery.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no on-disk writes"
+  "src/percell4/domain/io/discovery.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "not a use case"
+  "src/percell4/domain/io/discovery.py.atomic-write-contract":
+    status: n/a
+    evidence: "no file writes"
+  "src/percell4/domain/io/discovery.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "discover_by_subdirectory and discover_flat both build per-dataset DatasetSpec(files=tuple(...)) at lines 56-63 and 129-137 — IS the producer; correct shape"
+    notes: "Producer of plans. Consumers must read ds.files."
+  "src/percell4/domain/io/discovery.py.cross-format-token-matching":
+    status: n/a
+    evidence: "TIFF/bin discovery only; no .bin → channel binding"
+  "src/percell4/domain/io/discovery.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── domain/io/scanner.py ─────────────────────────────────────────────
+  "src/percell4/domain/io/scanner.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "pure-domain"
+  "src/percell4/domain/io/scanner.py.decay-write-path":
+    status: n/a
+    evidence: "scanner only"
+  "src/percell4/domain/io/scanner.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/domain/io/scanner.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/domain/io/scanner.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "src/percell4/domain/io/scanner.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "not a use case"
+  "src/percell4/domain/io/scanner.py.atomic-write-contract":
+    status: n/a
+    evidence: "no file writes"
+  "src/percell4/domain/io/scanner.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "FileScanner.scan accepts either path= OR files= (lines 24-47); both shapes preserved so callers can pass pre-discovered file lists"
+  "src/percell4/domain/io/scanner.py.cross-format-token-matching":
+    status: n/a
+    evidence: "token parser only"
+  "src/percell4/domain/io/scanner.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── domain/io/assembler.py ───────────────────────────────────────────
+  "src/percell4/domain/io/assembler.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "pure-domain"
+  "src/percell4/domain/io/assembler.py.decay-write-path":
+    status: n/a
+    evidence: "stitch only — does not write"
+  "src/percell4/domain/io/assembler.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/domain/io/assembler.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/domain/io/assembler.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "src/percell4/domain/io/assembler.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "not a use case"
+  "src/percell4/domain/io/assembler.py.atomic-write-contract":
+    status: n/a
+    evidence: "no file writes"
+  "src/percell4/domain/io/assembler.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "consumes a tile dict, not a directory"
+  "src/percell4/domain/io/assembler.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no tokens"
+  "src/percell4/domain/io/assembler.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── domain/io/models.py ──────────────────────────────────────────────
+  "src/percell4/domain/io/models.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "dataclasses only"
+  "src/percell4/domain/io/models.py.decay-write-path":
+    status: n/a
+    evidence: "no writes"
+  "src/percell4/domain/io/models.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/domain/io/models.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/domain/io/models.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no on-disk semantics"
+  "src/percell4/domain/io/models.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "not a use case"
+  "src/percell4/domain/io/models.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "src/percell4/domain/io/models.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "DatasetSpec carries both source_dir and files=tuple(DiscoveredFile,...) at lines 224-234 — provides the canonical-shape data class"
+  "src/percell4/domain/io/models.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "Defines CrossFormatRule variants (ZeroPadOffsetRule/BaseStemRule/ExplicitRule/CompositeRule) consumed by cross_format.py"
+  "src/percell4/domain/io/models.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "type defs"
+
+  # ── adapters/importer.py ─────────────────────────────────────────────
+  "src/percell4/adapters/importer.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "src/percell4/adapters/importer.py.decay-write-path":
+    status: drifts_from_canonical
+    evidence: "import_dataset uses write_decay_streaming at line 445 (correct), but lines 462-504 contain a dead-code legacy duplicate after `continue` at 458 — inline h5py.File.create_dataset bypasses the helper"
+    thread: cleanup-decay-write-deadcode
+    notes: "The reachable path consumes the canonical helper; the dead-code duplicate is the drift. Strictly, this is post-Thread-1 cleanup."
+  "src/percell4/adapters/importer.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "import-only path; no channel deletion"
+  "src/percell4/adapters/importer.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session interaction"
+  "src/percell4/adapters/importer.py.derived-layer-staleness-invalidation":
+    status: consumes_canonical
+    evidence: "write_decay_streaming invalidates stale /phasor/<channel> at lines 634-636 in the same write — derived-layer rule"
+  "src/percell4/adapters/importer.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "adapter, not a use case"
+  "src/percell4/adapters/importer.py.atomic-write-contract":
+    status: drifts_from_canonical
+    evidence: "store.create() (line 415) is per-operation `h5py.File(self.path, 'w')` (store.py:310) — NOT the tmp+os.replace pattern in DatasetStore.create_atomic. import_dataset bypasses create_atomic."
+    thread: import-atomicity-converge
+    notes: "create_atomic exists but is unused. Initial import is non-atomic — partial .h5 visible if the import crashes mid-write."
+  "src/percell4/adapters/importer.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "import_dataset accepts files= override (lines 80-84) — when caller passes ds.files, the per-dataset scoped subset is used; otherwise scans path"
+    notes: "Consumes canonical shape. Compress callsite at main_window.py:740 passes files=ds.files."
+  "src/percell4/adapters/importer.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "lines 234-243 build CompositeRule(ZeroPadOffsetRule(0,0), BaseStemRule()) and call match_bin_to_intensity — consumes the pure-domain matcher"
+  "src/percell4/adapters/importer.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "Routes to /intensity (channel), /labels/ (segmentation), /masks/ (mask), /decay/ (TCSPC) by layer_type at lines 162-178 and 437"
+
+  # ── adapters/readers.py ──────────────────────────────────────────────
+  "src/percell4/adapters/readers.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "src/percell4/adapters/readers.py.decay-write-path":
+    status: n/a
+    evidence: "readers only"
+  "src/percell4/adapters/readers.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "readers only"
+  "src/percell4/adapters/readers.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/adapters/readers.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "src/percell4/adapters/readers.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "not a use case"
+  "src/percell4/adapters/readers.py.atomic-write-contract":
+    status: n/a
+    evidence: "readers only"
+  "src/percell4/adapters/readers.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "single-file reader"
+  "src/percell4/adapters/readers.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no token matching"
+  "src/percell4/adapters/readers.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── adapters/hdf5_store.py ──────────────────────────────────────────
+  "src/percell4/adapters/hdf5_store.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "src/percell4/adapters/hdf5_store.py.decay-write-path":
+    status: n/a
+    evidence: "no decay writes — write_array delegated to store"
+  "src/percell4/adapters/hdf5_store.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "delete_path is a generic primitive; channel-deletion orchestration is at data_panel.py"
+  "src/percell4/adapters/hdf5_store.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/adapters/hdf5_store.py.derived-layer-staleness-invalidation":
+    status: consumes_canonical
+    evidence: "delete_path port (line 153) is the primitive that compute_phasor uses to drop g_filtered/s_filtered/lifetime_filtered"
+  "src/percell4/adapters/hdf5_store.py.fresh-metadata-read-in-use-cases":
+    status: consumes_canonical
+    evidence: "read_metadata(handle) at lines 149-151 is the port that fixes vector 2 of the staleness compound"
+    notes: "This file IS the canonical source of read_metadata."
+  "src/percell4/adapters/hdf5_store.py.atomic-write-contract":
+    status: n/a
+    evidence: "delegates per-op writes to DatasetStore"
+  "src/percell4/adapters/hdf5_store.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "no discovery"
+  "src/percell4/adapters/hdf5_store.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no token matching"
+  "src/percell4/adapters/hdf5_store.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "delegates write_labels / write_mask / write_array to DatasetStore which enforces /labels/, /masks/, /intensity placement"
+
+  # ── store.py ─────────────────────────────────────────────────────────
+  "src/percell4/store.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "src/percell4/store.py.decay-write-path":
+    status: consumes_canonical
+    evidence: "append_decay_layers (lines 338-438) is the bulk-append API; uses _choose_chunks/_compression_kwargs (is_decay=True). One of the canonical primitives."
+  "src/percell4/store.py.channel-deletion-permanence":
+    status: consumes_canonical
+    evidence: "rename_channel (lines 440-469) is the canonical rename; no canonical delete_channel here yet — sibling that delete-channel orchestration leans on. delete_item is the generic primitive."
+    notes: "rename has the canonical pattern; delete is orchestrated at the GUI."
+  "src/percell4/store.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/store.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "delete_item is the primitive; invalidation policy lives at use cases"
+    notes: "Note: store.append_decay_layers does NOT delete /phasor/<ch> when re-writing — the importer.write_decay_streaming helper does, but if a caller bypasses the helper and uses append_decay_layers (or write_array(decay_path, ...)) directly, /phasor is NOT invalidated. Latent drift surface."
+  "src/percell4/store.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "store IS the disk surface — every store.metadata access is fresh by definition (lines 286-295)"
+  "src/percell4/store.py.atomic-write-contract":
+    status: consumes_canonical
+    evidence: "DatasetStore.create_atomic (lines 471-498) IS the canonical implementation"
+    notes: "Canonical source for whole-file atomic writes. Per-op mutations are correctly NOT atomic-replace."
+  "src/percell4/store.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "no discovery"
+  "src/percell4/store.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "imports serialize_rule/deserialize_rule from cross_format; persists the rule under /metadata.attrs[cross_format_rule] in append_decay_layers (lines 376-384, 433-436)"
+  "src/percell4/store.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "write_labels enforces /labels/<name>+int32 (lines 229-239); write_mask enforces /masks/<name>+uint8 (lines 251-264); read/write helpers per-group"
+
+  # ── application/use_cases/export_images.py ──────────────────────────
+  "src/percell4/application/use_cases/export_images.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "src/percell4/application/use_cases/export_images.py.decay-write-path":
+    status: n/a
+    evidence: "export, no decay"
+  "src/percell4/application/use_cases/export_images.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/application/use_cases/export_images.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/application/use_cases/export_images.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "read-only export"
+  "src/percell4/application/use_cases/export_images.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "does not read /metadata"
+  "src/percell4/application/use_cases/export_images.py.atomic-write-contract":
+    status: drifts_from_canonical
+    evidence: "tifffile.imwrite(str(out_path), data) at lines 56, 63, 70 — direct writes; no tmp+os.replace. Partial files visible if interrupted mid-export."
+    thread: export-atomicity-and-roundtrip
+    notes: "Exports are TIFF, not HDF5, but the contract still applies."
+  "src/percell4/application/use_cases/export_images.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "consumes ExportRequest plan"
+  "src/percell4/application/use_cases/export_images.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no .bin"
+  "src/percell4/application/use_cases/export_images.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "reads via repo.read_array/read_labels/read_mask — payload-typed reads"
+
+  # ── application/use_cases/compute_phasor.py ─────────────────────────
+  "src/percell4/application/use_cases/compute_phasor.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "src/percell4/application/use_cases/compute_phasor.py.decay-write-path":
+    status: n/a
+    evidence: "reads decay, writes phasor"
+  "src/percell4/application/use_cases/compute_phasor.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/application/use_cases/compute_phasor.py.session-state-event-emission":
+    status: n/a
+    evidence: "uses Session.dataset; doesn't emit"
+  "src/percell4/application/use_cases/compute_phasor.py.derived-layer-staleness-invalidation":
+    status: consumes_canonical
+    evidence: "Lines 131-140 invalidate g_filtered/s_filtered/lifetime_filtered after rewriting g/s — vector-5 fix from staleness compound"
+  "src/percell4/application/use_cases/compute_phasor.py.fresh-metadata-read-in-use-cases":
+    status: consumes_canonical
+    evidence: "_read_fresh_metadata (lines 42-57) calls repo.read_metadata; line 95 reads cal via fresh dict — vector-2 fix"
+  "src/percell4/application/use_cases/compute_phasor.py.atomic-write-contract":
+    status: n/a
+    evidence: "in-place HDF5 mutation, not whole-file replacement"
+  "src/percell4/application/use_cases/compute_phasor.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "no discovery"
+  "src/percell4/application/use_cases/compute_phasor.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no .bin"
+  "src/percell4/application/use_cases/compute_phasor.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "writes /phasor/<ch>/g and /phasor/<ch>/s — phasor group separated from intensity/labels/masks/decay"
+
+  # ── application/use_cases/add_decay_to_dataset.py ───────────────────
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.decay-write-path":
+    status: consumes_canonical
+    evidence: "Line 224 calls write_decay_streaming(...) — the canonical helper. Phase 1 of the use case."
+    notes: "Thread 1 alignment commits e25831a/37dd603/392f66d/f31a970/c25950e produced this state."
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "append-only flow"
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.session-state-event-emission":
+    status: n/a
+    evidence: "use case; emission is dialog's job"
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.derived-layer-staleness-invalidation":
+    status: consumes_canonical
+    evidence: "_rotate_decay_in_place (lines 357-391) and _flip_decay_in_place (lines 325-354) BOTH delete /phasor/<ch> after mutating /decay; write_decay_streaming does the same"
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.fresh-metadata-read-in-use-cases":
+    status: partial
+    evidence: "Line 115 reads metadata = store.metadata — store.metadata is fresh from disk by definition (store.py:286-295), bypassing handle.metadata snapshot. NOT using repo.read_metadata port though."
+    residual_evidence: "Doesn't use the read_metadata(handle) port, but the alternative (DatasetStore.metadata property) IS a fresh-disk read. The port is the convention; the bypass works in practice because this is an adapter-adjacent use case that holds a DatasetStore directly."
+    thread: fresh-metadata-port-convention
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.atomic-write-contract":
+    status: drifts_from_canonical
+    evidence: "Direct h5py.File(h5_path, 'a') at lines 316, 334, 370 inside _write_provenance_attrs/_flip_decay_in_place/_rotate_decay_in_place — bypasses any store-level write boundary"
+    thread: write-boundary-discipline
+    notes: "Use cases reaching into h5py directly is a Two-Layer-Postel violation (P4)."
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.discovery-scopes-processing-consumes":
+    status: drifts_from_canonical
+    evidence: "Line 108: bin_files = sorted(p for p in source_dir.rglob('*.bin')) — re-derives files from source_dir instead of consuming a pre-discovered DatasetSpec/files list"
+    thread: append-flow-plan-consumption
+    notes: "Recurrence of the pattern documented in batch-compress-development-lessons.md Bug #3 and add-layer-flat-discovery-duplicate-import.md. Add-layer flow scans the directory at use-case time."
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "Lines 137-141 call match_bin_to_intensity with caller-supplied IntensityChannel records and rule"
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "writes only /decay/<ch>, /provenance/decay/<ch>, /metadata.attrs[cross_format_rule] — proper group separation"
+
+  # ── gui/import_dialog.py ────────────────────────────────────────────
+  "src/percell4/gui/import_dialog.py.dialog-scroll-when-tall":
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.wrap_in_scroll + cap_to_screen (U2 of dialog-scroll-helper-rollout)"
+    thread: dialog-scroll-helper-rollout
+  "src/percell4/gui/import_dialog.py.decay-write-path":
+    status: n/a
+    evidence: "no decay (basic TIFF importer)"
+  "src/percell4/gui/import_dialog.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/gui/import_dialog.py.session-state-event-emission":
+    status: n/a
+    evidence: "value-capture dialog; doesn't mutate Session"
+  "src/percell4/gui/import_dialog.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no in-session writes"
+  "src/percell4/gui/import_dialog.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "dialog, not a use case"
+  "src/percell4/gui/import_dialog.py.atomic-write-contract":
+    status: n/a
+    evidence: "delegates to import_dataset"
+  "src/percell4/gui/import_dialog.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "value-capture dialog; processing happens in caller"
+  "src/percell4/gui/import_dialog.py.cross-format-token-matching":
+    status: n/a
+    evidence: "TIFF only"
+  "src/percell4/gui/import_dialog.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no direct HDF5"
+
+  # ── gui/add_layer_dialog.py ─────────────────────────────────────────
+  "src/percell4/gui/add_layer_dialog.py.dialog-scroll-when-tall":
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.cap_to_screen + per-tab wrap_in_scroll (Discover TIFFs and TCSPC tabs); donor of the canonical helper (U5 of dialog-scroll-helper-rollout)"
+    thread: dialog-scroll-helper-rollout
+  "src/percell4/gui/add_layer_dialog.py.decay-write-path":
+    status: consumes_canonical
+    evidence: "Calls add_decay_to_dataset use case at line 1457; doesn't write decay directly"
+  "src/percell4/gui/add_layer_dialog.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "append-only dialog"
+  "src/percell4/gui/add_layer_dialog.py.session-state-event-emission":
+    status: drifts_from_canonical
+    evidence: "After append, _tcspc_persist_flim_metadata (lines 1611-1646) mutates session.dataset.metadata in-place but emits no Session event — peer views relying on a metadata-changed event won't refresh"
+    thread: post-append-session-events
+    notes: "There is no METADATA_CHANGED event today. Metadata mutation is hidden from the event system."
+  "src/percell4/gui/add_layer_dialog.py.derived-layer-staleness-invalidation":
+    status: consumes_canonical
+    evidence: "Use case (add_decay_to_dataset) handles /phasor invalidation via write_decay_streaming"
+  "src/percell4/gui/add_layer_dialog.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "dialog"
+  "src/percell4/gui/add_layer_dialog.py.atomic-write-contract":
+    status: drifts_from_canonical
+    evidence: "_tcspc_write_bin_intensity_debug_layers opens h5py.File(self._store.path, 'r') at line 1517 directly — sidesteps repo abstraction. Read-only here, but pattern leaks; debug intensity write is via store.write_array."
+    thread: write-boundary-discipline
+    notes: "GUI reaching into h5py directly even for reads is a Postel violation."
+  "src/percell4/gui/add_layer_dialog.py.discovery-scopes-processing-consumes":
+    status: drifts_from_canonical
+    evidence: "Line 1048: source.rglob('*.bin') in dialog code — same pattern that re-derives files; passes a directory path to the use case (which also re-rglobs at use case line 108)"
+    thread: append-flow-plan-consumption
+  "src/percell4/gui/add_layer_dialog.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "imports match_bin_to_intensity (line 46); preview/dialog state uses the matcher"
+  "src/percell4/gui/add_layer_dialog.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "uses store.write_array/write_labels/write_mask via _write_layer pattern"
+
+  # ── gui/compress_dialog.py ──────────────────────────────────────────
+  "src/percell4/gui/compress_dialog.py.dialog-scroll-when-tall":
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.wrap_in_scroll + cap_to_screen (U3 of dialog-scroll-helper-rollout)"
+    thread: dialog-scroll-helper-rollout
+  "src/percell4/gui/compress_dialog.py.decay-write-path":
+    status: n/a
+    evidence: "value-capture dialog; processing in main_window._run_batch_compress → import_dataset"
+  "src/percell4/gui/compress_dialog.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/gui/compress_dialog.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "src/percell4/gui/compress_dialog.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "value-capture only"
+  "src/percell4/gui/compress_dialog.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "dialog"
+  "src/percell4/gui/compress_dialog.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "src/percell4/gui/compress_dialog.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "Lines 568-576 use discover_by_subdirectory/discover_flat from domain/io/discovery; CompressConfig (line 444) carries datasets=list(self._datasets); main_window passes ds.files to import_dataset"
+  "src/percell4/gui/compress_dialog.py.cross-format-token-matching":
+    status: n/a
+    evidence: "TIFF discovery; .bin matching happens inside importer"
+  "src/percell4/gui/compress_dialog.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no direct HDF5"
+
+  # ── gui/export_images_dialog.py ─────────────────────────────────────
+  "src/percell4/gui/export_images_dialog.py.dialog-scroll-when-tall":
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.wrap_in_scroll + cap_to_screen (U6 of dialog-scroll-helper-rollout — drift fix)"
+    thread: dialog-scroll-helper-rollout
+  "src/percell4/gui/export_images_dialog.py.decay-write-path":
+    status: n/a
+    evidence: "no decay export"
+  "src/percell4/gui/export_images_dialog.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/gui/export_images_dialog.py.session-state-event-emission":
+    status: n/a
+    evidence: "value-capture dialog"
+  "src/percell4/gui/export_images_dialog.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "read-only"
+  "src/percell4/gui/export_images_dialog.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "dialog"
+  "src/percell4/gui/export_images_dialog.py.atomic-write-contract":
+    status: n/a
+    evidence: "delegates to ExportImages use case (which itself drifts — see that cell)"
+  "src/percell4/gui/export_images_dialog.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "no discovery"
+  "src/percell4/gui/export_images_dialog.py.cross-format-token-matching":
+    status: n/a
+    evidence: "TIFF export only"
+  "src/percell4/gui/export_images_dialog.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "Reads via store.read_labels/read_masks/read_array — typed accessors"
+
+  # ── gui/workflows/single_cell/config_dialog.py ──────────────────────
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.dialog-scroll-when-tall":
+    status: consumes_canonical
+    evidence: "uses gui._dialog_utils.wrap_in_scroll + cap_to_screen (U4 of dialog-scroll-helper-rollout)"
+    thread: dialog-scroll-helper-rollout
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.decay-write-path":
+    status: n/a
+    evidence: "no decay"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.session-state-event-emission":
+    status: n/a
+    evidence: "value-capture dialog"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "dialog"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.atomic-write-contract":
+    status: n/a
+    evidence: "no whole-file writes"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "uses CompressDialog for tiff_pending sources; carries compress_plan dicts in _PendingDataset records — plans-as-data shape"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no .bin"
+  "src/percell4/gui/workflows/single_cell/config_dialog.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no direct HDF5"
+
+  # ── tests/test_io/test_importer.py ──────────────────────────────────
+  "tests/test_io/test_importer.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_io/test_importer.py.decay-write-path":
+    status: consumes_canonical
+    evidence: "test_import_bin_only_splits_channels_by_token (line 130) exercises bin → /decay path indirectly via import_dataset"
+  "tests/test_io/test_importer.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "import only"
+  "tests/test_io/test_importer.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_io/test_importer.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "fresh-import tests"
+  "tests/test_io/test_importer.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case under test"
+  "tests/test_io/test_importer.py.atomic-write-contract":
+    status: n/a
+    evidence: "tests outcome, not atomicity"
+  "tests/test_io/test_importer.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "test_import_bin_only and others use _create_tiff_dir (line 13) and let import_dataset scan; doesn't pass files= override"
+    notes: "Could be enhanced to assert files= path explicitly, but the convention isn't violated."
+  "tests/test_io/test_importer.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "Indirectly exercises matcher via the bin-import test"
+  "tests/test_io/test_importer.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "Asserts /intensity exists; doesn't mix payload types"
+
+  # ── tests/test_io/test_cross_format.py ──────────────────────────────
+  "tests/test_io/test_cross_format.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_io/test_cross_format.py.decay-write-path":
+    status: n/a
+    evidence: "matcher tests"
+  "tests/test_io/test_cross_format.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "tests/test_io/test_cross_format.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_io/test_cross_format.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_cross_format.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case"
+  "tests/test_io/test_cross_format.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_cross_format.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "consumes pre-built bin lists"
+  "tests/test_io/test_cross_format.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "Direct unit tests for match_bin_to_intensity across all rule variants — IS the test surface for the canonical matcher"
+  "tests/test_io/test_cross_format.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── tests/test_io/test_store_append.py ─────────────────────────────
+  "tests/test_io/test_store_append.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_io/test_store_append.py.decay-write-path":
+    status: consumes_canonical
+    evidence: "Tests DatasetStore.append_decay_layers — exercises canonical bulk-append API"
+  "tests/test_io/test_store_append.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "append tests"
+  "tests/test_io/test_store_append.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_io/test_store_append.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "TBD — may not test /phasor invalidation alongside append"
+  "tests/test_io/test_store_append.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case"
+  "tests/test_io/test_store_append.py.atomic-write-contract":
+    status: n/a
+    evidence: "in-place append, not whole-file"
+  "tests/test_io/test_store_append.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "no discovery"
+  "tests/test_io/test_store_append.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "Tests cross_format_rule persistence + conflict detection in append_decay_layers"
+  "tests/test_io/test_store_append.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "Tests /decay/<ch> + /provenance/decay/<ch> — proper separation"
+
+  # ── tests/test_io/test_assembler.py ─────────────────────────────────
+  "tests/test_io/test_assembler.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_io/test_assembler.py.decay-write-path":
+    status: n/a
+    evidence: "stitching tests"
+  "tests/test_io/test_assembler.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "tests/test_io/test_assembler.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_io/test_assembler.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_assembler.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case"
+  "tests/test_io/test_assembler.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_assembler.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "no discovery"
+  "tests/test_io/test_assembler.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no tokens"
+  "tests/test_io/test_assembler.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── tests/test_io/test_scanner.py ──────────────────────────────────
+  "tests/test_io/test_scanner.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_io/test_scanner.py.decay-write-path":
+    status: n/a
+    evidence: "scanner tests"
+  "tests/test_io/test_scanner.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "tests/test_io/test_scanner.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_io/test_scanner.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_scanner.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case"
+  "tests/test_io/test_scanner.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_scanner.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "Tests both path= and files= modes of FileScanner.scan"
+  "tests/test_io/test_scanner.py.cross-format-token-matching":
+    status: n/a
+    evidence: "filename-token tests only"
+  "tests/test_io/test_scanner.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── tests/test_io/test_readers.py ──────────────────────────────────
+  "tests/test_io/test_readers.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_io/test_readers.py.decay-write-path":
+    status: n/a
+    evidence: "reader tests"
+  "tests/test_io/test_readers.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "tests/test_io/test_readers.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_io/test_readers.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_readers.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case"
+  "tests/test_io/test_readers.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_io/test_readers.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "single-file read tests"
+  "tests/test_io/test_readers.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no .bin → channel"
+  "tests/test_io/test_readers.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── tests/test_add_decay_to_dataset.py ──────────────────────────────
+  "tests/test_add_decay_to_dataset.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_add_decay_to_dataset.py.decay-write-path":
+    status: consumes_canonical
+    evidence: "Tests the use case which uses write_decay_streaming"
+  "tests/test_add_decay_to_dataset.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "append tests"
+  "tests/test_add_decay_to_dataset.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_add_decay_to_dataset.py.derived-layer-staleness-invalidation":
+    status: partial
+    evidence: "Likely covers /phasor invalidation post-append; need targeted assertions to confirm — file is 614 lines and not exhaustively read in this pass"
+    residual_evidence: "v1 audit time-box did not exhaustively read the test file. Confirm it asserts /phasor/<ch> absent after append-with-conflict-resolution."
+  "tests/test_add_decay_to_dataset.py.fresh-metadata-read-in-use-cases":
+    status: partial
+    evidence: "Need to confirm tests cover the store.metadata read path in add_decay_to_dataset.py:115"
+    residual_evidence: "v1 audit time-box."
+  "tests/test_add_decay_to_dataset.py.atomic-write-contract":
+    status: n/a
+    evidence: "in-place mutation"
+  "tests/test_add_decay_to_dataset.py.discovery-scopes-processing-consumes":
+    status: drifts_from_canonical
+    evidence: "Tests pass a source_dir; the use case rglobs it. Does NOT exercise a 'pre-discovered list of bins' path because that path doesn't exist in the use case."
+    thread: append-flow-plan-consumption
+    notes: "Test-side reflection of the use-case-side drift cell."
+  "tests/test_add_decay_to_dataset.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "Tests CompositeRule / ZeroPadOffsetRule / BaseStemRule / ExplicitRule paths through the use case"
+  "tests/test_add_decay_to_dataset.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "Tests /decay + /provenance/decay placement"
+
+  # ── tests/test_store.py ─────────────────────────────────────────────
+  "tests/test_store.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "no Qt"
+  "tests/test_store.py.decay-write-path":
+    status: consumes_canonical
+    evidence: "Likely tests write_array(is_decay=True) path"
+  "tests/test_store.py.channel-deletion-permanence":
+    status: partial
+    evidence: "delete_item is exercised; no test of the 7-step orchestration (lives in data_panel.py)"
+    residual_evidence: "Only the primitive is tested; the full permanence flow has no test today."
+  "tests/test_store.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_store.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "store-level primitive tests"
+  "tests/test_store.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case"
+  "tests/test_store.py.atomic-write-contract":
+    status: consumes_canonical
+    evidence: "Likely tests create_atomic; verify in v2 audit"
+  "tests/test_store.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "no discovery"
+  "tests/test_store.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no matcher tests in store"
+  "tests/test_store.py.one-payload-type-per-h5-group":
+    status: consumes_canonical
+    evidence: "Tests write_labels (int32, /labels/) and write_mask (uint8, /masks/) — payload-type-per-group enforcement"
+
+  # ── tests/test_gui_workflows/test_add_layer_tcspc.py ───────────────
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.dialog-scroll-when-tall":
+    status: n/a
+    evidence: "Tests TcspcTabState only — does not instantiate the QDialog"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.decay-write-path":
+    status: n/a
+    evidence: "state-machine tests"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "no use case"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.discovery-scopes-processing-consumes":
+    status: n/a
+    evidence: "constructs bins explicitly"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.cross-format-token-matching":
+    status: consumes_canonical
+    evidence: "Tests CompositeRule / ExplicitRule through TcspcTabState.build_selected_rule"
+  "tests/test_gui_workflows/test_add_layer_tcspc.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+  # ── tests/test_gui_workflows/test_config_dialog.py ─────────────────
+  "tests/test_gui_workflows/test_config_dialog.py.dialog-scroll-when-tall":
+    status: partial
+    evidence: "Tests the WorkflowConfigDialog but does NOT assert the QScrollArea is present; tests the data flow only"
+    residual_evidence: "No coverage that the scrollbar pattern exists. If the wrapper were removed, tests would still pass."
+    thread: dialog-scroll-helper-rollout
+  "tests/test_gui_workflows/test_config_dialog.py.decay-write-path":
+    status: n/a
+    evidence: "no decay"
+  "tests/test_gui_workflows/test_config_dialog.py.channel-deletion-permanence":
+    status: n/a
+    evidence: "no deletion"
+  "tests/test_gui_workflows/test_config_dialog.py.session-state-event-emission":
+    status: n/a
+    evidence: "no Session"
+  "tests/test_gui_workflows/test_config_dialog.py.derived-layer-staleness-invalidation":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_gui_workflows/test_config_dialog.py.fresh-metadata-read-in-use-cases":
+    status: n/a
+    evidence: "dialog test"
+  "tests/test_gui_workflows/test_config_dialog.py.atomic-write-contract":
+    status: n/a
+    evidence: "no writes"
+  "tests/test_gui_workflows/test_config_dialog.py.discovery-scopes-processing-consumes":
+    status: consumes_canonical
+    evidence: "Tests the _PendingDataset.dedupe_key shape (plan-as-data identity)"
+  "tests/test_gui_workflows/test_config_dialog.py.cross-format-token-matching":
+    status: n/a
+    evidence: "no .bin"
+  "tests/test_gui_workflows/test_config_dialog.py.one-payload-type-per-h5-group":
+    status: n/a
+    evidence: "no HDF5"
+
+# ── Gaps surfaced by the audit ─────────────────────────────────────────
+gaps:
+  - slug: dialog-scroll-when-tall
+    reason: "No solution doc existed; the user has had to instruct the QScrollArea-wrap-+-screen-cap pattern repeatedly throughout PerCell's lifetime (Thread 1 commit 6adde5a re-instructed it for add-layer TCSPC)."
+    authored_by_audit: docs/solutions/ui-bugs/dialog-scroll-when-tall.md
+  - slug: decay-write-path
+    reason: "Thread 1 produced the canonical write_decay_streaming + append_decay_layers but no docs/solutions/ entry named the canonical source; the 5 alignment commits (e25831a/37dd603/392f66d/f31a970/c25950e) document what NOT to do but not WHERE the canonical lives."
+    authored_by_audit: docs/solutions/architecture-patterns/decay-write-path.md
+  - slug: channel-deletion-permanence
+    reason: "Thread 1 surfaced the bug, but no solution doc named the 7-step convention or proposed promoting the orchestration to a use case."
+    authored_by_audit: docs/solutions/architecture-patterns/channel-deletion-permanence.md
+  - slug: atomic-write-contract
+    reason: "Pattern referenced across store/project/workflows but never named as a single-source-of-truth convention."
+    authored_by_audit: docs/solutions/architecture-patterns/atomic-write-contract.md
+  - slug: cross-format-token-matching
+    reason: "Pure-domain canonical exists at domain/io/cross_format.py but no docs/solutions/ entry frames it as a reusable boundary; would be useful for future format additions (.sdt → channel binding)."
+    authored_by_audit: null
+    note: "Not authored in this pass because the canonical is clean and consumed by both callsites; can be authored as a follow-up if a third callsite emerges."
+
+# ── Threads ────────────────────────────────────────────────────────────
+threads:
+  - slug: dialog-scroll-helper-rollout
+    description: "Promote the QScrollArea-wrap + screen-bound-resize pattern into a shared gui helper; converge all dialogs onto it; cover with a test."
+    cited_cells:
+      - "src/percell4/gui/import_dialog.py.dialog-scroll-when-tall"
+      - "src/percell4/gui/add_layer_dialog.py.dialog-scroll-when-tall"
+      - "src/percell4/gui/compress_dialog.py.dialog-scroll-when-tall"
+      - "src/percell4/gui/export_images_dialog.py.dialog-scroll-when-tall"
+      - "src/percell4/gui/workflows/single_cell/config_dialog.py.dialog-scroll-when-tall"
+      - "tests/test_gui_workflows/test_config_dialog.py.dialog-scroll-when-tall"
+    cited_io_principles_cells: []
+    complexity: small
+    rationale: |
+      Five dialogs implement a re-implements/drift variant of the same pattern; one (export_images_dialog) drifts (no wrapper at all). The user has named this as repeat-instruction pain across the project's lifetime. Authoring the canonical helper + migrating five callsites is a single small thread (~4-6 commits). Closes one whole canonical-source column at once. Acceptance: every *Dialog.py either uses the helper or has a documented exemption test fixture.
+    status: closed
+
+  - slug: append-flow-plan-consumption
+    description: "Make add_decay_to_dataset accept a pre-discovered bin list (DiscoveredFile / explicit Path list) instead of an rglob source_dir; align the dialog to pass that plan; fix the third occurrence of the discovery-scopes-processing-consumes pattern."
+    cited_cells:
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.discovery-scopes-processing-consumes"
+      - "src/percell4/gui/add_layer_dialog.py.discovery-scopes-processing-consumes"
+      - "tests/test_add_decay_to_dataset.py.discovery-scopes-processing-consumes"
+    cited_io_principles_cells:
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.5"
+    complexity: medium
+    rationale: |
+      Third occurrence of the bug pattern documented in batch-compress-development-lessons.md and add-layer-flat-discovery-duplicate-import.md. Use case currently does `source_dir.rglob("*.bin")` at the consumption layer — same shape as the two prior occurrences. Affects only the append flow today (single-bin-per-channel is fine), but a Reference/Consolidate refactor or a multi-source append would re-trip the bug. Aligns with I/O Principle 5 (one pipeline; batch ≡ incremental). Coherent thread that closes the third recurrence definitively.
+    status: proposed
+
+  - slug: write-boundary-discipline
+    description: "Eliminate direct `h5py.File(...)` / `os.replace`-bypass / tifffile.imwrite-direct in use cases and dialogs. All HDF5 mutation goes through DatasetStore methods; all TIFF export goes through an atomic-write helper."
+    cited_cells:
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.atomic-write-contract"
+      - "src/percell4/gui/add_layer_dialog.py.atomic-write-contract"
+      - "src/percell4/application/use_cases/export_images.py.atomic-write-contract"
+      - "src/percell4/adapters/importer.py.atomic-write-contract"
+      - "src/percell4/adapters/importer.py.decay-write-path"
+    cited_io_principles_cells:
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.4"
+      - "src/percell4/gui/add_layer_dialog.py.4"
+      - "src/percell4/application/use_cases/export_images.py.4"
+      - "src/percell4/adapters/importer.py.4"
+    complexity: medium
+    rationale: |
+      Five callsites bypass the centralized write boundary. `add_decay_to_dataset` reaches into h5py for rotate/flip/provenance; `add_layer_dialog._tcspc_write_bin_intensity_debug_layers` opens h5py directly; `export_images` writes TIFFs without atomic replace; `importer.import_dataset` calls `store.create()` (per-op write) instead of `create_atomic`. Closes both reuse-axis cells AND I/O Principle 4 cells in one go. Also retires the importer dead-code duplicate.
+    status: proposed
+
+  - slug: post-append-session-events
+    description: "Introduce per-state events for metadata-mutated and decay-layers-added so peer views can drop stale caches without coarse DATASET_CHANGED. Eliminates the manual handle.metadata.update(attrs) workaround inside add_layer_dialog._tcspc_persist_flim_metadata."
+    cited_cells:
+      - "src/percell4/gui/add_layer_dialog.py.session-state-event-emission"
+    cited_io_principles_cells: []
+    complexity: small
+    rationale: |
+      Vector 3 of the staleness compound is solved today by mutating `handle.metadata` in-place from the dialog. That works but bypasses the event system — a use case run from the CLI couldn't emit the same in-process update. Promoting to METADATA_CHANGED / DECAY_LAYERS_CHANGED events plus a CellDataModel forwarding bridge makes the fix mechanical and CLI-reachable. Small thread; pre-requisite for retiring the manual snapshot-mutation pattern.
+    status: proposed
+
+  - slug: cleanup-decay-write-deadcode
+    description: "Remove the unreachable inline-h5py decay-write block in adapters/importer.py:462-504 and the dead _read_and_stitch_decay helper in add_decay_to_dataset.py:407-471."
+    cited_cells:
+      - "src/percell4/adapters/importer.py.decay-write-path"
+    cited_io_principles_cells: []
+    complexity: small
+    rationale: |
+      Pure cleanup — both blocks are dead code left behind by Thread 1's consolidation. Trivial PR; reduces matrix surface area; removes future risk of someone "fixing" the dead code path and re-introducing the divergence Thread 1 closed.
+    status: proposed
+
+  - slug: import-atomicity-converge
+    description: "Make initial import use DatasetStore.create_atomic so a crashed import doesn't leave a partial .h5 visible. Also lifts the per-op `store.create()` to the canonical helper."
+    cited_cells:
+      - "src/percell4/adapters/importer.py.atomic-write-contract"
+    cited_io_principles_cells:
+      - "src/percell4/adapters/importer.py.4"
+    complexity: medium
+    rationale: |
+      The atomic-write helper exists (store.create_atomic) but the initial import path doesn't use it. Refactoring import_dataset to build under a temp .h5 and os.replace at the end requires threading the store handle through the channel/decay write phases — non-trivial because decay streaming writes incrementally. Alternative: keep per-op writes but add a "completion" sentinel (`/metadata.attrs[import_complete]`) that downstream readers check. User picks which approach. Could be merged into write-boundary-discipline thread.
+    status: proposed

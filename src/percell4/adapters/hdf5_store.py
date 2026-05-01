@@ -16,6 +16,22 @@ from percell4.domain.dataset import DatasetHandle, DatasetView
 from percell4.store import DatasetStore
 
 
+def _build_handle_metadata(store: DatasetStore) -> dict[str, Any]:
+    """Build DatasetHandle.metadata from a DatasetStore.
+
+    Combines the HDF5 ``/metadata`` attributes (channel_names, etc.) with
+    the inventory of available segmentations and masks. Segmentations are
+    label layers that are NOT in the mask set.
+    """
+    md = dict(store.metadata)
+    label_names = store.list_labels()
+    mask_names = store.list_masks()
+    mask_set = set(mask_names)
+    md["segmentation_names"] = [n for n in label_names if n not in mask_set]
+    md["mask_names"] = list(mask_names)
+    return md
+
+
 class Hdf5DatasetRepository:
     """DatasetRepository backed by HDF5 files via DatasetStore.
 
@@ -43,7 +59,7 @@ class Hdf5DatasetRepository:
         store = DatasetStore(path)
         if not store.exists():
             raise FileNotFoundError(f"Dataset not found: {path}")
-        return DatasetHandle(path=path, metadata=store.metadata)
+        return DatasetHandle(path=path, metadata=_build_handle_metadata(store))
 
     def build_view(self, handle: DatasetHandle) -> DatasetView:
         store = self._store(handle)
