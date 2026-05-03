@@ -488,18 +488,24 @@ def test_selection_banner_updates_on_rename(phasor_window_with_data):
     assert win._selected_banner.text() == "Selected: nucleus"
 
 
-def test_selected_roi_pen_is_bold_solid(phasor_window_with_data):
-    """Selected ROI's RectROI gets width=3 SolidLine; others stay width=1 DashLine."""
+def test_selected_roi_pen_is_black_solid(phasor_window_with_data):
+    """Selected ROI's RectROI is black + SolidLine; others stay in their own color + DashLine."""
+    from qtpy.QtGui import QColor
     win = phasor_window_with_data
     geos = [_make_geometry(1), _make_geometry(2, mean_g=0.55)]
     win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
     win._roi_list.setCurrentRow(0)
     pen0 = win._roi_widgets[0].roi.pen
     pen1 = win._roi_widgets[1].roi.pen
-    assert pen0.width() == 3
+    assert pen0.color() == QColor("black")
     assert pen0.style() == Qt.SolidLine
-    assert pen1.width() == 1
+    # Non-selected keeps its original color + DashLine
+    assert pen1.color() == QColor(win._roi_widgets[1].phasor_roi.color)
     assert pen1.style() == Qt.DashLine
+    # Banner still shows the selected ROI's original color so list ↔ plot
+    # mapping stays clear.
+    selected_color = win._roi_widgets[0].phasor_roi.color
+    assert selected_color in win._selected_banner.styleSheet()
 
 
 def test_close_event_stops_timers_before_unsubscribe(phasor_window_with_data):

@@ -698,22 +698,21 @@ class PhasorPlotWindow(QMainWindow):
         self._preview_timer.start()
 
     def _refresh_selected_roi_highlight(self) -> None:
-        """Render the selected ROI bold + solid; everyone else dashed.
+        """Render the selected ROI black; everyone else in their own color.
 
         Also updates the banner above the plot so the user can see at a
-        glance which ROI the spinboxes are operating on.
+        glance which ROI the spinboxes are operating on. The banner
+        keeps the ROI's original color so the user can still tie ROI
+        list entries to plot shapes.
         """
         for i, w in enumerate(self._roi_widgets):
-            color = w.phasor_roi.color
             if i == self._selected_roi_index:
-                pen = pg.mkPen(color, width=3, style=Qt.SolidLine)
+                w.roi.setPen(pg.mkPen("black", width=2, style=Qt.SolidLine))
+                w.curve.setPen(pg.mkPen("black", width=2))
             else:
-                pen = pg.mkPen(color, width=1, style=Qt.DashLine)
-            w.roi.setPen(pen)
-            # The ellipse curve uses the same color but always solid +
-            # width=2; selected gets a bump to width=3.
-            curve_pen = pg.mkPen(color, width=3 if i == self._selected_roi_index else 2)
-            w.curve.setPen(curve_pen)
+                color = w.phasor_roi.color
+                w.roi.setPen(pg.mkPen(color, width=1, style=Qt.DashLine))
+                w.curve.setPen(pg.mkPen(color, width=2))
 
         if (
             self._selected_roi_index is None
