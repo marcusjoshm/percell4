@@ -488,23 +488,35 @@ def test_selection_banner_updates_on_rename(phasor_window_with_data):
     assert win._selected_banner.text() == "Selected: nucleus"
 
 
-def test_selected_roi_pen_is_black_solid(phasor_window_with_data):
-    """Selected ROI's RectROI is black + SolidLine; others stay in their own color + DashLine."""
+def test_selected_roi_dashed_rect_turns_black_width_1(phasor_window_with_data):
+    """Only the dotted-line RectROI recolors black on selection; width stays 1.
+
+    The ellipse curve must keep its original color so the list-to-plot
+    color mapping is preserved.
+    """
     from qtpy.QtGui import QColor
     win = phasor_window_with_data
     geos = [_make_geometry(1), _make_geometry(2, mean_g=0.55)]
     win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
     win._roi_list.setCurrentRow(0)
-    pen0 = win._roi_widgets[0].roi.pen
-    pen1 = win._roi_widgets[1].roi.pen
-    assert pen0.color() == QColor("black")
-    assert pen0.style() == Qt.SolidLine
-    # Non-selected keeps its original color + DashLine
-    assert pen1.color() == QColor(win._roi_widgets[1].phasor_roi.color)
-    assert pen1.style() == Qt.DashLine
-    # Banner still shows the selected ROI's original color so list ↔ plot
-    # mapping stays clear.
+
+    # Selected ROI: RectROI dashed black, width 1
+    rect_pen0 = win._roi_widgets[0].roi.pen
+    assert rect_pen0.color() == QColor("black")
+    assert rect_pen0.style() == Qt.DashLine
+    assert rect_pen0.width() == 1
+    # Selected ROI: ellipse curve still uses the ROI's color (NOT black)
     selected_color = win._roi_widgets[0].phasor_roi.color
+    curve_pen0 = win._roi_widgets[0].curve.opts["pen"]
+    assert curve_pen0.color() == QColor(selected_color)
+
+    # Non-selected ROI: RectROI dashed in its own color, width 1
+    rect_pen1 = win._roi_widgets[1].roi.pen
+    assert rect_pen1.color() == QColor(win._roi_widgets[1].phasor_roi.color)
+    assert rect_pen1.style() == Qt.DashLine
+    assert rect_pen1.width() == 1
+
+    # Banner shows the selected ROI's original color
     assert selected_color in win._selected_banner.styleSheet()
 
 
