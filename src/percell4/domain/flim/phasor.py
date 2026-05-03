@@ -3,12 +3,26 @@
 Direct cosine/sine transform (not FFT) — computes only the requested
 harmonic, lower memory than full FFT. Supports in-memory arrays and
 chunked HDF5 datasets for large images.
+
+Also hosts the pure helpers backing GMM-based phasor segmentation:
+``universal_circle_gs``, ``gmm_eigenstructure``,
+``gmm_to_phasor_roi_geometry``, and ``gmm_fit_phasor``. Sklearn is lazy-
+imported inside ``gmm_fit_phasor`` to mirror ``domain/measure/grouper.py``
+and keep import time low.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
+
+# Default cap on the number of pixels passed to the GMM fitter — sampling
+# beyond this point doesn't measurably improve cluster recovery and the
+# memory cost grows linearly. Exposed as a kwarg on ``gmm_fit_phasor`` so
+# tests and future tuning can override it.
+MAX_GMM_PIXELS = 100_000
 
 
 def compute_phasor(
@@ -281,3 +295,267 @@ def measure_phasor_per_cell(
         "phasor_spread": out_spread,
         "n_valid_pixels": out_n,
     }
+
+
+# ── GMM-based phasor segmentation ────────────────────────────────────
+
+
+@dataclass
+class GMMFitResult:
+    """Output of ``gmm_fit_phasor`` — what the use case forwards to the GUI.
+
+    ``means`` and ``covariances`` are sklearn's per-component arrays; the
+    use case maps them through ``gmm_eigenstructure`` and
+    ``gmm_to_phasor_roi_geometry`` before constructing ROI dataclasses.
+    """
+
+    means: NDArray[np.float64]
+    covariances: NDArray[np.float64]
+    chosen_n: int
+    criterion_value: float | None
+    sampled_pixels: int
+
+
+def universal_circle_gs(
+    harmonic: int, tau_ns: float, freq_mhz: float
+) -> tuple[float, float]:
+    """Closed-form (G, S) on the universal semicircle for a single lifetime.
+
+    The reference scripts at ``ComplexWaveletFilter/CondensedPhaseGMM.py``
+    used ``scipy.minimize`` with a circle constraint to find this point;
+    the exact closed form is faster, deterministic, and has no
+    convergence failure mode.
+
+    Parameters
+    ----------
+    harmonic : Fourier harmonic number (1 = fundamental).
+    tau_ns : target fluorescence lifetime in nanoseconds (>= 0).
+    freq_mhz : laser repetition frequency in megahertz.
+
+    Returns
+    -------
+    (G_c, S_c) on the universal semicircle.
+    """
+    if tau_ns < 0:
+        raise ValueError(f"tau_ns must be >= 0, got {tau_ns!r}")
+
+    # ω in rad/s × τ in s. freq_mhz × 1e6 → Hz; tau_ns × 1e-9 → s.
+    omega_tau = 2.0 * np.pi * harmonic * (freq_mhz * 1e6) * (tau_ns * 1e-9)
+    denom = 1.0 + omega_tau * omega_tau
+    g_c = 1.0 / denom
+    s_c = omega_tau / denom
+    return float(g_c), float(s_c)
+
+
+def gmm_eigenstructure(
+    cov_matrix: NDArray[np.floating],
+) -> tuple[float, float, float]:
+    """Decompose a 2x2 covariance matrix into ROI-ready scalars.
+
+    Returns ``(lambda_major, lambda_minor, principal_angle_rad)``:
+
+    - ``lambda_major`` is the larger eigenvalue (variance along the major
+      axis); ``lambda_minor`` the smaller. Both are clamped to a small
+      positive floor so downstream radii never collapse to zero on
+      singular / near-singular covariance.
+    - ``principal_angle_rad`` is the angle of the major eigenvector,
+      measured counter-clockwise from the +G axis.
+    """
+    eigvals, eigvecs = np.linalg.eigh(np.asarray(cov_matrix, dtype=np.float64))
+    # eigh returns sorted ascending: [λ_minor, λ_major]; eigvecs columns match.
+    lambda_minor = float(eigvals[0])
+    lambda_major = float(eigvals[1])
+
+    trace = float(np.trace(cov_matrix))
+    floor = max(1e-6 * trace, 1e-9) if trace > 0 else 1e-9
+    lambda_minor = max(lambda_minor, floor)
+    lambda_major = max(lambda_major, floor)
+
+    major_vec = eigvecs[:, 1]
+    principal_angle_rad = float(np.arctan2(major_vec[1], major_vec[0]))
+    return lambda_major, lambda_minor, principal_angle_rad
+
+
+def gmm_to_phasor_roi_geometry(
+    mean: tuple[float, float],
+    lambda_major: float,
+    lambda_minor: float,
+    principal_angle_rad: float,
+    stretch_parallel: float,
+    stretch_perpendicular: float,
+    shift_parallel: float,
+    shift_perpendicular: float,
+    shape: str,
+) -> tuple[tuple[float, float], tuple[float, float], float]:
+    """Compute (center, radii, angle_deg) for a GMM-derived ROI.
+
+    Four data-determined coefficients drive ROI placement, two for
+    translation and two for stretch — each independent along the major
+    and minor eigenaxes of the cluster covariance:
+
+    - ``shift_parallel`` translates along the major eigenvector by
+      ``shift_parallel × √λ_major``.
+    - ``shift_perpendicular`` translates along the minor eigenvector by
+      ``shift_perpendicular × √λ_minor``.
+    - ``stretch_parallel`` scales the major-axis radius
+      (``stretch_parallel × √λ_major``).
+    - ``stretch_perpendicular`` scales the minor-axis radius
+      (``stretch_perpendicular × √λ_minor``).
+
+    All four are measured relative to the cluster mean — there is no
+    "drag-preserving anchor". GMM ROIs are non-draggable in the GUI;
+    the spinboxes are the exclusive way to move/scale them.
+
+    For ``shape="ellipse"`` the radii are
+    ``(stretch_parallel × √λ_major, stretch_perpendicular × √λ_minor)``
+    and the angle is the major-eigenvector angle. For ``shape="circle"``
+    the radii degenerate to
+    ``(stretch_perpendicular × √λ_minor, stretch_perpendicular × √λ_minor)``
+    — a circle inscribed in the cluster's minor extent (matches
+    ``Circular_ROI_lifetime.py:169``). The angle is ``0``.
+    """
+    if shape not in ("ellipse", "circle"):
+        raise ValueError(f"shape must be 'ellipse' or 'circle', got {shape!r}")
+    if stretch_parallel <= 0 or stretch_perpendicular <= 0:
+        raise ValueError(
+            f"stretch_parallel and stretch_perpendicular must be > 0, "
+            f"got ({stretch_parallel!r}, {stretch_perpendicular!r})"
+        )
+
+    sqrt_major = float(np.sqrt(lambda_major))
+    sqrt_minor = float(np.sqrt(lambda_minor))
+
+    cos_a = float(np.cos(principal_angle_rad))
+    sin_a = float(np.sin(principal_angle_rad))
+    # Parallel direction = major eigenvector; perpendicular direction is
+    # rotated 90° counter-clockwise (so a positive shift_perpendicular
+    # moves the ROI to the "left" of the major axis when looking outward
+    # from the cluster center).
+    delta_g = (
+        shift_parallel * sqrt_major * cos_a
+        - shift_perpendicular * sqrt_minor * sin_a
+    )
+    delta_s = (
+        shift_parallel * sqrt_major * sin_a
+        + shift_perpendicular * sqrt_minor * cos_a
+    )
+
+    mean_g, mean_s = mean
+    center = (float(mean_g) + delta_g, float(mean_s) + delta_s)
+
+    if shape == "ellipse":
+        radii = (stretch_parallel * sqrt_major, stretch_perpendicular * sqrt_minor)
+        angle_deg = float(np.degrees(principal_angle_rad))
+    else:  # circle
+        radii = (
+            stretch_perpendicular * sqrt_minor,
+            stretch_perpendicular * sqrt_minor,
+        )
+        angle_deg = 0.0
+
+    return center, radii, angle_deg
+
+
+def gmm_fit_phasor(
+    g: NDArray[np.floating],
+    s: NDArray[np.floating],
+    intensity: NDArray[np.floating],
+    n_components: int | None,
+    criterion: str | None,
+    n_min: int = 2,
+    n_max: int = 4,
+    max_pixels: int = MAX_GMM_PIXELS,
+    random_seed: int = 0,
+) -> GMMFitResult:
+    """Fit a Gaussian mixture to (g, s) pixels with intensity weighting.
+
+    When ``n_components`` is set, fits exactly that count. When it's
+    ``None``, sweeps ``n_min..n_max`` and picks the lowest BIC or AIC per
+    ``criterion``. Defaults reflect the FLIM rule "a single Gaussian over
+    the whole filtered phasor is never useful as an ROI" (``n_min=2``)
+    and the perf-tuned upper bound (``n_max=4``).
+
+    Intensity weighting uses ``np.random.default_rng(seed).choice`` with
+    ``p = intensity / intensity.sum()`` instead of the reference
+    scripts' ``np.repeat`` — same proportional weighting, bounded
+    memory. Subsamples to at most ``max_pixels``. When intensity sums
+    to zero (constant or all-zero), falls back to uniform sampling.
+
+    sklearn is lazy-imported inside this function (matches
+    ``domain/measure/grouper.py``).
+    """
+    from sklearn.mixture import GaussianMixture
+
+    if criterion is not None and criterion not in ("BIC", "AIC"):
+        raise ValueError(f"criterion must be 'BIC', 'AIC', or None, got {criterion!r}")
+    if n_components is not None and n_components < 1:
+        raise ValueError(f"n_components must be >= 1, got {n_components!r}")
+
+    g = np.asarray(g, dtype=np.float64)
+    s = np.asarray(s, dtype=np.float64)
+    intensity = np.asarray(intensity, dtype=np.float64)
+    if g.shape != s.shape or g.shape != intensity.shape:
+        raise ValueError("g, s, intensity must share shape")
+
+    n_valid = int(g.size)
+    floor_n = n_components if n_components is not None else n_min
+    if n_valid < floor_n:
+        raise ValueError(
+            f"Not enough valid pixels for n={floor_n} clusters (have {n_valid})"
+        )
+
+    rng = np.random.default_rng(random_seed)
+    sample_size = min(n_valid, max_pixels)
+
+    if intensity.sum() > 0:
+        p = intensity / intensity.sum()
+        idx = rng.choice(n_valid, size=sample_size, replace=False, p=p)
+    else:
+        # Constant / zero intensity → uniform sampling.
+        idx = rng.choice(n_valid, size=sample_size, replace=False)
+
+    samples = np.column_stack([g[idx], s[idx]])
+
+    def _fit_one(n: int) -> GaussianMixture:
+        gmm = GaussianMixture(
+            n_components=n,
+            covariance_type="full",
+            random_state=random_seed,
+        )
+        gmm.fit(samples)
+        return gmm
+
+    if n_components is not None:
+        best = _fit_one(n_components)
+        chosen_n = n_components
+        criterion_value: float | None = None
+    else:
+        if criterion is None:
+            raise ValueError("criterion required when n_components is None")
+        best_gmm: GaussianMixture | None = None
+        best_score = float("inf")
+        chosen_n = n_min
+        for n in range(n_min, n_max + 1):
+            if n_valid < n:
+                break
+            gmm = _fit_one(n)
+            score = gmm.bic(samples) if criterion == "BIC" else gmm.aic(samples)
+            if score < best_score:
+                best_score = score
+                best_gmm = gmm
+                chosen_n = n
+        if best_gmm is None:
+            raise ValueError(
+                f"Could not fit any GMM in range n={n_min}..{n_max} "
+                f"with {n_valid} valid pixels"
+            )
+        best = best_gmm
+        criterion_value = float(best_score)
+
+    return GMMFitResult(
+        means=np.asarray(best.means_, dtype=np.float64),
+        covariances=np.asarray(best.covariances_, dtype=np.float64),
+        chosen_n=chosen_n,
+        criterion_value=criterion_value,
+        sampled_pixels=sample_size,
+    )

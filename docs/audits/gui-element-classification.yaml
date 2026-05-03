@@ -1,12 +1,23 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
+last_updated: 2026-05-03
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 176
+total_widgets: 190
 counts:
   selector: 16
   creator: 15
-  action: 145
+  action: 159
+# 2026-05-03 update (feat/phasor-gmm-segmentation U7):
+#   +14 Actions on the FlimPanel and PhasorPlotWindow surfaces:
+#     FlimPanel: intensity_threshold_spin, ref_circle_check, ref_circle_tau_spin,
+#                ref_circle_radius_spin, shape_combo, auto_check, n_clusters_spin,
+#                criterion_combo, cov_f_spin, shift_spin, run_gmm_button (11)
+#     PhasorPlotWindow: selected_cov_f_spin, selected_shift_spin,
+#                       selected_reset_to_fit_button (3)
+#   No new Selectors or Creators. The downstream Apply Visible as Mask remains
+#   the existing Creator that writes /masks/<roi_name> when GMM-origin ROIs are
+#   committed.
 
 # Three-class taxonomy:
 #   Selector — reads session, writes session selection fields, no resource write
@@ -381,6 +392,123 @@ widgets:
     keystroke: null
     notes: "BORDERLINE — ComputeLifetime use case writes /phasor/<channel>/lifetime (compute_lifetime.py:73). Adds an Image layer to napari for the lifetime map. No session-selection auto-select. Closest fit: Creator."
 
+  # Phasor Filters group (added 2026-05-03 as part of feat/phasor-gmm-segmentation U6).
+  # GUI-local filter values pushed into PhasorPlotWindow.set_phasor_filters; never
+  # written to Session — these are Actions under the taxonomy.
+  - id: flim_panel.intensity_threshold_spin
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QSpinBox
+    handler: _push_filters_to_phasor_plot
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Pushes intensity threshold to PhasorPlotWindow.set_phasor_filters; no Session write."
+
+  - id: flim_panel.ref_circle_check
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QCheckBox
+    handler: _on_ref_circle_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Enables tau/radius spinboxes; pushes ref-circle params to PhasorPlotWindow. Disabled when flim_frequency_mhz is missing from dataset metadata."
+
+  - id: flim_panel.ref_circle_tau_spin
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QDoubleSpinBox
+    handler: _push_filters_to_phasor_plot
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Reference-circle target lifetime (ns)."
+
+  - id: flim_panel.ref_circle_radius_spin
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QDoubleSpinBox
+    handler: _push_filters_to_phasor_plot
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Reference-circle radius in phasor units."
+
+  # Phasor Segmentation group (added 2026-05-03). Run GMM does not write to
+  # Session or HDF5 directly; it appends ROIs to PhasorPlotWindow's local list.
+  # The downstream Apply Visible as Mask (existing) is the Creator that writes
+  # /masks/<roi_name>.
+  - id: flim_panel.shape_combo
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Per-run GMM ROI shape (Ellipse | Circle); read by _on_run_gmm at click time."
+
+  - id: flim_panel.auto_check
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QCheckBox
+    handler: _on_auto_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Switches n spinbox label between n / n_max; toggles Criterion combo enable."
+
+  - id: flim_panel.n_clusters_spin
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Either fixed n (Auto off) or n_max for the BIC/AIC sweep (Auto on)."
+
+  - id: flim_panel.criterion_combo
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Auto-mode model-selection criterion (BIC | AIC). setEnabled-toggled with Auto."
+
+  - id: flim_panel.cov_f_spin
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QDoubleSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Initial cov_f for newly-placed GMM ROIs; read by _on_run_gmm."
+
+  - id: flim_panel.shift_spin
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QDoubleSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Initial shift for newly-placed GMM ROIs; read by _on_run_gmm."
+
+  - id: flim_panel.run_gmm_button
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/flim_panel.py
+    widget_type: QPushButton
+    handler: _on_run_gmm
+    reads: [active_channel]
+    writes: []
+    keystroke: null
+    notes: "Spawns a Worker(QThread) running RunPhasorGMM.execute. On worker.finished, calls phasor_win.place_gmm_rois (appends to local _roi_widgets only). No Session write; no HDF5 write — Action under the taxonomy. The downstream Apply Visible as Mask (phasor_plot.apply_mask_button) remains the Creator that writes /masks/<name>."
+
   # ── io_panel.py ──────────────────────────────────────────────
   - id: io_panel.import_button
     class: Action
@@ -670,6 +798,41 @@ widgets:
     writes: []
     keystroke: null
     notes: "Toggles the selected ROI's visibility flag. Internal."
+
+  # GMM-origin ROI controls (added 2026-05-03 as part of feat/phasor-gmm-segmentation U5).
+  # Mutate PhasorROI.gmm_fit dataclass state held in _roi_widgets — that is
+  # GUI-local, not Session state — so the Selector/Creator/Action taxonomy
+  # treats these as Actions. Downstream Apply Visible as Mask reads
+  # phasor_roi.center / radii to write the mask.
+  - id: phasor_plot.selected_cov_f_spin
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QDoubleSpinBox (valueChanged)
+    handler: _on_cov_f_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Stretches the selected GMM ROI from stored eigenstructure. Drag-preserving (anchor=current center). Disabled for manual ROIs."
+
+  - id: phasor_plot.selected_shift_spin
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QDoubleSpinBox (valueChanged)
+    handler: _on_shift_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Translates the selected GMM ROI along its principal axis from the cluster mean. Disabled for manual ROIs."
+
+  - id: phasor_plot.selected_reset_to_fit_button
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QPushButton
+    handler: _on_reset_fit_clicked
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Snaps the selected GMM ROI's center back to the cluster mean (overrides any manual drag). Disabled for manual ROIs."
 
   - id: phasor_plot.apply_visible_as_mask_button
     class: Creator

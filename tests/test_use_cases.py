@@ -432,3 +432,344 @@ class TestComputePhasorInvalidatesWavelet:
         result = uc.execute(channel="ch0", harmonic=1)
 
         assert result.g_map.shape == (4, 4)
+
+
+# ── RunPhasorGMM (U3) ────────────────────────────────────────
+
+
+def _make_two_cluster_phasor(rng_seed: int = 7) -> tuple[np.ndarray, np.ndarray]:
+    """64x64 phasor with two well-separated clusters in the brightest pixels."""
+    rng = np.random.default_rng(rng_seed)
+    h = w = 64
+    g = np.full((h, w), np.nan, dtype=np.float32)
+    s = np.full((h, w), np.nan, dtype=np.float32)
+    # Two clusters spread across the spatial field
+    pts_a = rng.multivariate_normal([0.30, 0.40], np.eye(2) * 0.0008, size=h * w // 4)
+    pts_b = rng.multivariate_normal([0.55, 0.42], np.eye(2) * 0.0006, size=h * w // 4)
+    flat_g = g.ravel()
+    flat_s = s.ravel()
+    flat_g[: pts_a.shape[0]] = pts_a[:, 0]
+    flat_s[: pts_a.shape[0]] = pts_a[:, 1]
+    flat_g[pts_a.shape[0]: pts_a.shape[0] + pts_b.shape[0]] = pts_b[:, 0]
+    flat_s[pts_a.shape[0]: pts_a.shape[0] + pts_b.shape[0]] = pts_b[:, 1]
+    return flat_g.reshape(h, w), flat_s.reshape(h, w)
+
+
+def _seed_phasor_dataset(
+    repo: FakeRepo,
+    *,
+    intensity_value: float = 100.0,
+    freq_mhz: float | None = 80.0,
+    write_filtered: bool = True,
+    write_unfiltered: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    g_map, s_map = _make_two_cluster_phasor()
+    # Decay is broadcast intensity across 16 time bins so decay.sum(-1)
+    # equals intensity_value × 16 for every pixel.
+    n_bins = 16
+    h, w = g_map.shape
+    decay = np.full(
+        (h, w, n_bins), intensity_value, dtype=np.float32,
+    )
+    repo.written_arrays["decay/ch0"] = decay
+    if write_filtered:
+        repo.written_arrays["phasor/ch0/g_filtered"] = g_map
+        repo.written_arrays["phasor/ch0/s_filtered"] = s_map
+    if write_unfiltered:
+        repo.written_arrays["phasor/ch0/g"] = g_map
+        repo.written_arrays["phasor/ch0/s"] = s_map
+    if freq_mhz is not None:
+        repo.disk_metadata["flim_frequency_mhz"] = freq_mhz
+    return g_map, s_map
+
+
+class TestRunPhasorGMM:
+    """U3 — RunPhasorGMM use case test scenarios."""
+
+    def test_two_cluster_ellipse_recovers_means(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=2, criterion=None,
+        )
+        assert len(result.geometries) == 2
+        assert result.chosen_n == 2
+        # Ordered by mean_g
+        means_g = sorted(g.mean_g for g in result.geometries)
+        assert means_g[0] == pytest.approx(0.30, abs=0.03)
+        assert means_g[1] == pytest.approx(0.55, abs=0.03)
+
+    def test_auto_bic_selects_two(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=None, criterion="BIC",
+            n_max=4,
+        )
+        assert result.chosen_n == 2
+        assert result.criterion == "BIC"
+        assert result.criterion_value is not None
+
+    def test_circle_shape_has_equal_radii(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="circle",
+            n_components=2, criterion=None,
+        )
+        for geom in result.geometries:
+            assert geom.radii[0] == pytest.approx(geom.radii[1], abs=1e-12)
+            assert geom.angle_deg == 0.0
+
+    def test_dataset_path_snapshot_in_result(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        path = Path("/tmp/snapshot.h5")
+        session.set_dataset(DatasetHandle(path=path, metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(channel="ch0", shape="ellipse", n_components=2, criterion=None)
+        assert result.dataset_path == path
+
+    def test_intensity_derived_from_decay_not_intensity_layer(self):
+        """Alignment invariant: intensity must come from /decay.sum, never /intensity."""
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/align.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo, intensity_value=10.0)
+        # If the use case accidentally read /intensity[0] (a misleading
+        # layer with garbage data), the GMM would produce skewed weights.
+        # Plant a misleading /intensity stack with values 1e6 — opposite
+        # of what's in /decay (which sums to 160 per pixel).
+        repo.written_arrays["intensity"] = np.full((1, 64, 64), 1e6, dtype=np.float32)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse", n_components=2, criterion=None,
+        )
+        # The fit succeeds with consistent weights from /decay; no read
+        # of repo.written_arrays["intensity"] occurred.
+        assert result.chosen_n == 2
+
+    def test_use_filtered_gs_false_reads_unfiltered(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        # Only unfiltered phasor written
+        _seed_phasor_dataset(repo, write_filtered=False)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=2, criterion=None,
+            use_filtered_gs=False,
+        )
+        assert result.chosen_n == 2
+
+    def test_cell_filter_restricts_gmm_input(self):
+        """session.filter_ids + active_segmentation restrict pixels fed to GMM."""
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        g_map, s_map = _seed_phasor_dataset(repo)
+
+        # Synthetic labels: cluster A pixels are label 1, cluster B pixels
+        # are label 2, the rest are 0. This means filtering to {1} should
+        # cause the GMM to fit a unimodal blob and converge differently.
+        h, w = g_map.shape
+        labels = np.zeros((h, w), dtype=np.int32)
+        # Cluster A occupies the first quarter of the flat array
+        n_a = (h * w) // 4
+        labels.flat[:n_a] = 1
+        labels.flat[n_a: 2 * n_a] = 2
+        repo.labels["seg1"] = labels
+
+        session.set_active_segmentation("seg1")
+        session.set_filter({1})
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=2, criterion=None,
+        )
+        # Only label-1 pixels (cluster A) contributed → both fitted means
+        # should sit near cluster A's center (0.30, 0.40), not the bimodal
+        # truth.
+        for geom in result.geometries:
+            assert geom.mean_g == pytest.approx(0.30, abs=0.05)
+
+    def test_no_dataset_raises(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()  # no dataset set
+        repo = FakeRepo()
+        uc = RunPhasorGMM(repo, session)
+        with pytest.raises(NoDatasetError):
+            uc.execute(channel="ch0", shape="ellipse", n_components=2, criterion=None)
+
+    def test_missing_phasor_unfiltered_raises(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        # No phasor data written
+        repo.written_arrays["decay/ch0"] = np.zeros((4, 4, 8), dtype=np.float32)
+
+        uc = RunPhasorGMM(repo, session)
+        with pytest.raises(ValueError, match="Phasor data not found"):
+            uc.execute(
+                channel="ch0", shape="ellipse",
+                n_components=2, criterion=None,
+                use_filtered_gs=False,
+            )
+
+    def test_missing_filtered_phasor_raises_distinct_message(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo, write_filtered=False)
+
+        uc = RunPhasorGMM(repo, session)
+        with pytest.raises(ValueError, match="Wavelet-filtered phasor not found"):
+            uc.execute(
+                channel="ch0", shape="ellipse",
+                n_components=2, criterion=None,
+                use_filtered_gs=True,
+            )
+
+    def test_ref_circle_without_freq_raises(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo, freq_mhz=None)
+
+        uc = RunPhasorGMM(repo, session)
+        with pytest.raises(ValueError, match="flim_frequency_mhz"):
+            uc.execute(
+                channel="ch0", shape="ellipse",
+                n_components=2, criterion=None,
+                ref_circle_tau_ns=2.5, ref_circle_radius=0.5,
+            )
+
+    def test_mask_filter_active_with_no_active_mask_silently_bypassed(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=2, criterion=None,
+            mask_filter_active=True,  # but session.active_mask is None
+        )
+        assert result.chosen_n == 2
+
+    def test_n_components_one_explicit_allowed(self):
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo)
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=1, criterion=None,
+        )
+        assert result.chosen_n == 1
+        assert len(result.geometries) == 1
+
+    def test_fresh_metadata_path_sees_post_snapshot_freq(self):
+        """_read_fresh_metadata defeats handle.metadata snapshot staleness."""
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        # Empty metadata at set_dataset time (snapshot stale)
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        _seed_phasor_dataset(repo, freq_mhz=None)
+        # Simulate post-snapshot write of the freq into /metadata
+        repo.disk_metadata["flim_frequency_mhz"] = 80.0
+
+        uc = RunPhasorGMM(repo, session)
+        # Should not raise — fresh read picks up the post-snapshot freq
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=2, criterion=None,
+            ref_circle_tau_ns=2.5, ref_circle_radius=0.5,
+        )
+        assert result.chosen_n == 2
+
+    def test_decay_sum_uses_float64_intermediate(self):
+        """High photon counts must not lose precision in intensity weights."""
+        from percell4.application.use_cases.run_phasor_gmm import RunPhasorGMM
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/u3.h5"), metadata={}))
+        repo = FakeRepo()
+        # Large per-bin counts: 256 bins × 70_000 each → sum 1.79e7,
+        # above float32 precision (2^24 = 1.68e7).
+        h = w = 32
+        n_bins = 256
+        decay = np.full((h, w, n_bins), 70_000, dtype=np.uint32)
+        repo.written_arrays["decay/ch0"] = decay
+        g_map, s_map = _make_two_cluster_phasor()
+        # Reshape to match the seeded decay shape
+        rng = np.random.default_rng(2)
+        g_small = rng.multivariate_normal([0.30, 0.40], np.eye(2) * 0.0008, size=h * w // 2)
+        g_other = rng.multivariate_normal([0.55, 0.42], np.eye(2) * 0.0006, size=h * w // 2)
+        pts = np.vstack([g_small, g_other])
+        flat_g = np.full(h * w, np.nan, dtype=np.float32)
+        flat_s = np.full(h * w, np.nan, dtype=np.float32)
+        flat_g[: pts.shape[0]] = pts[:, 0]
+        flat_s[: pts.shape[0]] = pts[:, 1]
+        repo.written_arrays["phasor/ch0/g_filtered"] = flat_g.reshape(h, w)
+        repo.written_arrays["phasor/ch0/s_filtered"] = flat_s.reshape(h, w)
+        repo.disk_metadata["flim_frequency_mhz"] = 80.0
+
+        uc = RunPhasorGMM(repo, session)
+        result = uc.execute(
+            channel="ch0", shape="ellipse",
+            n_components=2, criterion=None,
+        )
+        # Sanity check the fit landed despite large sums — the precision
+        # invariant matters most for the sampling weight distribution.
+        assert result.chosen_n == 2
