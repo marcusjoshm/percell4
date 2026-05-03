@@ -186,26 +186,12 @@ class FlimPanel(QWidget):
         crit_row.addWidget(self._criterion_combo)
         seg_layout.addLayout(crit_row)
 
-        cov_row = QHBoxLayout()
-        cov_row.addWidget(QLabel("cov_f:"))
-        self._cov_f_spin = QDoubleSpinBox()
-        self._cov_f_spin.setRange(0.5, 5.0)
-        self._cov_f_spin.setSingleStep(0.1)
-        self._cov_f_spin.setDecimals(1)
-        self._cov_f_spin.setValue(2.0)
-        cov_row.addWidget(self._cov_f_spin)
-        seg_layout.addLayout(cov_row)
-
-        shift_row = QHBoxLayout()
-        shift_row.addWidget(QLabel("Shift:"))
-        self._shift_spin = QDoubleSpinBox()
-        self._shift_spin.setRange(-2.0, 2.0)
-        self._shift_spin.setSingleStep(0.1)
-        self._shift_spin.setDecimals(1)
-        self._shift_spin.setValue(0.0)
-        shift_row.addWidget(self._shift_spin)
-        seg_layout.addLayout(shift_row)
-
+        # Note: cov_f and shift placement defaults are not exposed in the
+        # FLIM tab — the Phasor window's Selected-ROI panel is the
+        # exclusive surface for per-ROI tuning. The use case is invoked
+        # with cov_f=2.0 / shift=0.0 (the eigenstructure baseline);
+        # users tune each placed ROI individually via Stretch ∥ / ⊥ and
+        # Shift ∥ / ⊥ on the phasor plot.
         self._run_gmm_btn = QPushButton("Run GMM")
         self._run_gmm_btn.clicked.connect(self._on_run_gmm)
         seg_layout.addWidget(self._run_gmm_btn)
@@ -544,8 +530,11 @@ class FlimPanel(QWidget):
             n_components=None if auto else int(self._n_clusters_spin.value()),
             criterion=self._criterion_combo.currentText() if auto else None,
             n_max=int(self._n_clusters_spin.value()) if auto else 4,
-            cov_f=float(self._cov_f_spin.value()),
-            shift=float(self._shift_spin.value()),
+            # cov_f / shift placement defaults are baked in; the user
+            # tunes each placed ROI's per-axis stretch and shift via
+            # the Phasor window's Selected-ROI panel.
+            cov_f=2.0,
+            shift=0.0,
             intensity_threshold=float(self._intensity_threshold_spin.value()),
             ref_circle_tau_ns=(
                 self._ref_circle_tau_spin.value()

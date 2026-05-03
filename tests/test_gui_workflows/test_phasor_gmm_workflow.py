@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from qtpy.QtCore import Qt
 
 from percell4.application.session import Session
 from percell4.application.use_cases.run_phasor_gmm import PhasorROIGeometry
@@ -453,6 +454,52 @@ def test_v3_json_round_trip_then_stretch_edit(phasor_window_with_data, tmp_path)
     # parallel only — major axis radius scales 1.5x; minor stays
     assert new_radii[0] == pytest.approx(initial_radii[0] * 1.5, abs=1e-9)
     assert new_radii[1] == pytest.approx(initial_radii[1], abs=1e-9)
+
+
+def test_selection_banner_shows_selected_roi_name(phasor_window_with_data):
+    """Banner above the plot reflects the currently-selected ROI name."""
+    win = phasor_window_with_data
+    assert win._selected_banner.text() == ""
+    geos = [_make_geometry(1), _make_geometry(2, mean_g=0.55)]
+    win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
+    win._roi_list.setCurrentRow(0)
+    assert win._selected_banner.text() == "Selected: GMM_1"
+    win._roi_list.setCurrentRow(1)
+    assert win._selected_banner.text() == "Selected: GMM_2"
+
+
+def test_selection_banner_clears_when_no_selection(phasor_window_with_data):
+    win = phasor_window_with_data
+    win._on_add_roi()
+    win._roi_list.setCurrentRow(0)
+    assert win._selected_banner.text() != ""
+    win._roi_list.setCurrentRow(-1)
+    assert win._selected_banner.text() == ""
+
+
+def test_selection_banner_updates_on_rename(phasor_window_with_data):
+    win = phasor_window_with_data
+    geos = [_make_geometry(1)]
+    win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
+    win._roi_list.setCurrentRow(0)
+    assert win._selected_banner.text() == "Selected: GMM_1"
+    win._name_edit.setText("nucleus")
+    win._on_name_edited()
+    assert win._selected_banner.text() == "Selected: nucleus"
+
+
+def test_selected_roi_pen_is_bold_solid(phasor_window_with_data):
+    """Selected ROI's RectROI gets width=3 SolidLine; others stay width=1 DashLine."""
+    win = phasor_window_with_data
+    geos = [_make_geometry(1), _make_geometry(2, mean_g=0.55)]
+    win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
+    win._roi_list.setCurrentRow(0)
+    pen0 = win._roi_widgets[0].roi.pen
+    pen1 = win._roi_widgets[1].roi.pen
+    assert pen0.width() == 3
+    assert pen0.style() == Qt.SolidLine
+    assert pen1.width() == 1
+    assert pen1.style() == Qt.DashLine
 
 
 def test_close_event_stops_timers_before_unsubscribe(phasor_window_with_data):

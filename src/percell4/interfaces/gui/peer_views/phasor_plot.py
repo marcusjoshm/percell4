@@ -350,6 +350,14 @@ class PhasorPlotWindow(QMainWindow):
 
         left_layout.addLayout(controls)
 
+        # Selected-ROI banner — shows the selected ROI's name above the
+        # plot, color-matched to the ROI. Empty when no ROI is selected.
+        self._selected_banner = QLabel("")
+        self._selected_banner.setStyleSheet(
+            "font-weight: bold; padding: 4px 8px; min-height: 18px;"
+        )
+        left_layout.addWidget(self._selected_banner)
+
         # Plot
         self._plot = pg.PlotWidget()
         from percell4.gui import theme
@@ -689,6 +697,36 @@ class PhasorPlotWindow(QMainWindow):
         self._status.showMessage(msg, 0)
         self._preview_timer.start()
 
+    def _refresh_selected_roi_highlight(self) -> None:
+        """Render the selected ROI bold + solid; everyone else dashed.
+
+        Also updates the banner above the plot so the user can see at a
+        glance which ROI the spinboxes are operating on.
+        """
+        for i, w in enumerate(self._roi_widgets):
+            color = w.phasor_roi.color
+            if i == self._selected_roi_index:
+                pen = pg.mkPen(color, width=3, style=Qt.SolidLine)
+            else:
+                pen = pg.mkPen(color, width=1, style=Qt.DashLine)
+            w.roi.setPen(pen)
+            # The ellipse curve uses the same color but always solid +
+            # width=2; selected gets a bump to width=3.
+            curve_pen = pg.mkPen(color, width=3 if i == self._selected_roi_index else 2)
+            w.curve.setPen(curve_pen)
+
+        if (
+            self._selected_roi_index is None
+            or self._selected_roi_index >= len(self._roi_widgets)
+        ):
+            self._selected_banner.setText("")
+            return
+        roi = self._roi_widgets[self._selected_roi_index].phasor_roi
+        self._selected_banner.setText(f"Selected: {roi.name}")
+        self._selected_banner.setStyleSheet(
+            f"font-weight: bold; padding: 4px 8px; min-height: 18px; color: {roi.color};"
+        )
+
     def _update_cluster_center_marker(self) -> None:
         """Render one + marker per GMM-origin ROI at its stored cluster mean.
 
@@ -858,6 +896,7 @@ class PhasorPlotWindow(QMainWindow):
             ):
                 spin.setEnabled(False)
             self._reset_fit_btn.setEnabled(False)
+            self._refresh_selected_roi_highlight()
             return
         self._selected_roi_index = row
         roi = self._roi_widgets[row].phasor_roi
@@ -893,6 +932,8 @@ class PhasorPlotWindow(QMainWindow):
                 spin.setValue(value)
                 spin.blockSignals(False)
 
+        self._refresh_selected_roi_highlight()
+
     def _on_name_edited(self) -> None:
         if self._selected_roi_index is None:
             return
@@ -907,6 +948,8 @@ class PhasorPlotWindow(QMainWindow):
             self._name_edit.setText(new_name)
         self._roi_widgets[self._selected_roi_index].phasor_roi.name = new_name
         self._refresh_roi_list()
+        # Banner reflects the new name immediately
+        self._refresh_selected_roi_highlight()
 
     def _on_angle_changed(self, value: int) -> None:
         if self._selected_roi_index is None:

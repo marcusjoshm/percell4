@@ -190,6 +190,12 @@ def test_push_filters_when_phasor_window_closed_does_not_crash(
 # ── Phasor Segmentation group ───────────────────────────────
 
 
+def test_flim_panel_does_not_expose_cov_f_or_shift_spinboxes(flim_panel):
+    """Per-ROI tuning lives exclusively in the phasor window."""
+    assert not hasattr(flim_panel, "_cov_f_spin")
+    assert not hasattr(flim_panel, "_shift_spin")
+
+
 def test_auto_toggles_n_label_and_criterion_combo(flim_panel):
     # Default Auto=True
     assert flim_panel._n_label.text() == "n_max:"
@@ -355,8 +361,6 @@ def test_run_gmm_starts_worker_with_correct_kwargs(flim_panel, monkeypatch, phas
     flim_panel._shape_combo.setCurrentText("Circle")
     flim_panel._auto_check.setChecked(False)
     flim_panel._n_clusters_spin.setValue(3)
-    flim_panel._cov_f_spin.setValue(2.5)
-    flim_panel._shift_spin.setValue(0.5)
 
     flim_panel._on_run_gmm()
 
@@ -365,8 +369,10 @@ def test_run_gmm_starts_worker_with_correct_kwargs(flim_panel, monkeypatch, phas
     assert kwargs["shape"] == "circle"
     assert kwargs["n_components"] == 3
     assert kwargs["criterion"] is None  # auto off
-    assert kwargs["cov_f"] == pytest.approx(2.5)
-    assert kwargs["shift"] == pytest.approx(0.5)
+    # Placement defaults are hardcoded on the FlimPanel; per-ROI tuning
+    # lives in the Phasor window's Selected-ROI panel.
+    assert kwargs["cov_f"] == pytest.approx(2.0)
+    assert kwargs["shift"] == pytest.approx(0.0)
     assert kwargs["intensity_threshold"] == pytest.approx(150.0)
     assert kwargs["ref_circle_tau_ns"] == pytest.approx(3.0)
     assert kwargs["ref_circle_radius"] == pytest.approx(0.4)
