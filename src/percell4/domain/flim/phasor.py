@@ -381,48 +381,76 @@ def gmm_to_phasor_roi_geometry(
     lambda_major: float,
     lambda_minor: float,
     principal_angle_rad: float,
-    cov_f: float,
-    shift: float,
+    stretch_parallel: float,
+    stretch_perpendicular: float,
+    shift_parallel: float,
+    shift_perpendicular: float,
     shape: str,
-    anchor: tuple[float, float] | None = None,
 ) -> tuple[tuple[float, float], tuple[float, float], float]:
     """Compute (center, radii, angle_deg) for a GMM-derived ROI.
 
-    The shift translation ``Δ = shift × √λ_major × (cos θ, sin θ)`` is
-    applied to ``anchor`` (defaults to ``mean`` when not provided). The
-    drag-preserving spinbox handler in the GUI passes
-    ``anchor = phasor_roi.center`` so a manual drag survives a cov_f or
-    shift edit; "Reset to fit" passes ``anchor=None`` to snap back to the
-    cluster mean.
+    Four data-determined coefficients drive ROI placement, two for
+    translation and two for stretch — each independent along the major
+    and minor eigenaxes of the cluster covariance:
+
+    - ``shift_parallel`` translates along the major eigenvector by
+      ``shift_parallel × √λ_major``.
+    - ``shift_perpendicular`` translates along the minor eigenvector by
+      ``shift_perpendicular × √λ_minor``.
+    - ``stretch_parallel`` scales the major-axis radius
+      (``stretch_parallel × √λ_major``).
+    - ``stretch_perpendicular`` scales the minor-axis radius
+      (``stretch_perpendicular × √λ_minor``).
+
+    All four are measured relative to the cluster mean — there is no
+    "drag-preserving anchor". GMM ROIs are non-draggable in the GUI;
+    the spinboxes are the exclusive way to move/scale them.
 
     For ``shape="ellipse"`` the radii are
-    ``(cov_f × √λ_major, cov_f × √λ_minor)``. For ``shape="circle"``
-    the radii are ``(cov_f × √λ_minor, cov_f × √λ_minor)`` — a circle
-    inscribed in the cluster's minor extent (matches
-    ``Circular_ROI_lifetime.py:169``). The angle is the major-eigenvector
-    angle for ellipses, ``0`` for circles.
+    ``(stretch_parallel × √λ_major, stretch_perpendicular × √λ_minor)``
+    and the angle is the major-eigenvector angle. For ``shape="circle"``
+    the radii degenerate to
+    ``(stretch_perpendicular × √λ_minor, stretch_perpendicular × √λ_minor)``
+    — a circle inscribed in the cluster's minor extent (matches
+    ``Circular_ROI_lifetime.py:169``). The angle is ``0``.
     """
     if shape not in ("ellipse", "circle"):
         raise ValueError(f"shape must be 'ellipse' or 'circle', got {shape!r}")
-    if cov_f <= 0:
-        raise ValueError(f"cov_f must be > 0, got {cov_f!r}")
+    if stretch_parallel <= 0 or stretch_perpendicular <= 0:
+        raise ValueError(
+            f"stretch_parallel and stretch_perpendicular must be > 0, "
+            f"got ({stretch_parallel!r}, {stretch_perpendicular!r})"
+        )
 
     sqrt_major = float(np.sqrt(lambda_major))
     sqrt_minor = float(np.sqrt(lambda_minor))
 
     cos_a = float(np.cos(principal_angle_rad))
     sin_a = float(np.sin(principal_angle_rad))
-    delta_g = shift * sqrt_major * cos_a
-    delta_s = shift * sqrt_major * sin_a
+    # Parallel direction = major eigenvector; perpendicular direction is
+    # rotated 90° counter-clockwise (so a positive shift_perpendicular
+    # moves the ROI to the "left" of the major axis when looking outward
+    # from the cluster center).
+    delta_g = (
+        shift_parallel * sqrt_major * cos_a
+        - shift_perpendicular * sqrt_minor * sin_a
+    )
+    delta_s = (
+        shift_parallel * sqrt_major * sin_a
+        + shift_perpendicular * sqrt_minor * cos_a
+    )
 
-    base_g, base_s = anchor if anchor is not None else mean
-    center = (float(base_g) + delta_g, float(base_s) + delta_s)
+    mean_g, mean_s = mean
+    center = (float(mean_g) + delta_g, float(mean_s) + delta_s)
 
     if shape == "ellipse":
-        radii = (cov_f * sqrt_major, cov_f * sqrt_minor)
+        radii = (stretch_parallel * sqrt_major, stretch_perpendicular * sqrt_minor)
         angle_deg = float(np.degrees(principal_angle_rad))
     else:  # circle
-        radii = (cov_f * sqrt_minor, cov_f * sqrt_minor)
+        radii = (
+            stretch_perpendicular * sqrt_minor,
+            stretch_perpendicular * sqrt_minor,
+        )
         angle_deg = 0.0
 
     return center, radii, angle_deg

@@ -232,13 +232,19 @@ class RunPhasorGMM:
             lambda_major, lambda_minor, angle_rad = gmm_eigenstructure(
                 fit.covariances[i]
             )
+            # FlimPanel's scalar cov_f / shift become per-axis defaults:
+            # both stretch axes share cov_f; shift_parallel = shift,
+            # shift_perpendicular = 0. Per-ROI fine-tuning of the four
+            # axis coefficients lives on the Selected-ROI panel.
             center, radii, angle_deg = gmm_to_phasor_roi_geometry(
                 mean=(mean_g, mean_s),
                 lambda_major=lambda_major,
                 lambda_minor=lambda_minor,
                 principal_angle_rad=angle_rad,
-                cov_f=cov_f,
-                shift=shift,
+                stretch_parallel=cov_f,
+                stretch_perpendicular=cov_f,
+                shift_parallel=shift,
+                shift_perpendicular=0.0,
                 shape=shape,
             )
             geometries.append(PhasorROIGeometry(

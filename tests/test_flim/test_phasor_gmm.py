@@ -75,29 +75,33 @@ def test_gmm_eigenstructure_singular_covariance_clamps():
 # ── gmm_to_phasor_roi_geometry ────────────────────────────────────────
 
 
-def test_geometry_ellipse_no_shift_no_anchor():
+def test_geometry_ellipse_no_shift():
+    """Defaults: stretch=2.0, shift=0 → center == mean, radii = (2√λ_major, 2√λ_minor)."""
     mean = (0.4, 0.3)
     center, radii, angle_deg = gmm_to_phasor_roi_geometry(
         mean=mean, lambda_major=4.0, lambda_minor=1.0,
         principal_angle_rad=0.0,
-        cov_f=2.0, shift=0.0, shape="ellipse",
+        stretch_parallel=2.0, stretch_perpendicular=2.0,
+        shift_parallel=0.0, shift_perpendicular=0.0,
+        shape="ellipse",
     )
     assert center == pytest.approx(mean, abs=1e-12)
-    # 2 × √4 = 4 ; 2 × √1 = 2
     assert radii[0] == pytest.approx(4.0, abs=1e-12)
     assert radii[1] == pytest.approx(2.0, abs=1e-12)
     assert angle_deg == pytest.approx(0.0, abs=1e-12)
 
 
-def test_geometry_ellipse_with_shift_displaces_along_principal_axis():
+def test_geometry_ellipse_with_parallel_shift():
     mean = (0.4, 0.3)
     angle_rad = np.radians(45.0)
     center, radii, _ = gmm_to_phasor_roi_geometry(
         mean=mean, lambda_major=4.0, lambda_minor=1.0,
         principal_angle_rad=angle_rad,
-        cov_f=2.0, shift=0.5, shape="ellipse",
+        stretch_parallel=2.0, stretch_perpendicular=2.0,
+        shift_parallel=0.5, shift_perpendicular=0.0,
+        shape="ellipse",
     )
-    # Δ = 0.5 × √4 × (cos 45°, sin 45°) = (0.707, 0.707)
+    # Δ = 0.5 × √4 × (cos 45°, sin 45°)
     expected_dx = 0.5 * 2.0 * np.cos(angle_rad)
     expected_dy = 0.5 * 2.0 * np.sin(angle_rad)
     assert center[0] == pytest.approx(mean[0] + expected_dx, abs=1e-9)
@@ -106,35 +110,51 @@ def test_geometry_ellipse_with_shift_displaces_along_principal_axis():
     assert radii[1] == pytest.approx(2.0, abs=1e-12)
 
 
-def test_geometry_drag_preservation_uses_anchor_not_mean():
-    """Spinbox-edit path: anchor is the user's dragged center."""
+def test_geometry_ellipse_with_perpendicular_shift():
+    """Perpendicular shift translates by 90° rotation of major axis."""
     mean = (0.4, 0.3)
-    dragged = (0.5, 0.35)
-    angle_rad = np.radians(30.0)
+    angle_rad = np.radians(45.0)
     center, _, _ = gmm_to_phasor_roi_geometry(
         mean=mean, lambda_major=4.0, lambda_minor=1.0,
         principal_angle_rad=angle_rad,
-        cov_f=2.0, shift=0.5, shape="ellipse",
-        anchor=dragged,
+        stretch_parallel=2.0, stretch_perpendicular=2.0,
+        shift_parallel=0.0, shift_perpendicular=0.5,
+        shape="ellipse",
     )
-    # Δ added to anchor (dragged), NOT mean
-    expected_dx = 0.5 * 2.0 * np.cos(angle_rad)
-    expected_dy = 0.5 * 2.0 * np.sin(angle_rad)
-    assert center[0] == pytest.approx(dragged[0] + expected_dx, abs=1e-9)
-    assert center[1] == pytest.approx(dragged[1] + expected_dy, abs=1e-9)
+    # Perpendicular unit = (-sin θ, cos θ); Δ = 0.5 × √λ_minor × perp_unit
+    expected_dx = -0.5 * 1.0 * np.sin(angle_rad)
+    expected_dy = +0.5 * 1.0 * np.cos(angle_rad)
+    assert center[0] == pytest.approx(mean[0] + expected_dx, abs=1e-9)
+    assert center[1] == pytest.approx(mean[1] + expected_dy, abs=1e-9)
 
 
-def test_geometry_circle_shape_uses_lambda_minor_and_zero_angle():
-    center, radii, angle_deg = gmm_to_phasor_roi_geometry(
+def test_geometry_independent_stretch_per_axis():
+    """stretch_parallel grows major-axis radius; stretch_perpendicular grows minor only."""
+    center, radii, _ = gmm_to_phasor_roi_geometry(
+        mean=(0.4, 0.3), lambda_major=4.0, lambda_minor=1.0,
+        principal_angle_rad=0.0,
+        stretch_parallel=3.0, stretch_perpendicular=1.5,
+        shift_parallel=0.0, shift_perpendicular=0.0,
+        shape="ellipse",
+    )
+    assert radii[0] == pytest.approx(3.0 * 2.0, abs=1e-9)  # 3 × √4
+    assert radii[1] == pytest.approx(1.5 * 1.0, abs=1e-9)  # 1.5 × √1
+    assert center == pytest.approx((0.4, 0.3), abs=1e-12)
+
+
+def test_geometry_circle_shape_uses_perpendicular_stretch_and_zero_angle():
+    """Circle shape uses stretch_perpendicular × √λ_minor for both radii."""
+    _, radii, angle_deg = gmm_to_phasor_roi_geometry(
         mean=(0.4, 0.3), lambda_major=4.0, lambda_minor=1.0,
         principal_angle_rad=np.radians(45.0),
-        cov_f=2.0, shift=0.0, shape="circle",
+        stretch_parallel=3.0,            # ignored for circle
+        stretch_perpendicular=2.0,
+        shift_parallel=0.0, shift_perpendicular=0.0,
+        shape="circle",
     )
-    assert center == pytest.approx((0.4, 0.3), abs=1e-12)
-    # Both radii from √λ_minor (= 1) × cov_f
+    # Both radii from √λ_minor (= 1) × stretch_perpendicular
     assert radii[0] == pytest.approx(2.0, abs=1e-12)
     assert radii[1] == pytest.approx(2.0, abs=1e-12)
-    # Circle ignores rotation
     assert angle_deg == 0.0
 
 
@@ -142,8 +162,21 @@ def test_geometry_invalid_shape_raises():
     with pytest.raises(ValueError, match="shape must be"):
         gmm_to_phasor_roi_geometry(
             mean=(0, 0), lambda_major=1.0, lambda_minor=1.0,
-            principal_angle_rad=0.0, cov_f=1.0, shift=0.0,
+            principal_angle_rad=0.0,
+            stretch_parallel=1.0, stretch_perpendicular=1.0,
+            shift_parallel=0.0, shift_perpendicular=0.0,
             shape="square",
+        )
+
+
+def test_geometry_invalid_stretch_raises():
+    with pytest.raises(ValueError, match="stretch_parallel and stretch_perpendicular"):
+        gmm_to_phasor_roi_geometry(
+            mean=(0, 0), lambda_major=1.0, lambda_minor=1.0,
+            principal_angle_rad=0.0,
+            stretch_parallel=0.0, stretch_perpendicular=1.0,
+            shift_parallel=0.0, shift_perpendicular=0.0,
+            shape="ellipse",
         )
 
 

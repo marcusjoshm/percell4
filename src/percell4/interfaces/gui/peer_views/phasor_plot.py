@@ -49,8 +49,11 @@ COLOR_CYCLE: Final[tuple[str, ...]] = (
 
 # JSON schema version for the saved ROI file.
 #   v1 = pre-GMM (origin field absent; loaded as origin="manual"; gmm_fit ignored)
-#   v2 = adds top-level schema_version + per-ROI origin / gmm_fit
-ROI_JSON_SCHEMA_VERSION: Final[int] = 2
+#   v2 = adds top-level schema_version + per-ROI origin / gmm_fit (single cov_f, single shift)
+#   v3 = splits cov_f into stretch_parallel / stretch_perpendicular and shift into
+#        shift_parallel / shift_perpendicular for independent per-axis control;
+#        v2 files are migrated on load (cov_f -> both stretch axes; shift -> parallel).
+ROI_JSON_SCHEMA_VERSION: Final[int] = 3
 
 
 @dataclass
@@ -58,11 +61,13 @@ class GMMFit:
     """Eigenstructure + spinbox state for a GMM-origin PhasorROI.
 
     The ``mean_*`` and ``lambda_*`` fields are constants captured at fit
-    time; ``cov_f`` and ``shift`` are the current spinbox values. The
-    drag-preserving recompute path uses ``phasor_roi.center`` as the
-    anchor (not ``mean_g``/``mean_s``) so a manual drag survives a
-    cov_f / shift edit. The "Reset to fit" button is the explicit
-    affordance for snapping the center back to the cluster mean.
+    time. The four axis coefficients (``stretch_parallel``,
+    ``stretch_perpendicular``, ``shift_parallel``,
+    ``shift_perpendicular``) are the current spinbox values; together
+    they describe an exact placement relative to the cluster mean.
+
+    GMM ROIs are non-draggable; the spinboxes are the exclusive way to
+    move and scale them. There is no drag-preserving anchor.
     """
 
     mean_g: float
@@ -70,8 +75,10 @@ class GMMFit:
     lambda_major: float
     lambda_minor: float
     principal_angle_rad: float
-    cov_f: float
-    shift: float
+    stretch_parallel: float
+    stretch_perpendicular: float
+    shift_parallel: float
+    shift_perpendicular: float
     shape: str  # "circle" | "ellipse"
     criterion: str | None  # "BIC" | "AIC" | None (when n was manual)
     sampled_pixels: int  # shared across all ROIs from one GMM run
@@ -80,19 +87,41 @@ class GMMFit:
     def from_dict(cls, d: dict) -> GMMFit:
         """Tolerant load of a GMMFit JSON sub-dict.
 
-        Raises ``ValueError`` on missing or wrongly-typed required fields
-        so the caller (``PhasorROI.from_dict``) can demote a malformed
-        ``gmm_fit`` to ``None`` and keep the rest of the ROI loadable.
+        Migrates v2 fields silently: a v2 dict carries ``cov_f`` (which
+        we treat as a uniform stretch on both axes) and ``shift`` (which
+        we treat as ``shift_parallel``); the perpendicular versions
+        default to 0 / cov_f respectively. v3 dicts carry all four
+        explicitly. Raises ``ValueError`` on missing required fields so
+        the caller can demote a malformed ``gmm_fit`` to ``None``.
         """
         try:
+            # v3 first; fall back to v2 keys if missing.
+            if "stretch_parallel" in d:
+                stretch_parallel = float(d["stretch_parallel"])
+                stretch_perpendicular = float(d["stretch_perpendicular"])
+            else:
+                # v2 → v3 migration: single cov_f maps to both stretch axes.
+                cov_f = float(d["cov_f"])
+                stretch_parallel = cov_f
+                stretch_perpendicular = cov_f
+
+            if "shift_parallel" in d:
+                shift_parallel = float(d["shift_parallel"])
+                shift_perpendicular = float(d["shift_perpendicular"])
+            else:
+                shift_parallel = float(d["shift"])
+                shift_perpendicular = 0.0
+
             return cls(
                 mean_g=float(d["mean_g"]),
                 mean_s=float(d["mean_s"]),
                 lambda_major=float(d["lambda_major"]),
                 lambda_minor=float(d["lambda_minor"]),
                 principal_angle_rad=float(d["principal_angle_rad"]),
-                cov_f=float(d["cov_f"]),
-                shift=float(d["shift"]),
+                stretch_parallel=stretch_parallel,
+                stretch_perpendicular=stretch_perpendicular,
+                shift_parallel=shift_parallel,
+                shift_perpendicular=shift_perpendicular,
                 shape=str(d["shape"]),
                 criterion=(None if d.get("criterion") is None
                            else str(d["criterion"])),
@@ -108,8 +137,10 @@ class GMMFit:
             "lambda_major": self.lambda_major,
             "lambda_minor": self.lambda_minor,
             "principal_angle_rad": self.principal_angle_rad,
-            "cov_f": self.cov_f,
-            "shift": self.shift,
+            "stretch_parallel": self.stretch_parallel,
+            "stretch_perpendicular": self.stretch_perpendicular,
+            "shift_parallel": self.shift_parallel,
+            "shift_perpendicular": self.shift_perpendicular,
             "shape": self.shape,
             "criterion": self.criterion,
             "sampled_pixels": self.sampled_pixels,
@@ -357,6 +388,16 @@ class PhasorPlotWindow(QMainWindow):
         self._ref_circle_curve.setVisible(False)
         self._plot.addItem(self._ref_circle_curve)
 
+        # Cluster-center scatter — one point per GMM-origin ROI at its
+        # stored (mean_g, mean_s). Color-matched to the ROI. Updates on
+        # place_gmm_rois / Remove ROI / dataset reset / cov_f-shift slot
+        # via _update_cluster_center_marker.
+        self._cluster_center_scatter = pg.ScatterPlotItem(
+            pen=None, symbol="+", size=12,
+        )
+        self._cluster_center_scatter.setZValue(11)  # above ROIs
+        self._plot.addItem(self._cluster_center_scatter)
+
         main_layout.addWidget(left, stretch=3)
 
         # Right: ROI panel
@@ -401,38 +442,79 @@ class PhasorPlotWindow(QMainWindow):
         angle_row.addWidget(self._angle_spin)
         sel_layout.addLayout(angle_row)
 
-        # cov_f / shift / Reset to fit — only meaningful for GMM-origin ROIs.
-        # Use ``setEnabled`` (not ``setVisible``) so the layout stays stable
-        # when the user switches between manual and GMM ROIs.
-        cov_row = QHBoxLayout()
-        cov_row.addWidget(QLabel("cov_f:"))
-        self._cov_f_spin = QDoubleSpinBox()
-        self._cov_f_spin.setRange(0.5, 5.0)
-        self._cov_f_spin.setSingleStep(0.1)
-        self._cov_f_spin.setDecimals(1)
-        self._cov_f_spin.setValue(2.0)
-        self._cov_f_spin.setEnabled(False)
-        self._cov_f_spin.valueChanged.connect(self._on_cov_f_changed)
-        cov_row.addWidget(self._cov_f_spin)
-        sel_layout.addLayout(cov_row)
+        # Per-axis stretch + shift coefficients for GMM-origin ROIs.
+        # ``setEnabled`` (not ``setVisible``) preserves layout stability
+        # when switching between manual and GMM selections.
+        # Stretch is a multiplier on √λ; shift is a multiplier on √λ
+        # (positive parallel = away from origin along major axis).
+        stretch_par_row = QHBoxLayout()
+        stretch_par_row.addWidget(QLabel("Stretch ∥:"))
+        self._stretch_parallel_spin = QDoubleSpinBox()
+        self._stretch_parallel_spin.setRange(0.1, 10.0)
+        self._stretch_parallel_spin.setSingleStep(0.1)
+        self._stretch_parallel_spin.setDecimals(2)
+        self._stretch_parallel_spin.setValue(2.0)
+        self._stretch_parallel_spin.setEnabled(False)
+        self._stretch_parallel_spin.setToolTip(
+            "Multiplier on √λ_major — controls ROI extent along the cluster's "
+            "major eigenaxis. cov_f coefficient for the parallel direction."
+        )
+        self._stretch_parallel_spin.valueChanged.connect(self._on_gmm_param_changed)
+        stretch_par_row.addWidget(self._stretch_parallel_spin)
+        sel_layout.addLayout(stretch_par_row)
 
-        shift_row = QHBoxLayout()
-        shift_row.addWidget(QLabel("Shift:"))
-        self._shift_spin = QDoubleSpinBox()
-        self._shift_spin.setRange(-2.0, 2.0)
-        self._shift_spin.setSingleStep(0.1)
-        self._shift_spin.setDecimals(1)
-        self._shift_spin.setValue(0.0)
-        self._shift_spin.setEnabled(False)
-        self._shift_spin.valueChanged.connect(self._on_shift_changed)
-        shift_row.addWidget(self._shift_spin)
-        sel_layout.addLayout(shift_row)
+        stretch_perp_row = QHBoxLayout()
+        stretch_perp_row.addWidget(QLabel("Stretch ⊥:"))
+        self._stretch_perpendicular_spin = QDoubleSpinBox()
+        self._stretch_perpendicular_spin.setRange(0.1, 10.0)
+        self._stretch_perpendicular_spin.setSingleStep(0.1)
+        self._stretch_perpendicular_spin.setDecimals(2)
+        self._stretch_perpendicular_spin.setValue(2.0)
+        self._stretch_perpendicular_spin.setEnabled(False)
+        self._stretch_perpendicular_spin.setToolTip(
+            "Multiplier on √λ_minor — controls ROI extent along the cluster's "
+            "minor eigenaxis. cov_f coefficient for the perpendicular direction."
+        )
+        self._stretch_perpendicular_spin.valueChanged.connect(self._on_gmm_param_changed)
+        stretch_perp_row.addWidget(self._stretch_perpendicular_spin)
+        sel_layout.addLayout(stretch_perp_row)
+
+        shift_par_row = QHBoxLayout()
+        shift_par_row.addWidget(QLabel("Shift ∥:"))
+        self._shift_parallel_spin = QDoubleSpinBox()
+        self._shift_parallel_spin.setRange(-5.0, 5.0)
+        self._shift_parallel_spin.setSingleStep(0.1)
+        self._shift_parallel_spin.setDecimals(2)
+        self._shift_parallel_spin.setValue(0.0)
+        self._shift_parallel_spin.setEnabled(False)
+        self._shift_parallel_spin.setToolTip(
+            "Translation along the major eigenvector by shift × √λ_major. "
+            "Positive = away from origin along the major direction."
+        )
+        self._shift_parallel_spin.valueChanged.connect(self._on_gmm_param_changed)
+        shift_par_row.addWidget(self._shift_parallel_spin)
+        sel_layout.addLayout(shift_par_row)
+
+        shift_perp_row = QHBoxLayout()
+        shift_perp_row.addWidget(QLabel("Shift ⊥:"))
+        self._shift_perpendicular_spin = QDoubleSpinBox()
+        self._shift_perpendicular_spin.setRange(-5.0, 5.0)
+        self._shift_perpendicular_spin.setSingleStep(0.1)
+        self._shift_perpendicular_spin.setDecimals(2)
+        self._shift_perpendicular_spin.setValue(0.0)
+        self._shift_perpendicular_spin.setEnabled(False)
+        self._shift_perpendicular_spin.setToolTip(
+            "Translation along the minor eigenvector by shift × √λ_minor. "
+            "Positive = perpendicular to the major axis (90° counter-clockwise)."
+        )
+        self._shift_perpendicular_spin.valueChanged.connect(self._on_gmm_param_changed)
+        shift_perp_row.addWidget(self._shift_perpendicular_spin)
+        sel_layout.addLayout(shift_perp_row)
 
         self._reset_fit_btn = QPushButton("Reset to fit")
         self._reset_fit_btn.setToolTip(
-            "Snap the ROI back to the cluster mean. Drag-preserving cov_f / shift "
-            "edits keep the user's drag position; this button explicitly returns to "
-            "the GMM fit's center."
+            "Reset stretch (parallel + perpendicular) to 2.0 and shift to 0; "
+            "snaps the ROI center back to the cluster mean."
         )
         self._reset_fit_btn.setEnabled(False)
         self._reset_fit_btn.clicked.connect(self._on_reset_fit_clicked)
@@ -579,7 +661,8 @@ class PhasorPlotWindow(QMainWindow):
                 mean_g=geo.mean_g, mean_s=geo.mean_s,
                 lambda_major=geo.lambda_major, lambda_minor=geo.lambda_minor,
                 principal_angle_rad=geo.principal_angle_rad,
-                cov_f=2.0, shift=0.0,
+                stretch_parallel=2.0, stretch_perpendicular=2.0,
+                shift_parallel=0.0, shift_perpendicular=0.0,
                 shape=shape,
                 criterion=criterion,
                 sampled_pixels=int(sampled_pixels),
@@ -594,6 +677,7 @@ class PhasorPlotWindow(QMainWindow):
 
         self._colormap_dirty = True
         self._refresh_roi_list()
+        self._update_cluster_center_marker()
 
         n_placed = len(truncated)
         msg = (
@@ -604,6 +688,27 @@ class PhasorPlotWindow(QMainWindow):
             msg += f" — truncated {n_dropped} due to 10-ROI cap"
         self._status.showMessage(msg, 0)
         self._preview_timer.start()
+
+    def _update_cluster_center_marker(self) -> None:
+        """Render one + marker per GMM-origin ROI at its stored cluster mean.
+
+        Called whenever the ROI list changes (place_gmm_rois, remove,
+        dataset reset) and whenever spinbox changes propagate via
+        _apply_gmm_geometry. The marker tracks the GMM fit's stored
+        ``(mean_g, mean_s)`` — independent of where the user has shifted
+        the ROI to.
+        """
+        spots = []
+        for w in self._roi_widgets:
+            roi = w.phasor_roi
+            if roi.origin != "gmm" or roi.gmm_fit is None or not roi.visible:
+                continue
+            spots.append({
+                "pos": (roi.gmm_fit.mean_g, roi.gmm_fit.mean_s),
+                "brush": pg.mkBrush(roi.color),
+                "pen": pg.mkPen(roi.color, width=2),
+            })
+        self._cluster_center_scatter.setData(spots)
 
     def _update_ref_circle_overlay(self) -> None:
         """Redraw or hide the reference-circle PlotCurveItem.
@@ -672,19 +777,36 @@ class PhasorPlotWindow(QMainWindow):
         self._colormap_dirty = True
         self._refresh_roi_list()
         self._on_roi_list_selection(self._roi_list.currentRow())
+        self._update_cluster_center_marker()
         if not self._roi_widgets:
             self._refresh_histogram()
         self._preview_timer.start()
 
     def _create_roi_widget(self, phasor_roi: PhasorROI) -> None:
-        """Create pyqtgraph ROI + curve for a PhasorROI and add to the list."""
+        """Create pyqtgraph ROI + curve for a PhasorROI and add to the list.
+
+        For GMM-origin ROIs the RectROI is non-interactive (no drag, no
+        resize handles) — placement is exclusively driven by the four
+        axis coefficients in the Selected-ROI panel. Manual ROIs keep
+        the standard drag/resize affordances.
+        """
         cx, cy = phasor_roi.center
         rx, ry = phasor_roi.radii
+        is_gmm = phasor_roi.origin == "gmm"
         roi = pg.RectROI(
             [cx - rx, cy - ry], [2 * rx, 2 * ry],
             pen=pg.mkPen(phasor_roi.color, width=1, style=Qt.DashLine),
         )
         roi.setZValue(10)
+        if is_gmm:
+            # Disable mouse drag and strip resize handles so the GMM
+            # ROI is fully driven by the four axis spinboxes — no manual
+            # drag/resize affordances. ``translatable`` is a settable
+            # attribute on pyqtgraph's ROI; iterate over a copy of the
+            # handles list because removeHandle mutates it in place.
+            roi.translatable = False
+            for h in list(roi.handles):
+                roi.removeHandle(h["item"])
         self._plot.addItem(roi)
 
         curve = pg.PlotCurveItem(pen=pg.mkPen(phasor_roi.color, width=2))
@@ -695,7 +817,9 @@ class PhasorPlotWindow(QMainWindow):
         self._roi_widgets.append(widget)
 
         # Connect ROI movement — look up widget by identity, not index,
-        # so removal/renumbering doesn't break surviving ROIs
+        # so removal/renumbering doesn't break surviving ROIs. (Won't
+        # fire for GMM ROIs since they're non-interactive, but the
+        # connection is harmless and simplifies the code.)
         roi.sigRegionChangeFinished.connect(
             lambda _roi, _w=widget: self._on_roi_moved_widget(_w)
         )
@@ -726,8 +850,13 @@ class PhasorPlotWindow(QMainWindow):
             self._vis_check.blockSignals(True)
             self._vis_check.setChecked(False)
             self._vis_check.blockSignals(False)
-            self._cov_f_spin.setEnabled(False)
-            self._shift_spin.setEnabled(False)
+            for spin in (
+                self._stretch_parallel_spin,
+                self._stretch_perpendicular_spin,
+                self._shift_parallel_spin,
+                self._shift_perpendicular_spin,
+            ):
+                spin.setEnabled(False)
             self._reset_fit_btn.setEnabled(False)
             return
         self._selected_roi_index = row
@@ -745,16 +874,24 @@ class PhasorPlotWindow(QMainWindow):
         # GMM-only controls. Use setEnabled (not setVisible) so the layout
         # stays put when the user switches between manual and GMM ROIs.
         is_gmm = roi.origin == "gmm" and roi.gmm_fit is not None
-        self._cov_f_spin.setEnabled(is_gmm)
-        self._shift_spin.setEnabled(is_gmm)
+        for spin in (
+            self._stretch_parallel_spin,
+            self._stretch_perpendicular_spin,
+            self._shift_parallel_spin,
+            self._shift_perpendicular_spin,
+        ):
+            spin.setEnabled(is_gmm)
         self._reset_fit_btn.setEnabled(is_gmm)
         if is_gmm:
-            self._cov_f_spin.blockSignals(True)
-            self._cov_f_spin.setValue(roi.gmm_fit.cov_f)
-            self._cov_f_spin.blockSignals(False)
-            self._shift_spin.blockSignals(True)
-            self._shift_spin.setValue(roi.gmm_fit.shift)
-            self._shift_spin.blockSignals(False)
+            for spin, value in (
+                (self._stretch_parallel_spin, roi.gmm_fit.stretch_parallel),
+                (self._stretch_perpendicular_spin, roi.gmm_fit.stretch_perpendicular),
+                (self._shift_parallel_spin, roi.gmm_fit.shift_parallel),
+                (self._shift_perpendicular_spin, roi.gmm_fit.shift_perpendicular),
+            ):
+                spin.blockSignals(True)
+                spin.setValue(value)
+                spin.blockSignals(False)
 
     def _on_name_edited(self) -> None:
         if self._selected_roi_index is None:
@@ -786,6 +923,7 @@ class PhasorPlotWindow(QMainWindow):
         self._roi_widgets[self._selected_roi_index].phasor_roi.visible = checked
         self._colormap_dirty = True
         self._refresh_roi_list()
+        self._update_cluster_center_marker()
         self._preview_timer.start()
 
     def _on_roi_moved_widget(self, widget: _ROIWidget) -> None:
@@ -803,23 +941,19 @@ class PhasorPlotWindow(QMainWindow):
         widget.cached_mask = None
         self._preview_timer.start()
 
-    # ── GMM-origin controls (cov_f / shift / Reset to fit) ────
+    # ── GMM-origin controls (stretch ∥ / ⊥, shift ∥ / ⊥, Reset to fit) ──
 
-    def _apply_gmm_geometry(
-        self,
-        widget: _ROIWidget,
-        anchor: tuple[float, float] | None,
-    ) -> None:
+    def _apply_gmm_geometry(self, widget: _ROIWidget) -> None:
         """Recompute geometry from ``gmm_fit`` and push to the RectROI.
 
-        ``anchor=None`` snaps the center back to the cluster mean (Reset
-        to fit). ``anchor=phasor_roi.center`` preserves a manual drag
-        across cov_f / shift edits.
+        Always recomputes from the cluster mean using the four stored
+        axis coefficients — there is no anchor mode. GMM ROIs are
+        non-draggable, so the spinboxes are the single source of truth.
 
-        ``RectROI.setPos`` / ``setSize`` programmatic calls are wrapped in
-        ``blockSignals`` so the resulting ``sigRegionChangeFinished`` does
-        not feed back through ``_on_roi_moved_widget`` and overwrite the
-        eigenstructure-derived values with rounded RectROI bbox values.
+        ``RectROI.setPos`` / ``setSize`` are wrapped in ``blockSignals``
+        so the programmatic update does not feed back through
+        ``_on_roi_moved_widget`` and round-trip the eigenstructure-
+        derived values through the RectROI bbox quantization.
         """
         from percell4.domain.flim.phasor import gmm_to_phasor_roi_geometry
 
@@ -832,9 +966,11 @@ class PhasorPlotWindow(QMainWindow):
             lambda_major=fit.lambda_major,
             lambda_minor=fit.lambda_minor,
             principal_angle_rad=fit.principal_angle_rad,
-            cov_f=fit.cov_f, shift=fit.shift,
+            stretch_parallel=fit.stretch_parallel,
+            stretch_perpendicular=fit.stretch_perpendicular,
+            shift_parallel=fit.shift_parallel,
+            shift_perpendicular=fit.shift_perpendicular,
             shape=fit.shape,
-            anchor=anchor,
         )
         widget.phasor_roi.center = center
         widget.phasor_roi.radii = radii
@@ -857,43 +993,52 @@ class PhasorPlotWindow(QMainWindow):
         self._angle_spin.blockSignals(False)
 
         self._update_ellipse_curve_for(widget)
+        self._update_cluster_center_marker()
         widget.cached_mask = None
         self._preview_timer.start()
 
-    def _on_cov_f_changed(self, value: float) -> None:
-        if self._selected_roi_index is None:
-            return
-        widget = self._roi_widgets[self._selected_roi_index]
-        if widget.phasor_roi.gmm_fit is None:
-            return
-        widget.phasor_roi.gmm_fit.cov_f = float(value)
-        # Drag-preserving anchor: keep current center, only update radii
-        # via the eigenstructure recompute.
-        self._apply_gmm_geometry(widget, anchor=widget.phasor_roi.center)
+    def _on_gmm_param_changed(self, _value: float) -> None:
+        """Single slot for all four GMM-axis spinboxes.
 
-    def _on_shift_changed(self, value: float) -> None:
+        Reads the four current spinbox values into ``gmm_fit`` then
+        recomputes the ROI geometry from the stored eigenstructure +
+        cluster mean. Ignores changes when no GMM ROI is selected.
+        """
         if self._selected_roi_index is None:
             return
         widget = self._roi_widgets[self._selected_roi_index]
         if widget.phasor_roi.gmm_fit is None:
             return
-        # Shift is measured against the cluster mean (the eigenstructure
-        # baseline); using ``anchor=current center`` would make shifts
-        # cumulative on top of any manual drag, which is surprising.
-        # Instead, the spinbox value represents the *current* shift from
-        # mean — so we re-anchor on the mean before applying.
-        widget.phasor_roi.gmm_fit.shift = float(value)
-        self._apply_gmm_geometry(widget, anchor=None)
+        fit = widget.phasor_roi.gmm_fit
+        fit.stretch_parallel = float(self._stretch_parallel_spin.value())
+        fit.stretch_perpendicular = float(self._stretch_perpendicular_spin.value())
+        fit.shift_parallel = float(self._shift_parallel_spin.value())
+        fit.shift_perpendicular = float(self._shift_perpendicular_spin.value())
+        self._apply_gmm_geometry(widget)
 
     def _on_reset_fit_clicked(self) -> None:
+        """Reset all four axis coefficients to defaults (stretch=2.0, shift=0)."""
         if self._selected_roi_index is None:
             return
         widget = self._roi_widgets[self._selected_roi_index]
         if widget.phasor_roi.gmm_fit is None:
             return
-        # "Reset to fit": apply current cov_f / shift against the cluster
-        # mean. Doesn't touch cov_f or shift values themselves.
-        self._apply_gmm_geometry(widget, anchor=None)
+        fit = widget.phasor_roi.gmm_fit
+        fit.stretch_parallel = 2.0
+        fit.stretch_perpendicular = 2.0
+        fit.shift_parallel = 0.0
+        fit.shift_perpendicular = 0.0
+        # Update spinboxes without firing _on_gmm_param_changed for each
+        for spin, value in (
+            (self._stretch_parallel_spin, 2.0),
+            (self._stretch_perpendicular_spin, 2.0),
+            (self._shift_parallel_spin, 0.0),
+            (self._shift_perpendicular_spin, 0.0),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self._apply_gmm_geometry(widget)
 
     # ── Unique-name helper ────────────────────────────────────
 
@@ -1092,6 +1237,7 @@ class PhasorPlotWindow(QMainWindow):
         self._preview_colormap = None
         self._refresh_roi_list()
         self._on_roi_list_selection(-1)  # clears Selected ROI panel widgets
+        self._update_cluster_center_marker()
 
         # Invalidate per-dataset coordinate maps and intensity caches
         self._g_map = None

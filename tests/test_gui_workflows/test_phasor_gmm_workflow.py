@@ -252,100 +252,131 @@ def test_set_phasor_filters_overlay_clipped_to_viewport(phasor_window_with_data)
 # ── cov_f / shift / Reset to fit slots ───────────────────────
 
 
-def _fit_for_geo(geo: PhasorROIGeometry, *, cov_f: float = 2.0, shift: float = 0.0) -> GMMFit:
-    return GMMFit(
-        mean_g=geo.mean_g, mean_s=geo.mean_s,
-        lambda_major=geo.lambda_major, lambda_minor=geo.lambda_minor,
-        principal_angle_rad=geo.principal_angle_rad,
-        cov_f=cov_f, shift=shift,
-        shape="ellipse", criterion=None, sampled_pixels=50_000,
-    )
-
-
-def test_cov_f_spinbox_disabled_for_manual_roi(phasor_window_with_data):
+def test_axis_spinboxes_disabled_for_manual_roi(phasor_window_with_data):
     win = phasor_window_with_data
     win._on_add_roi()
     win._roi_list.setCurrentRow(0)
-    assert not win._cov_f_spin.isEnabled()
-    assert not win._shift_spin.isEnabled()
+    assert not win._stretch_parallel_spin.isEnabled()
+    assert not win._stretch_perpendicular_spin.isEnabled()
+    assert not win._shift_parallel_spin.isEnabled()
+    assert not win._shift_perpendicular_spin.isEnabled()
     assert not win._reset_fit_btn.isEnabled()
 
 
-def test_cov_f_spinbox_enabled_for_gmm_roi(phasor_window_with_data):
+def test_axis_spinboxes_enabled_for_gmm_roi(phasor_window_with_data):
     win = phasor_window_with_data
     geo = _make_geometry(1)
     win.place_gmm_rois([geo], shape="ellipse", criterion=None, sampled_pixels=50_000)
     win._roi_list.setCurrentRow(0)
-    assert win._cov_f_spin.isEnabled()
-    assert win._shift_spin.isEnabled()
+    assert win._stretch_parallel_spin.isEnabled()
+    assert win._stretch_perpendicular_spin.isEnabled()
+    assert win._shift_parallel_spin.isEnabled()
+    assert win._shift_perpendicular_spin.isEnabled()
     assert win._reset_fit_btn.isEnabled()
     # Spinbox values match the GMMFit defaults
-    assert win._cov_f_spin.value() == pytest.approx(2.0)
-    assert win._shift_spin.value() == pytest.approx(0.0)
+    assert win._stretch_parallel_spin.value() == pytest.approx(2.0)
+    assert win._stretch_perpendicular_spin.value() == pytest.approx(2.0)
+    assert win._shift_parallel_spin.value() == pytest.approx(0.0)
+    assert win._shift_perpendicular_spin.value() == pytest.approx(0.0)
 
 
-def test_cov_f_change_grows_radii_proportionally(phasor_window_with_data):
+def test_stretch_parallel_grows_only_major_axis_radius(phasor_window_with_data):
+    """Independent per-axis stretch — parallel grows major, perpendicular stays."""
     win = phasor_window_with_data
     geo = _make_geometry(1)
     win.place_gmm_rois([geo], shape="ellipse", criterion=None, sampled_pixels=50_000)
     win._roi_list.setCurrentRow(0)
     initial_radii = win._roi_widgets[0].phasor_roi.radii
-    win._cov_f_spin.setValue(3.0)
+    win._stretch_parallel_spin.setValue(3.0)
     new_radii = win._roi_widgets[0].phasor_roi.radii
-    # 3.0 / 2.0 = 1.5x growth on both axes (eigenstructure unchanged)
+    # parallel: 3.0 / 2.0 = 1.5x growth on the major axis only
     assert new_radii[0] == pytest.approx(initial_radii[0] * 1.5, abs=1e-9)
-    assert new_radii[1] == pytest.approx(initial_radii[1] * 1.5, abs=1e-9)
+    assert new_radii[1] == pytest.approx(initial_radii[1], abs=1e-9)
 
 
-def test_drag_then_cov_f_change_preserves_drag_position(phasor_window_with_data):
-    """The user's drag is preserved across cov_f edits (not snapped back)."""
+def test_stretch_does_not_move_center(phasor_window_with_data):
+    """Bug fix: changing stretch must not shift the ROI center.
+
+    Pre-redesign, _on_cov_f_changed re-applied the shift on top of an
+    anchor=phasor_roi.center base, so a non-zero shift caused cov_f
+    edits to translate the ROI. With shifts measured against the
+    cluster mean, stretch changes affect radii only.
+    """
     win = phasor_window_with_data
     geo = _make_geometry(1, mean_g=0.4, mean_s=0.3)
     win.place_gmm_rois([geo], shape="ellipse", criterion=None, sampled_pixels=50_000)
     win._roi_list.setCurrentRow(0)
-    widget = win._roi_widgets[0]
-
-    # Simulate a manual drag by directly setting RectROI position. Use
-    # the public _on_roi_moved_widget hook which the real drag path also
-    # invokes via sigRegionChangeFinished.
-    rx, ry = widget.phasor_roi.radii
-    new_cx, new_cy = 0.55, 0.45
-    widget.roi.setPos((new_cx - rx, new_cy - ry))
-    win._on_roi_moved_widget(widget)
-    assert widget.phasor_roi.center == pytest.approx((new_cx, new_cy), abs=1e-9)
-
-    # Now change cov_f. Center should stay around (0.55, 0.45), only
-    # radii grow.
-    win._cov_f_spin.setValue(3.0)
-    assert widget.phasor_roi.center[0] == pytest.approx(0.55, abs=1e-3)
-    assert widget.phasor_roi.center[1] == pytest.approx(0.45, abs=1e-3)
+    # Apply a non-zero parallel shift first
+    win._shift_parallel_spin.setValue(-1.5)
+    center_after_shift = win._roi_widgets[0].phasor_roi.center
+    # Now change stretch — center must NOT move
+    win._stretch_parallel_spin.setValue(2.1)
+    center_after_stretch = win._roi_widgets[0].phasor_roi.center
+    assert center_after_stretch[0] == pytest.approx(center_after_shift[0], abs=1e-9)
+    assert center_after_stretch[1] == pytest.approx(center_after_shift[1], abs=1e-9)
 
 
-def test_reset_to_fit_returns_center_to_cluster_mean(phasor_window_with_data):
+def test_shift_perpendicular_translates_along_minor_axis(phasor_window_with_data):
+    """Perpendicular shift moves center 90° rotated from the major axis."""
     win = phasor_window_with_data
     geo = _make_geometry(1, mean_g=0.4, mean_s=0.3)
     win.place_gmm_rois([geo], shape="ellipse", criterion=None, sampled_pixels=50_000)
     win._roi_list.setCurrentRow(0)
-    widget = win._roi_widgets[0]
+    win._shift_perpendicular_spin.setValue(0.5)
+    center = win._roi_widgets[0].phasor_roi.center
+    # geo principal angle = 15°; perpendicular unit = (-sin 15°, cos 15°)
+    angle = np.radians(15.0)
+    expected_dx = -0.5 * np.sqrt(geo.lambda_minor) * np.sin(angle)
+    expected_dy = +0.5 * np.sqrt(geo.lambda_minor) * np.cos(angle)
+    assert center[0] == pytest.approx(geo.mean_g + expected_dx, abs=1e-9)
+    assert center[1] == pytest.approx(geo.mean_s + expected_dy, abs=1e-9)
 
-    # Simulate drag away from mean
-    rx, ry = widget.phasor_roi.radii
-    new_cx, new_cy = 0.6, 0.5
-    widget.roi.setPos((new_cx - rx, new_cy - ry))
-    win._on_roi_moved_widget(widget)
-    assert widget.phasor_roi.center != pytest.approx((0.4, 0.3), abs=1e-3)
 
-    # Reset to fit → back to (mean_g, mean_s) since shift == 0
+def test_reset_to_fit_resets_all_four_axes(phasor_window_with_data):
+    """Reset returns all spinboxes to (stretch=2.0, shift=0)."""
+    win = phasor_window_with_data
+    geo = _make_geometry(1, mean_g=0.4, mean_s=0.3)
+    win.place_gmm_rois([geo], shape="ellipse", criterion=None, sampled_pixels=50_000)
+    win._roi_list.setCurrentRow(0)
+    # Move all four
+    win._stretch_parallel_spin.setValue(3.5)
+    win._stretch_perpendicular_spin.setValue(1.5)
+    win._shift_parallel_spin.setValue(-1.0)
+    win._shift_perpendicular_spin.setValue(0.5)
+    # Reset
     win._on_reset_fit_clicked()
-    assert widget.phasor_roi.center[0] == pytest.approx(0.4, abs=1e-9)
-    assert widget.phasor_roi.center[1] == pytest.approx(0.3, abs=1e-9)
+    fit = win._roi_widgets[0].phasor_roi.gmm_fit
+    assert fit.stretch_parallel == pytest.approx(2.0)
+    assert fit.stretch_perpendicular == pytest.approx(2.0)
+    assert fit.shift_parallel == pytest.approx(0.0)
+    assert fit.shift_perpendicular == pytest.approx(0.0)
+    assert win._roi_widgets[0].phasor_roi.center[0] == pytest.approx(geo.mean_g, abs=1e-9)
+    assert win._roi_widgets[0].phasor_roi.center[1] == pytest.approx(geo.mean_s, abs=1e-9)
 
 
-def test_cov_f_change_does_not_loop_through_roi_moved_widget(
+def test_gmm_roi_is_non_draggable(phasor_window_with_data):
+    """GMM ROIs must be non-translatable with no resize handles."""
+    win = phasor_window_with_data
+    geo = _make_geometry(1)
+    win.place_gmm_rois([geo], shape="ellipse", criterion=None, sampled_pixels=50_000)
+    rect_roi = win._roi_widgets[0].roi
+    assert rect_roi.translatable is False
+    assert len(rect_roi.handles) == 0
+
+
+def test_manual_roi_remains_draggable(phasor_window_with_data):
+    """Manual ROIs keep the standard drag/resize affordances."""
+    win = phasor_window_with_data
+    win._on_add_roi()
+    rect_roi = win._roi_widgets[0].roi
+    assert rect_roi.translatable is True
+    assert len(rect_roi.handles) > 0
+
+
+def test_spinbox_change_does_not_loop_through_roi_moved_widget(
     phasor_window_with_data, monkeypatch
 ):
-    """RectROI.setPos / setSize are wrapped in blockSignals so the slot
-    doesn't feed back through ``_on_roi_moved_widget``."""
+    """programmatic RectROI updates are blockSignals-wrapped."""
     win = phasor_window_with_data
     geo = _make_geometry(1)
     win.place_gmm_rois([geo], shape="ellipse", criterion=None, sampled_pixels=50_000)
@@ -354,20 +385,48 @@ def test_cov_f_change_does_not_loop_through_roi_moved_widget(
     spy = MagicMock(side_effect=win._on_roi_moved_widget)
     monkeypatch.setattr(win, "_on_roi_moved_widget", spy)
 
-    win._cov_f_spin.setValue(3.0)
+    win._stretch_parallel_spin.setValue(3.0)
     assert spy.call_count == 0
 
 
-def test_v2_json_round_trip_then_cov_f_edit(phasor_window_with_data, tmp_path):
-    """Load v2 JSON with a GMM-origin ROI and edit cov_f via the spinbox."""
+def test_cluster_center_marker_appears_for_gmm_rois(phasor_window_with_data):
+    """A scatter marker is rendered at each GMM ROI's stored cluster mean."""
+    win = phasor_window_with_data
+    geos = [_make_geometry(1, mean_g=0.3), _make_geometry(2, mean_g=0.5)]
+    win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
+    spots = win._cluster_center_scatter.data
+    # ScatterPlotItem stores x/y as a structured array; len() works.
+    assert len(spots) == 2
+
+
+def test_cluster_center_marker_clears_on_remove(phasor_window_with_data):
+    win = phasor_window_with_data
+    geos = [_make_geometry(1)]
+    win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
+    assert len(win._cluster_center_scatter.data) == 1
+    win._roi_list.setCurrentRow(0)
+    win._on_remove_roi()
+    assert len(win._cluster_center_scatter.data) == 0
+
+
+def test_cluster_center_marker_skips_invisible_gmm_rois(phasor_window_with_data):
+    win = phasor_window_with_data
+    geos = [_make_geometry(1)]
+    win.place_gmm_rois(geos, shape="ellipse", criterion=None, sampled_pixels=50_000)
+    win._roi_list.setCurrentRow(0)
+    win._vis_check.setChecked(False)
+    assert len(win._cluster_center_scatter.data) == 0
+
+
+def test_v3_json_round_trip_then_stretch_edit(phasor_window_with_data, tmp_path):
+    """Load v3 JSON with a GMM-origin ROI and edit stretch via the spinbox."""
     win = phasor_window_with_data
     geo = _make_geometry(1)
     win.place_gmm_rois([geo], shape="ellipse", criterion="BIC", sampled_pixels=50_000)
     save_path = tmp_path / "rois.json"
-    # Save via the public dataclass round-trip (avoid the QFileDialog path)
     import json
     data = {
-        "schema_version": 2,
+        "schema_version": 3,
         "rois": [w.phasor_roi.to_dict() for w in win._roi_widgets],
     }
     save_path.write_text(json.dumps(data))
@@ -388,11 +447,12 @@ def test_v2_json_round_trip_then_cov_f_edit(phasor_window_with_data, tmp_path):
     win._refresh_roi_list()
     win._roi_list.setCurrentRow(0)
 
-    # cov_f edit works against the loaded gmm_fit
     initial_radii = win._roi_widgets[0].phasor_roi.radii
-    win._cov_f_spin.setValue(3.0)
+    win._stretch_parallel_spin.setValue(3.0)
     new_radii = win._roi_widgets[0].phasor_roi.radii
+    # parallel only — major axis radius scales 1.5x; minor stays
     assert new_radii[0] == pytest.approx(initial_radii[0] * 1.5, abs=1e-9)
+    assert new_radii[1] == pytest.approx(initial_radii[1], abs=1e-9)
 
 
 def test_close_event_stops_timers_before_unsubscribe(phasor_window_with_data):

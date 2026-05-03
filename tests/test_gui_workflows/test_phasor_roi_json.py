@@ -24,7 +24,8 @@ def _make_gmm_fit() -> GMMFit:
         mean_g=0.4, mean_s=0.3,
         lambda_major=0.05, lambda_minor=0.01,
         principal_angle_rad=0.524,  # ~30°
-        cov_f=2.0, shift=0.0,
+        stretch_parallel=2.0, stretch_perpendicular=2.0,
+        shift_parallel=0.0, shift_perpendicular=0.0,
         shape="ellipse",
         criterion="BIC",
         sampled_pixels=100_000,
@@ -65,16 +66,53 @@ def test_gmm_roi_round_trip_preserves_full_gmm_fit():
     assert out.gmm_fit.lambda_major == pytest.approx(fit.lambda_major)
     assert out.gmm_fit.lambda_minor == pytest.approx(fit.lambda_minor)
     assert out.gmm_fit.principal_angle_rad == pytest.approx(fit.principal_angle_rad)
-    assert out.gmm_fit.cov_f == pytest.approx(fit.cov_f)
-    assert out.gmm_fit.shift == pytest.approx(fit.shift)
+    assert out.gmm_fit.stretch_parallel == pytest.approx(fit.stretch_parallel)
+    assert out.gmm_fit.stretch_perpendicular == pytest.approx(fit.stretch_perpendicular)
+    assert out.gmm_fit.shift_parallel == pytest.approx(fit.shift_parallel)
+    assert out.gmm_fit.shift_perpendicular == pytest.approx(fit.shift_perpendicular)
     assert out.gmm_fit.shape == fit.shape
     assert out.gmm_fit.criterion == fit.criterion
     assert out.gmm_fit.sampled_pixels == fit.sampled_pixels
 
 
-def test_schema_version_constant_is_two():
+def test_schema_version_constant_is_three():
     """Sanity check that the constant matches the plan."""
-    assert ROI_JSON_SCHEMA_VERSION == 2
+    assert ROI_JSON_SCHEMA_VERSION == 3
+
+
+def test_v2_gmm_fit_migrates_to_v3_fields_on_load():
+    """Old v2 cov_f / shift JSON loads as the new four-axis fields.
+
+    cov_f maps to both stretch_parallel and stretch_perpendicular;
+    shift maps to shift_parallel; shift_perpendicular defaults to 0.
+    """
+    v2_blob = {
+        "name": "GMM_1",
+        "center": [0.4, 0.3],
+        "radii": [0.05, 0.01],
+        "angle_deg": 30.0,
+        "color": "#e74c3c",
+        "origin": "gmm",
+        "gmm_fit": {
+            "mean_g": 0.4, "mean_s": 0.3,
+            "lambda_major": 0.05, "lambda_minor": 0.01,
+            "principal_angle_rad": 0.524,
+            "cov_f": 2.5,    # legacy v2 field
+            "shift": -1.0,   # legacy v2 field
+            "shape": "ellipse",
+            "criterion": "BIC",
+            "sampled_pixels": 100_000,
+        },
+    }
+    roi = PhasorROI.from_dict(v2_blob, label=1, default_color="#000000")
+    assert roi.origin == "gmm"
+    assert roi.gmm_fit is not None
+    # cov_f -> both stretch axes
+    assert roi.gmm_fit.stretch_parallel == pytest.approx(2.5)
+    assert roi.gmm_fit.stretch_perpendicular == pytest.approx(2.5)
+    # shift -> shift_parallel; shift_perpendicular defaults to 0
+    assert roi.gmm_fit.shift_parallel == pytest.approx(-1.0)
+    assert roi.gmm_fit.shift_perpendicular == pytest.approx(0.0)
 
 
 # ── Backward-compat: v1 JSON (no schema_version, no origin) ───────────
@@ -154,7 +192,8 @@ def test_gmm_fit_criterion_none_round_trips():
         mean_g=0.4, mean_s=0.3,
         lambda_major=0.05, lambda_minor=0.01,
         principal_angle_rad=0.0,
-        cov_f=2.0, shift=0.0,
+        stretch_parallel=2.0, stretch_perpendicular=2.0,
+        shift_parallel=0.0, shift_perpendicular=0.0,
         shape="ellipse",
         criterion=None,
         sampled_pixels=50_000,
