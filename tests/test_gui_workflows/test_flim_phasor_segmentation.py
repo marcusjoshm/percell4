@@ -196,6 +196,24 @@ def test_flim_panel_does_not_expose_cov_f_or_shift_spinboxes(flim_panel):
     assert not hasattr(flim_panel, "_shift_spin")
 
 
+def test_flim_panel_group_order(flim_panel):
+    """Groups appear in the order: Analysis, Wavelet, Filters, Segmentation, Lifetime."""
+    from qtpy.QtWidgets import QGroupBox
+    titles = [
+        gb.title() for gb in flim_panel.findChildren(QGroupBox)
+    ]
+    expected = [
+        "Phasor Analysis",
+        "Wavelet Filter",
+        "Phasor Filters",
+        "Phasor Segmentation",
+        "Lifetime Map",
+    ]
+    # findChildren returns in tree order, which for a vertical QVBoxLayout
+    # matches the visual order top-to-bottom.
+    assert titles == expected
+
+
 def test_auto_toggles_n_label_and_criterion_combo(flim_panel):
     # Default Auto=True
     assert flim_panel._n_label.text() == "n_max:"

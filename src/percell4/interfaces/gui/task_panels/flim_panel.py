@@ -98,6 +98,24 @@ class FlimPanel(QWidget):
 
         layout.addWidget(phasor_group)
 
+        # ── Wavelet Filter ──
+        wavelet_group = QGroupBox("Wavelet Filter")
+        wavelet_layout = QVBoxLayout(wavelet_group)
+
+        level_row = QHBoxLayout()
+        level_row.addWidget(QLabel("Filter Level:"))
+        self._wavelet_level = QSpinBox()
+        self._wavelet_level.setRange(1, 15)
+        self._wavelet_level.setValue(9)
+        level_row.addWidget(self._wavelet_level)
+        wavelet_layout.addLayout(level_row)
+
+        btn_wavelet = QPushButton("Apply Wavelet Filter")
+        btn_wavelet.clicked.connect(self._on_apply_wavelet)
+        wavelet_layout.addWidget(btn_wavelet)
+
+        layout.addWidget(wavelet_group)
+
         # ── Phasor Filters (U6) ──
         # Intensity threshold + reference circle filters live in this
         # task panel; the existing "Filter by active mask" stays on the
@@ -197,24 +215,6 @@ class FlimPanel(QWidget):
         seg_layout.addWidget(self._run_gmm_btn)
 
         layout.addWidget(seg_group)
-
-        # ── Wavelet Filter ──
-        wavelet_group = QGroupBox("Wavelet Filter")
-        wavelet_layout = QVBoxLayout(wavelet_group)
-
-        level_row = QHBoxLayout()
-        level_row.addWidget(QLabel("Filter Level:"))
-        self._wavelet_level = QSpinBox()
-        self._wavelet_level.setRange(1, 15)
-        self._wavelet_level.setValue(9)
-        level_row.addWidget(self._wavelet_level)
-        wavelet_layout.addLayout(level_row)
-
-        btn_wavelet = QPushButton("Apply Wavelet Filter")
-        btn_wavelet.clicked.connect(self._on_apply_wavelet)
-        wavelet_layout.addWidget(btn_wavelet)
-
-        layout.addWidget(wavelet_group)
 
         # ── Lifetime ──
         lifetime_group = QGroupBox("Lifetime Map")
