@@ -18,6 +18,7 @@ from qtpy.QtCore import QRectF, QSettings, QTimer, Qt, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -235,6 +236,13 @@ class PhasorPlotWindow(QMainWindow):
         self._active_mask_array: np.ndarray | None = None
         self._active_mask_flat: np.ndarray | None = None
 
+        # FlimPanel-driven filter state (U5). All four are GUI-local —
+        # neither stored on Session nor derived from Session events.
+        self._intensity_threshold: float = 0.0
+        self._ref_circle_tau_ns: float | None = None
+        self._ref_circle_radius: float | None = None
+        self._ref_circle_center: tuple[float, float] | None = None
+
         self._roi_widgets: list[_ROIWidget] = []
         self._selected_roi_index: int | None = None
         self._colormap_dirty: bool = True
@@ -339,6 +347,16 @@ class PhasorPlotWindow(QMainWindow):
         self._semicircle.setZValue(10)
         self._plot.addItem(self._semicircle)
 
+        # Reference-circle filter overlay (FlimPanel-driven). Hidden until
+        # set_phasor_filters resolves a (G_c, S_c) and a radius. Z-value 9
+        # so it sits above the histogram but below the ROI ellipses.
+        self._ref_circle_curve = pg.PlotCurveItem(
+            pen=pg.mkPen("#ffd166", width=2, style=Qt.DashLine),
+        )
+        self._ref_circle_curve.setZValue(9)
+        self._ref_circle_curve.setVisible(False)
+        self._plot.addItem(self._ref_circle_curve)
+
         main_layout.addWidget(left, stretch=3)
 
         # Right: ROI panel
@@ -383,6 +401,43 @@ class PhasorPlotWindow(QMainWindow):
         angle_row.addWidget(self._angle_spin)
         sel_layout.addLayout(angle_row)
 
+        # cov_f / shift / Reset to fit — only meaningful for GMM-origin ROIs.
+        # Use ``setEnabled`` (not ``setVisible``) so the layout stays stable
+        # when the user switches between manual and GMM ROIs.
+        cov_row = QHBoxLayout()
+        cov_row.addWidget(QLabel("cov_f:"))
+        self._cov_f_spin = QDoubleSpinBox()
+        self._cov_f_spin.setRange(0.5, 5.0)
+        self._cov_f_spin.setSingleStep(0.1)
+        self._cov_f_spin.setDecimals(1)
+        self._cov_f_spin.setValue(2.0)
+        self._cov_f_spin.setEnabled(False)
+        self._cov_f_spin.valueChanged.connect(self._on_cov_f_changed)
+        cov_row.addWidget(self._cov_f_spin)
+        sel_layout.addLayout(cov_row)
+
+        shift_row = QHBoxLayout()
+        shift_row.addWidget(QLabel("Shift:"))
+        self._shift_spin = QDoubleSpinBox()
+        self._shift_spin.setRange(-2.0, 2.0)
+        self._shift_spin.setSingleStep(0.1)
+        self._shift_spin.setDecimals(1)
+        self._shift_spin.setValue(0.0)
+        self._shift_spin.setEnabled(False)
+        self._shift_spin.valueChanged.connect(self._on_shift_changed)
+        shift_row.addWidget(self._shift_spin)
+        sel_layout.addLayout(shift_row)
+
+        self._reset_fit_btn = QPushButton("Reset to fit")
+        self._reset_fit_btn.setToolTip(
+            "Snap the ROI back to the cluster mean. Drag-preserving cov_f / shift "
+            "edits keep the user's drag position; this button explicitly returns to "
+            "the GMM fit's center."
+        )
+        self._reset_fit_btn.setEnabled(False)
+        self._reset_fit_btn.clicked.connect(self._on_reset_fit_clicked)
+        sel_layout.addWidget(self._reset_fit_btn)
+
         self._vis_check = QCheckBox("Visible")
         self._vis_check.setChecked(True)
         self._vis_check.toggled.connect(self._on_visibility_toggled)
@@ -410,6 +465,169 @@ class PhasorPlotWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("No phasor data loaded")
+
+    # ── Public API (used by FlimPanel) ────────────────────────
+
+    def set_phasor_filters(
+        self,
+        *,
+        intensity_threshold: float,
+        ref_circle_tau_ns: float | None,
+        ref_circle_radius: float | None,
+    ) -> None:
+        """Push the FlimPanel-driven filter values into the phasor plot.
+
+        Resolves ``(G_c, S_c)`` immediately from harmonic + freq + tau,
+        invalidates per-ROI caches, refreshes the reference-circle
+        overlay (clipped to the visible viewport), and starts the
+        debounced histogram refresh.
+
+        When ``flim_frequency_mhz`` is missing from the dataset metadata,
+        the reference-circle filter degrades silently: the overlay is
+        hidden, ``_ref_circle_center`` stays None, and the histogram
+        path uses the remaining filters. A status-bar message tells the
+        user the filter is not applied.
+        """
+        from percell4.domain.flim.phasor import universal_circle_gs
+
+        self._intensity_threshold = float(intensity_threshold)
+        self._ref_circle_tau_ns = ref_circle_tau_ns
+        self._ref_circle_radius = ref_circle_radius
+
+        # Resolve the universal-circle anchor when both inputs are present
+        # and the dataset has a frequency. Otherwise leave the center at
+        # None so compute_valid_phasor_pixels skips the ref-circle filter.
+        self._ref_circle_center = None
+        ref_active_attempt = (
+            ref_circle_tau_ns is not None and ref_circle_radius is not None
+        )
+        freq_mhz = None
+        if self._session.dataset is not None:
+            freq_mhz = self._session.dataset.metadata.get("flim_frequency_mhz")
+
+        if ref_active_attempt and freq_mhz is None:
+            self._status.showMessage(
+                "Reference circle requires flim_frequency_mhz — filter not applied",
+                5000,
+            )
+        elif ref_active_attempt and freq_mhz is not None:
+            try:
+                harmonic = int(self._harmonic_combo.currentText())
+            except (ValueError, AttributeError):
+                harmonic = 1
+            self._ref_circle_center = universal_circle_gs(
+                harmonic, float(ref_circle_tau_ns), float(freq_mhz),
+            )
+
+        self._update_ref_circle_overlay()
+
+        # Multi-vector cache invalidation (per
+        # percell4-selection-filtering-multi-roi-patterns.md Pattern 5):
+        # every per-ROI cached mask + the active-mask flat cache.
+        for w in self._roi_widgets:
+            w.cached_mask = None
+        self._active_mask_array = None
+        self._active_mask_flat = None
+
+        self._filter_timer.start()
+
+    def place_gmm_rois(
+        self,
+        geometries: list,  # list[PhasorROIGeometry] from RunPhasorGMM
+        *,
+        shape: str,
+        criterion: str | None,
+        sampled_pixels: int,
+    ) -> None:
+        """Append GMM-origin ROIs to the existing list.
+
+        Honors the 10-ROI cap by truncating the input rather than
+        clobbering existing entries; reports the truncation count in the
+        status message. Color cycle continues from
+        ``len(_roi_widgets) + i`` so GMM ROIs don't collide visually with
+        manual ROIs already in the list.
+
+        Each ROI is constructed with ``cov_f=2.0`` and ``shift=0.0`` —
+        matching the geometries that came back from the use case (which
+        was called with the FlimPanel's spinbox values; the resulting
+        ``center``/``radii``/``angle_deg`` are consistent with those
+        defaults). The Selected-ROI panel's spinboxes pick up the same
+        values when this ROI is selected.
+        """
+        if self._g_map is None:
+            self._status.showMessage(
+                "Phasor data missing — GMM result discarded", 5000,
+            )
+            return
+
+        existing = len(self._roi_widgets)
+        available = 10 - existing
+        if available <= 0:
+            self._status.showMessage(
+                "ROI list full (10 max) — remove some before running GMM",
+                5000,
+            )
+            return
+
+        truncated = list(geometries)[:available]
+        n_dropped = len(geometries) - len(truncated)
+
+        for i, geo in enumerate(truncated):
+            global_idx = existing + i
+            color = COLOR_CYCLE[global_idx % len(COLOR_CYCLE)]
+            fit = GMMFit(
+                mean_g=geo.mean_g, mean_s=geo.mean_s,
+                lambda_major=geo.lambda_major, lambda_minor=geo.lambda_minor,
+                principal_angle_rad=geo.principal_angle_rad,
+                cov_f=2.0, shift=0.0,
+                shape=shape,
+                criterion=criterion,
+                sampled_pixels=int(sampled_pixels),
+            )
+            phasor_roi = PhasorROI(
+                name=self._make_unique_name(f"GMM_{geo.label}"),
+                center=geo.center, radii=geo.radii, angle_deg=geo.angle_deg,
+                label=global_idx + 1, color=color,
+                origin="gmm", gmm_fit=fit,
+            )
+            self._create_roi_widget(phasor_roi)
+
+        self._colormap_dirty = True
+        self._refresh_roi_list()
+
+        n_placed = len(truncated)
+        msg = (
+            f"GMM placed {n_placed} ROIs "
+            f"(criterion={criterion or 'manual'}, sampled {sampled_pixels:,} pixels)"
+        )
+        if n_dropped > 0:
+            msg += f" — truncated {n_dropped} due to 10-ROI cap"
+        self._status.showMessage(msg, 0)
+        self._preview_timer.start()
+
+    def _update_ref_circle_overlay(self) -> None:
+        """Redraw or hide the reference-circle PlotCurveItem.
+
+        Clips circle points to the visible Y range ``[0, 0.7]`` so a
+        large radius doesn't smear off-screen pyqtgraph clipping
+        artifacts. The filter still applies to all matching pixels in
+        the full-resolution path; only the overlay is clipped.
+        """
+        if self._ref_circle_center is None or self._ref_circle_radius is None:
+            self._ref_circle_curve.setVisible(False)
+            return
+        g_c, s_c = self._ref_circle_center
+        r = float(self._ref_circle_radius)
+        theta = np.linspace(0, 2 * np.pi, 200)
+        gs = g_c + r * np.cos(theta)
+        ss = s_c + r * np.sin(theta)
+        # Clip to viewport
+        in_view = (ss >= 0.0) & (ss <= 0.7)
+        if not in_view.any():
+            self._ref_circle_curve.setVisible(False)
+            return
+        self._ref_circle_curve.setData(gs[in_view], ss[in_view])
+        self._ref_circle_curve.setVisible(True)
 
     # ── ROI Management ────────────────────────────────────────
 
@@ -508,6 +726,9 @@ class PhasorPlotWindow(QMainWindow):
             self._vis_check.blockSignals(True)
             self._vis_check.setChecked(False)
             self._vis_check.blockSignals(False)
+            self._cov_f_spin.setEnabled(False)
+            self._shift_spin.setEnabled(False)
+            self._reset_fit_btn.setEnabled(False)
             return
         self._selected_roi_index = row
         roi = self._roi_widgets[row].phasor_roi
@@ -520,6 +741,20 @@ class PhasorPlotWindow(QMainWindow):
         self._vis_check.blockSignals(True)
         self._vis_check.setChecked(roi.visible)
         self._vis_check.blockSignals(False)
+
+        # GMM-only controls. Use setEnabled (not setVisible) so the layout
+        # stays put when the user switches between manual and GMM ROIs.
+        is_gmm = roi.origin == "gmm" and roi.gmm_fit is not None
+        self._cov_f_spin.setEnabled(is_gmm)
+        self._shift_spin.setEnabled(is_gmm)
+        self._reset_fit_btn.setEnabled(is_gmm)
+        if is_gmm:
+            self._cov_f_spin.blockSignals(True)
+            self._cov_f_spin.setValue(roi.gmm_fit.cov_f)
+            self._cov_f_spin.blockSignals(False)
+            self._shift_spin.blockSignals(True)
+            self._shift_spin.setValue(roi.gmm_fit.shift)
+            self._shift_spin.blockSignals(False)
 
     def _on_name_edited(self) -> None:
         if self._selected_roi_index is None:
@@ -567,6 +802,110 @@ class PhasorPlotWindow(QMainWindow):
         self._update_ellipse_curve_for(widget)
         widget.cached_mask = None
         self._preview_timer.start()
+
+    # ── GMM-origin controls (cov_f / shift / Reset to fit) ────
+
+    def _apply_gmm_geometry(
+        self,
+        widget: _ROIWidget,
+        anchor: tuple[float, float] | None,
+    ) -> None:
+        """Recompute geometry from ``gmm_fit`` and push to the RectROI.
+
+        ``anchor=None`` snaps the center back to the cluster mean (Reset
+        to fit). ``anchor=phasor_roi.center`` preserves a manual drag
+        across cov_f / shift edits.
+
+        ``RectROI.setPos`` / ``setSize`` programmatic calls are wrapped in
+        ``blockSignals`` so the resulting ``sigRegionChangeFinished`` does
+        not feed back through ``_on_roi_moved_widget`` and overwrite the
+        eigenstructure-derived values with rounded RectROI bbox values.
+        """
+        from percell4.domain.flim.phasor import gmm_to_phasor_roi_geometry
+
+        fit = widget.phasor_roi.gmm_fit
+        if fit is None:
+            return
+
+        center, radii, angle_deg = gmm_to_phasor_roi_geometry(
+            mean=(fit.mean_g, fit.mean_s),
+            lambda_major=fit.lambda_major,
+            lambda_minor=fit.lambda_minor,
+            principal_angle_rad=fit.principal_angle_rad,
+            cov_f=fit.cov_f, shift=fit.shift,
+            shape=fit.shape,
+            anchor=anchor,
+        )
+        widget.phasor_roi.center = center
+        widget.phasor_roi.radii = radii
+        widget.phasor_roi.angle_deg = angle_deg
+
+        cx, cy = center
+        rx, ry = radii
+        widget.roi.blockSignals(True)
+        try:
+            widget.roi.setPos((cx - rx, cy - ry))
+            widget.roi.setSize((2 * rx, 2 * ry))
+        finally:
+            widget.roi.blockSignals(False)
+
+        # Angle spinbox follows the GMM-derived value (may differ between
+        # circle=0 and ellipse=θ shapes); keep it in sync but don't fire
+        # _on_angle_changed.
+        self._angle_spin.blockSignals(True)
+        self._angle_spin.setValue(int(round(angle_deg)))
+        self._angle_spin.blockSignals(False)
+
+        self._update_ellipse_curve_for(widget)
+        widget.cached_mask = None
+        self._preview_timer.start()
+
+    def _on_cov_f_changed(self, value: float) -> None:
+        if self._selected_roi_index is None:
+            return
+        widget = self._roi_widgets[self._selected_roi_index]
+        if widget.phasor_roi.gmm_fit is None:
+            return
+        widget.phasor_roi.gmm_fit.cov_f = float(value)
+        # Drag-preserving anchor: keep current center, only update radii
+        # via the eigenstructure recompute.
+        self._apply_gmm_geometry(widget, anchor=widget.phasor_roi.center)
+
+    def _on_shift_changed(self, value: float) -> None:
+        if self._selected_roi_index is None:
+            return
+        widget = self._roi_widgets[self._selected_roi_index]
+        if widget.phasor_roi.gmm_fit is None:
+            return
+        # Shift is measured against the cluster mean (the eigenstructure
+        # baseline); using ``anchor=current center`` would make shifts
+        # cumulative on top of any manual drag, which is surprising.
+        # Instead, the spinbox value represents the *current* shift from
+        # mean — so we re-anchor on the mean before applying.
+        widget.phasor_roi.gmm_fit.shift = float(value)
+        self._apply_gmm_geometry(widget, anchor=None)
+
+    def _on_reset_fit_clicked(self) -> None:
+        if self._selected_roi_index is None:
+            return
+        widget = self._roi_widgets[self._selected_roi_index]
+        if widget.phasor_roi.gmm_fit is None:
+            return
+        # "Reset to fit": apply current cov_f / shift against the cluster
+        # mean. Doesn't touch cov_f or shift values themselves.
+        self._apply_gmm_geometry(widget, anchor=None)
+
+    # ── Unique-name helper ────────────────────────────────────
+
+    def _make_unique_name(self, base: str) -> str:
+        """Return a name unused by any existing ROI, appending _2/_3/... if needed."""
+        existing = {w.phasor_roi.name for w in self._roi_widgets}
+        if base not in existing:
+            return base
+        i = 2
+        while f"{base}_{i}" in existing:
+            i += 1
+        return f"{base}_{i}"
 
     # ── Ellipse drawing ───────────────────────────────────────
 
@@ -766,6 +1105,14 @@ class PhasorPlotWindow(QMainWindow):
         self._active_mask_array = None
         self._active_mask_flat = None
 
+        # Reset FlimPanel-driven filter state — values were tied to the
+        # previous dataset's metadata (frequency for ref-circle).
+        self._intensity_threshold = 0.0
+        self._ref_circle_tau_ns = None
+        self._ref_circle_radius = None
+        self._ref_circle_center = None
+        self._update_ref_circle_overlay()
+
         # Reset checkbox states. _on_active_mask_changed will re-enable
         # the mask-filter checkbox if the new dataset auto-selected a mask.
         self._filtered_check.blockSignals(True)
@@ -880,11 +1227,16 @@ class PhasorPlotWindow(QMainWindow):
             and self._g_map is not None
         )
 
+        intensity_flat = self._intensity.ravel() if self._intensity is not None else None
         valid = compute_valid_phasor_pixels(
             g_flat, s_flat,
             labels_flat=self._labels_flat,
             filter_ids=self._session.filter_ids,
             mask_flat=mask_flat,
+            intensity_flat=intensity_flat,
+            intensity_threshold=self._intensity_threshold,
+            ref_circle_center=self._ref_circle_center,
+            ref_circle_radius=self._ref_circle_radius,
         )
 
         g_flat = g_flat[valid]
@@ -1095,6 +1447,15 @@ class PhasorPlotWindow(QMainWindow):
     # ── Lifecycle ─────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        # Stop debounced timers before unsubscribing so a queued slot
+        # doesn't fire after teardown (origin: napari-modal-tool-overlay
+        # pattern). Both timers are single-shot, so .stop() is safe even
+        # when no callback is pending.
+        for timer in (self._filter_timer, self._preview_timer):
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass  # timer already destroyed
         for unsub in getattr(self, '_unsubs', []):
             try:
                 unsub()
