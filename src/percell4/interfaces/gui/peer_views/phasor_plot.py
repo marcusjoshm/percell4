@@ -46,6 +46,75 @@ COLOR_CYCLE: Final[tuple[str, ...]] = (
 )
 
 
+# JSON schema version for the saved ROI file.
+#   v1 = pre-GMM (origin field absent; loaded as origin="manual"; gmm_fit ignored)
+#   v2 = adds top-level schema_version + per-ROI origin / gmm_fit
+ROI_JSON_SCHEMA_VERSION: Final[int] = 2
+
+
+@dataclass
+class GMMFit:
+    """Eigenstructure + spinbox state for a GMM-origin PhasorROI.
+
+    The ``mean_*`` and ``lambda_*`` fields are constants captured at fit
+    time; ``cov_f`` and ``shift`` are the current spinbox values. The
+    drag-preserving recompute path uses ``phasor_roi.center`` as the
+    anchor (not ``mean_g``/``mean_s``) so a manual drag survives a
+    cov_f / shift edit. The "Reset to fit" button is the explicit
+    affordance for snapping the center back to the cluster mean.
+    """
+
+    mean_g: float
+    mean_s: float
+    lambda_major: float
+    lambda_minor: float
+    principal_angle_rad: float
+    cov_f: float
+    shift: float
+    shape: str  # "circle" | "ellipse"
+    criterion: str | None  # "BIC" | "AIC" | None (when n was manual)
+    sampled_pixels: int  # shared across all ROIs from one GMM run
+
+    @classmethod
+    def from_dict(cls, d: dict) -> GMMFit:
+        """Tolerant load of a GMMFit JSON sub-dict.
+
+        Raises ``ValueError`` on missing or wrongly-typed required fields
+        so the caller (``PhasorROI.from_dict``) can demote a malformed
+        ``gmm_fit`` to ``None`` and keep the rest of the ROI loadable.
+        """
+        try:
+            return cls(
+                mean_g=float(d["mean_g"]),
+                mean_s=float(d["mean_s"]),
+                lambda_major=float(d["lambda_major"]),
+                lambda_minor=float(d["lambda_minor"]),
+                principal_angle_rad=float(d["principal_angle_rad"]),
+                cov_f=float(d["cov_f"]),
+                shift=float(d["shift"]),
+                shape=str(d["shape"]),
+                criterion=(None if d.get("criterion") is None
+                           else str(d["criterion"])),
+                sampled_pixels=int(d.get("sampled_pixels", 0)),
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"Invalid gmm_fit data: {e}") from e
+
+    def to_dict(self) -> dict:
+        return {
+            "mean_g": self.mean_g,
+            "mean_s": self.mean_s,
+            "lambda_major": self.lambda_major,
+            "lambda_minor": self.lambda_minor,
+            "principal_angle_rad": self.principal_angle_rad,
+            "cov_f": self.cov_f,
+            "shift": self.shift,
+            "shape": self.shape,
+            "criterion": self.criterion,
+            "sampled_pixels": self.sampled_pixels,
+        }
+
+
 @dataclass
 class PhasorROI:
     """Single phasor ROI definition."""
@@ -57,15 +126,36 @@ class PhasorROI:
     label: int
     color: str
     visible: bool = True
+    origin: str = "manual"  # "manual" | "gmm"
+    gmm_fit: GMMFit | None = None  # present iff origin == "gmm"
 
     @classmethod
     def from_dict(cls, d: dict, label: int, default_color: str) -> PhasorROI:
-        """Create from JSON dict with validation."""
+        """Create from JSON dict with validation.
+
+        ``origin`` defaults to ``"manual"`` for v1 JSON files (no field).
+        A malformed ``gmm_fit`` is logged and demoted to ``None`` rather
+        than failing the whole ROI — same defensive policy as the
+        existing per-ROI try/except in ``_on_load_rois``.
+        """
         try:
             center = tuple(float(x) for x in d["center"])
             radii = tuple(float(x) for x in d["radii"])
             if len(center) != 2 or len(radii) != 2:
                 raise ValueError("center and radii must be 2-element sequences")
+
+            origin = str(d.get("origin", "manual"))
+            gmm_fit_data = d.get("gmm_fit")
+            gmm_fit: GMMFit | None = None
+            if isinstance(gmm_fit_data, dict):
+                try:
+                    gmm_fit = GMMFit.from_dict(gmm_fit_data)
+                except ValueError:
+                    # Malformed gmm_fit — keep the ROI but drop the fit
+                    # so the rest of the file still loads. The user sees
+                    # the ROI as a manual-style pin without cov_f/shift.
+                    gmm_fit = None
+
             return cls(
                 name=str(d["name"]),
                 center=center,
@@ -73,6 +163,8 @@ class PhasorROI:
                 angle_deg=float(d.get("angle_deg", 0)),
                 label=label,
                 color=str(d.get("color", default_color)),
+                origin=origin,
+                gmm_fit=gmm_fit,
             )
         except (KeyError, TypeError) as e:
             raise ValueError(f"Invalid ROI data: {e}") from e
@@ -85,6 +177,8 @@ class PhasorROI:
             "radii": list(self.radii),
             "angle_deg": self.angle_deg,
             "color": self.color,
+            "origin": self.origin,
+            "gmm_fit": self.gmm_fit.to_dict() if self.gmm_fit is not None else None,
         }
 
 
@@ -937,7 +1031,10 @@ class PhasorPlotWindow(QMainWindow):
         )
         if not path:
             return
-        data = {"rois": [w.phasor_roi.to_dict() for w in self._roi_widgets]}
+        data = {
+            "schema_version": ROI_JSON_SCHEMA_VERSION,
+            "rois": [w.phasor_roi.to_dict() for w in self._roi_widgets],
+        }
         Path(path).write_text(json.dumps(data, indent=2))
         self._status.showMessage(f"Saved {len(self._roi_widgets)} ROIs", 3000)
 
@@ -955,6 +1052,18 @@ class PhasorPlotWindow(QMainWindow):
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             QMessageBox.warning(self, "Load Error", f"Invalid ROI file:\n{e}")
             return
+
+        # Schema-version warning. v1 (no field) and v2 load fully; v>2 may
+        # carry fields this build doesn't know about — warn the user that
+        # those fields will be lost on the next Save.
+        loaded_version = int(data.get("schema_version", 1))
+        if loaded_version > ROI_JSON_SCHEMA_VERSION:
+            QMessageBox.information(
+                self, "Newer ROI file",
+                f"This ROI file was written with schema_version={loaded_version}; "
+                f"this build understands up to {ROI_JSON_SCHEMA_VERSION}. "
+                "Some fields may be lost if you save it again.",
+            )
 
         # Clear existing ROIs
         for w in self._roi_widgets:
