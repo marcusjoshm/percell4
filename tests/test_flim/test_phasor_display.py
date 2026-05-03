@@ -179,3 +179,121 @@ def test_mask_shape_matches_helper():
     assert not mask_shape_matches(None, b)
     assert not mask_shape_matches(a, None)
     assert not mask_shape_matches(None, None)
+
+
+# ── Intensity threshold + reference circle (U2) ───────────────────────
+
+
+def test_intensity_threshold_only(small_phasor):
+    """Pixels above the intensity floor are kept; below are dropped."""
+    intensity = np.array([
+        100, 200, 50, 50,
+        100, 100, 50, 50,
+        100, 100, 50, 50,
+        100, 100, 50, 50,
+    ], dtype=np.float32)
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        intensity_flat=intensity, intensity_threshold=100.0,
+    )
+    # 8 pixels have intensity >= 100 (rows 0–3 each contribute 2)
+    assert valid.sum() == 8
+    assert intensity[valid].min() >= 100
+
+
+def test_intensity_threshold_zero_is_noop(small_phasor):
+    """intensity_threshold=0 is a no-op even when intensity_flat is provided."""
+    intensity = np.full(16, 5.0, dtype=np.float32)
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        intensity_flat=intensity, intensity_threshold=0.0,
+    )
+    assert valid.all()
+
+
+def test_intensity_none_disables_threshold(small_phasor):
+    """intensity_flat=None disables the filter regardless of threshold."""
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        intensity_flat=None, intensity_threshold=999_999.0,
+    )
+    assert valid.all()
+
+
+def test_intensity_shape_mismatch_silently_bypassed(small_phasor):
+    """Wrong-size intensity is treated as 'no filter' — same as mask convention."""
+    bad_intensity = np.full(8, 999_999.0, dtype=np.float32)  # 8 != 16
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        intensity_flat=bad_intensity, intensity_threshold=100.0,
+    )
+    assert valid.all()
+
+
+def test_reference_circle_only(small_phasor):
+    """Restrict to pixels inside a circle around (G_c, S_c)."""
+    # small_phasor has g in {0.2, 0.3, 0.4, 0.5} and s == 0.3 everywhere.
+    # A circle at (0.4, 0.3) with radius 0.05 captures only the g=0.4
+    # column (4 pixels) — the 0.5 column is at distance 0.1.
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        ref_circle_center=(0.4, 0.3), ref_circle_radius=0.05,
+    )
+    assert valid.sum() == 4
+
+
+def test_reference_circle_zero_radius_excludes_all():
+    """A degenerate radius=0 circle excludes everything except an exact-center match.
+
+    When no pixel sits exactly on the center, valid is all-False.
+    """
+    g = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+    s = np.array([0.3, 0.4, 0.5], dtype=np.float32)
+    valid = compute_valid_phasor_pixels(
+        g, s, labels_flat=None, filter_ids=None, mask_flat=None,
+        ref_circle_center=(0.3, 0.3), ref_circle_radius=0.0,
+    )
+    assert not valid.any()
+
+
+def test_reference_circle_disabled_by_none():
+    """ref_circle_radius=None disables the filter."""
+    g = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+    s = np.array([0.3, 0.4, 0.5], dtype=np.float32)
+    valid = compute_valid_phasor_pixels(
+        g, s, labels_flat=None, filter_ids=None, mask_flat=None,
+        ref_circle_center=(0.5, 0.4), ref_circle_radius=None,
+    )
+    assert valid.all()
+
+
+def test_all_five_filters_compose_via_AND(small_phasor):
+    """Cell + mask + intensity + reference circle + finiteness all AND."""
+    intensity = np.array([
+        100, 200, 50, 50,
+        100, 100, 50, 50,
+        100, 100, 50, 50,
+        100, 100, 50, 50,
+    ], dtype=np.float32)
+    # Mask: top half only (indices 0..7)
+    mask = np.zeros(16, dtype=np.uint8)
+    mask[:8] = 1
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=small_phasor["labels_flat"],
+        filter_ids={1, 4},  # label 1 (top-left) + label 4 (bottom-right)
+        mask_flat=mask,  # top half only
+        intensity_flat=intensity, intensity_threshold=100.0,
+        # Reference circle around (0.5, 0.3) with r=0.01 — only g=0.5 column matches
+        ref_circle_center=(0.5, 0.3), ref_circle_radius=0.01,
+    )
+    # Intersection: label 1 (top-left, g=0.5) AND mask top half AND intensity≥100
+    # AND ref-circle (g=0.5). Result = top-left quadrant pixels with intensity≥100.
+    # Indices 0,1 have intensity 100,200 ≥ 100; indices 4,5 have intensity 100,100.
+    # All four are label 1 + top half + g=0.5 + ref circle. → 4 pixels.
+    assert valid.sum() == 4
