@@ -96,26 +96,55 @@ def test_npz_carries_documented_keys(tmp_path, session, repo_full_cache):
     result = ExportPhasorNpz(repo_full_cache, session).execute(out)
     _, path = result.exported[0]
 
-    data = np.load(path, allow_pickle=True)
+    # CRITICAL: load WITHOUT allow_pickle — schema v1 stores metadata
+    # as a JSON bytestring, not an object array. Reading without
+    # allow_pickle=True is the security guarantee that .npz import
+    # cannot execute arbitrary code.
+    data = np.load(path)
     keys = set(data.files)
     assert {"g", "s", "g_filtered", "s_filtered", "lifetime_filtered", "metadata"} <= keys
-    # CRITICAL: intensity is NOT in the .npz (decay-derived; importer reconstructs)
+    # intensity is NOT in the .npz (decay-derived; importer reconstructs)
     assert "intensity" not in keys
+    # metadata is uint8 bytes, NOT an object array
+    assert data["metadata"].dtype == np.uint8
+    assert data["metadata"].ndim == 1
 
 
 def test_metadata_round_trip(tmp_path, session, repo_full_cache):
+    import json as _json
     out = tmp_path / "out"
     out.mkdir()
 
     result = ExportPhasorNpz(repo_full_cache, session).execute(out)
     _, path = next(p for p in result.exported if "mTQ2" in p[1].name)
 
-    data = np.load(path, allow_pickle=True)
-    meta = data["metadata"].item()
+    # Decode without allow_pickle — JSON bytestring path.
+    data = np.load(path)
+    meta = _json.loads(bytes(data["metadata"]).decode("utf-8"))
     assert meta["schema_version"] == 1
     assert meta["channel"] == "mTQ2"
     assert meta["flim_frequency_mhz"] == 80.0
     assert meta["source_dataset_stem"] == "Dish_2_TAOK2"
+
+
+def test_no_pickle_required_to_load_exported_npz(tmp_path, session, repo_full_cache):
+    """Regression guard: every exported .npz must load WITHOUT allow_pickle.
+
+    This is the security guarantee — schema v1 forbids object-array
+    metadata, so a future regression that reintroduces the pickle path
+    fails here loudly.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+
+    result = ExportPhasorNpz(repo_full_cache, session).execute(out)
+
+    for _, path in result.exported:
+        # If exported with object-array metadata, this raises ValueError
+        # ("Object arrays cannot be loaded when allow_pickle=False").
+        with np.load(path) as data:
+            assert "metadata" in data.files
+            assert data["metadata"].dtype == np.uint8
 
 
 # ── np.savez suffix verification ──────────────────────────────
@@ -185,7 +214,7 @@ def test_raw_only_cache_writes_minimal_file(tmp_path, session):
     result = ExportPhasorNpz(repo, session).execute(out)
 
     _, path = result.exported[0]
-    data = np.load(path, allow_pickle=True)
+    data = np.load(path)
     assert "g" in data.files
     assert "s" in data.files
     assert "metadata" in data.files

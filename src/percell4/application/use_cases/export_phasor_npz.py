@@ -1,19 +1,26 @@
 """Use case: export cached phasor data to .npz files for external scripts.
 
 One .npz per channel: g, s, g_filtered, s_filtered, lifetime_filtered
-(when wavelet has been applied), plus a metadata dict. Intensity is
-NOT exported — it is decay-derived; the importer reconstructs it from
-its own /decay/<ch>. Storing intensity here would re-create the
+(when wavelet has been applied), plus a metadata bytestring. Intensity
+is NOT exported — it is decay-derived; the importer reconstructs it
+from its own /decay/<ch>. Storing intensity here would re-create the
 silent-misalignment hazard documented in
 docs/solutions/logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md.
 
 Atomic write contract: write to a temporary file in the destination
 directory, then os.replace to the final path. Pass an explicit file
 object to np.savez to defeat its .npz suffix auto-append behavior.
+
+Metadata format (security): the metadata dict is serialized as
+UTF-8 JSON bytes stored as a uint8 array. This intentionally avoids
+np.savez's object-array path (which requires allow_pickle=True on
+load and would expose pickle-based RCE on collaborator-supplied
+files). Importers decode via ``json.loads(bytes(data["metadata"]))``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
@@ -57,8 +64,11 @@ class ExportPhasorNpz:
         if reader is not None:
             try:
                 return reader(handle)
-            except Exception:
-                pass
+            except (KeyError, AttributeError, OSError) as exc:
+                logger.warning(
+                    "Fresh metadata read failed (%s); falling back to "
+                    "handle.metadata snapshot", exc,
+                )
         return dict(handle.metadata)
 
     def execute(self, out_dir: Path) -> ExportPhasorResult:
@@ -110,7 +120,17 @@ class ExportPhasorNpz:
                 except KeyError:
                     pass
             except KeyError:
-                # Asymmetric or absent wavelet cache: drop all wavelet keys.
+                # Asymmetric or absent wavelet cache: drop all wavelet
+                # keys. Surface a warning when partial wavelet cache is
+                # detected (mirrors LoadCachedPhasor's defensive
+                # logging) so an in-progress crash mid-write of
+                # apply_wavelet is visible at export time too.
+                if "g_filtered" in wavelet_keys:
+                    logger.warning(
+                        "Asymmetric wavelet cache for channel %s during "
+                        "export: g_filtered present, s_filtered missing. "
+                        "Dropping wavelet keys from .npz.", ch,
+                    )
                 wavelet_keys = {}
 
             metadata_dict = {
@@ -120,6 +140,11 @@ class ExportPhasorNpz:
                 "source_dataset_stem": stem,
             }
 
+            # Metadata as UTF-8 JSON bytes — avoids the pickle path that
+            # np.savez(..., metadata=np.array(d, dtype=object)) would
+            # require, eliminating the allow_pickle=True RCE vector for
+            # importers loading collaborator-supplied .npz files.
+            metadata_bytes = json.dumps(metadata_dict).encode("utf-8")
             payload: dict[str, np.ndarray] = {
                 "g": g_map.astype(np.float32, copy=False),
                 "s": s_map.astype(np.float32, copy=False),
@@ -127,7 +152,7 @@ class ExportPhasorNpz:
                     k: v.astype(np.float32, copy=False)
                     for k, v in wavelet_keys.items()
                 },
-                "metadata": np.array(metadata_dict, dtype=object),
+                "metadata": np.frombuffer(metadata_bytes, dtype=np.uint8),
             }
 
             final_path = out_dir / f"{stem}_{ch}_phasor.npz"

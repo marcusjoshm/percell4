@@ -3,8 +3,8 @@
 Schema (v1): top-level keys ``g``, ``s`` (required, float32 (H,W));
 ``g_filtered``, ``s_filtered``, ``lifetime_filtered`` (optional but
 all-three-or-none — wavelet writes them together); ``metadata`` (a
-0-d numpy object array containing a dict with at minimum
-``schema_version``).
+1-d uint8 array of UTF-8 JSON bytes containing a dict with at
+minimum ``schema_version``).
 
 Intensity is intentionally NOT in the schema. It is decay-derived; the
 target dataset's /decay/<target_channel> is the canonical source.
@@ -12,11 +12,16 @@ Storing intensity in the .npz would re-create the silent-misalignment
 hazard from
 docs/solutions/logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md.
 
-Security: ``target_channel`` is sanitized BEFORE any HDF5 access.
-Without this, a malicious .npz with ``metadata['channel'] =
-'../segmentation/cellpose'`` could overwrite arbitrary HDF5 groups.
-The regex matches the channel-name conventions seen in real fixtures
-(``mTQ2``, ``CA-SiR``, ``mTQ2_v2``, ``GFP_488``, ``ch.0``).
+Security:
+- ``target_channel`` is sanitized BEFORE any HDF5 access. Without this,
+  a malicious .npz with ``metadata['channel'] = '../segmentation/cellpose'``
+  could overwrite arbitrary HDF5 groups. The regex matches the
+  channel-name conventions seen in real fixtures (``mTQ2``, ``CA-SiR``,
+  ``mTQ2_v2``, ``GFP_488``, ``ch.0``).
+- ``np.load`` is called WITHOUT ``allow_pickle=True``. Metadata is a
+  uint8 array of UTF-8 JSON bytes (decoded via ``json.loads``); the
+  pickle-based object-array path is intentionally avoided so a
+  malicious .npz cannot execute arbitrary code at load time.
 
 Conflict resolution mirrors decay-append: ``LayerAlreadyExistsError``
 is raised when the target ``/phasor/<channel>/g`` exists and
@@ -27,6 +32,7 @@ proceed.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -44,11 +50,13 @@ logger = logging.getLogger(__name__)
 
 # Channel-name allowlist. Matches real fixtures (mTQ2, CA-SiR,
 # mTQ2_v2, ch.0, GFP_488). Rejects path separators (/, \), parent
-# traversal (.. is rejected because . is allowed once but the regex
-# disallows the double-dot pattern via length+character constraints
-# would still pass — handle .. explicitly below), null bytes, and
-# anything outside the allowlist.
-_CHANNEL_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,64}$")
+# traversal, null bytes, leading dots/dashes (which h5py resolves to
+# the parent group — `phasor/./g` becomes `/phasor/g`, polluting the
+# channel-name namespace), and anything outside the allowlist.
+# First character must be alphanumeric or underscore; subsequent
+# characters may include `-` and `.`. The `..` substring is
+# additionally rejected explicitly below as defense-in-depth.
+_CHANNEL_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-\.]{0,63}$")
 
 # Valid top-level keys in the .npz schema. Any other key signals a
 # multi-channel file (declared non-goal) or a third-party format we
@@ -89,34 +97,36 @@ class ImportPhasorNpz:
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
-        data = np.load(npz_path, allow_pickle=True)
-        try:
+        # Single `with` block guarantees data.close() across every exit
+        # path (validation failure, conflict raise, mid-write exception)
+        # without needing per-branch close() calls. ``allow_pickle`` is
+        # intentionally left False — metadata is a JSON bytestring;
+        # accepting pickled objects from collaborator-supplied files
+        # would expose arbitrary code execution at load time.
+        with np.load(npz_path) as data:
             _validate_npz(data)
-        except ValueError:
-            data.close()
-            raise
 
-        # Conflict check: target /phasor/<channel>/g already exists and
-        # force=False → raise; dialog catches and shows conflict chip.
-        if not force:
-            try:
-                self._repo.read_array(handle, f"phasor/{target_channel}/g")
-            except KeyError:
-                pass  # No conflict — proceed
-            else:
-                data.close()
-                raise LayerAlreadyExistsError(target_channel)
+            # Conflict check: target /phasor/<channel>/g already exists and
+            # force=False → raise; dialog catches and shows conflict chip.
+            if not force:
+                try:
+                    self._repo.read_array(
+                        handle, f"phasor/{target_channel}/g",
+                    )
+                except KeyError:
+                    pass  # No conflict — proceed
+                else:
+                    raise LayerAlreadyExistsError(target_channel)
 
-        # If force=True, clear the existing /phasor/<target> group so
-        # orphan keys (e.g., a stale lifetime_filtered) don't survive.
-        delete = getattr(self._repo, "delete_path", None)
-        if force and delete is not None:
-            try:
-                delete(handle, f"phasor/{target_channel}")
-            except KeyError:
-                pass
+            # If force=True, clear the existing /phasor/<target> group so
+            # orphan keys (e.g., a stale lifetime_filtered) don't survive.
+            delete = getattr(self._repo, "delete_path", None)
+            if force and delete is not None:
+                try:
+                    delete(handle, f"phasor/{target_channel}")
+                except KeyError:
+                    pass
 
-        try:
             attrs_base = {"channel": target_channel, "dims": ["H", "W"]}
 
             self._repo.write_array(
@@ -148,8 +158,6 @@ class ImportPhasorNpz:
                         data["lifetime_filtered"].astype(np.float32, copy=False),
                         attrs=dict(attrs_base),
                     )
-        finally:
-            data.close()
 
         return ImportPhasorResult(
             target_channel=target_channel,
@@ -235,18 +243,39 @@ def _validate_npz(data) -> None:
                 )
 
     if "metadata" in files:
-        meta_arr = data["metadata"]
-        # Object arrays from np.savez(metadata=np.array(d, dtype=object))
-        # are 0-d arrays whose .item() returns the dict.
-        try:
-            meta = meta_arr.item() if meta_arr.ndim == 0 else None
-        except (ValueError, AttributeError):
-            meta = None
-        if not isinstance(meta, dict):
-            raise ValueError(
-                "`.npz` metadata must be a 0-d object array containing a dict"
-            )
+        meta = _decode_metadata(data["metadata"])
         # If metadata claims a channel, sanitize it. The dialog should
         # already have done this, but defense-in-depth.
         if "channel" in meta:
             _sanitize_channel_name(str(meta["channel"]))
+
+
+def _decode_metadata(meta_arr) -> dict:
+    """Decode the metadata field from a uint8 JSON bytestring.
+
+    Schema v1 stores metadata as ``np.frombuffer(json.dumps(d).encode(),
+    dtype=np.uint8)``. Reject anything else (object arrays, strings,
+    multi-dim) so a malicious .npz cannot smuggle in a pickled object
+    even if the importer were ever called with allow_pickle=True.
+    """
+    if not isinstance(meta_arr, np.ndarray):
+        raise ValueError(
+            "`.npz` metadata must be a 1-d uint8 array of UTF-8 JSON bytes"
+        )
+    if meta_arr.dtype != np.uint8 or meta_arr.ndim != 1:
+        raise ValueError(
+            f"`.npz` metadata must be a 1-d uint8 array (got dtype "
+            f"{meta_arr.dtype}, ndim {meta_arr.ndim}); refusing to decode "
+            "object/pickle metadata"
+        )
+    try:
+        meta = json.loads(bytes(meta_arr).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"`.npz` metadata is not valid UTF-8 JSON: {exc}"
+        ) from exc
+    if not isinstance(meta, dict):
+        raise ValueError(
+            f"`.npz` metadata JSON must decode to a dict (got {type(meta).__name__})"
+        )
+    return meta

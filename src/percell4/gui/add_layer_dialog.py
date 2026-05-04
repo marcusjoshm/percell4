@@ -1740,9 +1740,10 @@ class AddLayerDialog(QDialog):
 
         # Help text + import button
         help_text = QLabel(
-            "Note: .npz files must be from a trusted source — import uses "
-            "np.load(allow_pickle=True). Channel names containing path "
-            "separators or '..' are rejected."
+            "Schema v1: g, s (required, float32); g_filtered, s_filtered, "
+            "lifetime_filtered (optional); metadata (UTF-8 JSON bytes). "
+            "Channel names are validated against an allowlist that rejects "
+            "path separators, leading dots, and '..'."
         )
         help_text.setWordWrap(True)
         help_text.setStyleSheet("color: #888; font-size: 11px;")
@@ -1785,7 +1786,7 @@ class AddLayerDialog(QDialog):
     def _phasor_npz_add_row(self, npz_path: Path) -> None:
         """Probe the .npz at file-add time; populate one table row."""
         from percell4.application.use_cases.import_phasor_npz import (
-            _validate_npz, _sanitize_channel_name,
+            _validate_npz, _sanitize_channel_name, _decode_metadata,
         )
         import re
 
@@ -1798,19 +1799,25 @@ class AddLayerDialog(QDialog):
         file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
         self._phasor_npz_table.setItem(row, self._PHASOR_COL_FILE, file_item)
 
-        # Probe the file
+        # Probe the file. allow_pickle is intentionally False: metadata
+        # is a JSON bytestring (schema v1). A .npz that requires pickle
+        # to load is a third-party format we won't accept; it surfaces
+        # here as a validation error chip without executing any code.
         detected_channel = ""
         shape_str = ""
         filtered_str = "—"
         validation_error: str | None = None
         try:
-            with np.load(npz_path, allow_pickle=True) as data:
+            with np.load(npz_path) as data:
                 _validate_npz(data)
                 shape_str = "×".join(str(d) for d in data["g"].shape)
                 filtered_str = "Yes" if "g_filtered" in data.files else "No"
                 # Channel inference: metadata['channel'] then filename regex.
                 if "metadata" in data.files:
-                    meta = data["metadata"].item()
+                    try:
+                        meta = _decode_metadata(data["metadata"])
+                    except ValueError:
+                        meta = None
                     if isinstance(meta, dict) and "channel" in meta:
                         try:
                             _sanitize_channel_name(str(meta["channel"]))
@@ -1826,7 +1833,7 @@ class AddLayerDialog(QDialog):
                     )
                     if m:
                         detected_channel = m.group("channel")
-        except Exception as e:
+        except (OSError, ValueError, KeyError, EOFError) as e:
             validation_error = str(e)
 
         # Detected channel cell (may carry an error chip)
@@ -1848,10 +1855,18 @@ class AddLayerDialog(QDialog):
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self._phasor_npz_table.setItem(row, col, item)
 
-        # Target channel: editable, default to detected
+        # Target channel: editable, default to detected. Re-probe
+        # conflict on edit so the chip reflects the new target rather
+        # than the original (decision #20 + cross-reviewer flag).
         target_edit = QLineEdit(detected_channel)
         if validation_error:
             target_edit.setEnabled(False)
+        # Look the row up by file path at probe time — row indices
+        # shift when other rows are removed.
+        file_path_for_lookup = str(npz_path)
+        target_edit.editingFinished.connect(
+            lambda p=file_path_for_lookup: self._phasor_npz_reprobe_row(p)
+        )
         self._phasor_npz_table.setCellWidget(
             row, self._PHASOR_COL_TARGET, target_edit
         )
@@ -1873,11 +1888,13 @@ class AddLayerDialog(QDialog):
             row, self._PHASOR_COL_ACTION, action_combo
         )
 
-        # Remove button
+        # Remove button. Look the row up by file path at click time
+        # since row indices shift when other rows are removed; do not
+        # capture ``row`` in the lambda.
         btn_remove = QPushButton("✕")
         btn_remove.setMaximumWidth(30)
         btn_remove.clicked.connect(
-            lambda _, r=row, p=str(npz_path): self._on_phasor_npz_remove_row(p)
+            lambda _checked=False, p=str(npz_path): self._on_phasor_npz_remove_row(p)
         )
         self._phasor_npz_table.setCellWidget(
             row, self._PHASOR_COL_REMOVE, btn_remove
@@ -1885,6 +1902,20 @@ class AddLayerDialog(QDialog):
 
         # Initial conflict probe
         self._phasor_npz_probe_conflict(row)
+
+    def _phasor_npz_reprobe_row(self, file_path: str) -> None:
+        """Re-probe conflict for the row matching ``file_path``.
+
+        Used when the user edits the Target channel cell — row indices
+        shift after Remove, so we look the row up by file path stored
+        in the File column's UserRole.
+        """
+        for row in range(self._phasor_npz_table.rowCount()):
+            item = self._phasor_npz_table.item(row, self._PHASOR_COL_FILE)
+            if item is not None and item.data(Qt.UserRole) == file_path:
+                self._phasor_npz_probe_conflict(row)
+                self._phasor_npz_refresh_state()
+                return
 
     def _phasor_npz_probe_conflict(self, row: int) -> None:
         """Check whether the row's target channel exists in the dataset."""

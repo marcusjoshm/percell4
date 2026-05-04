@@ -69,8 +69,10 @@ def session_with_dataset(tmp_path):
 
 
 def _full_bundle_npz(tmp_path: Path, channel: str = "mTQ2") -> Path:
+    import json as _json
     rng = np.random.default_rng(0)
     metadata = {"schema_version": 1, "channel": channel}
+    metadata_bytes = _json.dumps(metadata).encode("utf-8")
     path = tmp_path / f"src_{channel}_phasor.npz"
     np.savez(
         path,
@@ -79,7 +81,7 @@ def _full_bundle_npz(tmp_path: Path, channel: str = "mTQ2") -> Path:
         g_filtered=rng.uniform(size=(8, 8)).astype(np.float32),
         s_filtered=rng.uniform(size=(8, 8)).astype(np.float32),
         lifetime_filtered=rng.uniform(size=(8, 8)).astype(np.float32),
-        metadata=np.array(metadata, dtype=object),
+        metadata=np.frombuffer(metadata_bytes, dtype=np.uint8),
     )
     return path
 

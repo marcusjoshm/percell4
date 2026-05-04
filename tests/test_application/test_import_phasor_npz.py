@@ -77,6 +77,7 @@ def _make_npz(tmp_path: Path, name: str, **arrays) -> Path:
 
 
 def _full_bundle_npz(tmp_path: Path, name: str = "test.npz", channel: str = "mTQ2"):
+    import json as _json
     rng = np.random.default_rng(0)
     metadata = {
         "schema_version": 1,
@@ -84,6 +85,7 @@ def _full_bundle_npz(tmp_path: Path, name: str = "test.npz", channel: str = "mTQ
         "flim_frequency_mhz": 80.0,
         "source_dataset_stem": "src",
     }
+    metadata_bytes = _json.dumps(metadata).encode("utf-8")
     return _make_npz(
         tmp_path, name,
         g=rng.uniform(size=(8, 8)).astype(np.float32),
@@ -91,7 +93,7 @@ def _full_bundle_npz(tmp_path: Path, name: str = "test.npz", channel: str = "mTQ
         g_filtered=rng.uniform(size=(8, 8)).astype(np.float32),
         s_filtered=rng.uniform(size=(8, 8)).astype(np.float32),
         lifetime_filtered=rng.uniform(size=(8, 8)).astype(np.float32),
-        metadata=np.array(metadata, dtype=object),
+        metadata=np.frombuffer(metadata_bytes, dtype=np.uint8),
     )
 
 
@@ -194,6 +196,37 @@ def test_empty_channel_rejected(tmp_path, session, repo):
         ImportPhasorNpz(repo, session).execute(npz, "")
 
 
+def test_single_dot_channel_rejected(tmp_path, session, repo):
+    """Regression guard: h5py resolves `phasor/./g` to `/phasor/g`,
+    which would write channel data into the phasor-namespace root."""
+    npz = _full_bundle_npz(tmp_path)
+    with pytest.raises(ValueError, match="must match"):
+        ImportPhasorNpz(repo, session).execute(npz, ".")
+
+
+def test_all_dots_channel_rejected(tmp_path, session, repo):
+    """Names like `...` would similarly resolve to a parent group."""
+    npz = _full_bundle_npz(tmp_path)
+    for bad in ("..", "...", "...."):
+        with pytest.raises(ValueError):
+            ImportPhasorNpz(repo, session).execute(npz, bad)
+
+
+def test_leading_dot_channel_rejected(tmp_path, session, repo):
+    """Leading dots are HDF5 path-relativity hazards even when followed by chars."""
+    npz = _full_bundle_npz(tmp_path)
+    for bad in (".hidden", ".gitignore", ".."):
+        with pytest.raises(ValueError):
+            ImportPhasorNpz(repo, session).execute(npz, bad)
+
+
+def test_leading_dash_channel_rejected(tmp_path, session, repo):
+    """Leading dashes break some HDF5 tools and shell-tooling around the .h5."""
+    npz = _full_bundle_npz(tmp_path)
+    with pytest.raises(ValueError, match="must match"):
+        ImportPhasorNpz(repo, session).execute(npz, "-bad")
+
+
 def test_legitimate_channel_names_accepted(tmp_path, session, repo):
     """Real channel names like CA-SiR, mTQ2_v2, ch.0 work."""
     for ch in ("CA-SiR", "mTQ2_v2", "ch.0", "GFP_488"):
@@ -289,7 +322,14 @@ def test_export_then_import_round_trip(tmp_path, session, repo):
     repo.arrays[f"phasor/mTQ2/s_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
     repo.arrays[f"phasor/mTQ2/lifetime_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
     repo.arrays[f"decay/mTQ2"] = rng.uniform(size=(8, 8, 16)).astype(np.float32)
-    original_g = repo.arrays["phasor/mTQ2/g"].copy()
+    originals = {
+        k: repo.arrays[k].copy()
+        for k in (
+            "phasor/mTQ2/g", "phasor/mTQ2/s",
+            "phasor/mTQ2/g_filtered", "phasor/mTQ2/s_filtered",
+            "phasor/mTQ2/lifetime_filtered",
+        )
+    }
 
     out = tmp_path / "out"
     out.mkdir()
@@ -306,10 +346,23 @@ def test_export_then_import_round_trip(tmp_path, session, repo):
     # Re-import
     ImportPhasorNpz(repo, session).execute(exported_path, "mTQ2", force=False)
 
-    # Verify reconstituted
-    np.testing.assert_array_equal(repo.arrays["phasor/mTQ2/g"], original_g)
+    # Verify EVERY round-tripped key (regression guard against
+    # asserting only g and silently losing s/g_filtered/etc).
+    for path, expected in originals.items():
+        np.testing.assert_array_equal(
+            repo.arrays[path], expected,
+            err_msg=f"Round-trip mismatch on {path}",
+        )
+
     cached = LoadCachedPhasor(repo, session).execute("mTQ2")
-    np.testing.assert_array_equal(cached.g_map, original_g)
+    np.testing.assert_array_equal(cached.g_map, originals["phasor/mTQ2/g"])
+    np.testing.assert_array_equal(cached.s_map, originals["phasor/mTQ2/s"])
+    np.testing.assert_array_equal(
+        cached.g_filtered, originals["phasor/mTQ2/g_filtered"],
+    )
+    np.testing.assert_array_equal(
+        cached.s_filtered, originals["phasor/mTQ2/s_filtered"],
+    )
 
 
 # ── No dataset ────────────────────────────────────────────────
@@ -320,3 +373,55 @@ def test_no_dataset_raises(tmp_path, repo):
     npz = _full_bundle_npz(tmp_path)
     with pytest.raises(NoDatasetError):
         ImportPhasorNpz(repo, s).execute(npz, "mTQ2")
+
+
+# ── Pickle-RCE security guarantee ─────────────────────────────
+
+
+def test_object_array_metadata_rejected(tmp_path, session, repo):
+    """Schema v1 forbids object-array metadata (the pickle-RCE vector).
+
+    A .npz crafted with `metadata=np.array(d, dtype=object)` would
+    require allow_pickle=True to load — _validate_npz now rejects
+    object-array metadata explicitly so a pickled payload never
+    reaches the deserializer.
+    """
+    rng = np.random.default_rng(0)
+    bad_path = tmp_path / "with_object_meta.npz"
+    np.savez(
+        bad_path,
+        g=rng.uniform(size=(4, 4)).astype(np.float32),
+        s=rng.uniform(size=(4, 4)).astype(np.float32),
+        metadata=np.array({"channel": "mTQ2"}, dtype=object),
+    )
+    # Numpy itself rejects this with "Object arrays cannot be loaded
+    # when allow_pickle=False" before our validator runs — defense in
+    # depth. Either layer rejecting is correct; assert one of them does.
+    with pytest.raises(ValueError, match="uint8|object|allow_pickle"):
+        ImportPhasorNpz(repo, session).execute(bad_path, "mTQ2")
+
+
+def test_load_does_not_require_allow_pickle(tmp_path, session, repo):
+    """Regression guard: full-bundle .npz must load WITHOUT allow_pickle."""
+    npz = _full_bundle_npz(tmp_path)
+    # Prove np.load(path) (no allow_pickle) succeeds on our fixture.
+    with np.load(npz) as data:
+        assert "metadata" in data.files
+        assert data["metadata"].dtype == np.uint8
+    # And that the use case can also import it.
+    ImportPhasorNpz(repo, session).execute(npz, "mTQ2")
+    assert "phasor/mTQ2/g" in repo.arrays
+
+
+def test_garbage_metadata_bytes_rejected(tmp_path, session, repo):
+    """Non-UTF-8 or non-JSON metadata raises ValueError."""
+    rng = np.random.default_rng(0)
+    path = tmp_path / "garbage_meta.npz"
+    np.savez(
+        path,
+        g=rng.uniform(size=(4, 4)).astype(np.float32),
+        s=rng.uniform(size=(4, 4)).astype(np.float32),
+        metadata=np.array([0xff, 0xfe, 0xfd], dtype=np.uint8),  # invalid UTF-8
+    )
+    with pytest.raises(ValueError, match="UTF-8|JSON"):
+        ImportPhasorNpz(repo, session).execute(path, "mTQ2")

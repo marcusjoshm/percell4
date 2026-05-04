@@ -159,14 +159,17 @@ def test_show_with_g_map_already_set_does_not_clobber(qtbot, window, repo):
     """If a compute is already in flight (g_map set), auto-load is a no-op."""
     _seed_full_cache(repo)
     # Pre-populate g_map directly to simulate an in-progress compute
-    window._g_map = np.ones((4, 4), dtype=np.float32)
-    pre_value = window._g_map
+    sentinel = np.ones((4, 4), dtype=np.float32)
+    window._g_map = sentinel
 
     window.show()
     qtbot.waitExposed(window)
 
-    # _g_map is unchanged (no clobber)
-    assert window._g_map is pre_value
+    # _g_map content is unchanged (no clobber). Compare values rather
+    # than identity — a defensive copy in set_phasor_data would change
+    # the object identity without changing the semantic outcome.
+    assert window._g_map.shape == sentinel.shape
+    np.testing.assert_array_equal(window._g_map, sentinel)
 
 
 # ── Hide / show cycle ─────────────────────────────────────────
