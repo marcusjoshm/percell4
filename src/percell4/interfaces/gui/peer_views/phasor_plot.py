@@ -351,12 +351,14 @@ class PhasorPlotWindow(QMainWindow):
 
         controls.addStretch()
 
-        self._save_png_btn = QPushButton("Save Phasor .PNG")
-        self._save_png_btn.setToolTip(
-            "Save the current phasor plot as a PNG image."
+        self._save_svg_btn = QPushButton("Save Phasor .SVG")
+        self._save_svg_btn.setToolTip(
+            "Save the current phasor plot — including any ROIs — as a vector "
+            "SVG. Each histogram, ROI ellipse, handle, tick, and label is a "
+            "separate object editable in Illustrator / Inkscape / Affinity."
         )
-        self._save_png_btn.clicked.connect(self._on_save_png)
-        controls.addWidget(self._save_png_btn)
+        self._save_svg_btn.clicked.connect(self._on_save_svg)
+        controls.addWidget(self._save_svg_btn)
 
         left_layout.addLayout(controls)
 
@@ -1575,36 +1577,46 @@ class PhasorPlotWindow(QMainWindow):
         names = ", ".join(name for name, _, _ in roi_masks)
         self._status.showMessage(f"Applied {len(roi_masks)} mask(s): {names}", 5000)
 
-    # ── Save plot as PNG ──────────────────────────────────────
+    # ── Save plot as SVG ──────────────────────────────────────
 
-    def _on_save_png(self) -> None:
-        """Save the current phasor plot widget as a PNG image."""
+    def _on_save_svg(self) -> None:
+        """Save the current phasor plot as a vector SVG.
+
+        Uses pyqtgraph's SVGExporter so every histogram cell, ROI ellipse,
+        ROI handle, axis tick, and label is a separate, editable vector
+        object. Open in Illustrator / Inkscape / Affinity to delete the
+        rectangular ROI bounding handles for figure-ready output.
+        """
         if self._g_map is None:
             self._status.showMessage("No phasor data to save", 3000)
             return
 
-        default_name = "phasor.png"
+        default_name = "phasor.svg"
         handle = self._session.dataset
         if handle is not None:
             stem = handle.path.stem
             channel = self._session.active_channel
-            default_name = f"{stem}_{channel}_phasor.png" if channel else f"{stem}_phasor.png"
+            default_name = f"{stem}_{channel}_phasor.svg" if channel else f"{stem}_phasor.svg"
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Phasor PNG", default_name, "PNG Image (*.png)"
+            self, "Save Phasor SVG", default_name, "SVG (*.svg)"
         )
         if not path:
             return
-        if not path.lower().endswith(".png"):
-            path = f"{path}.png"
+        if not path.lower().endswith(".svg"):
+            path = f"{path}.svg"
 
-        pixmap = self._plot.grab()
-        if not pixmap.save(path, "PNG"):
+        from pyqtgraph.exporters import SVGExporter
+
+        try:
+            exporter = SVGExporter(self._plot.plotItem)
+            exporter.export(path)
+        except Exception as e:
             QMessageBox.warning(
-                self, "Save Error", f"Failed to save phasor PNG to:\n{path}"
+                self, "Save Error", f"Failed to save phasor SVG to:\n{path}\n\n{e}"
             )
             return
-        self._status.showMessage(f"Saved phasor PNG: {path}", 4000)
+        self._status.showMessage(f"Saved phasor SVG: {path}", 4000)
 
     # ── Save / Load ROIs ──────────────────────────────────────
 
