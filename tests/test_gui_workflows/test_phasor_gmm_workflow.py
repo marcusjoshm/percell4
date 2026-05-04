@@ -177,7 +177,7 @@ def test_set_phasor_filters_invalidates_caches(phasor_window_with_data):
     win = phasor_window_with_data
     win._on_add_roi()
     # Force compute of the cached mask
-    win._compute_combined_mask()
+    win._compute_filtered_binary(win._roi_widgets[0])
     assert win._roi_widgets[0].cached_mask is not None
     win.set_phasor_filters(
         intensity_threshold=100.0,

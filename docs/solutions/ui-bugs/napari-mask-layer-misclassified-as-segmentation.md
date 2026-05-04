@@ -29,6 +29,7 @@ root_cause: >
   repopulation.
 severity: high
 date: 2026-03-31
+last_refreshed: 2026-05-03
 ---
 
 # Mask Layers Incorrectly Classified as Segmentation
@@ -108,9 +109,11 @@ def add_mask(self, data, name, color_dict=None, **kwargs):
 
 Both `_on_phasor_mask_applied` and threshold accept write to HDF5 BEFORE calling `add_mask()`. The store write is inert (no Qt/napari signals), so this is safe.
 
-### 5. Metadata-based skip sets (`viewer.py`, `launcher.py`)
+### 5. Metadata-based skip sets + leading-underscore convention (`viewer.py`, `launcher.py`)
 
 Replaced all `{"phasor_roi", "_phasor_roi_preview"}` with `layer.metadata.get(PERCELL_TYPE_KEY) == LAYER_TYPE_MASK`. Scales to future mask types.
+
+**Parallel safety mechanism:** all three classification consumers (`_hide_mask_layers`, `_get_active_labels_layer`, and the launcher's segmentation-fallback) check `layer.name.startswith("_")` *before* the metadata check. Layers whose names begin with `_` (e.g., `_phasor_roi_preview_<roi_name>` per [Phasor ROI preview layer ownership](phasor-roi-preview-layer-ownership-2026-05-03.md)) are treated as transient overlays and excluded from segmentation classification regardless of whether they carry `PERCELL_TYPE_KEY` metadata. This means transient overlay layers may legitimately bypass the `add_mask` / `add_labels` wrappers and call `viewer._viewer.add_labels` directly, *as long as* their name uses the `_` prefix convention.
 
 ### 6. Mask filtering in dropdown population (`launcher.py`)
 
@@ -135,7 +138,7 @@ self._active_seg_combo.blockSignals(False)
 
 | Rule | Why | How to apply |
 |------|-----|--------------|
-| **Always use `add_mask()`/`add_labels()` wrappers** | They handle metadata tagging and idempotency | Never call `viewer.add_labels()` directly for masks or segmentations |
+| **Use `add_mask()`/`add_labels()` wrappers for persistent layers** | They handle metadata tagging and idempotency | Never call `viewer.add_labels()` directly for masks or segmentations. **Exception:** transient overlay layers whose name starts with `_` (e.g., `_phasor_roi_preview_<name>`) are excluded from segmentation classification by name convention and may call raw `viewer._viewer.add_labels` directly. See [Phasor ROI preview layer ownership](phasor-roi-preview-layer-ownership-2026-05-03.md) for the launcher-mediated per-resource pattern. |
 | **Write store before adding layer** | Sync callback fires synchronously during layer add | In any `_on_*_applied` handler, call `store.write_*()` before `viewer_win.add_mask()` |
 | **Write store deletion before/with layer removal** | Mirror of the rule above — channels reappeared on reload because deletion only removed napari layers | In delete handlers, mutate `/intensity`, `/labels/<name>`, `/masks/<name>` (and any FLIM-derived groups like `/decay/<ch>`, `/phasor/<ch>`, `/provenance/decay/<ch>`) before / alongside `viewer.layers.remove(name)`. See [`flim-phasor-cross-layer-alignment-2026-04-29.md`](../logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md) for the channel-deletion adjacent fix. |
 | **Never assume unknown layers are segmentations** | The FALLBACK pattern is the core of this bug | Any layer not identified by metadata or store should be ignored |
@@ -194,3 +197,4 @@ When adding a new type of Labels layer (tracking overlay, classification mask, e
 - [PerCell4 phases 0-6 napari/Qt learnings](percell4-phases-0-6-napari-qt-learnings.md) — Layer lifecycle, signal timing, viewer recreation
 - [FLIM phasor cross-layer alignment](../logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md) — Extends "Write store before adding layer" to the deletion mirror, plus invalidating `/phasor/<ch>` whenever `/decay/<ch>` is rewritten so cached derived layers can't be displayed against fresh source.
 - [Selection filtering multi-ROI patterns](percell4-selection-filtering-multi-roi-patterns.md) — Signal coalescing, DirectLabelColormap usage, combo sync
+- [Phasor ROI preview layer ownership](phasor-roi-preview-layer-ownership-2026-05-03.md) — Per-ROI preview layers (`_phasor_roi_preview_<name>`) created via raw `viewer._viewer.add_labels` and excluded from segmentation by the `_` prefix convention; per-resource Qt signals for upsert / remove / clear.

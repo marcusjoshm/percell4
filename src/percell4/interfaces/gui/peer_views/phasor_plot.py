@@ -231,13 +231,22 @@ class PhasorPlotWindow(QMainWindow):
     histogram. All visible ROIs combine into a single labeled mask.
 
     Communication with the viewer is decoupled via signals:
-    - preview_mask_ready: emitted when ROI preview mask needs display
+    - preview_roi_upserted: emitted when an ROI's preview needs creation/update
+    - preview_roi_removed: emitted when an ROI's preview should be removed
+    - preview_all_cleared: emitted when every preview should be removed
     - mask_applied: emitted when user clicks "Apply Visible as Mask"
     The launcher connects these to mediate viewer + HDF5 access.
     """
 
-    # (mask_ndarray, DirectLabelColormap) — for live ROI preview in viewer
-    preview_mask_ready = Signal(object, object)
+    # Per-ROI preview signals. One napari layer per ROI named
+    # ``_phasor_roi_preview_<name>``. The launcher creates/updates the
+    # layer on upsert (carrying ``visible`` to control layer.visible
+    # without flipping layer existence) and removes it on remove. A
+    # rename emits remove(old_name) followed by upsert(new_name, ...).
+    # (roi_name, binary_mask_uint8, hex_color, visible)
+    preview_roi_upserted = Signal(str, object, str, bool)
+    preview_roi_removed = Signal(str)
+    preview_all_cleared = Signal()
     # list[tuple[str, ndarray, str]] — per-ROI (name, binary_mask, hex_color)
     mask_applied = Signal(object)
 
@@ -276,8 +285,6 @@ class PhasorPlotWindow(QMainWindow):
 
         self._roi_widgets: list[_ROIWidget] = []
         self._selected_roi_index: int | None = None
-        self._colormap_dirty: bool = True
-        self._preview_colormap = None
 
         self._build_ui()
         self._restore_geometry()
@@ -424,9 +431,12 @@ class PhasorPlotWindow(QMainWindow):
         btn_row.addWidget(btn_remove)
         right_layout.addLayout(btn_row)
 
-        # ROI list
+        # ROI list. Each row carries a real Qt checkbox (Qt.ItemIsUserCheckable)
+        # so the user can toggle ROI visibility without first selecting the
+        # row and using the panel "Visible" checkbox.
         self._roi_list = QListWidget()
         self._roi_list.currentRowChanged.connect(self._on_roi_list_selection)
+        self._roi_list.itemChanged.connect(self._on_roi_list_item_changed)
         right_layout.addWidget(self._roi_list)
 
         # Selected ROI controls
@@ -683,7 +693,6 @@ class PhasorPlotWindow(QMainWindow):
             )
             self._create_roi_widget(phasor_roi)
 
-        self._colormap_dirty = True
         self._refresh_roi_list()
         self._update_cluster_center_marker()
 
@@ -800,7 +809,6 @@ class PhasorPlotWindow(QMainWindow):
             color=color,
         )
         self._create_roi_widget(phasor_roi)
-        self._colormap_dirty = True
         self._refresh_roi_list()
         self._roi_list.setCurrentRow(len(self._roi_widgets) - 1)
         self._preview_timer.start()
@@ -809,18 +817,21 @@ class PhasorPlotWindow(QMainWindow):
         if self._selected_roi_index is None or not self._roi_widgets:
             return
         widget = self._roi_widgets.pop(self._selected_roi_index)
+        removed_name = widget.phasor_roi.name
         self._plot.removeItem(widget.roi)
         self._plot.removeItem(widget.curve)
         for i, w in enumerate(self._roi_widgets):
             w.phasor_roi.label = i + 1
             w.cached_mask = None
         self._selected_roi_index = None
-        self._colormap_dirty = True
         self._refresh_roi_list()
         self._on_roi_list_selection(self._roi_list.currentRow())
         self._update_cluster_center_marker()
         if not self._roi_widgets:
             self._refresh_histogram()
+        # Drop the napari preview layer for the removed ROI before the
+        # debounced preview re-emits the survivors.
+        self.preview_roi_removed.emit(removed_name)
         self._preview_timer.start()
 
     def _create_roi_widget(self, phasor_roi: PhasorROI) -> None:
@@ -867,16 +878,33 @@ class PhasorPlotWindow(QMainWindow):
         self._update_ellipse_curve_for(widget)
 
     def _refresh_roi_list(self) -> None:
-        """Rebuild the QListWidget from current _roi_widgets."""
+        """Rebuild the QListWidget from current _roi_widgets.
+
+        Each row uses a real Qt checkbox (Qt.ItemIsUserCheckable +
+        setCheckState) so toggling visibility is a single click; the
+        previous render used a static "✓"/"✗" glyph that looked
+        clickable but was just text.
+        """
         self._roi_list.blockSignals(True)
         self._roi_list.clear()
         for w in self._roi_widgets:
-            vis = "✓" if w.phasor_roi.visible else "✗"
-            item = QListWidgetItem(f"[{vis}] {w.phasor_roi.name}")
+            item = QListWidgetItem(w.phasor_roi.name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if w.phasor_roi.visible else Qt.Unchecked
+            )
             self._roi_list.addItem(item)
         self._roi_list.blockSignals(False)
         if self._selected_roi_index is not None and self._selected_roi_index < len(self._roi_widgets):
             self._roi_list.setCurrentRow(self._selected_roi_index)
+
+    def _on_roi_list_item_changed(self, item: QListWidgetItem) -> None:
+        """Handle visibility-checkbox toggles from rows in the ROI list."""
+        row = self._roi_list.row(item)
+        if row < 0 or row >= len(self._roi_widgets):
+            return
+        checked = item.checkState() == Qt.Checked
+        self._set_roi_visibility(row, checked)
 
     def _on_roi_list_selection(self, row: int) -> None:
         """User selected a different ROI in the list."""
@@ -949,10 +977,18 @@ class PhasorPlotWindow(QMainWindow):
         if new_name in existing:
             new_name = f"{new_name}_2"
             self._name_edit.setText(new_name)
-        self._roi_widgets[self._selected_roi_index].phasor_roi.name = new_name
+        roi = self._roi_widgets[self._selected_roi_index].phasor_roi
+        old_name = roi.name
+        if new_name == old_name:
+            return
+        roi.name = new_name
         self._refresh_roi_list()
         # Banner reflects the new name immediately
         self._refresh_selected_roi_highlight()
+        # Drop the old napari preview layer; the next debounced preview
+        # tick will upsert the new name.
+        self.preview_roi_removed.emit(old_name)
+        self._preview_timer.start()
 
     def _on_angle_changed(self, value: int) -> None:
         if self._selected_roi_index is None:
@@ -966,8 +1002,27 @@ class PhasorPlotWindow(QMainWindow):
     def _on_visibility_toggled(self, checked: bool) -> None:
         if self._selected_roi_index is None:
             return
-        self._roi_widgets[self._selected_roi_index].phasor_roi.visible = checked
-        self._colormap_dirty = True
+        self._set_roi_visibility(self._selected_roi_index, checked)
+
+    def _set_roi_visibility(self, index: int, checked: bool) -> None:
+        """Single source of truth for flipping an ROI's visible flag.
+
+        Called from both the Selected-ROI panel checkbox and the per-row
+        check state in the ROI list. Refreshes the list (which keeps the
+        two checkboxes in sync) and pokes the preview timer.
+        """
+        if index < 0 or index >= len(self._roi_widgets):
+            return
+        roi = self._roi_widgets[index].phasor_roi
+        if roi.visible == checked:
+            return
+        roi.visible = checked
+        # Mirror state into the panel checkbox (the click may have come
+        # from the list, not the panel).
+        if index == self._selected_roi_index:
+            self._vis_check.blockSignals(True)
+            self._vis_check.setChecked(checked)
+            self._vis_check.blockSignals(False)
         self._refresh_roi_list()
         self._update_cluster_center_marker()
         self._preview_timer.start()
@@ -1129,82 +1184,58 @@ class PhasorPlotWindow(QMainWindow):
             return self._g_map_unfiltered, self._s_map_unfiltered
         return self._g_map, self._s_map
 
-    def _compute_combined_mask(self) -> np.ndarray:
-        """Combine all visible ROIs into a single labeled uint8 mask.
+    def _compute_filtered_binary(self, widget: _ROIWidget) -> np.ndarray:
+        """Build the (H, W) uint8 binary preview mask for one ROI.
 
-        Uses cached per-ROI boolean masks. Only uncached ROIs recomputed.
-        When a cell filter is active, the mask is restricted to pixels
-        belonging to filtered cells only.
+        Computes (or reuses) the cached phasor-ROI boolean mask, then
+        applies the cell-selection filter and the active-mask filter so
+        the preview matches what would be saved on Apply.
         """
         from percell4.domain.flim.phasor import phasor_roi_to_mask
 
         g, s = self._get_active_gs_maps()
-        mask = np.zeros(g.shape, dtype=np.uint8)
+        if widget.cached_mask is None:
+            roi = widget.phasor_roi
+            widget.cached_mask = phasor_roi_to_mask(
+                g, s, center=roi.center, radii=roi.radii,
+                angle_rad=np.radians(roi.angle_deg),
+            )
 
-        for widget in self._roi_widgets:
-            if not widget.phasor_roi.visible:
-                continue
-            if widget.cached_mask is None:
-                roi = widget.phasor_roi
-                angle_rad = np.radians(roi.angle_deg)
-                widget.cached_mask = phasor_roi_to_mask(
-                    g, s, center=roi.center, radii=roi.radii,
-                    angle_rad=angle_rad,
-                )
-            mask[widget.cached_mask] = widget.phasor_roi.label
+        binary = np.zeros(g.shape, dtype=np.uint8)
+        binary[widget.cached_mask] = 1
 
-        # Restrict mask to filtered cells when cell filter is active
         filtered_ids = self._session.filter_ids
         if filtered_ids is not None and self._labels is not None:
-            cell_mask = np.isin(self._labels, list(filtered_ids))
-            mask[~cell_mask] = 0
+            binary[~np.isin(self._labels, list(filtered_ids))] = 0
 
-        # Restrict mask to active mask when the mask filter is engaged.
-        # Trigger lazy load via _load_active_mask_flat so the preview
-        # path works even if the histogram hasn't rendered yet.
+        # Active-mask filter — lazy-load shared cache so preview matches
+        # the histogram path even before the first refresh.
         self._load_active_mask_flat()
         if (
             self._mask_filter_check.isChecked()
             and self._active_mask_array is not None
-            and self._active_mask_array.shape == mask.shape
+            and self._active_mask_array.shape == binary.shape
         ):
-            mask[self._active_mask_array == 0] = 0
+            binary[self._active_mask_array == 0] = 0
 
-        return mask
+        return binary
 
     def _update_preview(self) -> None:
-        """Compute combined mask and emit preview_mask_ready for the launcher."""
+        """Emit one preview_roi_upserted per ROI; update status with counts."""
         if self._g_map is None or not self._roi_widgets:
             return
 
-        mask = self._compute_combined_mask()
+        total = self._total_valid_pixels or 1
+        parts: list[str] = []
+        for widget in self._roi_widgets:
+            roi = widget.phasor_roi
+            binary = self._compute_filtered_binary(widget)
+            self.preview_roi_upserted.emit(roi.name, binary, roi.color, roi.visible)
+            if roi.visible:
+                count = int(binary.sum())
+                parts.append(f"{roi.name}: {count:,} ({count / total * 100:.1f}%)")
 
-        # Build colormap only when dirty
-        if self._colormap_dirty:
-            from napari.utils.colormaps import DirectLabelColormap
-
-            color_dict = {0: "transparent", None: "transparent"}
-            for w in self._roi_widgets:
-                if w.phasor_roi.visible:
-                    color_dict[w.phasor_roi.label] = w.phasor_roi.color
-            self._preview_colormap = DirectLabelColormap(color_dict=color_dict)
-            self._colormap_dirty = False
-
-        # Emit signal — launcher mediates viewer access
-        self.preview_mask_ready.emit(mask, self._preview_colormap)
-
-        # Status bar: pixel counts per ROI via bincount
-        max_label = max((w.phasor_roi.label for w in self._roi_widgets
-                         if w.phasor_roi.visible), default=0)
-        if max_label > 0:
-            counts = np.bincount(mask.ravel(), minlength=max_label + 1)
-            total = self._total_valid_pixels or 1
-            parts = []
-            for w in self._roi_widgets:
-                if w.phasor_roi.visible:
-                    lbl = w.phasor_roi.label
-                    pct = counts[lbl] / total * 100
-                    parts.append(f"{w.phasor_roi.name}: {counts[lbl]:,} ({pct:.1f}%)")
+        if parts:
             self._status.showMessage(" | ".join(parts))
 
     # ── Data ──────────────────────────────────────────────────
@@ -1273,14 +1304,13 @@ class PhasorPlotWindow(QMainWindow):
         invalidate; checkboxes reset; the histogram re-derives from the
         next compute_phasor call.
         """
-        # Tear down ROI graphics
+        # Tear down ROI graphics + every napari preview layer
         for widget in list(self._roi_widgets):
             self._plot.removeItem(widget.roi)
             self._plot.removeItem(widget.curve)
         self._roi_widgets.clear()
         self._selected_roi_index = None
-        self._colormap_dirty = True
-        self._preview_colormap = None
+        self.preview_all_cleared.emit()
         self._refresh_roi_list()
         self._on_roi_list_selection(-1)  # clears Selected ROI panel widgets
         self._update_cluster_center_marker()
@@ -1609,11 +1639,12 @@ class PhasorPlotWindow(QMainWindow):
                 "Some fields may be lost if you save it again.",
             )
 
-        # Clear existing ROIs
+        # Clear existing ROIs (and any napari preview layers from them)
         for w in self._roi_widgets:
             self._plot.removeItem(w.roi)
             self._plot.removeItem(w.curve)
         self._roi_widgets.clear()
+        self.preview_all_cleared.emit()
 
         # Create from JSON — labels derived from position
         for i, roi_data in enumerate(rois_data):
@@ -1628,7 +1659,6 @@ class PhasorPlotWindow(QMainWindow):
                 continue
             self._create_roi_widget(phasor_roi)
 
-        self._colormap_dirty = True
         self._selected_roi_index = None
         self._refresh_roi_list()
         if self._roi_widgets:
@@ -1653,9 +1683,20 @@ class PhasorPlotWindow(QMainWindow):
                 unsub()
             except ValueError:
                 pass  # already unsubscribed
+        # Phasor preview layers belong to the phasor window — hide the
+        # window, hide the previews. Reopening the window re-emits via
+        # showEvent → _preview_timer.
+        self.preview_all_cleared.emit()
         self._save_geometry()
         self.hide()
         event.ignore()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Re-render preview layers when the window is reopened, since
+        # closeEvent cleared them.
+        if self._roi_widgets and self._g_map is not None:
+            self._preview_timer.start()
 
     def _save_geometry(self) -> None:
         QSettings("LeeLabPerCell4", "PerCell4").setValue(

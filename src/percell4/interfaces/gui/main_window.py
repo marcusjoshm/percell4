@@ -583,7 +583,9 @@ class LauncherWindow(QMainWindow):
                 self._windows[key] = window
                 # Wire phasor plot signals — launcher mediates viewer access
                 if key == "phasor_plot":
-                    window.preview_mask_ready.connect(self._on_phasor_preview)
+                    window.preview_roi_upserted.connect(self._on_phasor_preview_upserted)
+                    window.preview_roi_removed.connect(self._on_phasor_preview_removed)
+                    window.preview_all_cleared.connect(self._on_phasor_preview_cleared)
                     window.mask_applied.connect(self._on_phasor_mask_applied)
                 # The viewer's `multi_select_requested` signal is
                 # available for any callers that want a per-instance
@@ -1014,35 +1016,94 @@ class LauncherWindow(QMainWindow):
 
     # ── Phasor plot signal handlers ─────────────────────────────
 
-    def _on_phasor_preview(self, mask, colormap) -> None:
-        """Forward phasor ROI preview mask to the viewer."""
+    # ── Phasor ROI preview layers ───────────────────────────────
+    #
+    # One napari Labels layer per phasor ROI, named
+    # ``_phasor_roi_preview_<roi_name>``. The phasor window owns the
+    # state; the launcher just maps signals to layer create/update/
+    # remove. Visibility is `layer.visible` so the user can keep
+    # opacity/colormap tweaks across hide/show.
+
+    _PHASOR_PREVIEW_PREFIX = "_phasor_roi_preview_"
+
+    def _phasor_preview_layer_name(self, roi_name: str) -> str:
+        return f"{self._PHASOR_PREVIEW_PREFIX}{roi_name}"
+
+    def _on_phasor_preview_upserted(
+        self, roi_name: str, binary_mask, hex_color: str, visible: bool
+    ) -> None:
+        """Create or update the napari preview layer for one phasor ROI."""
         viewer_win = self._windows.get("viewer")
         if viewer_win is None or not viewer_win._is_alive():
             return
-        preview_name = "_phasor_roi_preview"
-        try:
-            layer = viewer_win._viewer.layers[preview_name]
-            layer.data = mask
+
+        from napari.utils.colormaps import DirectLabelColormap
+
+        layer_name = self._phasor_preview_layer_name(roi_name)
+        color_dict = {0: "transparent", 1: hex_color, None: "transparent"}
+        colormap = DirectLabelColormap(color_dict=color_dict)
+
+        layers = viewer_win._viewer.layers
+        if layer_name in layers:
+            layer = layers[layer_name]
+            layer.data = binary_mask
             layer.colormap = colormap
-        except KeyError:
+            layer.visible = visible
+        else:
             viewer_win._viewer.add_labels(
-                mask, name=preview_name,
-                colormap=colormap, opacity=0.4,
+                binary_mask,
+                name=layer_name,
+                colormap=colormap,
+                opacity=0.4,
                 blending="translucent",
+                visible=visible,
             )
+
+    def _on_phasor_preview_removed(self, roi_name: str) -> None:
+        """Remove the napari preview layer for one phasor ROI, if present."""
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or not viewer_win._is_alive():
+            return
+        try:
+            viewer_win._viewer.layers.remove(
+                self._phasor_preview_layer_name(roi_name)
+            )
+        except (KeyError, ValueError):
+            pass
+
+    def _on_phasor_preview_cleared(self) -> None:
+        """Remove every phasor-ROI preview layer (dataset switch / window close)."""
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or not viewer_win._is_alive():
+            return
+        layers = viewer_win._viewer.layers
+        stale = [
+            layer.name for layer in layers
+            if layer.name.startswith(self._PHASOR_PREVIEW_PREFIX)
+        ]
+        for name in stale:
+            try:
+                layers.remove(name)
+            except (KeyError, ValueError):
+                pass
 
     def _on_phasor_mask_applied(self, roi_masks) -> None:
         """Handle per-ROI phasor masks: one binary mask per ROI.
 
         Each entry is (roi_name, binary_mask_uint8, hex_color).
-        Store-before-layer invariant preserved for each mask.
+        Store-before-layer invariant preserved for each mask. The
+        per-ROI preview layers for the applied (visible) ROIs are
+        removed since their mask role is taken over by the saved layer.
         """
         viewer_win = self._windows.get("viewer")
         if viewer_win is not None and viewer_win._is_alive():
-            try:
-                viewer_win._viewer.layers.remove("_phasor_roi_preview")
-            except ValueError:
-                pass
+            for roi_name, _binary, _color in roi_masks:
+                try:
+                    viewer_win._viewer.layers.remove(
+                        self._phasor_preview_layer_name(roi_name)
+                    )
+                except (KeyError, ValueError):
+                    pass
             if hasattr(self, "_preview_timer"):
                 self._preview_timer.stop()
 

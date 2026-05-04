@@ -17,9 +17,9 @@ This test is intentionally written **red-first**: it must fail on ``main``
 and pass after U8 lands. See
 ``docs/plans/2026-05-01-refactor-gui-state-handling-audit-plan.md`` U6.
 
-The ``_phasor_roi_preview`` napari layer removal goes through the
-``preview_mask_ready`` signal → napari subscriber chain. The fixture has no
-real napari viewer, so layer-list state is **not** asserted here (per the
+The per-ROI ``_phasor_roi_preview_<name>`` napari layer removal goes through
+the ``preview_roi_removed`` signal → napari subscriber chain. The fixture has
+no real napari viewer, so layer-list state is **not** asserted here (per the
 plan's explicit scope note).
 """
 

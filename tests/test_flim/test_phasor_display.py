@@ -3,7 +3,7 @@
 Covers ``compute_valid_phasor_pixels`` — the pure helper that composes
 validity + cell-selection + mask filters into a single boolean array.
 The phasor plot uses this in ``_refresh_histogram`` and
-``_compute_combined_mask``; testing it as a pure function avoids needing
+``_compute_filtered_binary``; testing it as a pure function avoids needing
 a QApplication.
 """
 
