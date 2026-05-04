@@ -385,11 +385,21 @@ def test_clear_does_not_write_session_fields(phasor_window):
     introduces such a write.
     """
     sess = phasor_window._session
-    sess.set_active_mask = MagicMock(side_effect=AssertionError("must not write active_mask"))
-    sess.set_active_segmentation = MagicMock(side_effect=AssertionError("must not write active_segmentation"))
-    sess.set_active_channel = MagicMock(side_effect=AssertionError("must not write active_channel"))
-    sess.set_filter = MagicMock(side_effect=AssertionError("must not write filter_ids"))
-    sess.set_selection = MagicMock(side_effect=AssertionError("must not write selection"))
+    sess.set_active_mask = MagicMock(
+        side_effect=AssertionError("must not write active_mask")
+    )
+    sess.set_active_segmentation = MagicMock(
+        side_effect=AssertionError("must not write active_segmentation")
+    )
+    sess.set_active_channel = MagicMock(
+        side_effect=AssertionError("must not write active_channel")
+    )
+    sess.set_filter = MagicMock(
+        side_effect=AssertionError("must not write filter_ids")
+    )
+    sess.set_selection = MagicMock(
+        side_effect=AssertionError("must not write selection")
+    )
 
     _add_small_roi(phasor_window)
     phasor_window._selected_roi_index = 0
@@ -416,9 +426,6 @@ def test_histogram_render_excludes_cleared_pixels(phasor_window):
     # _refresh_histogram pulls the visible mask via _compute_visible_valid_2d
     # and feeds it into np.histogram2d. The simplest behavioral assertion is
     # that the bins corresponding to cleared pixels' (g, s) values are zero.
-    g = phasor_window._g_map
-    s = phasor_window._s_map
-
     visible = phasor_window._compute_visible_valid_2d()
     assert visible is not None
     assert np.all(visible[cleared] == False), (  # noqa: E712
