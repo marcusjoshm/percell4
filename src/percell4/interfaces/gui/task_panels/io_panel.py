@@ -36,6 +36,7 @@ class IoPanel(QWidget):
         on_close: Callable[[], None],
         on_export_csv: Callable[[], None],
         on_export_images: Callable[[], None],
+        on_export_phasor_npz: Callable[[], None],
         show_status: Callable[[str], None] = lambda _: None,
         parent: QWidget | None = None,
     ) -> None:
@@ -46,6 +47,7 @@ class IoPanel(QWidget):
         self._on_close = on_close
         self._on_export_csv = on_export_csv
         self._on_export_images = on_export_images
+        self._on_export_phasor_npz = on_export_phasor_npz
         self._show_status = show_status
         self._build_ui()
 
@@ -96,6 +98,14 @@ class IoPanel(QWidget):
         btn_export_images = QPushButton("Export Images...")
         btn_export_images.clicked.connect(lambda: self._on_export_images())
         export_layout.addWidget(btn_export_images)
+
+        btn_export_phasor = QPushButton("Export Phasor (.npz)...")
+        btn_export_phasor.setToolTip(
+            "Export cached phasor data for every channel as one .npz file per "
+            "channel for use with external Python scripts."
+        )
+        btn_export_phasor.clicked.connect(lambda: self._on_export_phasor_npz())
+        export_layout.addWidget(btn_export_phasor)
 
         layout.addWidget(export_group)
 

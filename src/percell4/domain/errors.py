@@ -23,3 +23,13 @@ class NoMaskError(PercellError):
 
 class NoChannelError(PercellError):
     """No active channel is set."""
+
+
+class NoCachedPhasorError(PercellError):
+    """No cached phasor data exists for the requested channel.
+
+    Raised by LoadCachedPhasor.execute when /phasor/<channel>/g is
+    absent from the dataset. Callers (FlimPanel buttons, PhasorPlot
+    auto-load) catch this to fall through to compute or to leave the
+    phasor window empty.
+    """

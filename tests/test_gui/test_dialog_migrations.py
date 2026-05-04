@@ -80,7 +80,8 @@ def test_add_layer_dialog_per_tab_scroll_areas(qtbot, tmp_path):
     qtbot.addWidget(dlg)
 
     scrolls = _scroll_areas(dlg)
-    assert len(scrolls) == 2
+    # Three tabs use wrap_in_scroll: Discover TIFFs, TCSPC (.bin), Phasor (.npz).
+    assert len(scrolls) == 3
 
     # Per-tab scroll wrappers must remain — TCSPC tab carries the
     # per-channel token override widgets from Thread 1.

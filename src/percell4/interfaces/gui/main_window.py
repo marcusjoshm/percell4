@@ -239,6 +239,7 @@ class LauncherWindow(QMainWindow):
             on_close=self._on_close_dataset,
             on_export_csv=self._on_export_csv,
             on_export_images=self._on_export_images,
+            on_export_phasor_npz=self._on_export_phasor_npz,
             show_status=lambda msg: self.statusBar().showMessage(msg),
         )
         return self._io_panel
@@ -1202,6 +1203,40 @@ class LauncherWindow(QMainWindow):
             )
         except Exception as e:
             self.statusBar().showMessage(f"Export error: {e}")
+
+    def _on_export_phasor_npz(self) -> None:
+        """Export every channel's cached phasor data to .npz files."""
+        if self.data_model.session.dataset is None:
+            self.statusBar().showMessage("No dataset loaded")
+            return
+
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Export Phasor (.npz) to..."
+        )
+        if not out_dir:
+            return
+
+        from percell4.application.use_cases.export_phasor_npz import (
+            ExportPhasorNpz,
+        )
+
+        try:
+            uc = ExportPhasorNpz(self._repo, self.data_model.session)
+            result = uc.execute(Path(out_dir))
+        except Exception as e:
+            self.statusBar().showMessage(f"Export Phasor (.npz) error: {e}")
+            return
+
+        if not result.exported:
+            self.statusBar().showMessage("No cached phasor to export")
+            return
+
+        msg = (
+            f"Exported phasor for {len(result.exported)} channel(s) to {out_dir}"
+        )
+        if result.skipped:
+            msg += f" ({len(result.skipped)} channel(s) skipped: no cache)"
+        self.statusBar().showMessage(msg)
 
     # ── Batch workflow host API ───────────────────────────────
     #
