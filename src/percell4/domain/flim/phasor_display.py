@@ -23,13 +23,14 @@ def compute_valid_phasor_pixels(
     intensity_threshold: float = 0.0,
     ref_circle_center: tuple[float, float] | None = None,
     ref_circle_radius: float | None = None,
+    cleared_mask_flat: NDArray[np.bool_] | None = None,
 ) -> NDArray[np.bool_]:
     """Compute the boolean mask of phasor pixels to render.
 
     The phasor plot's intensity-weighted 2D histogram and the GMM input
     pipeline both restrict to pixels where this returns True.
 
-    Five filters compose with AND:
+    Six filters compose with AND:
 
     1. **Validity** — pixel has finite, non-zero (g, s). Always applied.
     2. **Cell selection** — when ``filter_ids`` is non-None and labels are
@@ -50,6 +51,11 @@ def compute_valid_phasor_pixels(
        ``(g - G_c)² + (s - S_c)² <= radius²``. Used by the FLIM tab's
        "circular ROI at a target lifetime" filter; the caller computes
        ``(G_c, S_c)`` via ``universal_circle_gs``.
+    6. **Cleared mask** — when ``cleared_mask_flat`` is provided and
+       matches ``g_flat`` size, *exclude* pixels where the cleared mask
+       is True. Used by the phasor plot's "Clear within ROI" feature to
+       subtract user-marked regions from the visible histogram. Shape
+       mismatch silently bypasses (the caller surfaces a status message).
 
     Parameters
     ----------
@@ -61,6 +67,8 @@ def compute_valid_phasor_pixels(
     intensity_threshold : minimum intensity (inclusive). Zero is a no-op.
     ref_circle_center : (G_c, S_c) of the reference-circle filter, or None.
     ref_circle_radius : radius of the reference-circle filter, or None.
+    cleared_mask_flat : flattened (H*W,) boolean mask of pixels to exclude
+        from the visible plot, or None.
 
     Returns
     -------
@@ -87,6 +95,9 @@ def compute_valid_phasor_pixels(
         dg = g_flat - g_c
         ds = s_flat - s_c
         valid = valid & (dg * dg + ds * ds <= ref_circle_radius * ref_circle_radius)
+
+    if cleared_mask_flat is not None and cleared_mask_flat.size == g_flat.size:
+        valid = valid & ~cleared_mask_flat.astype(bool)
 
     return valid
 

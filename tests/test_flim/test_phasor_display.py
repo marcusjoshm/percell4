@@ -297,3 +297,96 @@ def test_all_five_filters_compose_via_AND(small_phasor):
     # Indices 0,1 have intensity 100,200 ≥ 100; indices 4,5 have intensity 100,100.
     # All four are label 1 + top half + g=0.5 + ref circle. → 4 pixels.
     assert valid.sum() == 4
+
+
+# ── Cleared mask filter (U6) ──────────────────────────────────────────
+
+
+def test_cleared_mask_none_is_noop(small_phasor):
+    """cleared_mask_flat=None leaves the existing valid mask untouched."""
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        cleared_mask_flat=None,
+    )
+    assert valid.all()
+
+
+def test_cleared_mask_all_false_is_noop(small_phasor):
+    """An all-False cleared mask excludes nothing."""
+    cleared = np.zeros(16, dtype=bool)
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        cleared_mask_flat=cleared,
+    )
+    assert valid.all()
+
+
+def test_cleared_mask_excludes_marked_pixels(small_phasor):
+    """Pixels where cleared_mask is True are dropped from valid."""
+    cleared = np.zeros(16, dtype=bool)
+    cleared[[0, 1, 5, 10, 15]] = True
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        cleared_mask_flat=cleared,
+    )
+    assert valid.sum() == 11
+    assert np.flatnonzero(~valid).tolist() == [0, 1, 5, 10, 15]
+
+
+def test_cleared_mask_all_true_excludes_everything(small_phasor):
+    """An all-True cleared mask leaves zero valid pixels."""
+    cleared = np.ones(16, dtype=bool)
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        cleared_mask_flat=cleared,
+    )
+    assert not valid.any()
+
+
+def test_cleared_mask_shape_mismatch_silently_bypassed(small_phasor):
+    """Wrong-size cleared mask is treated as 'no filter' — same convention as mask_flat."""
+    bad_cleared = np.ones(8, dtype=bool)  # 8 != 16
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        cleared_mask_flat=bad_cleared,
+    )
+    assert valid.all()
+
+
+def test_cleared_mask_uint8_input_handled(small_phasor):
+    """A uint8 0/1 array (lazy-allocated bitmap) is coerced to bool correctly."""
+    cleared = np.zeros(16, dtype=np.uint8)
+    cleared[[2, 3]] = 1
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=None, filter_ids=None, mask_flat=None,
+        cleared_mask_flat=cleared,
+    )
+    assert valid.sum() == 14
+    assert np.flatnonzero(~valid).tolist() == [2, 3]
+
+
+def test_cleared_mask_composes_with_other_filters(small_phasor):
+    """Cleared mask ANDs with cell selection AND active mask AND intensity."""
+    intensity = np.full(16, 100.0, dtype=np.float32)
+    mask = np.zeros(16, dtype=np.uint8)
+    mask[:8] = 1  # top half
+    cleared = np.zeros(16, dtype=bool)
+    cleared[0] = True  # exclude one pixel from what would otherwise be valid
+    valid = compute_valid_phasor_pixels(
+        small_phasor["g_flat"], small_phasor["s_flat"],
+        labels_flat=small_phasor["labels_flat"],
+        filter_ids={1, 4},  # label 1 (top-left) + label 4 (bottom-right)
+        mask_flat=mask,  # top half only
+        intensity_flat=intensity, intensity_threshold=50.0,
+        cleared_mask_flat=cleared,
+    )
+    # Without cleared: label 1 ∩ top half = 4 pixels (indices 0,1,4,5).
+    # Cleared excludes index 0 → 3 pixels remain.
+    assert valid.sum() == 3
+    assert np.flatnonzero(valid).tolist() == [1, 4, 5]
