@@ -867,6 +867,26 @@ widgets:
     keystroke: null
     notes: "Reads ROI definitions from JSON; rebuilds local ROI widget list. No session or dataset-resource write."
 
+  - id: phasor_plot.clear_within_roi_button
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QPushButton
+    handler: _on_clear_within_roi
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Consumes the selected ROI: OR's its inside-mask into PhasorPlotWindow._cleared_mask (peer-local field, NOT a session field), then routes through _remove_roi_widget (same path as Remove). Cleared pixels disappear from the histogram, the per-ROI Apply preview, and any subsequent Apply Visible as Mask output via the cleared_mask_flat term in compute_valid_phasor_pixels. No session selection field is written. Greyed when no ROI is selected. Strict Action under the taxonomy."
+
+  - id: phasor_plot.reset_cleared_button
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QPushButton
+    handler: _on_reset_cleared
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Wipes PhasorPlotWindow._cleared_mask (peer-local field). Strict Action — writes only the local cleared bitmap, no session selection field, no dataset resource. Greyed when nothing has been cleared."
+
   # ╔══════════════════════════════════════════════════════════════╗
   # ║ U2 — Legacy gui/* tree                                       ║
   # ╚══════════════════════════════════════════════════════════════╝
