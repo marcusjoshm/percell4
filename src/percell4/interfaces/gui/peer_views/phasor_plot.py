@@ -1184,12 +1184,42 @@ class PhasorPlotWindow(QMainWindow):
             return self._g_map_unfiltered, self._s_map_unfiltered
         return self._g_map, self._s_map
 
-    def _compute_filtered_binary(self, widget: _ROIWidget) -> np.ndarray:
-        """Build the (H, W) uint8 binary preview mask for one ROI.
+    def _compute_visible_valid_2d(self) -> np.ndarray | None:
+        """Return the 2D boolean mask of pixels visible in the histogram.
 
-        Computes (or reuses) the cached phasor-ROI boolean mask, then
-        applies the cell-selection filter and the active-mask filter so
-        the preview matches what would be saved on Apply.
+        AND-composes every filter that the visible phasor histogram
+        applies (validity, cell selection, active mask, intensity
+        threshold, reference circle) so callers can intersect it with
+        a per-ROI membership mask to produce "literally what is visible"
+        as a binary mask.
+        """
+        if self._g_map is None or self._s_map is None:
+            return None
+
+        g, s = self._get_active_gs_maps()
+        mask_flat = self._load_active_mask_flat()
+        intensity_flat = (
+            self._intensity.ravel() if self._intensity is not None else None
+        )
+
+        valid_flat = compute_valid_phasor_pixels(
+            g.ravel(), s.ravel(),
+            labels_flat=self._labels_flat,
+            filter_ids=self._session.filter_ids,
+            mask_flat=mask_flat,
+            intensity_flat=intensity_flat,
+            intensity_threshold=self._intensity_threshold,
+            ref_circle_center=self._ref_circle_center,
+            ref_circle_radius=self._ref_circle_radius,
+        )
+        return valid_flat.reshape(g.shape)
+
+    def _compute_filtered_binary(self, widget: _ROIWidget) -> np.ndarray:
+        """Build the (H, W) uint8 binary mask for one ROI.
+
+        Result equals (ROI membership) AND (every filter the visible
+        histogram applies), so the preview and the saved binary mask
+        match the rendered phasor pixel-for-pixel.
         """
         from percell4.domain.flim.phasor import phasor_roi_to_mask
 
@@ -1201,23 +1231,10 @@ class PhasorPlotWindow(QMainWindow):
                 angle_rad=np.radians(roi.angle_deg),
             )
 
+        visible = self._compute_visible_valid_2d()
         binary = np.zeros(g.shape, dtype=np.uint8)
-        binary[widget.cached_mask] = 1
-
-        filtered_ids = self._session.filter_ids
-        if filtered_ids is not None and self._labels is not None:
-            binary[~np.isin(self._labels, list(filtered_ids))] = 0
-
-        # Active-mask filter — lazy-load shared cache so preview matches
-        # the histogram path even before the first refresh.
-        self._load_active_mask_flat()
-        if (
-            self._mask_filter_check.isChecked()
-            and self._active_mask_array is not None
-            and self._active_mask_array.shape == binary.shape
-        ):
-            binary[self._active_mask_array == 0] = 0
-
+        keep = widget.cached_mask & visible if visible is not None else widget.cached_mask
+        binary[keep] = 1
         return binary
 
     def _update_preview(self) -> None:
@@ -1531,28 +1548,20 @@ class PhasorPlotWindow(QMainWindow):
     def _on_apply_mask(self) -> None:
         """Emit mask_applied with per-ROI binary masks.
 
-        Each visible ROI becomes its own binary mask named after the ROI.
+        Each visible ROI becomes its own binary mask whose pixels are
+        exactly those visible in the current phasor histogram and inside
+        the ROI — i.e. the same intersection the napari preview shows.
         The launcher saves each to HDF5 and adds each as a napari layer.
         """
         if self._g_map is None or not self._roi_widgets:
             self._status.showMessage("No phasor data or ROIs", 3000)
             return
 
-        from percell4.domain.flim.phasor import phasor_roi_to_mask
-
         roi_masks: list[tuple[str, np.ndarray, str]] = []
         for w in self._roi_widgets:
             if not w.phasor_roi.visible:
                 continue
-            if w.cached_mask is None:
-                roi = w.phasor_roi
-                w.cached_mask = phasor_roi_to_mask(
-                    self._g_map, self._s_map,
-                    center=roi.center, radii=roi.radii,
-                    angle_rad=np.radians(roi.angle_deg),
-                )
-            binary = np.zeros(self._g_map.shape, dtype=np.uint8)
-            binary[w.cached_mask] = 1
+            binary = self._compute_filtered_binary(w)
             roi_masks.append((w.phasor_roi.name, binary, w.phasor_roi.color))
 
         if not roi_masks:
