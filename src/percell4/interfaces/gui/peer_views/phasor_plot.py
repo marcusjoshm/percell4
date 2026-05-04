@@ -249,6 +249,10 @@ class PhasorPlotWindow(QMainWindow):
     preview_all_cleared = Signal()
     # list[tuple[str, ndarray, str]] — per-ROI (name, binary_mask, hex_color)
     mask_applied = Signal(object)
+    # Fired whenever the inputs to the Clear/Reset toolbar button enable
+    # rules change (selection, _cleared_mask). One slot connection;
+    # callers just emit. Avoids the enumerate-call-sites trap.
+    _clear_state_changed = Signal()
 
     def __init__(
         self,
@@ -286,6 +290,14 @@ class PhasorPlotWindow(QMainWindow):
         self._roi_widgets: list[_ROIWidget] = []
         self._selected_roi_index: int | None = None
 
+        # Manual exclusion bitmap for "Clear within ROI" feature.
+        # Pixels marked True are subtracted from the visible histogram and
+        # from any "Apply Visible as Mask" output. Lazy-allocated on first
+        # Clear; reset to None whenever set_phasor_data installs a new
+        # (g, s) frame (the bitmap is bound to the frame, not to abstract
+        # pixel indices) and on explicit Reset.
+        self._cleared_mask: np.ndarray | None = None
+
         self._build_ui()
         self._restore_geometry()
 
@@ -313,6 +325,13 @@ class PhasorPlotWindow(QMainWindow):
         # window is created (e.g., re-opening the phasor plot after a
         # mask was set elsewhere).
         self._on_active_mask_changed()
+
+        # Single connection point for Clear/Reset button enable state.
+        # Every site that mutates _selected_roi_index or _cleared_mask
+        # emits _clear_state_changed; this slot reads both fields and
+        # updates button.setEnabled accordingly.
+        self._clear_state_changed.connect(self._update_clear_buttons_enabled)
+        self._update_clear_buttons_enabled()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -435,6 +454,22 @@ class PhasorPlotWindow(QMainWindow):
         btn_remove.clicked.connect(self._on_remove_roi)
         btn_row.addWidget(btn_remove)
         right_layout.addLayout(btn_row)
+
+        # Manual exclusion ("Clear within ROI") buttons. Clear consumes
+        # the selected ROI: its inside-mask is OR'd into _cleared_mask
+        # and the ROI is removed from the list. Reset wipes the entire
+        # cleared bitmap. Both are strict Actions — no session-field
+        # writes — see docs/audits/gui-element-classification.yaml.
+        clear_row = QHBoxLayout()
+        self._btn_clear = QPushButton("Clear within selected ROI")
+        self._btn_clear.clicked.connect(self._on_clear_within_roi)
+        self._btn_clear.setEnabled(False)
+        clear_row.addWidget(self._btn_clear)
+        self._btn_reset_cleared = QPushButton("Reset cleared")
+        self._btn_reset_cleared.clicked.connect(self._on_reset_cleared)
+        self._btn_reset_cleared.setEnabled(False)
+        clear_row.addWidget(self._btn_reset_cleared)
+        right_layout.addLayout(clear_row)
 
         # ROI list. Each row carries a real Qt checkbox (Qt.ItemIsUserCheckable)
         # so the user can toggle ROI visibility without first selecting the
@@ -710,6 +745,7 @@ class PhasorPlotWindow(QMainWindow):
             msg += f" — truncated {n_dropped} due to 10-ROI cap"
         self._status.showMessage(msg, 0)
         self._preview_timer.start()
+        self._clear_state_changed.emit()
 
     def _refresh_selected_roi_highlight(self) -> None:
         """Recolor only the selected ROI's dashed bounding-box rectangle.
@@ -821,7 +857,18 @@ class PhasorPlotWindow(QMainWindow):
     def _on_remove_roi(self) -> None:
         if self._selected_roi_index is None or not self._roi_widgets:
             return
-        widget = self._roi_widgets.pop(self._selected_roi_index)
+        self._remove_roi_widget(self._selected_roi_index)
+
+    def _remove_roi_widget(self, index: int) -> None:
+        """Remove the ROI at ``index``; emit per-resource signals.
+
+        Shared by the Remove button and the Clear-within-ROI action so
+        both removal paths go through the same proven sequence (pop,
+        pyqtgraph teardown, label reindex, per-ROI cache invalidation,
+        selection reset, list refresh, cluster marker, napari preview
+        layer cleanup via ``preview_roi_removed``).
+        """
+        widget = self._roi_widgets.pop(index)
         removed_name = widget.phasor_roi.name
         self._plot.removeItem(widget.roi)
         self._plot.removeItem(widget.curve)
@@ -838,6 +885,57 @@ class PhasorPlotWindow(QMainWindow):
         # debounced preview re-emits the survivors.
         self.preview_roi_removed.emit(removed_name)
         self._preview_timer.start()
+        self._clear_state_changed.emit()
+
+    def _on_clear_within_roi(self) -> None:
+        """Consume the selected ROI: OR its inside-mask into _cleared_mask, then remove the ROI.
+
+        Synchronous refresh + preview update (no debounce). Clear is a
+        discrete user action; debouncing creates a race window in which
+        the user could click Apply Visible as Mask before the preview
+        catches up to the new cleared state.
+        """
+        if self._selected_roi_index is None or not self._roi_widgets:
+            return
+        index = self._selected_roi_index
+        widget = self._roi_widgets[index]
+
+        if not self._apply_clear_to_roi(widget):
+            # Inside-mask was empty (e.g. ROI on NaN region). The helper
+            # surfaced a status message; do not consume the ROI.
+            return
+
+        self._remove_roi_widget(index)
+        self._refresh_histogram()
+        self._update_preview()
+        # _apply_clear_to_roi and _remove_roi_widget already emit
+        # _clear_state_changed; no need to emit a third time here.
+
+    def _on_reset_cleared(self) -> None:
+        """Wipe the cumulative cleared-pixel bitmap; refresh synchronously."""
+        # _reset_cleared_mask emits _clear_state_changed when it actually
+        # transitions the bitmap to None.
+        self._reset_cleared_mask()
+
+    def _update_clear_buttons_enabled(self) -> None:
+        """Update enable state for the Clear and Reset toolbar buttons.
+
+        Connected once to ``_clear_state_changed``; every site that
+        mutates either ``_selected_roi_index`` or ``_cleared_mask``
+        emits the signal. Cheap to call — just reads two scalar fields.
+
+        Reset's enable rule is ``_cleared_mask is not None`` rather than
+        ``... and self._cleared_mask.any()`` because ``_apply_clear_to_roi``
+        early-returns on an empty inside-mask, guaranteeing the
+        invariant ``non-None ⇒ has cleared pixels``. The simpler rule
+        is O(1); the ``.any()`` reduction would be O(H*W) per emission.
+        """
+        has_selection = (
+            self._selected_roi_index is not None
+            and 0 <= self._selected_roi_index < len(self._roi_widgets)
+        )
+        self._btn_clear.setEnabled(has_selection)
+        self._btn_reset_cleared.setEnabled(self._cleared_mask is not None)
 
     def _create_roi_widget(self, phasor_roi: PhasorROI) -> None:
         """Create pyqtgraph ROI + curve for a PhasorROI and add to the list.
@@ -933,8 +1031,10 @@ class PhasorPlotWindow(QMainWindow):
                 spin.setEnabled(False)
             self._reset_fit_btn.setEnabled(False)
             self._refresh_selected_roi_highlight()
+            self._clear_state_changed.emit()
             return
         self._selected_roi_index = row
+        self._clear_state_changed.emit()
         roi = self._roi_widgets[row].phasor_roi
         self._name_edit.blockSignals(True)
         self._name_edit.setText(roi.name)
@@ -1194,9 +1294,9 @@ class PhasorPlotWindow(QMainWindow):
 
         AND-composes every filter that the visible phasor histogram
         applies (validity, cell selection, active mask, intensity
-        threshold, reference circle) so callers can intersect it with
-        a per-ROI membership mask to produce "literally what is visible"
-        as a binary mask.
+        threshold, reference circle, manual cleared regions) so callers
+        can intersect it with a per-ROI membership mask to produce
+        "literally what is visible" as a binary mask.
         """
         if self._g_map is None or self._s_map is None:
             return None
@@ -1207,6 +1307,23 @@ class PhasorPlotWindow(QMainWindow):
             self._intensity.ravel() if self._intensity is not None else None
         )
 
+        cleared_flat: np.ndarray | None = None
+        if self._cleared_mask is not None:
+            if self._cleared_mask.size == g.size:
+                cleared_flat = self._cleared_mask.ravel()
+            else:
+                # Defense-in-depth: set_phasor_data resets _cleared_mask
+                # whenever a new (g, s) frame lands, so a size mismatch
+                # here means a code path mutated G/S without going through
+                # set_phasor_data. Bypass the filter and surface a sticky
+                # status message — the 8-second timeout outlives the
+                # per-ROI count messages that overwrite the status bar
+                # on every refresh.
+                self._status.showMessage(
+                    "Cleared mask shape mismatch — Clear-within-ROI filter not applied",
+                    8000,
+                )
+
         valid_flat = compute_valid_phasor_pixels(
             g.ravel(), s.ravel(),
             labels_flat=self._labels_flat,
@@ -1216,8 +1333,73 @@ class PhasorPlotWindow(QMainWindow):
             intensity_threshold=self._intensity_threshold,
             ref_circle_center=self._ref_circle_center,
             ref_circle_radius=self._ref_circle_radius,
+            cleared_mask_flat=cleared_flat,
         )
         return valid_flat.reshape(g.shape)
+
+    def _apply_clear_to_roi(self, widget: _ROIWidget) -> bool:
+        """OR a ROI's inside-mask into ``_cleared_mask``.
+
+        Returns True if any pixels were cleared, False if the ROI's
+        inside-mask is empty (e.g. the ellipse fell entirely on NaN
+        pixels). The False return signals to the caller that the ROI
+        should NOT be consumed — there's nothing to show for the
+        operation.
+
+        Lazy-allocates ``_cleared_mask`` on first non-empty Clear, so
+        the invariant ``_cleared_mask is not None ⇒ at least one pixel
+        cleared`` holds. That invariant is what lets the Reset button's
+        enable rule be a cheap ``is not None`` check instead of an
+        O(H*W) ``.any()`` reduction.
+        """
+        from percell4.domain.flim.phasor import phasor_roi_to_mask
+
+        g, s = self._get_active_gs_maps()
+        if g is None or s is None:
+            return False
+
+        roi = widget.phasor_roi
+        roi_inside = phasor_roi_to_mask(
+            g, s, center=roi.center, radii=roi.radii,
+            angle_rad=np.radians(roi.angle_deg),
+        )
+
+        if not roi_inside.any():
+            self._status.showMessage(
+                "ROI has no pixels in the active region — nothing to clear",
+                4000,
+            )
+            return False
+
+        if self._cleared_mask is None:
+            self._cleared_mask = np.zeros(g.shape, dtype=bool)
+        elif self._cleared_mask.shape != g.shape:
+            # Defensive: should not happen because set_phasor_data resets
+            # the bitmap whenever the frame changes. If it does, reset
+            # cleanly rather than crashing.
+            self._status.showMessage(
+                "Cleared mask shape mismatch — resetting before Clear",
+                8000,
+            )
+            self._cleared_mask = np.zeros(g.shape, dtype=bool)
+
+        self._cleared_mask |= roi_inside
+        self._clear_state_changed.emit()
+        return True
+
+    def _reset_cleared_mask(self) -> None:
+        """Discard all cleared pixels; refresh synchronously.
+
+        Synchronous (no debounce) because Reset is a discrete user
+        action — there's no slider-drag scenario that benefits from
+        coalescing.
+        """
+        if self._cleared_mask is None:
+            return
+        self._cleared_mask = None
+        self._refresh_histogram()
+        self._update_preview()
+        self._clear_state_changed.emit()
 
     def _compute_filtered_binary(self, widget: _ROIWidget) -> np.ndarray:
         """Build the (H, W) uint8 binary mask for one ROI.
@@ -1291,6 +1473,12 @@ class PhasorPlotWindow(QMainWindow):
         # differs even when shapes match (rotation/flip applied to
         # /decay between computes, channel switch, dataset switch).
         # Forcing a re-read on next refresh keeps mask alignment correct.
+        # Same rationale applies to the Clear-within-ROI bitmap below:
+        # cleared pixels are bound to the frame they were drawn against.
+        cleared_mask_was_set = self._cleared_mask is not None
+        self._cleared_mask = None
+        if cleared_mask_was_set:
+            self._clear_state_changed.emit()
         self._active_mask_array = None
         self._active_mask_flat = None
 
@@ -1348,6 +1536,13 @@ class PhasorPlotWindow(QMainWindow):
         self._total_valid_pixels = 0
         self._active_mask_array = None
         self._active_mask_flat = None
+        # Reset cleared-pixel bitmap alongside the rest of the per-dataset
+        # state — the next dataset's set_phasor_data will not have run yet,
+        # so without this the Reset button stays enabled with a stale
+        # bitmap until the user navigates to a channel.
+        if self._cleared_mask is not None:
+            self._cleared_mask = None
+            self._clear_state_changed.emit()
 
         # Reset FlimPanel-driven filter state — values were tied to the
         # previous dataset's metadata (frequency for ref-circle).
@@ -1457,34 +1652,31 @@ class PhasorPlotWindow(QMainWindow):
             return
 
         g_display, s_display = self._get_active_gs_maps()
-        g_flat = g_display.ravel()
-        s_flat = s_display.ravel()
+        g_flat_full = g_display.ravel()
+        s_flat_full = s_display.ravel()
 
-        mask_flat = self._load_active_mask_flat()
         # Surface a status message when the mask is configured but
-        # bypassed (shape mismatch / read failure). The checkbox stays
-        # checked so the user can fix the mismatch without re-toggling.
+        # bypassed (shape mismatch / read failure). Computed inline
+        # because _compute_visible_valid_2d does not expose this.
         mask_bypassed = (
             self._mask_filter_check.isChecked()
             and self._session.active_mask
-            and mask_flat is None
+            and self._load_active_mask_flat() is None
             and self._g_map is not None
         )
 
-        intensity_flat = self._intensity.ravel() if self._intensity is not None else None
-        valid = compute_valid_phasor_pixels(
-            g_flat, s_flat,
-            labels_flat=self._labels_flat,
-            filter_ids=self._session.filter_ids,
-            mask_flat=mask_flat,
-            intensity_flat=intensity_flat,
-            intensity_threshold=self._intensity_threshold,
-            ref_circle_center=self._ref_circle_center,
-            ref_circle_radius=self._ref_circle_radius,
-        )
+        # Delegate the AND filter chain to _compute_visible_valid_2d so
+        # this render path picks up every filter (cell selection, active
+        # mask, intensity, ref circle, cleared mask) without duplicating
+        # the call. Single integration point — mirrors the per-ROI Apply
+        # path in _compute_filtered_binary.
+        valid_2d = self._compute_visible_valid_2d()
+        if valid_2d is None:
+            return
+        valid = valid_2d.ravel()
 
-        g_flat = g_flat[valid]
-        s_flat = s_flat[valid]
+        g_flat = g_flat_full[valid]
+        s_flat = s_flat_full[valid]
 
         if len(g_flat) == 0:
             if mask_bypassed:
@@ -1688,6 +1880,7 @@ class PhasorPlotWindow(QMainWindow):
         if self._roi_widgets:
             self._roi_list.setCurrentRow(0)
         self._preview_timer.start()
+        self._clear_state_changed.emit()
         self._status.showMessage(f"Loaded {len(self._roi_widgets)} ROIs", 3000)
 
     # ── Lifecycle ─────────────────────────────────────────────
@@ -1812,6 +2005,12 @@ class PhasorPlotWindow(QMainWindow):
         self._labels = None
         self._labels_flat = None
         self._total_valid_pixels = 0
+        # The cleared-pixel bitmap is bound to the (g, s) frame just
+        # invalidated above; reset alongside it so a later channel switch
+        # does not silently re-apply stale pixel coordinates.
+        if self._cleared_mask is not None:
+            self._cleared_mask = None
+            self._clear_state_changed.emit()
         if self._hist_item is not None:
             self._plot.removeItem(self._hist_item)
             self._hist_item = None
