@@ -249,6 +249,10 @@ class PhasorPlotWindow(QMainWindow):
     preview_all_cleared = Signal()
     # list[tuple[str, ndarray, str]] — per-ROI (name, binary_mask, hex_color)
     mask_applied = Signal(object)
+    # Fired whenever the inputs to the Clear/Reset toolbar button enable
+    # rules change (selection, _cleared_mask). One slot connection;
+    # callers just emit. Avoids the enumerate-call-sites trap.
+    _clear_state_changed = Signal()
 
     def __init__(
         self,
@@ -321,6 +325,13 @@ class PhasorPlotWindow(QMainWindow):
         # window is created (e.g., re-opening the phasor plot after a
         # mask was set elsewhere).
         self._on_active_mask_changed()
+
+        # Single connection point for Clear/Reset button enable state.
+        # Every site that mutates _selected_roi_index or _cleared_mask
+        # emits _clear_state_changed; this slot reads both fields and
+        # updates button.setEnabled accordingly.
+        self._clear_state_changed.connect(self._update_clear_buttons_enabled)
+        self._update_clear_buttons_enabled()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -443,6 +454,22 @@ class PhasorPlotWindow(QMainWindow):
         btn_remove.clicked.connect(self._on_remove_roi)
         btn_row.addWidget(btn_remove)
         right_layout.addLayout(btn_row)
+
+        # Manual exclusion ("Clear within ROI") buttons. Clear consumes
+        # the selected ROI: its inside-mask is OR'd into _cleared_mask
+        # and the ROI is removed from the list. Reset wipes the entire
+        # cleared bitmap. Both are strict Actions — no session-field
+        # writes — see docs/audits/gui-element-classification.yaml.
+        clear_row = QHBoxLayout()
+        self._btn_clear = QPushButton("Clear within selected ROI")
+        self._btn_clear.clicked.connect(self._on_clear_within_roi)
+        self._btn_clear.setEnabled(False)
+        clear_row.addWidget(self._btn_clear)
+        self._btn_reset_cleared = QPushButton("Reset cleared")
+        self._btn_reset_cleared.clicked.connect(self._on_reset_cleared)
+        self._btn_reset_cleared.setEnabled(False)
+        clear_row.addWidget(self._btn_reset_cleared)
+        right_layout.addLayout(clear_row)
 
         # ROI list. Each row carries a real Qt checkbox (Qt.ItemIsUserCheckable)
         # so the user can toggle ROI visibility without first selecting the
@@ -718,6 +745,7 @@ class PhasorPlotWindow(QMainWindow):
             msg += f" — truncated {n_dropped} due to 10-ROI cap"
         self._status.showMessage(msg, 0)
         self._preview_timer.start()
+        self._clear_state_changed.emit()
 
     def _refresh_selected_roi_highlight(self) -> None:
         """Recolor only the selected ROI's dashed bounding-box rectangle.
@@ -829,7 +857,18 @@ class PhasorPlotWindow(QMainWindow):
     def _on_remove_roi(self) -> None:
         if self._selected_roi_index is None or not self._roi_widgets:
             return
-        widget = self._roi_widgets.pop(self._selected_roi_index)
+        self._remove_roi_widget(self._selected_roi_index)
+
+    def _remove_roi_widget(self, index: int) -> None:
+        """Remove the ROI at ``index``; emit per-resource signals.
+
+        Shared by the Remove button and the Clear-within-ROI action so
+        both removal paths go through the same proven sequence (pop,
+        pyqtgraph teardown, label reindex, per-ROI cache invalidation,
+        selection reset, list refresh, cluster marker, napari preview
+        layer cleanup via ``preview_roi_removed``).
+        """
+        widget = self._roi_widgets.pop(index)
         removed_name = widget.phasor_roi.name
         self._plot.removeItem(widget.roi)
         self._plot.removeItem(widget.curve)
@@ -846,6 +885,55 @@ class PhasorPlotWindow(QMainWindow):
         # debounced preview re-emits the survivors.
         self.preview_roi_removed.emit(removed_name)
         self._preview_timer.start()
+        self._clear_state_changed.emit()
+
+    def _on_clear_within_roi(self) -> None:
+        """Consume the selected ROI: OR its inside-mask into _cleared_mask, then remove the ROI.
+
+        Synchronous refresh + preview update (no debounce). Clear is a
+        discrete user action; debouncing creates a race window in which
+        the user could click Apply Visible as Mask before the preview
+        catches up to the new cleared state.
+        """
+        if self._selected_roi_index is None or not self._roi_widgets:
+            return
+        index = self._selected_roi_index
+        widget = self._roi_widgets[index]
+
+        if not self._apply_clear_to_roi(widget):
+            # Inside-mask was empty (e.g. ROI on NaN region). The helper
+            # surfaced a status message; do not consume the ROI.
+            return
+
+        self._remove_roi_widget(index)
+        self._refresh_histogram()
+        self._update_preview()
+        self._clear_state_changed.emit()
+
+    def _on_reset_cleared(self) -> None:
+        """Wipe the cumulative cleared-pixel bitmap; refresh synchronously."""
+        self._reset_cleared_mask()
+        self._clear_state_changed.emit()
+
+    def _update_clear_buttons_enabled(self) -> None:
+        """Update enable state for the Clear and Reset toolbar buttons.
+
+        Connected once to ``_clear_state_changed``; every site that
+        mutates either ``_selected_roi_index`` or ``_cleared_mask``
+        emits the signal. Cheap to call — just reads two scalar fields.
+
+        Reset's enable rule is ``_cleared_mask is not None`` rather than
+        ``... and self._cleared_mask.any()`` because ``_apply_clear_to_roi``
+        early-returns on an empty inside-mask, guaranteeing the
+        invariant ``non-None ⇒ has cleared pixels``. The simpler rule
+        is O(1); the ``.any()`` reduction would be O(H*W) per emission.
+        """
+        has_selection = (
+            self._selected_roi_index is not None
+            and 0 <= self._selected_roi_index < len(self._roi_widgets)
+        )
+        self._btn_clear.setEnabled(has_selection)
+        self._btn_reset_cleared.setEnabled(self._cleared_mask is not None)
 
     def _create_roi_widget(self, phasor_roi: PhasorROI) -> None:
         """Create pyqtgraph ROI + curve for a PhasorROI and add to the list.
@@ -941,8 +1029,10 @@ class PhasorPlotWindow(QMainWindow):
                 spin.setEnabled(False)
             self._reset_fit_btn.setEnabled(False)
             self._refresh_selected_roi_highlight()
+            self._clear_state_changed.emit()
             return
         self._selected_roi_index = row
+        self._clear_state_changed.emit()
         roi = self._roi_widgets[row].phasor_roi
         self._name_edit.blockSignals(True)
         self._name_edit.setText(roi.name)
@@ -1292,6 +1382,7 @@ class PhasorPlotWindow(QMainWindow):
             self._cleared_mask = np.zeros(g.shape, dtype=bool)
 
         self._cleared_mask |= roi_inside
+        self._clear_state_changed.emit()
         return True
 
     def _reset_cleared_mask(self) -> None:
@@ -1306,6 +1397,7 @@ class PhasorPlotWindow(QMainWindow):
         self._cleared_mask = None
         self._refresh_histogram()
         self._update_preview()
+        self._clear_state_changed.emit()
 
     def _compute_filtered_binary(self, widget: _ROIWidget) -> np.ndarray:
         """Build the (H, W) uint8 binary mask for one ROI.
@@ -1381,7 +1473,10 @@ class PhasorPlotWindow(QMainWindow):
         # Forcing a re-read on next refresh keeps mask alignment correct.
         # Same rationale applies to the Clear-within-ROI bitmap below:
         # cleared pixels are bound to the frame they were drawn against.
+        cleared_mask_was_set = self._cleared_mask is not None
         self._cleared_mask = None
+        if cleared_mask_was_set:
+            self._clear_state_changed.emit()
         self._active_mask_array = None
         self._active_mask_flat = None
 
@@ -1776,6 +1871,7 @@ class PhasorPlotWindow(QMainWindow):
         if self._roi_widgets:
             self._roi_list.setCurrentRow(0)
         self._preview_timer.start()
+        self._clear_state_changed.emit()
         self._status.showMessage(f"Loaded {len(self._roi_widgets)} ROIs", 3000)
 
     # ── Lifecycle ─────────────────────────────────────────────
