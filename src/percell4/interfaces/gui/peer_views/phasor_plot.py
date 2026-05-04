@@ -908,12 +908,14 @@ class PhasorPlotWindow(QMainWindow):
         self._remove_roi_widget(index)
         self._refresh_histogram()
         self._update_preview()
-        self._clear_state_changed.emit()
+        # _apply_clear_to_roi and _remove_roi_widget already emit
+        # _clear_state_changed; no need to emit a third time here.
 
     def _on_reset_cleared(self) -> None:
         """Wipe the cumulative cleared-pixel bitmap; refresh synchronously."""
+        # _reset_cleared_mask emits _clear_state_changed when it actually
+        # transitions the bitmap to None.
         self._reset_cleared_mask()
-        self._clear_state_changed.emit()
 
     def _update_clear_buttons_enabled(self) -> None:
         """Update enable state for the Clear and Reset toolbar buttons.
@@ -1534,6 +1536,13 @@ class PhasorPlotWindow(QMainWindow):
         self._total_valid_pixels = 0
         self._active_mask_array = None
         self._active_mask_flat = None
+        # Reset cleared-pixel bitmap alongside the rest of the per-dataset
+        # state — the next dataset's set_phasor_data will not have run yet,
+        # so without this the Reset button stays enabled with a stale
+        # bitmap until the user navigates to a channel.
+        if self._cleared_mask is not None:
+            self._cleared_mask = None
+            self._clear_state_changed.emit()
 
         # Reset FlimPanel-driven filter state — values were tied to the
         # previous dataset's metadata (frequency for ref-circle).
@@ -1996,6 +2005,12 @@ class PhasorPlotWindow(QMainWindow):
         self._labels = None
         self._labels_flat = None
         self._total_valid_pixels = 0
+        # The cleared-pixel bitmap is bound to the (g, s) frame just
+        # invalidated above; reset alongside it so a later channel switch
+        # does not silently re-apply stale pixel coordinates.
+        if self._cleared_mask is not None:
+            self._cleared_mask = None
+            self._clear_state_changed.emit()
         if self._hist_item is not None:
             self._plot.removeItem(self._hist_item)
             self._hist_item = None

@@ -338,35 +338,24 @@ def test_set_phasor_data_resets_cleared_mask(phasor_window):
     assert not phasor_window._btn_reset_cleared.isEnabled()
 
 
-def test_clear_does_not_invalidate_surviving_roi_cached_mask(phasor_window):
-    """Clearing one ROI must not invalidate per-ROI cached_mask on surviving ROIs.
+def test_surviving_roi_apply_excludes_cleared_pixels(phasor_window):
+    """After Clear consumes one ROI, the surviving ROI's Apply output excludes cleared pixels.
 
-    Pins both the perf claim (no unnecessary recomputation) and the
-    correctness claim (surviving ROIs' Apply output picks up the new
-    visible state via the AND composition with _compute_visible_valid_2d).
+    The AND composition in _compute_filtered_binary (cached_mask & visible)
+    picks up the new cleared state automatically — the surviving ROI's
+    cached_mask is recomputed from the same (g, s) and ROI geometry, so
+    the AND with _compute_visible_valid_2d (which now includes the cleared
+    bitmap) produces the right result without any per-ROI cache plumbing.
     """
     _add_small_roi(phasor_window, name="lyso")  # index 0 — will be consumed
     _add_wide_roi(phasor_window, name="cyto")  # index 1 — will survive
 
-    cyto = phasor_window._roi_widgets[1]
-    # Prime the surviving ROI's cached_mask
-    phasor_window._compute_filtered_binary(cyto)
-    cyto_cache_before = cyto.cached_mask
-    assert cyto_cache_before is not None
-
     phasor_window._selected_roi_index = 0
     phasor_window._on_clear_within_roi()
 
-    # cyto is now at index 0 (label was reindexed by _remove_roi_widget,
-    # but its cached_mask object identity should be preserved... wait,
-    # _remove_roi_widget invalidates per-ROI caches. So the identity is
-    # NOT preserved across removal. The correctness claim still holds:
-    # the new cached_mask is recomputed from the same (g, s) and ROI
-    # geometry, which is unchanged.
     surviving = phasor_window._roi_widgets[0]
     assert surviving.phasor_roi.name == "cyto"
 
-    # Apply on the surviving ROI — must exclude cleared pixels.
     emitted = _capture_apply(phasor_window)
     _name, binary, _color = emitted[0]
     cleared = phasor_window._cleared_mask
