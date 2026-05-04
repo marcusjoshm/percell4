@@ -89,6 +89,10 @@ class FlimPanel(QWidget):
         phasor_layout.addLayout(harm_row)
 
         btn_phasor = QPushButton("Compute Phasor")
+        btn_phasor.setToolTip(
+            "Compute phasor from /decay (or load cached result if present)\n"
+            "Shift+click to force recompute"
+        )
         btn_phasor.clicked.connect(self._on_compute_phasor)
         phasor_layout.addWidget(btn_phasor)
 
@@ -111,6 +115,10 @@ class FlimPanel(QWidget):
         wavelet_layout.addLayout(level_row)
 
         btn_wavelet = QPushButton("Apply Wavelet Filter")
+        btn_wavelet.setToolTip(
+            "Apply DTCWT wavelet denoising (or load cached result if present)\n"
+            "Shift+click to force recompute"
+        )
         btn_wavelet.clicked.connect(self._on_apply_wavelet)
         wavelet_layout.addWidget(btn_wavelet)
 
@@ -237,6 +245,21 @@ class FlimPanel(QWidget):
     def _get_active_seg_labels(self):
         return self._get_active_seg_labels_cb()
 
+    # ── Helpers ──────────────────────────────────────────────
+
+    def _shift_held(self) -> bool:
+        """Read Shift modifier at handler entry to detect force-recompute intent.
+
+        Reads ``QApplication.keyboardModifiers()`` at slot dispatch time.
+        There is a documented async-release race (user releases Shift
+        between click and dispatch) — accepted tradeoff per the plan's
+        Risks table. If the race bites in practice, upgrade to a
+        QPushButton subclass that captures modifier state at press.
+        """
+        from qtpy.QtWidgets import QApplication
+
+        return bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+
     # ── Phasor ───────────────────────────────────────────────
 
     def _on_compute_phasor(self) -> None:
@@ -245,8 +268,49 @@ class FlimPanel(QWidget):
             self._show_status("Select a channel in the viewer first")
             return
 
+        # Cache-check unless Shift forces recompute.
+        if not self._shift_held():
+            try:
+                from percell4.application.use_cases.load_cached_phasor import (
+                    LoadCachedPhasor,
+                )
+                from percell4.domain.errors import (
+                    NoCachedPhasorError,
+                    NoDatasetError,
+                )
+
+                repo = self._get_repo()
+                cached = LoadCachedPhasor(repo, self.data_model.session).execute(
+                    active_channel,
+                )
+            except NoCachedPhasorError:
+                pass  # Fall through to compute
+            except NoDatasetError as e:
+                self._show_status(str(e))
+                return
+            else:
+                # Cache hit — push to phasor window with the unfiltered call
+                # shape (raw g/s, no g_unfiltered/s_unfiltered).
+                self._show_window("phasor_plot")
+                seg_labels = self._get_active_seg_labels()
+                phasor_win = self._get_phasor_window()
+                if phasor_win is not None:
+                    phasor_win.set_phasor_data(
+                        cached.g_map, cached.s_map,
+                        intensity=cached.intensity, labels=seg_labels,
+                    )
+                self._show_status(
+                    f"Loaded cached phasor (channel: {active_channel})"
+                )
+                self._refresh_ref_circle_enabled()
+                return
+
         harmonic = int(self._phasor_harmonic.currentText())
-        self._show_status(f"Computing phasor for {active_channel}...")
+        recompute_prefix = (
+            "Recomputing phasor (Shift)" if self._shift_held()
+            else f"Computing phasor for {active_channel}"
+        )
+        self._show_status(f"{recompute_prefix}...")
 
         try:
             from percell4.application.use_cases.compute_phasor import ComputePhasor
@@ -291,9 +355,11 @@ class FlimPanel(QWidget):
                 )
 
         freq = handle.metadata.get("flim_frequency_mhz", "unknown") if handle else "unknown"
+        verb = "Recomputed" if self._shift_held() else "Phasor computed:"
+        suffix = " (Shift)" if self._shift_held() else ""
         self._show_status(
-            f"Phasor computed: {result.n_valid:,} valid pixels | "
-            f"channel: {active_channel} | harmonic: {harmonic} | freq: {freq} MHz"
+            f"{verb} {result.n_valid:,} valid pixels | "
+            f"channel: {active_channel} | harmonic: {harmonic} | freq: {freq} MHz{suffix}"
         )
         # Compute Phasor reads (and may have just propagated)
         # flim_frequency_mhz; refresh the reference-circle checkbox state
@@ -308,10 +374,50 @@ class FlimPanel(QWidget):
             self._show_status("Select a channel in the viewer first")
             return
 
+        # Cache-check unless Shift forces recompute. We check g_filtered
+        # specifically — wavelet's cache distinct from raw phasor cache.
+        if not self._shift_held():
+            try:
+                from percell4.application.use_cases.load_cached_phasor import (
+                    LoadCachedPhasor,
+                )
+                from percell4.domain.errors import (
+                    NoCachedPhasorError,
+                    NoDatasetError,
+                )
+
+                repo = self._get_repo()
+                cached = LoadCachedPhasor(repo, self.data_model.session).execute(
+                    active_channel,
+                )
+            except NoCachedPhasorError:
+                pass  # No raw phasor either — fall through to compute (will fail in apply_wavelet with a clear ValueError)
+            except NoDatasetError as e:
+                self._show_status(str(e))
+                return
+            else:
+                if cached.g_filtered is not None and cached.s_filtered is not None:
+                    seg_labels = self._get_active_seg_labels()
+                    phasor_win = self._get_phasor_window()
+                    if phasor_win is not None:
+                        phasor_win.set_phasor_data(
+                            cached.g_filtered, cached.s_filtered,
+                            intensity=cached.intensity,
+                            g_unfiltered=cached.g_map, s_unfiltered=cached.s_map,
+                            labels=seg_labels,
+                        )
+                    self._show_status(
+                        f"Loaded cached wavelet (channel: {active_channel})"
+                    )
+                    return
+                # Raw cache exists but no wavelet — fall through to compute.
+
         filter_level = self._wavelet_level.value()
-        self._show_status(
-            f"Applying wavelet filter (level {filter_level}) to {active_channel}..."
+        recompute_prefix = (
+            "Recomputing wavelet (Shift)" if self._shift_held()
+            else f"Applying wavelet filter (level {filter_level}) to {active_channel}"
         )
+        self._show_status(f"{recompute_prefix}...")
 
         from qtpy.QtWidgets import QApplication
 
@@ -371,9 +477,11 @@ class FlimPanel(QWidget):
                     labels=seg_labels,
                 )
 
+        verb = "Recomputed wavelet:" if self._shift_held() else "Wavelet filter applied:"
+        suffix = " (Shift)" if self._shift_held() else ""
         self._show_status(
-            f"Wavelet filter applied: level {filter_level} | "
-            f"{result.n_valid:,} valid pixels | channel: {active_channel}"
+            f"{verb} level {filter_level} | "
+            f"{result.n_valid:,} valid pixels | channel: {active_channel}{suffix}"
         )
 
     # ── Lifetime ─────────────────────────────────────────────

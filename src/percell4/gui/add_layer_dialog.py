@@ -84,6 +84,7 @@ class AddLayerDialog(QDialog):
         self._tabs.addTab(self._build_tcspc_tab(), "TCSPC (.bin)")
         self._tabs.addTab(self._build_roi_tab(), "ImageJ ROIs (.zip)")
         self._tabs.addTab(self._build_cellpose_tab(), "Cellpose (.npy)")
+        self._tabs.addTab(self._build_phasor_npz_tab(), "Phasor (.npz)")
         layout.addWidget(self._tabs)
 
     # ------------------------------------------------------------------
@@ -1670,6 +1671,383 @@ class AddLayerDialog(QDialog):
             f"{self._store.path.name}"
         )
         self.accept()
+
+    # ------------------------------------------------------------------
+    # Tab: Phasor (.npz) — import cached phasor data from external scripts
+    # ------------------------------------------------------------------
+
+    # Column indices for the per-row file table.
+    _PHASOR_COL_FILE = 0
+    _PHASOR_COL_DETECTED = 1
+    _PHASOR_COL_SHAPE = 2
+    _PHASOR_COL_FILTERED = 3
+    _PHASOR_COL_TARGET = 4
+    _PHASOR_COL_CONFLICT = 5
+    _PHASOR_COL_ACTION = 6
+    _PHASOR_COL_REMOVE = 7
+
+    def _build_phasor_npz_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        outer.addWidget(wrap_in_scroll(content))
+
+        # Header text
+        header = QLabel(
+            "Import phasor data from .npz files. Each file becomes one "
+            "channel's cached phasor in the active dataset."
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        # Add files button + clear-all
+        button_row = QHBoxLayout()
+        btn_add = QPushButton("Add files...")
+        btn_add.clicked.connect(self._on_phasor_npz_add_files)
+        button_row.addWidget(btn_add)
+        btn_clear = QPushButton("Clear all")
+        btn_clear.clicked.connect(self._on_phasor_npz_clear)
+        button_row.addWidget(btn_clear)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+
+        # Empty-state placeholder (shown when table is empty)
+        self._phasor_npz_empty = QLabel(
+            "No files selected. Click 'Add files...' to choose one or more "
+            ".npz files."
+        )
+        self._phasor_npz_empty.setStyleSheet("font-style: italic; padding: 20px;")
+        layout.addWidget(self._phasor_npz_empty)
+
+        # Table
+        self._phasor_npz_table = QTableWidget(0, 8)
+        self._phasor_npz_table.setHorizontalHeaderLabels([
+            "File", "Detected channel", "Shape", "Filtered?",
+            "Target channel", "Conflict?", "Action", "",
+        ])
+        self._phasor_npz_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive
+        )
+        self._phasor_npz_table.horizontalHeader().setSectionResizeMode(
+            self._PHASOR_COL_FILE, QHeaderView.Stretch
+        )
+        self._phasor_npz_table.verticalHeader().setVisible(False)
+        self._phasor_npz_table.setMinimumHeight(220)
+        self._phasor_npz_table.hide()  # hidden until first row is added
+        layout.addWidget(self._phasor_npz_table)
+
+        # Help text + import button
+        help_text = QLabel(
+            "Schema v1: g, s (required, float32); g_filtered, s_filtered, "
+            "lifetime_filtered (optional); metadata (UTF-8 JSON bytes). "
+            "Channel names are validated against an allowlist that rejects "
+            "path separators, leading dots, and '..'."
+        )
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(help_text)
+
+        layout.addStretch()
+
+        self._phasor_npz_import_btn = QPushButton("Import")
+        self._phasor_npz_import_btn.setEnabled(False)
+        self._phasor_npz_import_btn.clicked.connect(self._on_phasor_npz_import)
+        layout.addWidget(self._phasor_npz_import_btn)
+        return tab
+
+    def _on_phasor_npz_add_files(self) -> None:
+        """Open multi-select file picker; append rows for new (deduplicated) paths."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Phasor .npz files", "",
+            "NumPy archives (*.npz);;All Files (*)",
+        )
+        if not paths:
+            return
+
+        # Dedup by path against existing rows (additive behavior — Decision #13).
+        existing = {
+            self._phasor_npz_table.item(r, self._PHASOR_COL_FILE).data(Qt.UserRole)
+            for r in range(self._phasor_npz_table.rowCount())
+        }
+        for p in paths:
+            if p in existing:
+                continue
+            self._phasor_npz_add_row(Path(p))
+
+        self._phasor_npz_refresh_state()
+
+    def _on_phasor_npz_clear(self) -> None:
+        """Clear all rows from the table."""
+        self._phasor_npz_table.setRowCount(0)
+        self._phasor_npz_refresh_state()
+
+    def _phasor_npz_add_row(self, npz_path: Path) -> None:
+        """Probe the .npz at file-add time; populate one table row."""
+        from percell4.application.use_cases.import_phasor_npz import (
+            _validate_npz, _sanitize_channel_name, _decode_metadata,
+        )
+        import re
+
+        row = self._phasor_npz_table.rowCount()
+        self._phasor_npz_table.insertRow(row)
+
+        # File column carries display name + full path in UserRole
+        file_item = QTableWidgetItem(npz_path.name)
+        file_item.setData(Qt.UserRole, str(npz_path))
+        file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
+        self._phasor_npz_table.setItem(row, self._PHASOR_COL_FILE, file_item)
+
+        # Probe the file. allow_pickle is intentionally False: metadata
+        # is a JSON bytestring (schema v1). A .npz that requires pickle
+        # to load is a third-party format we won't accept; it surfaces
+        # here as a validation error chip without executing any code.
+        detected_channel = ""
+        shape_str = ""
+        filtered_str = "—"
+        validation_error: str | None = None
+        try:
+            with np.load(npz_path) as data:
+                _validate_npz(data)
+                shape_str = "×".join(str(d) for d in data["g"].shape)
+                filtered_str = "Yes" if "g_filtered" in data.files else "No"
+                # Channel inference: metadata['channel'] then filename regex.
+                if "metadata" in data.files:
+                    try:
+                        meta = _decode_metadata(data["metadata"])
+                    except ValueError:
+                        meta = None
+                    if isinstance(meta, dict) and "channel" in meta:
+                        try:
+                            _sanitize_channel_name(str(meta["channel"]))
+                            detected_channel = str(meta["channel"])
+                        except ValueError:
+                            pass  # fall through to filename regex
+                if not detected_channel:
+                    # Filename regex: <stem>_<channel>_phasor.npz, channel = greedy
+                    # alternation that handles underscores in channel names.
+                    m = re.match(
+                        r"^(?P<stem>.+?)_(?P<channel>[A-Za-z0-9_\-\.]+?)_phasor\.npz$",
+                        npz_path.name,
+                    )
+                    if m:
+                        detected_channel = m.group("channel")
+        except (OSError, ValueError, KeyError, EOFError) as e:
+            validation_error = str(e)
+
+        # Detected channel cell (may carry an error chip)
+        detected_item = QTableWidgetItem(
+            validation_error or detected_channel or "(unknown)"
+        )
+        detected_item.setFlags(detected_item.flags() & ~Qt.ItemIsEditable)
+        if validation_error:
+            detected_item.setForeground(Qt.red)
+            detected_item.setToolTip(validation_error)
+        self._phasor_npz_table.setItem(row, self._PHASOR_COL_DETECTED, detected_item)
+
+        # Shape + Filtered (display-only)
+        for col, text in (
+            (self._PHASOR_COL_SHAPE, shape_str or "—"),
+            (self._PHASOR_COL_FILTERED, filtered_str),
+        ):
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self._phasor_npz_table.setItem(row, col, item)
+
+        # Target channel: editable, default to detected. Re-probe
+        # conflict on edit so the chip reflects the new target rather
+        # than the original (decision #20 + cross-reviewer flag).
+        target_edit = QLineEdit(detected_channel)
+        if validation_error:
+            target_edit.setEnabled(False)
+        # Look the row up by file path at probe time — row indices
+        # shift when other rows are removed.
+        file_path_for_lookup = str(npz_path)
+        target_edit.editingFinished.connect(
+            lambda p=file_path_for_lookup: self._phasor_npz_reprobe_row(p)
+        )
+        self._phasor_npz_table.setCellWidget(
+            row, self._PHASOR_COL_TARGET, target_edit
+        )
+
+        # Conflict + Action — probed below
+        conflict_item = QTableWidgetItem("—")
+        conflict_item.setFlags(conflict_item.flags() & ~Qt.ItemIsEditable)
+        self._phasor_npz_table.setItem(row, self._PHASOR_COL_CONFLICT, conflict_item)
+
+        action_combo = QComboBox()
+        action_combo.addItems(["Skip", "Import"])
+        if validation_error:
+            action_combo.setCurrentText("Skip")
+            action_combo.setEnabled(False)
+        else:
+            action_combo.setCurrentText("Import")
+        action_combo.currentTextChanged.connect(self._phasor_npz_refresh_state)
+        self._phasor_npz_table.setCellWidget(
+            row, self._PHASOR_COL_ACTION, action_combo
+        )
+
+        # Remove button. Look the row up by file path at click time
+        # since row indices shift when other rows are removed; do not
+        # capture ``row`` in the lambda.
+        btn_remove = QPushButton("✕")
+        btn_remove.setMaximumWidth(30)
+        btn_remove.clicked.connect(
+            lambda _checked=False, p=str(npz_path): self._on_phasor_npz_remove_row(p)
+        )
+        self._phasor_npz_table.setCellWidget(
+            row, self._PHASOR_COL_REMOVE, btn_remove
+        )
+
+        # Initial conflict probe
+        self._phasor_npz_probe_conflict(row)
+
+    def _phasor_npz_reprobe_row(self, file_path: str) -> None:
+        """Re-probe conflict for the row matching ``file_path``.
+
+        Used when the user edits the Target channel cell — row indices
+        shift after Remove, so we look the row up by file path stored
+        in the File column's UserRole.
+        """
+        for row in range(self._phasor_npz_table.rowCount()):
+            item = self._phasor_npz_table.item(row, self._PHASOR_COL_FILE)
+            if item is not None and item.data(Qt.UserRole) == file_path:
+                self._phasor_npz_probe_conflict(row)
+                self._phasor_npz_refresh_state()
+                return
+
+    def _phasor_npz_probe_conflict(self, row: int) -> None:
+        """Check whether the row's target channel exists in the dataset."""
+        target_widget = self._phasor_npz_table.cellWidget(
+            row, self._PHASOR_COL_TARGET,
+        )
+        if target_widget is None:
+            return
+        target = target_widget.text().strip()
+
+        conflict_item = self._phasor_npz_table.item(row, self._PHASOR_COL_CONFLICT)
+        action_combo = self._phasor_npz_table.cellWidget(
+            row, self._PHASOR_COL_ACTION,
+        )
+        if not target:
+            conflict_item.setText("—")
+            return
+
+        repo = self._launcher._repo
+        handle = self._data_model.session.dataset
+        if handle is None:
+            return
+        try:
+            repo.read_array(handle, f"phasor/{target}/g")
+            # Conflict
+            conflict_item.setText("Yes")
+            conflict_item.setForeground(Qt.red)
+            if action_combo is not None and action_combo.currentText() == "Import":
+                # Add Overwrite option, default to Skip for safety
+                if action_combo.findText("Overwrite") < 0:
+                    action_combo.addItem("Overwrite")
+                action_combo.setCurrentText("Skip")
+        except KeyError:
+            conflict_item.setText("No")
+            conflict_item.setForeground(Qt.gray)
+            if action_combo is not None:
+                # Remove Overwrite option if present (no longer relevant)
+                idx = action_combo.findText("Overwrite")
+                if idx >= 0:
+                    action_combo.removeItem(idx)
+
+    def _on_phasor_npz_remove_row(self, file_path: str) -> None:
+        """Remove the row matching ``file_path``."""
+        for row in range(self._phasor_npz_table.rowCount()):
+            item = self._phasor_npz_table.item(row, self._PHASOR_COL_FILE)
+            if item is not None and item.data(Qt.UserRole) == file_path:
+                self._phasor_npz_table.removeRow(row)
+                break
+        self._phasor_npz_refresh_state()
+
+    def _phasor_npz_refresh_state(self) -> None:
+        """Update empty-state visibility + Import button enabled state."""
+        n_rows = self._phasor_npz_table.rowCount()
+        self._phasor_npz_empty.setVisible(n_rows == 0)
+        self._phasor_npz_table.setVisible(n_rows > 0)
+
+        # Enable Import only when ≥1 row has Action != Skip
+        any_actionable = False
+        for r in range(n_rows):
+            combo = self._phasor_npz_table.cellWidget(r, self._PHASOR_COL_ACTION)
+            if combo is not None and combo.currentText() != "Skip":
+                any_actionable = True
+                break
+        self._phasor_npz_import_btn.setEnabled(any_actionable)
+
+    def _on_phasor_npz_import(self) -> None:
+        """Process each row with Action != Skip; surface a status summary."""
+        from percell4.application.use_cases.import_phasor_npz import (
+            ImportPhasorNpz,
+        )
+        from percell4.store import LayerAlreadyExistsError
+
+        repo = self._launcher._repo
+        session = self._data_model.session
+        uc = ImportPhasorNpz(repo, session)
+
+        imported = 0
+        skipped = 0
+        errored = 0
+
+        for row in range(self._phasor_npz_table.rowCount()):
+            combo = self._phasor_npz_table.cellWidget(row, self._PHASOR_COL_ACTION)
+            if combo is None:
+                continue
+            action = combo.currentText()
+            if action == "Skip":
+                skipped += 1
+                continue
+
+            file_item = self._phasor_npz_table.item(row, self._PHASOR_COL_FILE)
+            target_widget = self._phasor_npz_table.cellWidget(
+                row, self._PHASOR_COL_TARGET,
+            )
+            if file_item is None or target_widget is None:
+                errored += 1
+                continue
+            npz_path = Path(file_item.data(Qt.UserRole))
+            target_channel = target_widget.text().strip()
+            force = action == "Overwrite"
+
+            try:
+                # Re-probe at import time (Decision #20: defense against batch race).
+                # If a sibling row already imported into this target, the conflict
+                # state is now stale; the use case raises and we surface the error.
+                uc.execute(npz_path, target_channel, force=force)
+                imported += 1
+            except LayerAlreadyExistsError:
+                # Reflect new conflict state in the table for user clarity
+                conflict_item = self._phasor_npz_table.item(
+                    row, self._PHASOR_COL_CONFLICT,
+                )
+                conflict_item.setText("Yes (by sibling row)")
+                conflict_item.setForeground(Qt.red)
+                errored += 1
+            except (ValueError, OSError) as e:
+                errored += 1
+                detected_item = self._phasor_npz_table.item(
+                    row, self._PHASOR_COL_DETECTED,
+                )
+                detected_item.setText(str(e)[:80])
+                detected_item.setForeground(Qt.red)
+                detected_item.setToolTip(str(e))
+
+        msg = f"Imported phasor for {imported} channel(s)"
+        if skipped:
+            msg += f"; {skipped} skipped"
+        if errored:
+            msg += f"; {errored} errored"
+        self.statusBar_msg(msg)
+
+        if imported and not errored:
+            self.accept()
 
     # ------------------------------------------------------------------
     # Styling

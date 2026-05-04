@@ -305,6 +305,9 @@ class PhasorPlotWindow(QMainWindow):
                 Event.ACTIVE_MASK_CHANGED, self._on_active_mask_changed
             ),
             self._session.subscribe(Event.DATASET_CHANGED, self._on_dataset_changed),
+            self._session.subscribe(
+                Event.ACTIVE_CHANNEL_CHANGED, self._on_active_channel_changed,
+            ),
         ]
         # Sync checkbox state for whatever mask is already active when the
         # window is created (e.g., re-opening the phasor plot after a
@@ -348,12 +351,14 @@ class PhasorPlotWindow(QMainWindow):
 
         controls.addStretch()
 
-        self._save_png_btn = QPushButton("Save Phasor .PNG")
-        self._save_png_btn.setToolTip(
-            "Save the current phasor plot as a PNG image."
+        self._save_svg_btn = QPushButton("Save Phasor .SVG")
+        self._save_svg_btn.setToolTip(
+            "Save the current phasor plot — including any ROIs — as a vector "
+            "SVG. Each histogram, ROI ellipse, handle, tick, and label is a "
+            "separate object editable in Illustrator / Inkscape / Affinity."
         )
-        self._save_png_btn.clicked.connect(self._on_save_png)
-        controls.addWidget(self._save_png_btn)
+        self._save_svg_btn.clicked.connect(self._on_save_svg)
+        controls.addWidget(self._save_svg_btn)
 
         left_layout.addLayout(controls)
 
@@ -1572,36 +1577,46 @@ class PhasorPlotWindow(QMainWindow):
         names = ", ".join(name for name, _, _ in roi_masks)
         self._status.showMessage(f"Applied {len(roi_masks)} mask(s): {names}", 5000)
 
-    # ── Save plot as PNG ──────────────────────────────────────
+    # ── Save plot as SVG ──────────────────────────────────────
 
-    def _on_save_png(self) -> None:
-        """Save the current phasor plot widget as a PNG image."""
+    def _on_save_svg(self) -> None:
+        """Save the current phasor plot as a vector SVG.
+
+        Uses pyqtgraph's SVGExporter so every histogram cell, ROI ellipse,
+        ROI handle, axis tick, and label is a separate, editable vector
+        object. Open in Illustrator / Inkscape / Affinity to delete the
+        rectangular ROI bounding handles for figure-ready output.
+        """
         if self._g_map is None:
             self._status.showMessage("No phasor data to save", 3000)
             return
 
-        default_name = "phasor.png"
+        default_name = "phasor.svg"
         handle = self._session.dataset
         if handle is not None:
             stem = handle.path.stem
             channel = self._session.active_channel
-            default_name = f"{stem}_{channel}_phasor.png" if channel else f"{stem}_phasor.png"
+            default_name = f"{stem}_{channel}_phasor.svg" if channel else f"{stem}_phasor.svg"
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Phasor PNG", default_name, "PNG Image (*.png)"
+            self, "Save Phasor SVG", default_name, "SVG (*.svg)"
         )
         if not path:
             return
-        if not path.lower().endswith(".png"):
-            path = f"{path}.png"
+        if not path.lower().endswith(".svg"):
+            path = f"{path}.svg"
 
-        pixmap = self._plot.grab()
-        if not pixmap.save(path, "PNG"):
+        from pyqtgraph.exporters import SVGExporter
+
+        try:
+            exporter = SVGExporter(self._plot.plotItem)
+            exporter.export(path)
+        except Exception as e:
             QMessageBox.warning(
-                self, "Save Error", f"Failed to save phasor PNG to:\n{path}"
+                self, "Save Error", f"Failed to save phasor SVG to:\n{path}\n\n{e}"
             )
             return
-        self._status.showMessage(f"Saved phasor PNG: {path}", 4000)
+        self._status.showMessage(f"Saved phasor SVG: {path}", 4000)
 
     # ── Save / Load ROIs ──────────────────────────────────────
 
@@ -1702,10 +1717,105 @@ class PhasorPlotWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # Auto-load cached phasor for the active channel if no compute is
+        # in flight. Guard with `_g_map is None` so an in-progress compute
+        # is not clobbered (the existing FlimPanel path writes _g_map via
+        # set_phasor_data once the compute finishes; this guard keeps the
+        # auto-load from racing against it).
+        if self._g_map is None:
+            self._try_auto_load_cached()
         # Re-render preview layers when the window is reopened, since
         # closeEvent cleared them.
         if self._roi_widgets and self._g_map is not None:
             self._preview_timer.start()
+
+    def _on_active_channel_changed(self) -> None:
+        """Hydrate the phasor window when the user switches to a new channel.
+
+        Per Decision #15 (planning review): switching to an uncached
+        channel clears the histogram (consistent with per-channel
+        caching — the user expects to see the new channel's data, not
+        the previous one).
+        """
+        if not self.isVisible():
+            return
+        self._try_auto_load_cached()
+
+    def _try_auto_load_cached(self) -> None:
+        """Read /phasor/<active_channel> via LoadCachedPhasor; populate window if cached.
+
+        Reads the active channel from ``self._session.active_channel``
+        (current session truth — matches the existing subscription
+        pattern, NOT the event payload, per Decision #9).
+
+        On NoCachedPhasorError: clears any prior channel's display so
+        switching to an uncached channel doesn't leave stale data
+        showing (Decision #15).
+        """
+        from percell4.application.use_cases.load_cached_phasor import (
+            LoadCachedPhasor,
+        )
+        from percell4.domain.errors import NoCachedPhasorError, NoDatasetError
+
+        if self._get_repo is None or self._session.dataset is None:
+            return
+        active_channel = self._session.active_channel
+        if not active_channel:
+            return
+
+        try:
+            cached = LoadCachedPhasor(self._get_repo(), self._session).execute(
+                active_channel,
+            )
+        except (NoCachedPhasorError, NoDatasetError):
+            # Clear prior channel's display so the user sees the new
+            # channel's empty state, not stale data from a different
+            # channel. _on_dataset_changed already does this for the
+            # dataset case; the channel-switch case is handled here.
+            if self._g_map is not None:
+                self._clear_phasor_display()
+            return
+
+        # Cache hit — choose call shape based on whether wavelet is cached.
+        if cached.g_filtered is not None and cached.s_filtered is not None:
+            # Mirror apply_wavelet's call: filtered as displayed g/s,
+            # raw as the unfiltered toggle source.
+            self.set_phasor_data(
+                cached.g_filtered, cached.s_filtered,
+                intensity=cached.intensity,
+                g_unfiltered=cached.g_map, s_unfiltered=cached.s_map,
+                labels=None,  # cell filter degraded; user re-clicks Compute to re-engage
+            )
+        else:
+            # Mirror compute_phasor's call: raw only, no unfiltered counterpart.
+            self.set_phasor_data(
+                cached.g_map, cached.s_map,
+                intensity=cached.intensity,
+                labels=None,
+            )
+        self._status.showMessage(
+            f"Auto-loaded cached phasor (channel: {active_channel})"
+        )
+
+    def _clear_phasor_display(self) -> None:
+        """Clear the displayed phasor data without touching ROIs or signals.
+
+        Used when switching to an uncached channel so the previous
+        channel's histogram doesn't linger. Mirrors the relevant subset
+        of _on_dataset_changed without the ROI teardown.
+        """
+        self._g_map = None
+        self._s_map = None
+        self._g_map_unfiltered = None
+        self._s_map_unfiltered = None
+        self._intensity = None
+        self._labels = None
+        self._labels_flat = None
+        self._total_valid_pixels = 0
+        if self._hist_item is not None:
+            self._plot.removeItem(self._hist_item)
+            self._hist_item = None
+        self._status.showMessage("No phasor cached for this channel")
 
     def _save_geometry(self) -> None:
         QSettings("LeeLabPerCell4", "PerCell4").setValue(
