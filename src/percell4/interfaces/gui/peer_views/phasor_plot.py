@@ -286,6 +286,14 @@ class PhasorPlotWindow(QMainWindow):
         self._roi_widgets: list[_ROIWidget] = []
         self._selected_roi_index: int | None = None
 
+        # Manual exclusion bitmap for "Clear within ROI" feature.
+        # Pixels marked True are subtracted from the visible histogram and
+        # from any "Apply Visible as Mask" output. Lazy-allocated on first
+        # Clear; reset to None whenever set_phasor_data installs a new
+        # (g, s) frame (the bitmap is bound to the frame, not to abstract
+        # pixel indices) and on explicit Reset.
+        self._cleared_mask: np.ndarray | None = None
+
         self._build_ui()
         self._restore_geometry()
 
@@ -1194,9 +1202,9 @@ class PhasorPlotWindow(QMainWindow):
 
         AND-composes every filter that the visible phasor histogram
         applies (validity, cell selection, active mask, intensity
-        threshold, reference circle) so callers can intersect it with
-        a per-ROI membership mask to produce "literally what is visible"
-        as a binary mask.
+        threshold, reference circle, manual cleared regions) so callers
+        can intersect it with a per-ROI membership mask to produce
+        "literally what is visible" as a binary mask.
         """
         if self._g_map is None or self._s_map is None:
             return None
@@ -1207,6 +1215,23 @@ class PhasorPlotWindow(QMainWindow):
             self._intensity.ravel() if self._intensity is not None else None
         )
 
+        cleared_flat: np.ndarray | None = None
+        if self._cleared_mask is not None:
+            if self._cleared_mask.size == g.size:
+                cleared_flat = self._cleared_mask.ravel()
+            else:
+                # Defense-in-depth: set_phasor_data resets _cleared_mask
+                # whenever a new (g, s) frame lands, so a size mismatch
+                # here means a code path mutated G/S without going through
+                # set_phasor_data. Bypass the filter and surface a sticky
+                # status message — the 8-second timeout outlives the
+                # per-ROI count messages that overwrite the status bar
+                # on every refresh.
+                self._status.showMessage(
+                    "Cleared mask shape mismatch — Clear-within-ROI filter not applied",
+                    8000,
+                )
+
         valid_flat = compute_valid_phasor_pixels(
             g.ravel(), s.ravel(),
             labels_flat=self._labels_flat,
@@ -1216,8 +1241,71 @@ class PhasorPlotWindow(QMainWindow):
             intensity_threshold=self._intensity_threshold,
             ref_circle_center=self._ref_circle_center,
             ref_circle_radius=self._ref_circle_radius,
+            cleared_mask_flat=cleared_flat,
         )
         return valid_flat.reshape(g.shape)
+
+    def _apply_clear_to_roi(self, widget: _ROIWidget) -> bool:
+        """OR a ROI's inside-mask into ``_cleared_mask``.
+
+        Returns True if any pixels were cleared, False if the ROI's
+        inside-mask is empty (e.g. the ellipse fell entirely on NaN
+        pixels). The False return signals to the caller that the ROI
+        should NOT be consumed — there's nothing to show for the
+        operation.
+
+        Lazy-allocates ``_cleared_mask`` on first non-empty Clear, so
+        the invariant ``_cleared_mask is not None ⇒ at least one pixel
+        cleared`` holds. That invariant is what lets the Reset button's
+        enable rule be a cheap ``is not None`` check instead of an
+        O(H*W) ``.any()`` reduction.
+        """
+        from percell4.domain.flim.phasor import phasor_roi_to_mask
+
+        g, s = self._get_active_gs_maps()
+        if g is None or s is None:
+            return False
+
+        roi = widget.phasor_roi
+        roi_inside = phasor_roi_to_mask(
+            g, s, center=roi.center, radii=roi.radii,
+            angle_rad=np.radians(roi.angle_deg),
+        )
+
+        if not roi_inside.any():
+            self._status.showMessage(
+                "ROI has no pixels in the active region — nothing to clear",
+                4000,
+            )
+            return False
+
+        if self._cleared_mask is None:
+            self._cleared_mask = np.zeros(g.shape, dtype=bool)
+        elif self._cleared_mask.shape != g.shape:
+            # Defensive: should not happen because set_phasor_data resets
+            # the bitmap whenever the frame changes. If it does, reset
+            # cleanly rather than crashing.
+            self._status.showMessage(
+                "Cleared mask shape mismatch — resetting before Clear",
+                8000,
+            )
+            self._cleared_mask = np.zeros(g.shape, dtype=bool)
+
+        self._cleared_mask |= roi_inside
+        return True
+
+    def _reset_cleared_mask(self) -> None:
+        """Discard all cleared pixels; refresh synchronously.
+
+        Synchronous (no debounce) because Reset is a discrete user
+        action — there's no slider-drag scenario that benefits from
+        coalescing.
+        """
+        if self._cleared_mask is None:
+            return
+        self._cleared_mask = None
+        self._refresh_histogram()
+        self._update_preview()
 
     def _compute_filtered_binary(self, widget: _ROIWidget) -> np.ndarray:
         """Build the (H, W) uint8 binary mask for one ROI.
@@ -1291,6 +1379,9 @@ class PhasorPlotWindow(QMainWindow):
         # differs even when shapes match (rotation/flip applied to
         # /decay between computes, channel switch, dataset switch).
         # Forcing a re-read on next refresh keeps mask alignment correct.
+        # Same rationale applies to the Clear-within-ROI bitmap below:
+        # cleared pixels are bound to the frame they were drawn against.
+        self._cleared_mask = None
         self._active_mask_array = None
         self._active_mask_flat = None
 
@@ -1457,34 +1548,31 @@ class PhasorPlotWindow(QMainWindow):
             return
 
         g_display, s_display = self._get_active_gs_maps()
-        g_flat = g_display.ravel()
-        s_flat = s_display.ravel()
+        g_flat_full = g_display.ravel()
+        s_flat_full = s_display.ravel()
 
-        mask_flat = self._load_active_mask_flat()
         # Surface a status message when the mask is configured but
-        # bypassed (shape mismatch / read failure). The checkbox stays
-        # checked so the user can fix the mismatch without re-toggling.
+        # bypassed (shape mismatch / read failure). Computed inline
+        # because _compute_visible_valid_2d does not expose this.
         mask_bypassed = (
             self._mask_filter_check.isChecked()
             and self._session.active_mask
-            and mask_flat is None
+            and self._load_active_mask_flat() is None
             and self._g_map is not None
         )
 
-        intensity_flat = self._intensity.ravel() if self._intensity is not None else None
-        valid = compute_valid_phasor_pixels(
-            g_flat, s_flat,
-            labels_flat=self._labels_flat,
-            filter_ids=self._session.filter_ids,
-            mask_flat=mask_flat,
-            intensity_flat=intensity_flat,
-            intensity_threshold=self._intensity_threshold,
-            ref_circle_center=self._ref_circle_center,
-            ref_circle_radius=self._ref_circle_radius,
-        )
+        # Delegate the AND filter chain to _compute_visible_valid_2d so
+        # this render path picks up every filter (cell selection, active
+        # mask, intensity, ref circle, cleared mask) without duplicating
+        # the call. Single integration point — mirrors the per-ROI Apply
+        # path in _compute_filtered_binary.
+        valid_2d = self._compute_visible_valid_2d()
+        if valid_2d is None:
+            return
+        valid = valid_2d.ravel()
 
-        g_flat = g_flat[valid]
-        s_flat = s_flat[valid]
+        g_flat = g_flat_full[valid]
+        s_flat = s_flat_full[valid]
 
         if len(g_flat) == 0:
             if mask_bypassed:
