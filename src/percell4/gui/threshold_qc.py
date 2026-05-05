@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from percell4.model import CellDataModel
     from percell4.store import DatasetStore
 
+from percell4.config import viewer_presets as vp
 from percell4.gui import theme
 
 logger = logging.getLogger(__name__)
@@ -46,11 +47,9 @@ _LAYER_GROUP_IMAGE = "_group_image"
 _LAYER_THRESHOLD_PREVIEW = "_group_threshold_preview"
 _LAYER_ROI = "_group_roi"
 
-# Group colors (categorical, up to 10 groups)
-_GROUP_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-]
+# File-local convenience alias — not exported. Source of truth lives in
+# percell4.config.viewer_presets.THRESHOLD_QC_GROUP_COLORS.
+_GROUP_COLORS = vp.THRESHOLD_QC_GROUP_COLORS
 
 
 class GroupStatus(enum.StrEnum):
@@ -174,8 +173,8 @@ class ThresholdQCController(QObject):
         viewer.add_labels(
             group_index,
             name=_LAYER_GROUP_PREVIEW,
-            opacity=0.5,
-            blending="translucent",
+            opacity=vp.LABELS_OVERLAY_DEFAULT_OPACITY,
+            blending=vp.LABELS_OVERLAY_DEFAULT_BLENDING,
             colormap=cmap,
             metadata={"percell_type": "group_preview"},
         )
@@ -397,8 +396,8 @@ class ThresholdQCController(QObject):
         viewer.add_image(
             self._group_image_buffer.copy(),  # copy since buffer is reused
             name=_LAYER_GROUP_IMAGE,
-            colormap="gray",
-            blending="additive",
+            colormap=vp.THRESHOLD_QC_GROUP_IMAGE_COLORMAP,
+            blending=vp.THRESHOLD_QC_GROUP_IMAGE_BLENDING,
         )
 
         # Compute initial threshold
@@ -416,14 +415,12 @@ class ThresholdQCController(QObject):
 
         self._remove_layer(_LAYER_THRESHOLD_PREVIEW)
         from napari.utils.colormaps import DirectLabelColormap
-        yellow_cmap = DirectLabelColormap(
-            color_dict={0: "transparent", 1: "yellow", None: "transparent"},
-        )
+        yellow_cmap = DirectLabelColormap(color_dict=dict(vp.YELLOW_LABEL_COLOR_DICT))
         viewer.add_labels(
             preview,
             name=_LAYER_THRESHOLD_PREVIEW,
-            opacity=0.5,
-            blending="translucent",
+            opacity=vp.LABELS_OVERLAY_DEFAULT_OPACITY,
+            blending=vp.LABELS_OVERLAY_DEFAULT_BLENDING,
             colormap=yellow_cmap,
         )
 
@@ -433,10 +430,10 @@ class ThresholdQCController(QObject):
             [],
             shape_type="rectangle",
             name=_LAYER_ROI,
-            edge_color="yellow",
-            edge_width=2,
-            face_color=[1, 1, 0, 0.1],
-            blending="additive",
+            edge_color=vp.YELLOW_ROI_EDGE_COLOR,
+            edge_width=vp.YELLOW_ROI_EDGE_WIDTH,
+            face_color=list(vp.YELLOW_ROI_FACE_COLOR),
+            blending=vp.YELLOW_ROI_BLENDING,
         )
 
         # Wire ROI changes — listen to mode changes so we update only when
