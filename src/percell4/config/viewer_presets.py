@@ -45,9 +45,9 @@ CHANNEL_COLORMAPS: Final[dict[str, str]] = {
     "brightfield": "gray",
     "dic": "gray",
     "phase": "gray",
-    "mNG": "gray",
-    "CA-SiR": "magenta",
-    "mTQ2": "green",
+    "mng": "gray",
+    "casir": "magenta",
+    "mtq2": "green",
 }
 
 CHANNEL_FALLBACK_CYCLE: Final[tuple[str, ...]] = (
@@ -94,7 +94,7 @@ def _optional_kwargs(**axes: object) -> dict[str, object]:
 
 
 # ── Image layer defaults ────────────────────────────────────
-IMAGE_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
+IMAGE_DEFAULT_BLENDING: Final[str] = "additive"
 IMAGE_DEFAULT_OPACITY: Final[float | None] = None
 # Override for ``add_image``'s auto-from-data contrast computation.
 # Precedence: caller-passed ``contrast_limits=`` wins, then this override
@@ -107,7 +107,7 @@ IMAGE_DEFAULT_CONTRAST_OVERRIDE: Final[tuple[float, float] | None] = None
 
 # ── Labels layer defaults ───────────────────────────────────
 LABELS_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
-LABELS_DEFAULT_OPACITY: Final[float | None] = None
+LABELS_DEFAULT_OPACITY: Final[float | None] = 0.25
 # When non-None, ``add_labels`` wraps this dict in a DirectLabelColormap
 # and applies it whenever the caller did not pass ``colormap=`` explicitly.
 # Caller-passed colormap always wins.
