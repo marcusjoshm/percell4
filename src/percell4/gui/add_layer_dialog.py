@@ -1600,6 +1600,12 @@ class AddLayerDialog(QDialog):
             "channel_names": all_names,
             "n_channels": len(all_names),
         })
+        # Sync the in-memory session snapshot so Data tab combos (Active
+        # Channel + Layer Management Channels) re-list immediately. Without
+        # this, the new <ch>_bin entries only appear after a dataset reload
+        # because session.dataset.metadata was captured at set_dataset time.
+        # Same pattern the Single TIFF tab uses after writing /intensity.
+        self._data_model.session.refresh_resource_lists(channel_names=all_names)
         msg = f"Wrote debug intensity layers: {', '.join(new_names)}"
         if skipped:
             msg += f" (skipped due to shape mismatch: {', '.join(skipped)})"
