@@ -835,6 +835,13 @@ class AddLayerDialog(QDialog):
         self._tcspc_stitch_check.toggled.connect(self._on_tcspc_stitch_toggled)
         layout.addWidget(self._tcspc_stitch_check)
 
+        # Track whether the user has manually edited the stitching controls.
+        # Once true, ``_tcspc_seed_stitching_from_metadata`` becomes a no-op
+        # so re-clicking Scan & Match doesn't clobber the user's choice. The
+        # TIFF compress config in /metadata is only a sensible default — LASX
+        # .bin scan order is independent of how the TIFF was stitched.
+        self._tcspc_stitching_user_edited = False
+
         self._tcspc_stitch_widget = QWidget()
         stitch_layout = QHBoxLayout(self._tcspc_stitch_widget)
         stitch_layout.setContentsMargins(20, 0, 0, 0)
@@ -866,6 +873,16 @@ class AddLayerDialog(QDialog):
         stitch_layout.addStretch()
         self._tcspc_stitch_widget.setVisible(False)
         layout.addWidget(self._tcspc_stitch_widget)
+
+        # Mark stitching as user-edited as soon as any stitch control changes.
+        # Connected AFTER the initial setValue/addItems calls so the seed
+        # values above don't trip the flag at construction time.
+        def _mark_user_edited(*_):
+            self._tcspc_stitching_user_edited = True
+        self._tcspc_stitch_rows.valueChanged.connect(_mark_user_edited)
+        self._tcspc_stitch_cols.valueChanged.connect(_mark_user_edited)
+        self._tcspc_stitch_type.currentIndexChanged.connect(_mark_user_edited)
+        self._tcspc_stitch_order.currentIndexChanged.connect(_mark_user_edited)
 
         # ── Rotation + Flip (LASX vs TIFF orientation) ──────────────
         # Both transforms apply to /decay/<ch> only (never /intensity).
@@ -1078,9 +1095,16 @@ class AddLayerDialog(QDialog):
         with stitching. Reading those back here means picking ``Auto: zero
         pad with offset`` and clicking Scan & Match against a compress-
         produced .h5 will replicate the exact tile placement compress used,
-        so the resulting decay aligns with the existing intensity / mask /
-        labels and the spatial Filtered phasor matches.
+        as a sensible default.
+
+        BUT: LASX .bin scan order is independent of how the TIFF was
+        stitched, so once the user has edited any stitch control, this
+        seeding is suppressed — re-clicking Scan & Match must not clobber
+        a user choice. The TIFF compress config is a starting hint, not
+        a constraint on the .bin layer.
         """
+        if self._tcspc_stitching_user_edited:
+            return
         meta = self._store.metadata
         rows = meta.get("stitch_grid_rows")
         cols = meta.get("stitch_grid_cols")
@@ -1095,6 +1119,9 @@ class AddLayerDialog(QDialog):
             return
         if rows * cols <= 1:
             return
+        # Block the user-edited flag while applying seed values — these are
+        # programmatic, not user input.
+        was_edited = self._tcspc_stitching_user_edited
         self._tcspc_stitch_check.setChecked(True)
         self._tcspc_stitch_rows.setValue(rows)
         self._tcspc_stitch_cols.setValue(cols)
@@ -1108,6 +1135,7 @@ class AddLayerDialog(QDialog):
             idx = self._tcspc_stitch_order.findText(str(order))
             if idx >= 0:
                 self._tcspc_stitch_order.setCurrentIndex(idx)
+        self._tcspc_stitching_user_edited = was_edited
         self.statusBar_msg(
             f"Pre-filled stitching from dataset metadata: "
             f"{rows}×{cols} {grid_type or ''} {order or ''}".strip()

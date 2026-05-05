@@ -434,6 +434,96 @@ def test_add_decay_stitch_then_rotate_compose(tmp_path, mock_read_flim_bin):
         assert f["decay/ch00"].shape == (16, 16, 4)
 
 
+def test_add_decay_multitile_rotate_flip_repositions_tiles_globally(
+    tmp_path, monkeypatch,
+):
+    """Multi-tile rot+flip moves entire tile blocks (not just rotates contents).
+
+    Regression for the "individual tiles are rotated/flipped in place" bug
+    report: verifies that on a 4x4 grid stitched as
+    ``snake_by_column + bottom_right`` followed by ``rotate_k=1`` (CCW90)
+    and ``flip_axis=1`` (horizontal), tile #0 — placed by the stitch at
+    grid block (3,3) — ends up at the rotated+flipped output's grid block
+    (0,0), proving the transforms run on the full stitched array, not
+    per-tile.
+    """
+    grid_rows, grid_cols = 4, 4
+    tile_h, tile_w, t_dim = 4, 4, 2
+
+    def _patterned_read(path, **kwargs):
+        # Use the file stem's _s<idx> token to embed the tile id in T=0 plane
+        import re as _re
+        m = _re.search(r"_s(\d+)", str(path))
+        idx = int(m.group(1)) if m else 0
+        arr = np.zeros((tile_h, tile_w, t_dim), dtype=np.uint16)
+        arr[:, :, 0] = idx
+        return {"array": arr, "intensity": arr[..., 0].astype(np.float32),
+                "metadata": {"shape": (tile_h, tile_w, t_dim)}}
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _patterned_read,
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _patterned_read,
+    )
+
+    # /intensity sized to match: 4x4 grid of 4x4 tiles = 16x16
+    store = DatasetStore(tmp_path / "experiment.h5")
+    store.create(metadata={"channel_names": ["ch00"]})
+    intensity = np.zeros((1, grid_rows * tile_h, grid_cols * tile_w),
+                         dtype=np.uint16)
+    store.write_array("intensity", intensity, attrs={"dims": ["C", "H", "W"]})
+
+    src = tmp_path / "bin"
+    src.mkdir()
+    for i in range(16):
+        # offset=0 so token "00" maps to "ch00"; tile token from _s<idx>
+        (src / f"exp_s{i:02d}_ch00.bin").write_bytes(b"\0")
+
+    report = add_decay_to_dataset(
+        h5_path=store.path, source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(
+            grid_rows=grid_rows, grid_cols=grid_cols,
+            grid_type="snake_by_column", order="bottom_right",
+        ),
+        flim_config=FlimConfig(bin_x=tile_w, bin_y=tile_h, bin_t=t_dim,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+        rotate_k=1, flip_axis=1,
+    )
+    assert report.written == ("ch00",), report.errors
+
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+
+    # Read tile-id at the top-left pixel of every grid block in the output.
+    # If rot+flip operates on the FULL stitched array, the resulting
+    # tile-id grid is the canonical raster scan (top_left + snake_by_row):
+    #     0  1  2  3
+    #     7  6  5  4
+    #     8  9 10 11
+    #    15 14 13 12
+    # If rot+flip were applied per-tile (the bug), tile #0 would still be
+    # at output (3,3) — same grid slot the stitch placed it.
+    tid = decay[..., 0]
+    out_grid = np.array([
+        [int(tid[r * tile_h, c * tile_w]) for c in range(grid_cols)]
+        for r in range(grid_rows)
+    ])
+    expected = np.array([
+        [0, 1, 2, 3],
+        [7, 6, 5, 4],
+        [8, 9, 10, 11],
+        [15, 14, 13, 12],
+    ])
+    assert np.array_equal(out_grid, expected), (
+        f"rot+flip not applied at full-image level\n"
+        f"got:\n{out_grid}\nexpected:\n{expected}"
+    )
+
+
 # ── Error paths ─────────────────────────────────────────────────────────
 
 
