@@ -57,10 +57,13 @@ def test_colormap_for_channel_substring_match():
 
 def test_colormap_for_channel_unknown_falls_back_and_increments():
     """Unrecognized name falls back to the first cycle entry; index advances."""
-    from percell4.config.viewer_presets import _colormap_for_channel
+    from percell4.config.viewer_presets import (
+        CHANNEL_FALLBACK_CYCLE,
+        _colormap_for_channel,
+    )
 
     cmap, idx = _colormap_for_channel("unknown_chan", 0)
-    assert cmap == "green"
+    assert cmap == CHANNEL_FALLBACK_CYCLE[0]
     assert idx == 1
 
 

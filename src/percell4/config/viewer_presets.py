@@ -30,10 +30,13 @@ CHANNEL_COLORMAPS: Final[dict[str, str]] = {
     "brightfield": "gray",
     "dic": "gray",
     "phase": "gray",
+    "mNG": "gray",
+    "CA-SiR": "magenta",
+    "mTQ2": "green",
 }
 
 CHANNEL_FALLBACK_CYCLE: Final[tuple[str, ...]] = (
-    "green", "magenta", "cyan", "yellow", "red", "blue",
+    "gray", "gray", "gray", "gray", "gray", "gray",
 )
 
 
@@ -54,14 +57,14 @@ def _colormap_for_channel(name: str, color_index: int = 0) -> tuple[str, int]:
 
 
 # ── Image layer defaults ────────────────────────────────────
-IMAGE_DEFAULT_BLENDING: Final[str] = "additive"
+IMAGE_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
 
 # ── Labels layer defaults ───────────────────────────────────
-LABELS_DEFAULT_BLENDING: Final[str] = "additive"
+LABELS_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
 
 # ── Mask layer defaults (runtime mask creation; tunable independently) ──
-MASK_DEFAULT_BLENDING: Final[str] = "additive"
-MASK_DEFAULT_OPACITY: Final[float] = 0.5
+MASK_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
+MASK_DEFAULT_OPACITY: Final[float] = 0.75
 BINARY_MASK_COLOR_DICT: Final[dict[int | None, str]] = {
     0: "transparent", 1: "yellow", None: "transparent",
 }
