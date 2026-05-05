@@ -514,6 +514,10 @@ class FlimPanel(QWidget):
                     name=f"Lifetime ({active_channel})",
                     colormap=vp.FLIM_LIFETIME_COLORMAP,
                     blending=vp.FLIM_LIFETIME_BLENDING,
+                    **vp._optional_kwargs(
+                        opacity=vp.FLIM_LIFETIME_OPACITY,
+                        contrast_limits=vp.FLIM_LIFETIME_CONTRAST_OVERRIDE,
+                    ),
                 )
 
         if result.mean_tau is not None:

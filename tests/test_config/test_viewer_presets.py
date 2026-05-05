@@ -77,3 +77,28 @@ def test_colormap_for_channel_cycle_wraps_modulo():
     cmap, idx = _colormap_for_channel("unknown_chan", len(CHANNEL_FALLBACK_CYCLE))
     assert cmap == CHANNEL_FALLBACK_CYCLE[0]
     assert idx == len(CHANNEL_FALLBACK_CYCLE) + 1
+
+
+def test_optional_kwargs_filters_none_values():
+    """Helper drops None-valued entries; non-None values pass through."""
+    from percell4.config.viewer_presets import _optional_kwargs
+
+    assert _optional_kwargs(a=1, b=None, c="x") == {"a": 1, "c": "x"}
+
+
+def test_optional_kwargs_empty_when_all_none():
+    """If every axis is None (today's day-one ship state), result is empty."""
+    from percell4.config.viewer_presets import _optional_kwargs
+
+    assert _optional_kwargs(opacity=None, contrast_limits=None) == {}
+
+
+def test_optional_kwargs_zero_is_kept():
+    """0 / 0.0 / '' / [] are NOT None and must pass through."""
+    from percell4.config.viewer_presets import _optional_kwargs
+
+    assert _optional_kwargs(opacity=0.0, count=0, name="") == {
+        "opacity": 0.0,
+        "count": 0,
+        "name": "",
+    }

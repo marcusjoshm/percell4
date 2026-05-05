@@ -388,6 +388,8 @@ class AnalysisPanel(QWidget):
         # Drift preserved: this call site does NOT pass blending=. The
         # threshold_qc.py:432 sibling does (vp.YELLOW_ROI_BLENDING).
         # Adding blending here would be a behavior change — see plan U7.
+        # Opacity follows the None-sentinel discipline through _optional_kwargs:
+        # editing vp.YELLOW_ROI_OPACITY (currently None) auto-applies here.
         viewer_win.viewer.add_shapes(
             [],
             shape_type="rectangle",
@@ -395,6 +397,7 @@ class AnalysisPanel(QWidget):
             edge_color=vp.YELLOW_ROI_EDGE_COLOR,
             edge_width=vp.YELLOW_ROI_EDGE_WIDTH,
             face_color=list(vp.YELLOW_ROI_FACE_COLOR),
+            **vp._optional_kwargs(opacity=vp.YELLOW_ROI_OPACITY),
         )
 
         for layer in viewer_win.viewer.layers:
