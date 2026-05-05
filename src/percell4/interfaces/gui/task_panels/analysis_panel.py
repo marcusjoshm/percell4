@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.config import viewer_presets as vp
 from percell4.gui import theme
 from percell4.model import CellDataModel
 
@@ -374,23 +375,26 @@ class AnalysisPanel(QWidget):
         from napari.utils.colormaps import DirectLabelColormap
 
         yellow_cmap = DirectLabelColormap(
-            color_dict={0: "transparent", 1: "yellow", None: "transparent"},
+            color_dict=dict(vp.YELLOW_LABEL_COLOR_DICT),
         )
         viewer_win.viewer.add_labels(
             mask,
             name="_threshold_preview",
-            opacity=0.5,
-            blending="translucent",
+            opacity=vp.LABELS_OVERLAY_DEFAULT_OPACITY,
+            blending=vp.LABELS_OVERLAY_DEFAULT_BLENDING,
             colormap=yellow_cmap,
         )
 
+        # Drift preserved: this call site does NOT pass blending=. The
+        # threshold_qc.py:432 sibling does (vp.YELLOW_ROI_BLENDING).
+        # Adding blending here would be a behavior change — see plan U7.
         viewer_win.viewer.add_shapes(
             [],
             shape_type="rectangle",
             name="_threshold_roi",
-            edge_color="yellow",
-            edge_width=2,
-            face_color=[1, 1, 0, 0.1],
+            edge_color=vp.YELLOW_ROI_EDGE_COLOR,
+            edge_width=vp.YELLOW_ROI_EDGE_WIDTH,
+            face_color=list(vp.YELLOW_ROI_FACE_COLOR),
         )
 
         for layer in viewer_win.viewer.layers:

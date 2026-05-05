@@ -58,8 +58,6 @@ logger = logging.getLogger(__name__)
 type LabelId = int
 
 _PAN_ZOOM: Final = "pan_zoom"
-_STAGED_COLOR: Final = (0.0, 0.9, 0.9, 0.6)  # cyan 0.6α
-_OVERLAY_LAYER_NAME: Final = "_multi_select_staged"
 
 
 class StagedRenderer(Protocol):

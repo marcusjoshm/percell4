@@ -11,6 +11,7 @@ import weakref
 
 from qtpy.QtCore import QObject, QSettings, Signal
 
+from percell4.config import viewer_presets as vp
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
@@ -20,27 +21,9 @@ PERCELL_TYPE_KEY = "percell_type"
 LAYER_TYPE_MASK = "mask"
 LAYER_TYPE_SEGMENTATION = "segmentation"
 
-# Colormap mapping for common fluorophore names
-CHANNEL_COLORMAPS = {
-    "dapi": "blue",
-    "hoechst": "blue",
-    "gfp": "green",
-    "fitc": "green",
-    "alexa488": "green",
-    "rfp": "red",
-    "mcherry": "red",
-    "tritc": "red",
-    "alexa594": "red",
-    "cy5": "magenta",
-    "alexa647": "magenta",
-    "bf": "gray",
-    "brightfield": "gray",
-    "dic": "gray",
-    "phase": "gray",
-}
-
-# Color cycle for channels without a recognized name
-_COLOR_CYCLE = ["green", "magenta", "cyan", "yellow", "red", "blue"]
+# DEPRECATED: import from percell4.config.viewer_presets directly. Re-exported
+# here for one release so external readers (notebooks, scripts) keep working.
+CHANNEL_COLORMAPS = vp.CHANNEL_COLORMAPS
 
 
 # ── Module-level registry for the napari `M` keymap handler ────────
@@ -149,20 +132,6 @@ def _register_m_bind_key_once() -> None:
     Labels.bind_key("M", _on_m_keystroke_labels, overwrite=True)
     Viewer.bind_key("M", _on_m_keystroke_viewer, overwrite=True)
     _M_BIND_KEY_REGISTERED = True
-
-
-def _colormap_for_channel(name: str, color_index: int = 0) -> tuple[str, int]:
-    """Auto-detect colormap from channel name, or cycle through distinct colors.
-
-    Returns (colormap_name, updated_color_index).
-    """
-    key = name.lower().replace(" ", "").replace("-", "").replace("_", "")
-    for pattern, cmap in CHANNEL_COLORMAPS.items():
-        if pattern in key:
-            return cmap, color_index
-    # No match — assign next color from cycle
-    color = _COLOR_CYCLE[color_index % len(_COLOR_CYCLE)]
-    return color, color_index + 1
 
 
 class ViewerWindow(QObject):
@@ -289,9 +258,9 @@ class ViewerWindow(QObject):
         """Add an image layer with auto-detected colormap and additive blending."""
         import numpy as np
 
-        cmap, self._color_index = _colormap_for_channel(name, self._color_index)
+        cmap, self._color_index = vp._colormap_for_channel(name, self._color_index)
         cmap = kwargs.pop("colormap", cmap)
-        blending = kwargs.pop("blending", "additive")
+        blending = kwargs.pop("blending", vp.IMAGE_DEFAULT_BLENDING)
 
         # Set contrast limits from actual data range so sparse images aren't blank
         if "contrast_limits" not in kwargs:
@@ -307,7 +276,7 @@ class ViewerWindow(QObject):
 
     def add_labels(self, data, name: str, **kwargs) -> None:
         """Add a labels layer with additive blending."""
-        blending = kwargs.pop("blending", "additive")
+        blending = kwargs.pop("blending", vp.LABELS_DEFAULT_BLENDING)
         metadata = kwargs.pop("metadata", {})
         metadata.setdefault(PERCELL_TYPE_KEY, LAYER_TYPE_SEGMENTATION)
         self.viewer.add_labels(
@@ -331,11 +300,11 @@ class ViewerWindow(QObject):
         from napari.utils.colormaps import DirectLabelColormap
 
         if color_dict is None:
-            color_dict = {0: "transparent", 1: "yellow", None: "transparent"}
+            color_dict = dict(vp.BINARY_MASK_COLOR_DICT)
         kwargs.pop("colormap", None)  # color_dict takes precedence
         cmap = DirectLabelColormap(color_dict=color_dict)
 
-        blending = kwargs.pop("blending", "additive")
+        blending = kwargs.pop("blending", vp.MASK_DEFAULT_BLENDING)
 
         if name in self.viewer.layers:
             layer = self.viewer.layers[name]
@@ -345,7 +314,7 @@ class ViewerWindow(QObject):
             layer.metadata[PERCELL_TYPE_KEY] = LAYER_TYPE_MASK
         else:
             if "opacity" not in kwargs:
-                kwargs["opacity"] = 0.5
+                kwargs["opacity"] = vp.MASK_DEFAULT_OPACITY
             self.viewer.add_labels(
                 data,
                 name=name,
@@ -511,22 +480,22 @@ class ViewerWindow(QObject):
 
             if visible_ids and highlight_ids:
                 # Both: hide non-filtered, dim filtered non-selected, highlight selected
-                color_dict[None] = [0.0, 0.0, 0.0, 0.0]
+                color_dict[None] = list(vp.TRANSPARENT_RGBA)
                 for lid in visible_ids:
                     if lid in highlight_ids:
-                        color_dict[lid] = [1.0, 1.0, 0.0, 0.8]
+                        color_dict[lid] = list(vp.SELECTION_HIGHLIGHT_RGBA)
                     else:
-                        color_dict[lid] = [0.5, 0.5, 0.5, 0.15]
+                        color_dict[lid] = list(vp.SELECTION_DIM_NONSELECTED)
             elif visible_ids:
                 # Filter only: show filtered, hide rest
-                color_dict[None] = [0.0, 0.0, 0.0, 0.0]
+                color_dict[None] = list(vp.TRANSPARENT_RGBA)
                 for lid in visible_ids:
-                    color_dict[lid] = [0.3, 0.8, 0.8, 0.5]
+                    color_dict[lid] = list(vp.FILTER_ONLY_VISIBLE_RGBA)
             elif highlight_ids:
                 # Selection only: highlight selected, dim rest
-                color_dict[None] = [0.0, 0.0, 0.0, 0.0]
+                color_dict[None] = list(vp.TRANSPARENT_RGBA)
                 for lid in highlight_ids:
-                    color_dict[lid] = [1.0, 1.0, 0.0, 0.8]
+                    color_dict[lid] = list(vp.SELECTION_HIGHLIGHT_RGBA)
 
             labels_layer.colormap = DirectLabelColormap(
                 color_dict=color_dict
@@ -652,11 +621,6 @@ class ViewerWindow(QObject):
         reference — no copy."""
         from napari.utils.colormaps import DirectLabelColormap
 
-        from percell4.gui.multi_select import (
-            _OVERLAY_LAYER_NAME,
-            _STAGED_COLOR,
-        )
-
         if not self._is_alive() or self._viewer is None:
             return
         primary = self._get_active_labels_layer()
@@ -665,20 +629,20 @@ class ViewerWindow(QObject):
 
         color_dict = {0: "transparent", None: "transparent"}
         for lid in staged_ids:
-            color_dict[int(lid)] = list(_STAGED_COLOR)
+            color_dict[int(lid)] = list(vp.STAGED_OVERLAY_COLOR)
         cmap = DirectLabelColormap(color_dict=color_dict)
 
-        if _OVERLAY_LAYER_NAME in self._viewer.layers:
-            overlay = self._viewer.layers[_OVERLAY_LAYER_NAME]
+        if vp.STAGED_OVERLAY_LAYER_NAME in self._viewer.layers:
+            overlay = self._viewer.layers[vp.STAGED_OVERLAY_LAYER_NAME]
             overlay.data = primary.data
             overlay.colormap = cmap
         else:
             self._viewer.add_labels(
                 primary.data,
-                name=_OVERLAY_LAYER_NAME,
+                name=vp.STAGED_OVERLAY_LAYER_NAME,
                 colormap=cmap,
-                opacity=0.6,
-                blending="translucent",
+                opacity=vp.STAGED_OVERLAY_OPACITY,
+                blending=vp.STAGED_OVERLAY_BLENDING,
                 metadata={PERCELL_TYPE_KEY: "multi_select_staged"},
             )
             # Keep the primary labels layer as the active layer so
@@ -694,29 +658,22 @@ class ViewerWindow(QObject):
         refresh timer. No-op if the overlay has been removed."""
         from napari.utils.colormaps import DirectLabelColormap
 
-        from percell4.gui.multi_select import (
-            _OVERLAY_LAYER_NAME,
-            _STAGED_COLOR,
-        )
-
         if not self._is_alive() or self._viewer is None:
             return
-        if _OVERLAY_LAYER_NAME not in self._viewer.layers:
+        if vp.STAGED_OVERLAY_LAYER_NAME not in self._viewer.layers:
             return
         color_dict = {0: "transparent", None: "transparent"}
         for lid in staged_ids:
-            color_dict[int(lid)] = list(_STAGED_COLOR)
-        overlay = self._viewer.layers[_OVERLAY_LAYER_NAME]
+            color_dict[int(lid)] = list(vp.STAGED_OVERLAY_COLOR)
+        overlay = self._viewer.layers[vp.STAGED_OVERLAY_LAYER_NAME]
         overlay.colormap = DirectLabelColormap(color_dict=color_dict)
 
     def remove_staged_overlay(self) -> None:
         """Remove the staging overlay layer. Idempotent."""
-        from percell4.gui.multi_select import _OVERLAY_LAYER_NAME
-
         if not self._is_alive() or self._viewer is None:
             return
-        if _OVERLAY_LAYER_NAME in self._viewer.layers:
-            del self._viewer.layers[_OVERLAY_LAYER_NAME]
+        if vp.STAGED_OVERLAY_LAYER_NAME in self._viewer.layers:
+            del self._viewer.layers[vp.STAGED_OVERLAY_LAYER_NAME]
 
     def launch_multi_select_tool(self, launcher) -> str:
         """Open the modal multi-label selection tool.

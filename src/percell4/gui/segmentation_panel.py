@@ -24,6 +24,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.config import viewer_presets as vp
 from percell4.model import CellDataModel
 
 
@@ -489,7 +490,10 @@ class SegmentationPanel(QWidget):
         removed_mask = (labels > 0) & (filtered == 0)
         highlight = np.where(removed_mask, 1, 0).astype(np.int32)
         viewer_win.viewer.add_labels(
-            highlight, name="_cleanup_preview", opacity=0.5, blending="translucent",
+            highlight,
+            name="_cleanup_preview",
+            opacity=vp.LABELS_OVERLAY_DEFAULT_OPACITY,
+            blending=vp.LABELS_OVERLAY_DEFAULT_BLENDING,
         )
 
         parts = []

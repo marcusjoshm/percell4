@@ -49,6 +49,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.config import viewer_presets as vp
 from percell4.gui.workflows.base_runner import PhaseResult
 from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
@@ -450,8 +451,8 @@ class SegmentationQCController(QObject):
         viewer.add_labels(
             highlight,
             name=_LAYER_CLEANUP_PREVIEW,
-            opacity=0.6,
-            blending="translucent",
+            opacity=vp.GROUPED_SEG_CLEANUP_PREVIEW_OPACITY,
+            blending=vp.LABELS_OVERLAY_DEFAULT_BLENDING,
         )
         parts = []
         if edge_removed:

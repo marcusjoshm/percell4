@@ -29,7 +29,9 @@ import pytest
 from vispy import keys
 
 from percell4.application.session import Event, Session
-from percell4.gui.multi_select import _OVERLAY_LAYER_NAME
+from percell4.config.viewer_presets import (
+    STAGED_OVERLAY_LAYER_NAME as _OVERLAY_LAYER_NAME,
+)
 from percell4.gui.viewer import (
     LAYER_TYPE_MASK,
     LAYER_TYPE_SEGMENTATION,
