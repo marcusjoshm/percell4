@@ -7,6 +7,21 @@ data exposed below.
 
 Pattern mirrors ``percell4.gui.theme`` for Qt styling: pure-data module
 of ``Final``-typed constants, imported absolutely.
+
+``None`` sentinel convention
+----------------------------
+
+A constant set to ``None`` means "don't pass this kwarg to napari; let
+napari use its own default." Editing such a constant from ``None`` to a
+concrete value (a float, a tuple, a dict) starts applying that value at
+every call site that reads it — no further code edits required.
+
+Constants set to a numeric/string value are *always* passed to napari.
+
+Caller-passed ``kwarg=None`` is treated as "kwarg absent" by the call
+sites' pop pattern (the conditional skips re-injection in both cases).
+To force napari's default at a call site, omit the kwarg entirely; do
+not write ``opacity=None``.
 """
 
 from __future__ import annotations
@@ -58,9 +73,23 @@ def _colormap_for_channel(name: str, color_index: int = 0) -> tuple[str, int]:
 
 # ── Image layer defaults ────────────────────────────────────
 IMAGE_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
+IMAGE_DEFAULT_OPACITY: Final[float | None] = None
+# Override for ``add_image``'s auto-from-data contrast computation.
+# Precedence: caller-passed ``contrast_limits=`` wins, then this override
+# if non-None, then the auto-from-nanmin/nanmax fallback.
+IMAGE_DEFAULT_CONTRAST_OVERRIDE: Final[tuple[float, float] | None] = None
+
+# Note: image colormap is auto-resolved per channel via
+# ``_colormap_for_channel`` + CHANNEL_COLORMAPS. Do NOT add a global
+# IMAGE_DEFAULT_COLORMAP — it would conflict with auto-resolution.
 
 # ── Labels layer defaults ───────────────────────────────────
 LABELS_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
+LABELS_DEFAULT_OPACITY: Final[float | None] = None
+# When non-None, ``add_labels`` wraps this dict in a DirectLabelColormap
+# and applies it whenever the caller did not pass ``colormap=`` explicitly.
+# Caller-passed colormap always wins.
+LABELS_DEFAULT_COLOR_DICT: Final[dict[int | None, str] | None] = None
 
 # ── Mask layer defaults (runtime mask creation; tunable independently) ──
 MASK_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
@@ -104,6 +133,8 @@ THRESHOLD_QC_GROUP_COLORS: Final[tuple[str, ...]] = (
 )
 THRESHOLD_QC_GROUP_IMAGE_COLORMAP: Final[str] = "gray"
 THRESHOLD_QC_GROUP_IMAGE_BLENDING: Final[str] = "additive"
+THRESHOLD_QC_GROUP_IMAGE_OPACITY: Final[float | None] = None
+THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE: Final[tuple[float, float] | None] = None
 
 # ── Yellow labels color_dict (shared by threshold_qc + analysis_panel) ──
 YELLOW_LABEL_COLOR_DICT: Final[dict[int | None, str]] = {
@@ -119,6 +150,11 @@ YELLOW_ROI_EDGE_COLOR: Final[str] = "yellow"
 YELLOW_ROI_EDGE_WIDTH: Final[int] = 2
 YELLOW_ROI_FACE_COLOR: Final[tuple[float, ...]] = (1, 1, 0, 0.1)
 YELLOW_ROI_BLENDING: Final[str] = "additive"
+# Layer-level opacity multiplies into face, edge, and text alphas at the
+# vispy node level. Effective face alpha = face_color[3] * layer.opacity.
+# Setting YELLOW_ROI_OPACITY tunes ALL sub-elements globally; for
+# per-element alpha, edit YELLOW_ROI_FACE_COLOR[3] / YELLOW_ROI_EDGE_COLOR.
+YELLOW_ROI_OPACITY: Final[float | None] = None
 
 # ── Segmentation cleanup previews (drift survives in opacity only) ──
 # segmentation_panel.py:491 reads LABELS_OVERLAY_DEFAULT_OPACITY (0.5).
@@ -129,3 +165,5 @@ GROUPED_SEG_CLEANUP_PREVIEW_OPACITY: Final[float] = 0.6
 # ── FLIM lifetime ───────────────────────────────────────────
 FLIM_LIFETIME_COLORMAP: Final[str] = "turbo"
 FLIM_LIFETIME_BLENDING: Final[str] = "additive"
+FLIM_LIFETIME_OPACITY: Final[float | None] = None
+FLIM_LIFETIME_CONTRAST_OVERRIDE: Final[tuple[float, float] | None] = None
