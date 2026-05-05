@@ -1577,6 +1577,17 @@ class PhasorPlotWindow(QMainWindow):
         # checkbox must still re-enable.
         self._on_active_mask_changed()
 
+        # Same suppression pattern for ACTIVE_CHANNEL_CHANGED: when the
+        # two datasets share a channel name (typical in microscopy —
+        # every dataset has "ch1"/"ch2"/... or biological channel names
+        # that repeat), Session.set_dataset omits the channel-changed
+        # emit, so the existing _on_active_channel_changed auto-load
+        # path never fires. Trigger the cache-load directly here so the
+        # new dataset's HDF5-cached phasor (and wavelet, if present)
+        # lands without forcing the user to click Compute Phasor and
+        # Apply Wavelet Filter on every dataset switch.
+        self._try_auto_load_cached()
+
     def _on_active_mask_changed(self) -> None:
         """Update mask-filter checkbox enabled state when active_mask flips.
 
