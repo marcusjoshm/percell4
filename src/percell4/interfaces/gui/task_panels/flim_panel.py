@@ -24,6 +24,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event
+from percell4.config import viewer_presets as vp
 from percell4.gui import theme
 from percell4.model import CellDataModel
 
@@ -511,8 +512,8 @@ class FlimPanel(QWidget):
                 viewer_win.viewer.add_image(
                     result.lifetime,
                     name=f"Lifetime ({active_channel})",
-                    colormap="turbo",
-                    blending="additive",
+                    colormap=vp.FLIM_LIFETIME_COLORMAP,
+                    blending=vp.FLIM_LIFETIME_BLENDING,
                 )
 
         if result.mean_tau is not None:
