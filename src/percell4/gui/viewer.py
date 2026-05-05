@@ -262,13 +262,22 @@ class ViewerWindow(QObject):
         cmap = kwargs.pop("colormap", cmap)
         blending = kwargs.pop("blending", vp.IMAGE_DEFAULT_BLENDING)
 
-        # Set contrast limits from actual data range so sparse images aren't blank
+        # Opacity: None sentinel = don't pass kwarg. Caller > preset > napari default.
+        opacity = kwargs.pop("opacity", vp.IMAGE_DEFAULT_OPACITY)
+        if opacity is not None:
+            kwargs["opacity"] = opacity
+
+        # Contrast limits precedence: caller > preset override > auto-from-data.
         if "contrast_limits" not in kwargs:
-            d = np.asarray(data)
-            dmin = float(np.nanmin(d)) if np.any(np.isfinite(d)) else 0.0
-            dmax = float(np.nanmax(d)) if np.any(np.isfinite(d)) else 1.0
-            if dmax > dmin:
-                kwargs["contrast_limits"] = (dmin, dmax)
+            if vp.IMAGE_DEFAULT_CONTRAST_OVERRIDE is not None:
+                kwargs["contrast_limits"] = vp.IMAGE_DEFAULT_CONTRAST_OVERRIDE
+            else:
+                # Auto-from-data so sparse images aren't blank
+                d = np.asarray(data)
+                dmin = float(np.nanmin(d)) if np.any(np.isfinite(d)) else 0.0
+                dmax = float(np.nanmax(d)) if np.any(np.isfinite(d)) else 1.0
+                if dmax > dmin:
+                    kwargs["contrast_limits"] = (dmin, dmax)
 
         self.viewer.add_image(
             data, name=name, colormap=cmap, blending=blending, **kwargs
@@ -279,6 +288,22 @@ class ViewerWindow(QObject):
         blending = kwargs.pop("blending", vp.LABELS_DEFAULT_BLENDING)
         metadata = kwargs.pop("metadata", {})
         metadata.setdefault(PERCELL_TYPE_KEY, LAYER_TYPE_SEGMENTATION)
+
+        # Opacity: None sentinel = don't pass kwarg. Caller > preset > napari default.
+        opacity = kwargs.pop("opacity", vp.LABELS_DEFAULT_OPACITY)
+        if opacity is not None:
+            kwargs["opacity"] = opacity
+
+        # Colormap precedence: caller-passed colormap wins; else preset color_dict
+        # (wrapped lazily in DirectLabelColormap); else napari default (random palette).
+        # Asymmetry note: this differs from add_mask, where BINARY_MASK_COLOR_DICT
+        # is the contract and silently overrides any caller colormap.
+        if "colormap" not in kwargs and vp.LABELS_DEFAULT_COLOR_DICT is not None:
+            from napari.utils.colormaps import DirectLabelColormap
+            kwargs["colormap"] = DirectLabelColormap(
+                color_dict=dict(vp.LABELS_DEFAULT_COLOR_DICT)
+            )
+
         self.viewer.add_labels(
             data, name=name, blending=blending, metadata=metadata, **kwargs
         )
