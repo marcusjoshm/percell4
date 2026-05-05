@@ -157,7 +157,13 @@ def _compute_combined_mask(self):
     return mask
 ```
 
-**Invalidate all caches** when G/S maps change (harmonic switch, filtered/unfiltered toggle).
+**Invalidate all caches** when G/S maps change. There are three funnels in `phasor_plot.py` that mutate `_g_map`, and pixel-bound caches must reset on every one of them — not just `set_phasor_data`:
+
+- `set_phasor_data` (every fresh compute / channel hydrate)
+- `_on_dataset_changed` (DATASET_CHANGED event handler — sets `_g_map = None` directly)
+- `_clear_phasor_display` (channel-switch-to-uncached path — also sets `_g_map = None` directly)
+
+See [`../logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md`](../logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md) Vector 4 follow-up for the audit history. Defensive comments that read "set_phasor_data resets X" silently bake in a single-funnel mental model — they are not a substitute for auditing all three.
 
 ---
 

@@ -1,6 +1,7 @@
 ---
 title: "Multi-vector in-session staleness after HDF5 writes (Qt + h5py)"
 date: 2026-04-30
+last_updated: 2026-05-04
 category: logic-errors
 module: percell4.application, percell4.gui, percell4.interfaces.gui.peer_views
 problem_type: logic_error
@@ -11,6 +12,7 @@ symptoms:
   - "Phasor plot 'Filter by active mask' looked broken in-session — broad smear of ~75k pixels along the universal semicircle — but produced a tight ~86k cluster after restart."
   - "Peer views (mask overlay, segmentation badge) kept showing the previous dataset's state after a dataset switch."
   - "Toggling 'Filtered' (wavelet) on the phasor plot displayed an old wavelet cloud that didn't match the freshly recomputed (g, s)."
+  - "Adding new pixel-bound state (Clear-within-ROI bitmap, 2026-05-04) and resetting it only inside set_phasor_data left the bitmap alive on every code path that mutates _g_map without going through set_phasor_data."
 root_cause: scope_issue
 resolution_type: code_fix
 severity: high
@@ -141,6 +143,35 @@ self._active_mask_array = None
 self._active_mask_flat = None
 ```
 
+#### Vector 4 follow-up — `set_phasor_data` is not the only frame-change funnel (2026-05-04)
+
+The original Vector 4 fix landed `_active_mask_flat = None` inside `set_phasor_data` and stopped there. Six weeks later, the Clear-within-ROI feature added a new pixel-bound bitmap (`_cleared_mask`) and reused the same single-funnel pattern — invalidate inside `set_phasor_data`. Code review caught two **sibling funnels** that mutate `_g_map` directly without going through `set_phasor_data`:
+
+- `_on_dataset_changed` (the `DATASET_CHANGED` event handler, `phasor_plot.py:1508`) — sets `self._g_map = None` directly when the active dataset switches.
+- `_clear_phasor_display` (channel-switch-to-uncached-channel path, `phasor_plot.py:1993`, with comment *"Mirrors the relevant subset of `_on_dataset_changed` without the ROI teardown"*) — also sets `self._g_map = None` directly.
+
+The earlier Vector 4 patch never resets `_active_mask_flat` on these two paths either; it only happens to be benign because of the early-return guard `if self._g_map is None: return` in `_compute_visible_valid_2d`. For `_cleared_mask` the gap was visible: the Reset button stayed enabled with a stale bitmap until the user navigated to a channel.
+
+The fix that landed alongside the Clear-within-ROI feature audits all three funnels:
+
+```python
+# src/percell4/interfaces/gui/peer_views/phasor_plot.py — _on_dataset_changed
+self._active_mask_array = None
+self._active_mask_flat = None
+if self._cleared_mask is not None:
+    self._cleared_mask = None
+    self._clear_state_changed.emit()
+
+# _clear_phasor_display — same reset alongside _g_map = None
+if self._cleared_mask is not None:
+    self._cleared_mask = None
+    self._clear_state_changed.emit()
+```
+
+The deeper lesson: **whenever a peer view writes any cache aligned to the same primary input, audit every code path that mutates the primary input** — not just the most obvious one. For `PhasorPlotWindow` the three funnels for `_g_map` are `set_phasor_data`, `_on_dataset_changed`, and `_clear_phasor_display`. Defensive comments throughout the file (e.g., "set_phasor_data resets…") bake in the single-funnel mental model and make the bypass paths easy to overlook. (session history: this was an *implicit* finding in Vector 4 itself — the original fix touched only `set_phasor_data` and never enumerated other writers of `_g_map` — but it took a second occurrence with the Clear-within-ROI work to surface as a named pattern.)
+
+Reference: shipped on `feat/phasor-clear-within-roi`, merged 2026-05-04 (PR #5, commit 46b1c7c). Caught by `ce-code-review` in autofix mode; would have shipped as a real bug had the review been skipped.
+
 ### Vector 5 — Invalidate derived on-disk layers on phasor recompute
 
 `compute_phasor` rewrote `/phasor/<ch>/g` and `/s` but left `g_filtered`, `s_filtered`, `lifetime_filtered` from a *previous* `apply_wavelet` run untouched — those had been computed from uncalibrated `(g, s)` *before* vector 2's fix took effect. Toggling "Filtered=ON" displayed the stale wavelet cloud filtered by the mask, producing the broad ~75k-pixel smear (Image #3).
@@ -177,7 +208,7 @@ The reason this took five rounds: each fix made the symptom *mutate* rather than
 
 3. **When a primary dataset is written, invalidate its derived datasets in the same function.** `compute_phasor` writes `(g, s)` → must delete `(g_filtered, s_filtered, lifetime_filtered)`. Keep an explicit derivation map per group so this is mechanical, not from-memory. This generalizes the rule already documented in [`flim-phasor-cross-layer-alignment-2026-04-29.md`](flim-phasor-cross-layer-alignment-2026-04-29.md) Prevention #2 ("invalidate stale `/phasor/<ch>` when `/decay/<ch>` is rewritten") to all primary→derived relationships.
 
-4. **`Session.set_*` methods that change input semantics must invalidate dependent caches.** `set_phasor_data` invalidates ROI cache *and* mask-flat cache. `set_active_mask` invalidates phasor pixel-validity cache. Treat session caches as a coherent set — when one input changes, list every cache derived from it.
+4. **`Session.set_*` (and peer-view set-data methods) must invalidate dependent caches at every funnel that mutates the primary input — not just the obvious one.** `set_phasor_data` invalidates ROI cache *and* mask-flat cache. `set_active_mask` invalidates phasor pixel-validity cache. Treat the caches as a coherent set — when one input changes, list every cache derived from it. **And** when adding new pixel-bound state, audit every code path that mutates the primary input: for `PhasorPlotWindow._g_map` that means `set_phasor_data`, `_on_dataset_changed`, AND `_clear_phasor_display`. Defensive comments that say "set_phasor_data resets X" silently bake in a single-funnel assumption and make the sibling paths easy to miss in code review. (Updated 2026-05-04 after a second occurrence on `feat/phasor-clear-within-roi`; the original 2026-04-30 fix only patched `set_phasor_data`.)
 
 5. **Per-state events on every state slot.** Any `Session.set_*` that clears multiple slots must emit per-slot events, not just a coarse `DATASET_CHANGED`. Peer views subscribe to specific slots; coarse events leave them stale. (Second occurrence of this rule — see [`session-bridge-event-forwarding.md`](../architecture-decisions/session-bridge-event-forwarding.md).)
 
@@ -196,3 +227,4 @@ The reason this took five rounds: each fix made the symptom *mutate* rather than
 - [`percell4-flim-phasor-troubleshooting.md`](../ui-bugs/percell4-flim-phasor-troubleshooting.md) — foundational FLIM pipeline correctness work. The math from that doc is correct; this doc explains why correct math can still produce wrong-looking output when the *inputs* are stale. (session history: an April 23 BOE wavelet session reported "BOE filter looks unfiltered, levels do nothing" — concluded at the time to be inherent algorithm mildness, but in retrospect that symptom shape matches vector 5 and may have been an earlier brush with this class.)
 - [`napari-mask-layer-misclassified-as-segmentation.md`](../ui-bugs/napari-mask-layer-misclassified-as-segmentation.md) — Item 6 ("Stale HDF5 data") is a micro-precedent for vector 5 from a different module.
 - [`docs/brainstorms/2026-04-30-phasor-mask-filter-requirements.md`](../../brainstorms/2026-04-30-phasor-mask-filter-requirements.md) — feature requirements for the mask-filter checkbox that exposed this bug class. The feature itself is straightforward; the staleness chain it surfaced is the durable learning.
+- [`docs/plans/2026-05-04-001-feat-phasor-clear-within-roi-plan.md`](../../plans/2026-05-04-001-feat-phasor-clear-within-roi-plan.md) and PR #5 (commit 46b1c7c) — second occurrence of Vector 4. The Clear-within-ROI feature added a new pixel-bound bitmap whose initial lifecycle reset assumed `set_phasor_data` was the single funnel. Code review surfaced the two sibling funnels (`_on_dataset_changed`, `_clear_phasor_display`) that bypass it. See the Vector 4 follow-up section above for the corrected pattern.
