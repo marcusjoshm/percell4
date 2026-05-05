@@ -155,6 +155,131 @@ def test_channel_switch_while_hidden_is_noop(qtbot, window, repo, session_with_d
 # ── Race guard ────────────────────────────────────────────────
 
 
+# ── Dataset switch auto-load ─────────────────────────────────
+
+
+def test_dataset_switch_same_channel_name_auto_loads_new_cache(qtbot, tmp_path, repo):
+    """Switching datasets where both have the same active_channel name
+    must auto-load the new dataset's cached phasor.
+
+    Bug: Session.set_dataset suppresses ACTIVE_CHANNEL_CHANGED when
+    prev_channel == new_channel (session.py:166). This is very common
+    in microscopy workflows where every dataset has channels named
+    'ch0'/'ch1'/... or domain-specific names that repeat across
+    datasets. Without an explicit auto-load call in
+    _on_dataset_changed, the user is forced to click Compute Phasor
+    and then Apply Wavelet Filter every time they load a new dataset
+    — even when the new dataset's HDF5 already contains both caches.
+    """
+    s = Session()
+    handle_a = DatasetHandle(
+        path=tmp_path / "a.h5",
+        metadata={"flim_frequency_mhz": 80.0, "channel_names": ["ch0"]},
+    )
+    s.set_dataset(handle_a)
+
+    win = PhasorPlotWindow(s, get_repo=lambda: repo)
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    # No cache seeded → window is empty (no spurious data from showEvent).
+    assert win._g_map is None
+
+    # Seed the cache the new dataset will hit. Same channel name "ch0".
+    _seed_full_cache(repo, channel="ch0")
+
+    # Switch to dataset B with the same channel name. Per session.set_dataset
+    # emit ordering, ACTIVE_CHANNEL_CHANGED is SUPPRESSED here because
+    # prev_channel == new_channel == "ch0" — so the existing
+    # _on_active_channel_changed auto-load path will NOT fire.
+    handle_b = DatasetHandle(
+        path=tmp_path / "b.h5",
+        metadata={"flim_frequency_mhz": 80.0, "channel_names": ["ch0"]},
+    )
+    s.set_dataset(handle_b)
+
+    # The fix: _on_dataset_changed must explicitly call
+    # _try_auto_load_cached so the new dataset's cached phasor lands
+    # without requiring user clicks. Mirror the existing pattern at
+    # phasor_plot.py for the mask checkbox (line 1576-1578), which
+    # already handles the same suppressed-event case for masks.
+    assert win._g_map is not None, (
+        "Phasor auto-load did not fire on dataset switch when prev_channel "
+        "== new_channel — _on_dataset_changed needs to call "
+        "_try_auto_load_cached() at the end."
+    )
+    # Wavelet was cached → filtered values are what landed in _g_map.
+    assert win._g_map_unfiltered is not None
+
+
+def test_dataset_switch_different_channel_name_still_auto_loads(
+    qtbot, tmp_path, repo
+):
+    """Switching datasets where channel names differ also auto-loads.
+
+    In this case ACTIVE_CHANNEL_CHANGED fires (prev != new), and the
+    existing _on_active_channel_changed path would auto-load. The
+    explicit call in _on_dataset_changed makes it idempotent — calling
+    twice with the same cache hits the same set_phasor_data path.
+    """
+    s = Session()
+    handle_a = DatasetHandle(
+        path=tmp_path / "a.h5",
+        metadata={"flim_frequency_mhz": 80.0, "channel_names": ["chA"]},
+    )
+    s.set_dataset(handle_a)
+
+    win = PhasorPlotWindow(s, get_repo=lambda: repo)
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    assert win._g_map is None
+
+    _seed_full_cache(repo, channel="chB")
+
+    handle_b = DatasetHandle(
+        path=tmp_path / "b.h5",
+        metadata={"flim_frequency_mhz": 80.0, "channel_names": ["chB"]},
+    )
+    s.set_dataset(handle_b)
+
+    assert win._g_map is not None
+
+
+def test_dataset_switch_no_cache_leaves_window_empty(qtbot, tmp_path, repo):
+    """If the new dataset has no cached phasor, auto-load no-ops.
+    'No phasor computed' status from _on_dataset_changed remains."""
+    s = Session()
+    handle_a = DatasetHandle(
+        path=tmp_path / "a.h5",
+        metadata={"flim_frequency_mhz": 80.0, "channel_names": ["ch0"]},
+    )
+    s.set_dataset(handle_a)
+    _seed_full_cache(repo, channel="ch0")
+
+    win = PhasorPlotWindow(s, get_repo=lambda: repo)
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    assert win._g_map is not None  # auto-loaded from showEvent
+
+    # Switch to a dataset with no cache. Same channel name (so
+    # ACTIVE_CHANNEL_CHANGED suppressed). _on_dataset_changed clears
+    # state, then _try_auto_load_cached sees no cache and silently
+    # leaves _g_map cleared.
+    handle_b = DatasetHandle(
+        path=tmp_path / "b.h5",
+        metadata={"flim_frequency_mhz": 80.0, "channel_names": ["ch0"]},
+    )
+    # Do NOT seed for the switch — but the existing seed remains under
+    # "ch0" in the FakeRepo. Wipe so we simulate a truly empty cache.
+    repo.arrays.clear()
+
+    s.set_dataset(handle_b)
+
+    assert win._g_map is None
+
+
 def test_show_with_g_map_already_set_does_not_clobber(qtbot, window, repo):
     """If a compute is already in flight (g_map set), auto-load is a no-op."""
     _seed_full_cache(repo)
