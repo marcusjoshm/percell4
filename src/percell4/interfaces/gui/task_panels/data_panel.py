@@ -285,7 +285,17 @@ class DataPanel(QWidget):
     # ── Layer Management ─────────────────────────────────────
 
     def refresh_management_combos(self) -> None:
-        """Refresh all management dropdowns from the current store."""
+        """Refresh all management dropdowns from the current store.
+
+        Channel names come from ``session.dataset.metadata["channel_names"]``
+        (the canonical source the Active Channel combo also uses). Sourcing
+        from ``viewer.layers`` alone is timing-fragile — if this runs before
+        ``_populate_viewer_from_store`` adds the layers, the combo lands
+        with zero items, which renders as an unclickable dropdown in Qt
+        (an empty QComboBox doesn't open its popup). Napari Image layers
+        not already in metadata are unioned in afterward so orphan names
+        like ``ch<N>`` remain deletable from this UI.
+        """
         store = self._get_store()
 
         self._mgmt_seg_combo.clear()
@@ -299,11 +309,19 @@ class DataPanel(QWidget):
                 self._mgmt_mask_combo.addItem(name)
 
         self._mgmt_chan_combo.clear()
+        seen: set[str] = set()
+        session = self.data_model.session
+        if session.dataset is not None:
+            for name in session.dataset.metadata.get("channel_names", []):
+                if name not in seen:
+                    self._mgmt_chan_combo.addItem(name)
+                    seen.add(name)
         viewer_win = self._get_viewer_win()
         if viewer_win is not None and viewer_win.viewer is not None:
             for layer in viewer_win.viewer.layers:
-                if layer.__class__.__name__ == "Image":
+                if layer.__class__.__name__ == "Image" and layer.name not in seen:
                     self._mgmt_chan_combo.addItem(layer.name)
+                    seen.add(layer.name)
 
     def refresh_active_combos(self) -> None:
         """Refresh the active segmentation/mask dropdowns from store + session.
