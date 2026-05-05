@@ -124,13 +124,18 @@ def test_labels_opacity_caller_wins(monkeypatch, viewer_harness, small_labels):
     assert viewer_harness.viewer.layers["seg"].opacity == pytest.approx(0.9)
 
 
-def test_labels_opacity_none_defers_to_napari_default(
-    viewer_harness, small_labels
-):
-    """With LABELS_DEFAULT_OPACITY = None, napari's default 0.7 applies."""
-    assert vp.LABELS_DEFAULT_OPACITY is None
+def test_labels_opacity_default_propagates(viewer_harness, small_labels):
+    """The current LABELS_DEFAULT_OPACITY ships through add_labels.
+
+    If the constant is None (sentinel), no kwarg is passed and napari's
+    default 0.7 applies. If a numeric value is set in viewer_presets.py,
+    that value reaches the layer.
+    """
+    expected = (
+        0.7 if vp.LABELS_DEFAULT_OPACITY is None else vp.LABELS_DEFAULT_OPACITY
+    )
     viewer_harness.add_labels(small_labels, "seg")
-    assert viewer_harness.viewer.layers["seg"].opacity == pytest.approx(0.7)
+    assert viewer_harness.viewer.layers["seg"].opacity == pytest.approx(expected)
 
 
 # ── add_labels color_dict propagation (caller-wins precedence) ────────
