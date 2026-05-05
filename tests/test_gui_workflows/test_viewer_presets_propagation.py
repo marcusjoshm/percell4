@@ -187,3 +187,64 @@ def test_labels_color_dict_none_uses_napari_random(
     # The contract is "we didn't override" — assert by exclusion.
     cmap = viewer_harness.viewer.layers["seg"].colormap
     assert not isinstance(cmap, DirectLabelColormap)
+
+
+# ── Specialized call sites (U3/U4/U5): assembly via _optional_kwargs ───
+#
+# Threshold-QC group image, FLIM lifetime, and yellow-ROI shapes call
+# napari's ``add_image`` / ``add_shapes`` directly (not through
+# ``ViewerWindow``). Each site uses ``vp._optional_kwargs(...)`` to spread
+# its preset axes. These tests exercise that assembly path with
+# monkeypatched constants — they prove the constants flow through the
+# helper into the kwargs the call site spreads. Visual smoke pass in U6
+# covers the rendering side.
+
+
+def test_threshold_qc_group_image_kwargs_omit_none_today():
+    """With today's ship values (both None), the assembly produces no
+    opacity / contrast_limits kwargs at the threshold-QC group image call site."""
+    assert vp.THRESHOLD_QC_GROUP_IMAGE_OPACITY is None
+    assert vp.THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE is None
+    assembled = vp._optional_kwargs(
+        opacity=vp.THRESHOLD_QC_GROUP_IMAGE_OPACITY,
+        contrast_limits=vp.THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE,
+    )
+    assert assembled == {}
+
+
+def test_threshold_qc_group_image_opacity_propagates_when_set(monkeypatch):
+    """Monkeypatching THRESHOLD_QC_GROUP_IMAGE_OPACITY yields an opacity
+    kwarg that the threshold-QC call site spreads into add_image."""
+    monkeypatch.setattr(vp, "THRESHOLD_QC_GROUP_IMAGE_OPACITY", 0.42)
+    assembled = vp._optional_kwargs(
+        opacity=vp.THRESHOLD_QC_GROUP_IMAGE_OPACITY,
+        contrast_limits=vp.THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE,
+    )
+    assert assembled == {"opacity": 0.42}
+
+
+def test_threshold_qc_group_image_contrast_propagates_when_set(monkeypatch):
+    """Monkeypatching the contrast override yields a contrast_limits kwarg."""
+    monkeypatch.setattr(
+        vp, "THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE", (10.0, 200.0)
+    )
+    assembled = vp._optional_kwargs(
+        opacity=vp.THRESHOLD_QC_GROUP_IMAGE_OPACITY,
+        contrast_limits=vp.THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE,
+    )
+    assert assembled == {"contrast_limits": (10.0, 200.0)}
+
+
+def test_threshold_qc_group_image_call_site_uses_helper():
+    """Source-level guard: the threshold_qc.py group-image add_image call
+    must spread vp._optional_kwargs and reference both new constants."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "src" / "percell4" / "gui" / "threshold_qc.py"
+    )
+    text = src.read_text(encoding="utf-8")
+    assert "vp._optional_kwargs(" in text
+    assert "THRESHOLD_QC_GROUP_IMAGE_OPACITY" in text
+    assert "THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE" in text

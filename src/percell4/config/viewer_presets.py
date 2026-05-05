@@ -71,6 +71,28 @@ def _colormap_for_channel(name: str, color_index: int = 0) -> tuple[str, int]:
     return color, color_index + 1
 
 
+def _optional_kwargs(**axes: object) -> dict[str, object]:
+    """Filter ``None`` values from kwargs so call sites can pass preset
+    constants through the ``None``-sentinel discipline.
+
+    Used by specialized call sites that construct napari ``add_*`` kwargs
+    directly (rather than through ``ViewerWindow.add_image`` / ``add_labels``,
+    which do their own per-axis pop). Spread the result with ``**`` at the
+    call site::
+
+        viewer.add_image(
+            data, name=name, colormap=cmap, blending=blending,
+            **_optional_kwargs(
+                opacity=THRESHOLD_QC_GROUP_IMAGE_OPACITY,
+                contrast_limits=THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE,
+            ),
+        )
+
+    Pure function — no napari, no Qt, no module state.
+    """
+    return {k: v for k, v in axes.items() if v is not None}
+
+
 # ── Image layer defaults ────────────────────────────────────
 IMAGE_DEFAULT_BLENDING: Final[str] = "translucent_no_depth"
 IMAGE_DEFAULT_OPACITY: Final[float | None] = None

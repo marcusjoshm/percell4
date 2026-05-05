@@ -391,13 +391,18 @@ class ThresholdQCController(QObject):
         np.copyto(self._group_image_buffer, self._smoothed_image, where=group_cell_mask)
         self._current_group_mask = group_cell_mask
 
-        # Add/update group image layer
+        # Add/update group image layer. opacity / contrast_limits read from
+        # vp through _optional_kwargs — None-sentinel values are skipped.
         self._remove_layer(_LAYER_GROUP_IMAGE)
         viewer.add_image(
             self._group_image_buffer.copy(),  # copy since buffer is reused
             name=_LAYER_GROUP_IMAGE,
             colormap=vp.THRESHOLD_QC_GROUP_IMAGE_COLORMAP,
             blending=vp.THRESHOLD_QC_GROUP_IMAGE_BLENDING,
+            **vp._optional_kwargs(
+                opacity=vp.THRESHOLD_QC_GROUP_IMAGE_OPACITY,
+                contrast_limits=vp.THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE,
+            ),
         )
 
         # Compute initial threshold
