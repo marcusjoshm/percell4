@@ -8,6 +8,7 @@ channels) rather than individual files.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from qtpy.QtCore import Qt
@@ -437,13 +438,27 @@ class CompressDialog(QDialog):
                 },
             }
 
+        # Re-resolve each DatasetSpec.output_path against the current
+        # Output field. Discovery bakes output_path at scan time, but
+        # the user can edit Output afterward without re-running
+        # discovery — this materialization is the single point where
+        # the typed value becomes authoritative. Without this, edits to
+        # the Output field are silently discarded and .h5 files land
+        # at the auto-fill location (the parent of the source dir).
+        datasets = list(self._datasets)
+        if output_dir is not None:
+            datasets = [
+                replace(ds, output_path=output_dir / f"{ds.name}.h5")
+                for ds in datasets
+            ]
+
         return CompressConfig(
             z_project_method=self._z_combo.currentText(),
             token_config=self._current_token_config(),
             output_dir=output_dir,
             selected_channels=selected_channels,
             tile_config=tile_config,
-            datasets=list(self._datasets),
+            datasets=datasets,
             gui_states=gui_states,
             layer_assignments=layer_assignments,
             dataset_name_overrides=dataset_name_overrides,
