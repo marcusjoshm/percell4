@@ -248,3 +248,48 @@ def test_threshold_qc_group_image_call_site_uses_helper():
     assert "vp._optional_kwargs(" in text
     assert "THRESHOLD_QC_GROUP_IMAGE_OPACITY" in text
     assert "THRESHOLD_QC_GROUP_IMAGE_CONTRAST_OVERRIDE" in text
+
+
+# ── FLIM lifetime ──────────────────────────────────────────────────────
+
+
+def test_flim_lifetime_kwargs_omit_none_today():
+    assert vp.FLIM_LIFETIME_OPACITY is None
+    assert vp.FLIM_LIFETIME_CONTRAST_OVERRIDE is None
+    assembled = vp._optional_kwargs(
+        opacity=vp.FLIM_LIFETIME_OPACITY,
+        contrast_limits=vp.FLIM_LIFETIME_CONTRAST_OVERRIDE,
+    )
+    assert assembled == {}
+
+
+def test_flim_lifetime_opacity_propagates_when_set(monkeypatch):
+    monkeypatch.setattr(vp, "FLIM_LIFETIME_OPACITY", 0.42)
+    assembled = vp._optional_kwargs(
+        opacity=vp.FLIM_LIFETIME_OPACITY,
+        contrast_limits=vp.FLIM_LIFETIME_CONTRAST_OVERRIDE,
+    )
+    assert assembled == {"opacity": 0.42}
+
+
+def test_flim_lifetime_contrast_propagates_when_set(monkeypatch):
+    monkeypatch.setattr(vp, "FLIM_LIFETIME_CONTRAST_OVERRIDE", (0.5, 5.0))
+    assembled = vp._optional_kwargs(
+        opacity=vp.FLIM_LIFETIME_OPACITY,
+        contrast_limits=vp.FLIM_LIFETIME_CONTRAST_OVERRIDE,
+    )
+    assert assembled == {"contrast_limits": (0.5, 5.0)}
+
+
+def test_flim_lifetime_call_site_uses_helper():
+    """Source-level guard for flim_panel.py lifetime add_image."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "src" / "percell4" / "interfaces" / "gui" / "task_panels" / "flim_panel.py"
+    )
+    text = src.read_text(encoding="utf-8")
+    assert "vp._optional_kwargs(" in text
+    assert "FLIM_LIFETIME_OPACITY" in text
+    assert "FLIM_LIFETIME_CONTRAST_OVERRIDE" in text
