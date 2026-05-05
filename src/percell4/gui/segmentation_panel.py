@@ -102,6 +102,15 @@ class SegmentationPanel(QWidget):
         self._cp_gpu.setStyleSheet(f"QCheckBox {{ color: {theme.TEXT}; }}")
         cp_layout.addWidget(self._cp_gpu)
 
+        self._cp_remove_edges = QCheckBox("Remove edge cells")
+        self._cp_remove_edges.setChecked(True)
+        self._cp_remove_edges.setStyleSheet(f"QCheckBox {{ color: {theme.TEXT}; }}")
+        self._cp_remove_edges.setToolTip(
+            "Discard cells touching the image border after segmentation.\n"
+            "Untick to keep partial edge cells (e.g., for tiled imaging)."
+        )
+        cp_layout.addWidget(self._cp_remove_edges)
+
         btn_run_cp = QPushButton("Run Cellpose")
         btn_run_cp.clicked.connect(self._on_run_cellpose)
         cp_layout.addWidget(btn_run_cp)
@@ -283,7 +292,9 @@ class SegmentationPanel(QWidget):
         try:
             repo = Hdf5DatasetRepository()
             uc = SegmentCells(repo, self.data_model.session)
-            result = uc.finalize(masks)
+            result = uc.finalize(
+                masks, remove_edge_cells=self._cp_remove_edges.isChecked()
+            )
         except ValueError as e:
             self._show_status(f"Error: {e}")
             return

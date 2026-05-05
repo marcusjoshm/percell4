@@ -74,6 +74,7 @@ class SegmentCells:
         self,
         raw_masks: NDArray[np.int32],
         min_area: int = 15,
+        remove_edge_cells: bool = True,
     ) -> SegmentationResult:
         """Post-process masks, write to store, update session.
 
@@ -83,7 +84,11 @@ class SegmentCells:
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
-        labels, edge_removed = filter_edge_cells(raw_masks)
+        if remove_edge_cells:
+            labels, edge_removed = filter_edge_cells(raw_masks)
+        else:
+            labels = raw_masks.copy()
+            edge_removed = 0
         labels, small_removed = filter_small_cells(labels, min_area=min_area)
         labels = relabel_sequential(labels)
         n_cells = int(labels.max())
