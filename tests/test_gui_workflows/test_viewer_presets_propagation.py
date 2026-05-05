@@ -293,3 +293,62 @@ def test_flim_lifetime_call_site_uses_helper():
     assert "vp._optional_kwargs(" in text
     assert "FLIM_LIFETIME_OPACITY" in text
     assert "FLIM_LIFETIME_CONTRAST_OVERRIDE" in text
+
+
+# ── Yellow-ROI shapes (both call sites) ────────────────────────────────
+
+
+def test_yellow_roi_opacity_kwargs_omit_none_today():
+    assert vp.YELLOW_ROI_OPACITY is None
+    assembled = vp._optional_kwargs(opacity=vp.YELLOW_ROI_OPACITY)
+    assert assembled == {}
+
+
+def test_yellow_roi_opacity_propagates_when_set(monkeypatch):
+    monkeypatch.setattr(vp, "YELLOW_ROI_OPACITY", 0.42)
+    assembled = vp._optional_kwargs(opacity=vp.YELLOW_ROI_OPACITY)
+    assert assembled == {"opacity": 0.42}
+
+
+def test_yellow_roi_threshold_qc_call_site_uses_helper():
+    """Source-level guard for threshold_qc.py add_shapes."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "src" / "percell4" / "gui" / "threshold_qc.py"
+    )
+    text = src.read_text(encoding="utf-8")
+    # Must use the helper for opacity at the yellow-ROI add_shapes site
+    assert "YELLOW_ROI_OPACITY" in text
+
+
+def test_yellow_roi_analysis_panel_call_site_uses_helper():
+    """Source-level guard for analysis_panel.py add_shapes — no blending=
+    drift preserved."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "src" / "percell4" / "interfaces" / "gui" / "task_panels"
+        / "analysis_panel.py"
+    )
+    text = src.read_text(encoding="utf-8")
+    assert "YELLOW_ROI_OPACITY" in text
+    # Drift preservation: the analysis_panel ROI add_shapes does NOT pass
+    # blending=. This guards against a future contributor "fixing" the
+    # asymmetry by adding blending=vp.YELLOW_ROI_BLENDING to this site.
+    # We check the specific add_shapes block: between the pre-call comment
+    # and the closing paren of the add_shapes call, no `blending=` appears.
+    add_shapes_idx = text.find("viewer_win.viewer.add_shapes(\n            [],")
+    if add_shapes_idx == -1:
+        # Fallback: less strict match
+        add_shapes_idx = text.find("add_shapes(\n            [],")
+    assert add_shapes_idx != -1, "Could not locate the analysis-panel add_shapes block"
+    closing_idx = text.find(")", add_shapes_idx)
+    assert closing_idx != -1
+    block = text[add_shapes_idx:closing_idx]
+    assert "blending=" not in block, (
+        "analysis_panel.py yellow-ROI add_shapes must NOT pass blending= "
+        "(drift preserved per plan U5/U7)"
+    )

@@ -439,6 +439,7 @@ class ThresholdQCController(QObject):
             edge_width=vp.YELLOW_ROI_EDGE_WIDTH,
             face_color=list(vp.YELLOW_ROI_FACE_COLOR),
             blending=vp.YELLOW_ROI_BLENDING,
+            **vp._optional_kwargs(opacity=vp.YELLOW_ROI_OPACITY),
         )
 
         # Wire ROI changes — listen to mode changes so we update only when
