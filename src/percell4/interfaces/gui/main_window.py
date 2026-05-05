@@ -35,6 +35,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.config import viewer_presets as vp
 from percell4.gui import theme
 from percell4.model import CellDataModel
 
@@ -1055,8 +1056,8 @@ class LauncherWindow(QMainWindow):
                 binary_mask,
                 name=layer_name,
                 colormap=colormap,
-                opacity=0.4,
-                blending="translucent",
+                opacity=vp.PHASOR_ROI_MASK_OPACITY,
+                blending=vp.PHASOR_ROI_MASK_BLENDING,
                 visible=visible,
             )
 
