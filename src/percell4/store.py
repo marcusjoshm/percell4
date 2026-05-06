@@ -31,6 +31,19 @@ from percell4.domain.io.models import (
 _READ_CACHE_BYTES = 64 * 1024 * 1024
 
 
+# Provenance-attribute keys for masks captured by "Apply Current Phasor
+# as Mask". Single source of truth so future readers cannot drift from
+# the writer in main_window.py.
+PHASOR_MASK_ATTR_INTENSITY_THRESHOLD = "phasor_intensity_threshold"
+PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_G = "phasor_ref_circle_center_g"
+PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_S = "phasor_ref_circle_center_s"
+PHASOR_MASK_ATTR_REF_CIRCLE_RADIUS = "phasor_ref_circle_radius"
+PHASOR_MASK_ATTR_ACTIVE_MASK = "phasor_active_mask_at_capture"
+PHASOR_MASK_ATTR_CLEARED_PIXEL_COUNT = "phasor_cleared_pixel_count"
+PHASOR_MASK_ATTR_ACTIVE_CHANNEL = "phasor_active_channel"
+PHASOR_MASK_ATTR_CAPTURE_ISO = "phasor_capture_iso8601"
+
+
 class LayerAlreadyExistsError(Exception):
     """Raised when a payload group already exists and force=False."""
 
@@ -271,7 +284,7 @@ class DatasetStore:
         """List all mask names under /masks/."""
         return self.list_groups("masks")
 
-    def set_mask_attrs(self, name: str, attrs: dict[str, Any]) -> int:
+    def set_mask_attrs(self, name: str, attrs: dict[str, Any]) -> None:
         """Write HDF5 attributes onto an existing /masks/<name> dataset.
 
         HDF5 attributes do not accept Python ``None``. Callers must
@@ -279,11 +292,9 @@ class DatasetStore:
         intensity threshold, -1.0 for an unset radius, "" for an empty
         string). Keys whose value is ``None`` are skipped.
 
-        Returns the number of attributes actually written. Raises
-        ``KeyError`` if /masks/<name> does not exist.
+        Raises ``KeyError`` if /masks/<name> does not exist.
         """
         path = f"masks/{name}"
-        written = 0
         with h5py.File(self.path, "a") as f:
             if path not in f:
                 raise KeyError(f"Mask not found: {path}")
@@ -292,8 +303,6 @@ class DatasetStore:
                 if val is None:
                     continue
                 ds.attrs[key] = val
-                written += 1
-        return written
 
     # ── Groups and metadata ───────────────────────────────────
 

@@ -1145,13 +1145,24 @@ class LauncherWindow(QMainWindow):
 
         Filter-state attributes are read back from the live
         ``PhasorPlotWindow`` rather than carried in the payload — this
-        is an explicit launcher → window tight coupling on a handful of
+        is an explicit launcher → window coupling on a handful of
         private fields (``_intensity_threshold``, ``_ref_circle_*``,
-        ``_cleared_mask``). U2 keeps the payload contract minimal at
-        ``(name, binary)``; if that coupling becomes a problem, switch
-        to extending the payload with a filter-state dict.
+        ``_cleared_mask``). The signal payload stays minimal at
+        ``(name, binary)``; if the coupling becomes a problem, extend
+        the payload with a filter-state dict.
         """
         from datetime import datetime, timezone
+
+        from percell4.store import (
+            PHASOR_MASK_ATTR_ACTIVE_CHANNEL,
+            PHASOR_MASK_ATTR_ACTIVE_MASK,
+            PHASOR_MASK_ATTR_CAPTURE_ISO,
+            PHASOR_MASK_ATTR_CLEARED_PIXEL_COUNT,
+            PHASOR_MASK_ATTR_INTENSITY_THRESHOLD,
+            PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_G,
+            PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_S,
+            PHASOR_MASK_ATTR_REF_CIRCLE_RADIUS,
+        )
 
         name, binary = payload
 
@@ -1159,23 +1170,18 @@ class LauncherWindow(QMainWindow):
         if store is None:
             return
 
-        # Step 1: write the mask before any UI side effect
-        # (store-before-layer invariant).
         store.write_mask(name, binary)
 
-        # Step 2: napari layer for visual feedback. Mirrors the per-ROI
-        # subscriber's add_mask call.
         viewer_win = self._windows.get("viewer")
         if viewer_win is not None and viewer_win._is_alive():
             viewer_win.add_mask(binary, name=name)
 
-        # Step 3: persist filter-state attributes on /masks/<name>.
-        # Reach back into the live phasor window for snapshot fields.
-        # HDF5 attrs do not accept None — substitute sentinel values
-        # documented in DatasetStore.set_mask_attrs.
+        # Sentinel values stand in for None because HDF5 attrs cannot
+        # hold None: 0.0 for unset center, -1.0 for unset radius (so
+        # readers can distinguish "no circle" from "radius 0").
         phasor_win = self._windows.get("phasor_plot")
         attrs: dict[str, object] = {
-            "phasor_capture_iso8601": (
+            PHASOR_MASK_ATTR_CAPTURE_ISO: (
                 datetime.now(timezone.utc)
                 .replace(tzinfo=None)
                 .isoformat()
@@ -1185,32 +1191,28 @@ class LauncherWindow(QMainWindow):
         if phasor_win is not None:
             session = phasor_win._session
             threshold = phasor_win._intensity_threshold
-            attrs["phasor_intensity_threshold"] = (
+            attrs[PHASOR_MASK_ATTR_INTENSITY_THRESHOLD] = (
                 float(threshold) if threshold is not None else 0.0
             )
             center = phasor_win._ref_circle_center
             if center is not None:
-                attrs["phasor_ref_circle_center_g"] = float(center[0])
-                attrs["phasor_ref_circle_center_s"] = float(center[1])
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_G] = float(center[0])
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_S] = float(center[1])
             else:
-                attrs["phasor_ref_circle_center_g"] = 0.0
-                attrs["phasor_ref_circle_center_s"] = 0.0
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_G] = 0.0
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_S] = 0.0
             radius = phasor_win._ref_circle_radius
-            attrs["phasor_ref_circle_radius"] = (
+            attrs[PHASOR_MASK_ATTR_REF_CIRCLE_RADIUS] = (
                 float(radius) if radius is not None else -1.0
             )
-            attrs["phasor_active_mask_at_capture"] = (
-                session.active_mask or ""
-            )
+            attrs[PHASOR_MASK_ATTR_ACTIVE_MASK] = session.active_mask or ""
             cleared = phasor_win._cleared_mask
-            attrs["phasor_cleared_pixel_count"] = (
+            attrs[PHASOR_MASK_ATTR_CLEARED_PIXEL_COUNT] = (
                 int(cleared.sum()) if cleared is not None else 0
             )
-            attrs["phasor_active_channel"] = session.active_channel or ""
+            attrs[PHASOR_MASK_ATTR_ACTIVE_CHANNEL] = session.active_channel or ""
         store.set_mask_attrs(name, attrs)
 
-        # Step 4: refresh resource lists, set active mask, surface
-        # the snapshot→active transition before the next click.
         self.data_model.session.refresh_resource_lists(
             mask_names=store.list_masks(),
         )

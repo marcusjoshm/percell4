@@ -1823,21 +1823,27 @@ class PhasorPlotWindow(QMainWindow):
         self._btn_apply_rois.setEnabled(enabled)
         self._btn_apply_current_phasor.setEnabled(enabled)
 
-    def _default_phasor_mask_name(self) -> str:
+    def _existing_mask_names(self) -> list[str]:
+        """Snapshot of mask names from the active session's metadata.
+
+        Returns an empty list when no dataset is loaded.
+        """
+        if self._session.dataset is None:
+            return []
+        return list(self._session.dataset.metadata.get("mask_names", []))
+
+    def _default_phasor_mask_name(
+        self, existing: list[str] | None = None
+    ) -> str:
         """Compute the default name for an Apply Current Phasor save.
 
         Template: ``phasor_<active_channel>_<N>`` where ``N`` is the
         smallest positive integer such that the resulting name is not
-        already in ``session.dataset.metadata["mask_names"]``. Falls back
-        to ``phasor_<N>`` when ``active_channel`` is falsy (no
-        ``unknown`` placeholder).
+        already in ``existing``. Falls back to ``phasor_<N>`` when
+        ``active_channel`` is falsy (no ``unknown`` placeholder).
         """
-        if self._session.dataset is not None:
-            existing = list(
-                self._session.dataset.metadata.get("mask_names", [])
-            )
-        else:
-            existing = []
+        if existing is None:
+            existing = self._existing_mask_names()
         existing_set = set(existing)
         channel = self._session.active_channel
         prefix = f"phasor_{channel}_" if channel else "phasor_"
@@ -1853,32 +1859,20 @@ class PhasorPlotWindow(QMainWindow):
         ``_compute_visible_valid_2d()`` cast to uint8. Prompts for a
         name, refuses to overwrite an existing mask, and warns if the
         result would be empty before emitting ``phasor_mask_applied``
-        with a ``(name, binary)`` tuple. The launcher subscriber
-        (wired in U3) writes /masks/<name> and auto-selects it.
+        with a ``(name, binary)`` tuple. The launcher subscriber writes
+        ``/masks/<name>`` and auto-selects it.
         """
-        # Step 1: compute the visibility predicate. Must precede any
-        # .astype call — disabled-when-empty gate normally prevents
-        # reach, but the early-return is the load-bearing safety net.
+        # The disabled-when-empty gate normally prevents reach with no
+        # data; the early-return is the load-bearing safety net behind
+        # it because `.astype` on None would raise.
         visible = self._compute_visible_valid_2d()
         if visible is None:
             return
-
-        # Step 2: cast to the launcher's expected dtype.
         binary = visible.astype(np.uint8)
 
-        # Step 3: read existing mask names from session metadata and
-        # compute the default name.
-        if self._session.dataset is not None:
-            existing = list(
-                self._session.dataset.metadata.get("mask_names", [])
-            )
-        else:
-            existing = []
-        current_default = self._default_phasor_mask_name()
+        existing = self._existing_mask_names()
+        current_default = self._default_phasor_mask_name(existing)
 
-        # Step 4: prompt-and-validate loop. A blank submission keeps the
-        # original computed default; a collision pre-fills the typed
-        # name and warns; Cancel returns silently.
         while True:
             name, ok = QInputDialog.getText(
                 self,
@@ -1903,8 +1897,6 @@ class PhasorPlotWindow(QMainWindow):
                 continue
             break
 
-        # Step 5: confirm zero-pixel saves. Researcher mental model is
-        # regions/cells, not pixels, so the copy avoids "zero pixels".
         if int(binary.sum()) == 0:
             response = QMessageBox.question(
                 self,
@@ -1916,7 +1908,6 @@ class PhasorPlotWindow(QMainWindow):
             if response != QMessageBox.Yes:
                 return
 
-        # Step 6: emit. Launcher handles the HDF5 write + auto-select.
         self.phasor_mask_applied.emit((name, binary))
 
     # ── Save plot as SVG ──────────────────────────────────────

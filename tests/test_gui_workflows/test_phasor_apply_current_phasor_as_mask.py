@@ -15,56 +15,12 @@ import numpy as np
 import pytest
 from qtpy.QtWidgets import QInputDialog, QMessageBox
 
-from percell4.application.session import Session
-from percell4.domain.dataset import DatasetHandle
-from percell4.interfaces.gui.peer_views.phasor_plot import (
-    PhasorPlotWindow,
-    PhasorROI,
-)
+from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
 
-
-@pytest.fixture
-def session_with_dataset(tmp_path) -> Session:
-    sess = Session()
-    sess._dataset = DatasetHandle(path=tmp_path / "fake.h5", metadata={})
-    return sess
-
-
-def _wide_phasor_maps(shape=(16, 16)) -> tuple[np.ndarray, np.ndarray]:
-    """Build deterministic g/s maps that span a wide phasor region."""
-    h, w = shape
-    gs = np.linspace(0.05, 0.95, h * w, dtype=np.float32).reshape(shape)
-    ss = np.linspace(0.05, 0.45, h * w, dtype=np.float32).reshape(shape)
-    return gs, ss
-
-
-def _add_wide_roi(window: PhasorPlotWindow, name: str = "ROI_test") -> None:
-    """Place a single ROI big enough to enclose the entire phasor cloud."""
-    roi = PhasorROI(
-        name=name,
-        center=(0.5, 0.25),
-        radii=(0.6, 0.4),
-        angle_deg=0,
-        label=1,
-        color="#ff00ff",
-    )
-    window._create_roi_widget(roi)
-
-
-@pytest.fixture
-def phasor_window(qtbot, session_with_dataset) -> PhasorPlotWindow:
-    repo = MagicMock()
-    win = PhasorPlotWindow(session_with_dataset, get_repo=lambda: repo)
-    qtbot.addWidget(win)
-    g, s = _wide_phasor_maps()
-    win._g_map = g
-    win._s_map = s
-    win._total_valid_pixels = int((np.isfinite(g) & (g != 0)).sum())
-    # Phasor data was patched in directly (matching the existing test
-    # fixture), so push the gate update by hand. set_phasor_data normally
-    # does this for us.
-    win._refresh_apply_buttons_enabled()
-    return win
+# Shared fixtures (`session_with_dataset`, `phasor_window`) and helpers
+# (`_wide_phasor_maps`, `_add_wide_roi`) live in
+# `tests/test_gui_workflows/conftest.py`.
+from .conftest import _add_wide_roi, _wide_phasor_maps  # noqa: F401
 
 
 def _accept_default_name(monkeypatch) -> None:
@@ -349,7 +305,10 @@ def test_collision_warns_and_reprompts_with_typed_name(
     captured = _capture_phasor_apply(phasor_window)
 
     assert warned == [True], "collision must show a warning"
-    assert seen_defaults[0] == phasor_window._default_phasor_mask_name() or seen_defaults[0] == "phasor_1"
+    # The fixture leaves session.active_channel unset, so the default
+    # falls back to phasor_<N>. With "nucleus" registered as the only
+    # existing mask name, the next free integer is 1.
+    assert seen_defaults[0] == "phasor_1"
     assert seen_defaults[1] == "nucleus", (
         "collision re-prompt must pre-fill the typed name"
     )
