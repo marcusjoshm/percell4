@@ -22,6 +22,7 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -235,6 +236,9 @@ class PhasorPlotWindow(QMainWindow):
     - preview_roi_removed: emitted when an ROI's preview should be removed
     - preview_all_cleared: emitted when every preview should be removed
     - mask_applied: emitted when user clicks "Apply ROIs as Masks"
+    - phasor_mask_applied: emitted when user clicks "Apply Current Phasor as
+      Mask" — payload is a ``(name: str, binary: np.ndarray uint8 2D)``
+      tuple capturing the current filter intersection (ROIs ignored).
     The launcher connects these to mediate viewer + HDF5 access.
     """
 
@@ -249,6 +253,9 @@ class PhasorPlotWindow(QMainWindow):
     preview_all_cleared = Signal()
     # list[tuple[str, ndarray, str]] — per-ROI (name, binary_mask, hex_color)
     mask_applied = Signal(object)
+    # tuple[str, ndarray uint8 2D] — single mask captured from the current
+    # filter intersection (no ROIs). Emitted by "Apply Current Phasor as Mask".
+    phasor_mask_applied = Signal(object)
     # Fired whenever the inputs to the Clear/Reset toolbar button enable
     # rules change (selection, _cleared_mask). One slot connection;
     # callers just emit. Avoids the enumerate-call-sites trap.
@@ -332,6 +339,11 @@ class PhasorPlotWindow(QMainWindow):
         # updates button.setEnabled accordingly.
         self._clear_state_changed.connect(self._update_clear_buttons_enabled)
         self._update_clear_buttons_enabled()
+
+        # Initial disabled state for both apply buttons (data lands later
+        # via set_phasor_data). The single-source helper drives them so a
+        # missed mutation site cannot leave the buttons stale.
+        self._refresh_apply_buttons_enabled()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -585,10 +597,26 @@ class PhasorPlotWindow(QMainWindow):
 
         right_layout.addWidget(sel_group)
 
-        # Apply + Save/Load buttons
-        btn_apply = QPushButton("Apply ROIs as Masks")
-        btn_apply.clicked.connect(self._on_apply_mask)
-        right_layout.addWidget(btn_apply)
+        # Apply + Save/Load buttons. Both apply buttons gate on phasor data
+        # being loaded; their enable state is driven by a single helper
+        # (_refresh_apply_buttons_enabled) so they cannot drift.
+        self._btn_apply_rois = QPushButton("Apply ROIs as Masks")
+        self._btn_apply_rois.setToolTip(
+            "Save one mask per drawn ROI (filters applied). "
+            "Disabled until phasor data is loaded."
+        )
+        self._btn_apply_rois.clicked.connect(self._on_apply_mask)
+        right_layout.addWidget(self._btn_apply_rois)
+
+        self._btn_apply_current_phasor = QPushButton("Apply Current Phasor as Mask")
+        self._btn_apply_current_phasor.setToolTip(
+            "Save the current filter intersection as a single mask. "
+            "Drawn ROIs are not included. Disabled until phasor data is loaded."
+        )
+        self._btn_apply_current_phasor.clicked.connect(
+            self._on_apply_current_phasor_as_mask
+        )
+        right_layout.addWidget(self._btn_apply_current_phasor)
 
         io_row = QHBoxLayout()
         btn_save = QPushButton("Save ROIs...")
@@ -1493,6 +1521,7 @@ class PhasorPlotWindow(QMainWindow):
             self._filtered_check.setEnabled(False)
             self._filtered_check.setChecked(False)
 
+        self._refresh_apply_buttons_enabled()
         self._refresh_histogram()
 
     def _on_filtered_toggled(self, checked: bool) -> None:
@@ -1568,6 +1597,7 @@ class PhasorPlotWindow(QMainWindow):
             self._plot.removeItem(self._hist_item)
             self._hist_item = None
         self._status.showMessage("No phasor computed")
+        self._refresh_apply_buttons_enabled()
 
         # Re-derive checkbox state from current session.active_mask. When
         # both the old and new dataset have the same mask name (e.g.,
@@ -1779,6 +1809,115 @@ class PhasorPlotWindow(QMainWindow):
         self.mask_applied.emit(roi_masks)
         names = ", ".join(name for name, _, _ in roi_masks)
         self._status.showMessage(f"Applied {len(roi_masks)} mask(s): {names}", 5000)
+
+    def _refresh_apply_buttons_enabled(self) -> None:
+        """Single-source enable gate for both apply buttons.
+
+        Reads ``self._g_map is not None`` and pushes that to both
+        ``_btn_apply_rois`` and ``_btn_apply_current_phasor``. Every site
+        that mutates ``self._g_map`` calls this helper rather than
+        toggling buttons inline, which guards against the regression
+        where one button's gate flips but the sibling stays stale.
+        """
+        enabled = self._g_map is not None
+        self._btn_apply_rois.setEnabled(enabled)
+        self._btn_apply_current_phasor.setEnabled(enabled)
+
+    def _default_phasor_mask_name(self) -> str:
+        """Compute the default name for an Apply Current Phasor save.
+
+        Template: ``phasor_<active_channel>_<N>`` where ``N`` is the
+        smallest positive integer such that the resulting name is not
+        already in ``session.dataset.metadata["mask_names"]``. Falls back
+        to ``phasor_<N>`` when ``active_channel`` is falsy (no
+        ``unknown`` placeholder).
+        """
+        if self._session.dataset is not None:
+            existing = list(
+                self._session.dataset.metadata.get("mask_names", [])
+            )
+        else:
+            existing = []
+        existing_set = set(existing)
+        channel = self._session.active_channel
+        prefix = f"phasor_{channel}_" if channel else "phasor_"
+        n = 1
+        while f"{prefix}{n}" in existing_set:
+            n += 1
+        return f"{prefix}{n}"
+
+    def _on_apply_current_phasor_as_mask(self) -> None:
+        """Capture the current filter intersection as a single mask.
+
+        ROIs are ignored — the captured pixels are exactly
+        ``_compute_visible_valid_2d()`` cast to uint8. Prompts for a
+        name, refuses to overwrite an existing mask, and warns if the
+        result would be empty before emitting ``phasor_mask_applied``
+        with a ``(name, binary)`` tuple. The launcher subscriber
+        (wired in U3) writes /masks/<name> and auto-selects it.
+        """
+        # Step 1: compute the visibility predicate. Must precede any
+        # .astype call — disabled-when-empty gate normally prevents
+        # reach, but the early-return is the load-bearing safety net.
+        visible = self._compute_visible_valid_2d()
+        if visible is None:
+            return
+
+        # Step 2: cast to the launcher's expected dtype.
+        binary = visible.astype(np.uint8)
+
+        # Step 3: read existing mask names from session metadata and
+        # compute the default name.
+        if self._session.dataset is not None:
+            existing = list(
+                self._session.dataset.metadata.get("mask_names", [])
+            )
+        else:
+            existing = []
+        current_default = self._default_phasor_mask_name()
+
+        # Step 4: prompt-and-validate loop. A blank submission keeps the
+        # original computed default; a collision pre-fills the typed
+        # name and warns; Cancel returns silently.
+        while True:
+            name, ok = QInputDialog.getText(
+                self,
+                "Save Phasor as Mask",
+                "Mask name:",
+                text=current_default,
+            )
+            if not ok:
+                return
+            if name.strip() == "":
+                # Re-prompt with the original computed default — not the
+                # blank string the user just submitted.
+                continue
+            if name in existing:
+                QMessageBox.warning(
+                    self,
+                    "Name in use",
+                    f"A mask named '{name}' already exists. "
+                    "Please enter a different name below.",
+                )
+                current_default = name
+                continue
+            break
+
+        # Step 5: confirm zero-pixel saves. Researcher mental model is
+        # regions/cells, not pixels, so the copy avoids "zero pixels".
+        if int(binary.sum()) == 0:
+            response = QMessageBox.question(
+                self,
+                "Empty mask",
+                "No pixels match your current filters. "
+                "Save this empty mask anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if response != QMessageBox.Yes:
+                return
+
+        # Step 6: emit. Launcher handles the HDF5 write + auto-select.
+        self.phasor_mask_applied.emit((name, binary))
 
     # ── Save plot as SVG ──────────────────────────────────────
 
@@ -2026,6 +2165,7 @@ class PhasorPlotWindow(QMainWindow):
             self._plot.removeItem(self._hist_item)
             self._hist_item = None
         self._status.showMessage("No phasor cached for this channel")
+        self._refresh_apply_buttons_enabled()
 
     def _save_geometry(self) -> None:
         QSettings("LeeLabPerCell4", "PerCell4").setValue(
