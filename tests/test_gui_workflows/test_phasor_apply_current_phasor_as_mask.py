@@ -479,3 +479,269 @@ def test_signal_payload_shape(phasor_window, monkeypatch):
     assert binary.dtype == np.uint8
     assert binary.ndim == 2
     assert binary.shape == phasor_window._g_map.shape
+
+
+# ── Launcher integration (U3) ────────────────────────────────────────
+
+
+@pytest.fixture
+def launcher_store(tmp_path):
+    """Create a real DatasetStore backing a fresh .h5 file."""
+    from percell4.store import DatasetStore
+
+    store = DatasetStore(tmp_path / "launcher.h5")
+    store.create(metadata={"source": "test"})
+    return store
+
+
+class _StubViewer:
+    """Minimal stub of ViewerWindow for launcher integration tests."""
+
+    def __init__(self, alive: bool = True):
+        self._alive = alive
+        self.add_mask_calls: list[tuple[np.ndarray, str]] = []
+
+    def _is_alive(self) -> bool:
+        return self._alive
+
+    def add_mask(self, binary, name, **kwargs):
+        # Capture exactly the payload the launcher sent so the test
+        # can assert (binary, name) parity with the per-ROI flow.
+        self.add_mask_calls.append((binary, name))
+
+    def close(self) -> None:  # pragma: no cover - cleanup only
+        """Required by LauncherWindow.closeEvent which closes managed windows."""
+        pass
+
+
+@pytest.fixture
+def launcher(qtbot, launcher_store, phasor_window):
+    """Build a real LauncherWindow connected to a real DatasetStore.
+
+    The phasor window is registered in ``_windows`` so that the
+    launcher slot can read filter-state attributes back from it
+    (Option A wiring per U3 plan).
+    """
+    from percell4.application.session import Session
+    from percell4.interfaces.gui.main_window import LauncherWindow
+    from percell4.model import CellDataModel
+
+    sess = Session()
+    sess._dataset = phasor_window._session._dataset  # share dataset metadata
+    model = CellDataModel(session=sess)
+    win = LauncherWindow(model)
+    qtbot.addWidget(win)
+    win._current_store = launcher_store
+    win._windows["phasor_plot"] = phasor_window
+    # Connect the new signal manually — _show_window normally does this
+    # but we are not exercising the show path.
+    phasor_window.phasor_mask_applied.connect(
+        win._on_phasor_current_mask_applied
+    )
+    return win
+
+
+def _binary_8(value: int = 1) -> np.ndarray:
+    arr = np.zeros((8, 8), dtype=np.uint8)
+    arr[2:5, 2:5] = value
+    return arr
+
+
+def test_launcher_persists_mask_and_sets_active(launcher, launcher_store):
+    """Happy path: HDF5 entry exists, list_masks reflects it, active_mask set."""
+    binary = _binary_8()
+
+    state_changes: list = []
+    launcher.data_model.state_changed.connect(state_changes.append)
+
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", binary))
+
+    assert "phasor_NADH_1" in launcher_store.list_masks()
+    np.testing.assert_array_equal(
+        launcher_store.read_mask("phasor_NADH_1"), binary
+    )
+    assert launcher.data_model.session.active_mask == "phasor_NADH_1"
+    flags = {
+        flag
+        for change in state_changes
+        for flag in ("mask", "mask_list")
+        if getattr(change, flag, False)
+    }
+    assert {"mask", "mask_list"} <= flags
+
+
+def test_launcher_adds_napari_layer_when_viewer_alive(launcher, launcher_store):
+    """A live viewer receives an add_mask call with (binary, name)."""
+    stub = _StubViewer(alive=True)
+    launcher._windows["viewer"] = stub
+    binary = _binary_8()
+
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", binary))
+
+    assert len(stub.add_mask_calls) == 1
+    captured_binary, captured_name = stub.add_mask_calls[0]
+    np.testing.assert_array_equal(captured_binary, binary)
+    assert captured_name == "phasor_NADH_1"
+
+
+def test_launcher_skips_layer_when_no_viewer(launcher, launcher_store):
+    """No viewer attached → write proceeds, layer step is skipped."""
+    binary = _binary_8()
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", binary))
+
+    assert "phasor_NADH_1" in launcher_store.list_masks()
+    assert launcher.data_model.session.active_mask == "phasor_NADH_1"
+
+
+def test_launcher_skips_layer_when_viewer_dead(launcher, launcher_store):
+    """Viewer present but ``_is_alive`` False → no add_mask call."""
+    stub = _StubViewer(alive=False)
+    launcher._windows["viewer"] = stub
+
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", _binary_8()))
+
+    assert stub.add_mask_calls == []
+    assert "phasor_NADH_1" in launcher_store.list_masks()
+
+
+def test_launcher_returns_silently_when_no_store(launcher):
+    """``_current_store is None`` → no write, no active_mask change."""
+    launcher._current_store = None
+    initial_active = launcher.data_model.session.active_mask
+
+    # Must not raise.
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", _binary_8()))
+
+    assert launcher.data_model.session.active_mask == initial_active
+
+
+def test_launcher_two_consecutive_saves(launcher, launcher_store):
+    """Both masks land in HDF5; the second becomes active."""
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", _binary_8(1)))
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_2", _binary_8(1)))
+
+    masks = launcher_store.list_masks()
+    assert "phasor_NADH_1" in masks
+    assert "phasor_NADH_2" in masks
+    assert launcher.data_model.session.active_mask == "phasor_NADH_2"
+
+
+def test_launcher_persists_filter_state_attributes(
+    launcher, launcher_store, phasor_window,
+):
+    """/masks/<name> carries every documented provenance attribute."""
+    import h5py
+
+    phasor_window._intensity_threshold = 42.5
+    phasor_window._ref_circle_center = (0.5, 0.25)
+    phasor_window._ref_circle_radius = 0.3
+    phasor_window._cleared_mask = np.zeros((16, 16), dtype=bool)
+    phasor_window._cleared_mask[0:3, 0:3] = True
+    phasor_window._session.set_active_channel("NADH")
+    phasor_window._session.set_active_mask("nucleus")
+
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", _binary_8()))
+
+    with h5py.File(launcher_store.path, "r") as f:
+        attrs = dict(f["masks/phasor_NADH_1"].attrs)
+
+    assert attrs["phasor_intensity_threshold"] == pytest.approx(42.5)
+    assert attrs["phasor_ref_circle_center_g"] == pytest.approx(0.5)
+    assert attrs["phasor_ref_circle_center_s"] == pytest.approx(0.25)
+    assert attrs["phasor_ref_circle_radius"] == pytest.approx(0.3)
+    assert attrs["phasor_active_mask_at_capture"] == "nucleus"
+    assert attrs["phasor_cleared_pixel_count"] == 9
+    assert attrs["phasor_active_channel"] == "NADH"
+    assert "phasor_capture_iso8601" in attrs
+    iso = attrs["phasor_capture_iso8601"]
+    if isinstance(iso, bytes):
+        iso = iso.decode()
+    assert iso.endswith("Z")
+
+
+def test_launcher_filter_state_distinct_across_saves(
+    launcher, launcher_store, phasor_window,
+):
+    """Two saves at different thresholds yield distinguishable attrs."""
+    import h5py
+
+    phasor_window._intensity_threshold = 10.0
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", _binary_8()))
+
+    phasor_window._intensity_threshold = 200.0
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_2", _binary_8()))
+
+    with h5py.File(launcher_store.path, "r") as f:
+        a1 = dict(f["masks/phasor_NADH_1"].attrs)
+        a2 = dict(f["masks/phasor_NADH_2"].attrs)
+
+    assert a1["phasor_intensity_threshold"] == pytest.approx(10.0)
+    assert a2["phasor_intensity_threshold"] == pytest.approx(200.0)
+
+
+def test_launcher_filter_state_sentinels_when_unset(
+    launcher, launcher_store, phasor_window,
+):
+    """Unset ref-circle / channel / mask use documented sentinels."""
+    import h5py
+
+    phasor_window._intensity_threshold = 0.0
+    phasor_window._ref_circle_center = None
+    phasor_window._ref_circle_radius = None
+    phasor_window._cleared_mask = None
+    phasor_window._session.set_active_channel(None)
+    phasor_window._session.set_active_mask(None)
+
+    launcher._on_phasor_current_mask_applied(("phasor_1", _binary_8()))
+
+    with h5py.File(launcher_store.path, "r") as f:
+        attrs = dict(f["masks/phasor_1"].attrs)
+
+    assert attrs["phasor_intensity_threshold"] == pytest.approx(0.0)
+    assert attrs["phasor_ref_circle_center_g"] == pytest.approx(0.0)
+    assert attrs["phasor_ref_circle_center_s"] == pytest.approx(0.0)
+    assert attrs["phasor_ref_circle_radius"] == pytest.approx(-1.0)
+    assert attrs["phasor_active_mask_at_capture"] == ""
+    assert attrs["phasor_cleared_pixel_count"] == 0
+    assert attrs["phasor_active_channel"] == ""
+
+
+def test_launcher_status_bar_message(launcher, launcher_store):
+    """Status bar shows the auto-select notification on save."""
+    messages: list[tuple[str, int]] = []
+    real_status_bar = launcher.statusBar()
+
+    def fake_show(msg, timeout=0):
+        messages.append((msg, timeout))
+
+    real_status_bar.showMessage = fake_show  # type: ignore[assignment]
+
+    launcher._on_phasor_current_mask_applied(("phasor_NADH_1", _binary_8()))
+
+    assert messages, "expected at least one status-bar message"
+    text, _timeout = messages[-1]
+    assert "phasor_NADH_1" in text
+    assert "now active" in text
+
+
+def test_cancel_does_not_invoke_launcher(
+    launcher, launcher_store, phasor_window, monkeypatch,
+):
+    """Phasor cancel → signal not emitted → launcher slot not invoked.
+
+    End-to-end assertion that the cancel path on the dialog never
+    reaches the HDF5 write or active_mask transition.
+    """
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *args, **kwargs: ("", False)),
+    )
+
+    initial_active = launcher.data_model.session.active_mask
+    initial_masks = list(launcher_store.list_masks())
+
+    phasor_window._on_apply_current_phasor_as_mask()
+
+    assert launcher_store.list_masks() == initial_masks
+    assert launcher.data_model.session.active_mask == initial_active

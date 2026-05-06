@@ -271,6 +271,30 @@ class DatasetStore:
         """List all mask names under /masks/."""
         return self.list_groups("masks")
 
+    def set_mask_attrs(self, name: str, attrs: dict[str, Any]) -> int:
+        """Write HDF5 attributes onto an existing /masks/<name> dataset.
+
+        HDF5 attributes do not accept Python ``None``. Callers must
+        substitute sentinel values themselves (e.g., 0.0 for an unset
+        intensity threshold, -1.0 for an unset radius, "" for an empty
+        string). Keys whose value is ``None`` are skipped.
+
+        Returns the number of attributes actually written. Raises
+        ``KeyError`` if /masks/<name> does not exist.
+        """
+        path = f"masks/{name}"
+        written = 0
+        with h5py.File(self.path, "a") as f:
+            if path not in f:
+                raise KeyError(f"Mask not found: {path}")
+            ds = f[path]
+            for key, val in attrs.items():
+                if val is None:
+                    continue
+                ds.attrs[key] = val
+                written += 1
+        return written
+
     # ── Groups and metadata ───────────────────────────────────
 
     def list_groups(self, prefix: str) -> list[str]:
