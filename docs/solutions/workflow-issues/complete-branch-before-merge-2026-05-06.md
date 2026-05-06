@@ -97,6 +97,32 @@ pytest tests/ -x -q                              # at minimum the dirs touching 
 ls docs/solutions/**/*.md 2>/dev/null | xargs grep -l "$(date +%Y-%m-%d)"  # any learning doc dated today already committed?
 ```
 
+## Scope — when this rule does not apply
+
+The rule binds at the **merge boundary**, not at every commit. Two
+cases are intentionally out of scope:
+
+- **Standalone retrospective learnings.** A workflow or process doc
+  with no parent fix branch — including this very doc, committed
+  directly to `main` as `2380117` — has no branch to ride; committing
+  it directly is correct because there is nothing to merge it *with*.
+  The rule fires when a fix branch exists and a related artifact was
+  left out of it, not on every doc-only commit.
+- **Genuinely independent doc updates.** Typo fixes, link repairs,
+  reference renames, or cross-links between existing docs that are
+  not tied to a specific code change. These live outside the
+  merge-unit contract this rule protects.
+
+What the rule *does* bind: any artifact — test, doc, config,
+migration, follow-up code change — that is causally tied to a
+specific branch's work must land inside that branch before the
+merge. The test that breaks because of a tuned constant (Instance A)
+is causally tied to the refactor; the compound learning that
+documents a fix (Instance B) is causally tied to the fix.
+**Causal-tie is the test, not commit type.** A future agent or
+session must not use "it's just a doc" to justify dropping a
+fix-branch learning straight onto `main` after the fact.
+
 ## Why This Matters
 
 The cost is historical, not functional. A logical change like "tune
