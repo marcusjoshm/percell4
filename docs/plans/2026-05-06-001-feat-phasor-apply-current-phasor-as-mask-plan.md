@@ -1,7 +1,7 @@
 ---
 title: Add "Apply Current Phasor as Mask" button (and rename existing apply button)
 type: feat
-status: active
+status: completed
 date: 2026-05-06
 ---
 
