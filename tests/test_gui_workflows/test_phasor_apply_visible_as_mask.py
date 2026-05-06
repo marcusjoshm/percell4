@@ -1,10 +1,12 @@
-"""Apply Visible as Mask must equal what the histogram renders.
+"""Apply ROIs as Masks must equal what the histogram renders.
 
 Regression coverage for the bug where ``_on_apply_mask`` emitted the raw
 ROI-membership mask, ignoring every FLIM-tab filter (active mask,
 filter_ids, intensity threshold, reference circle). The user expectation
 is "function literally": the saved binary mask must match the visible
-phasor histogram pixel-for-pixel.
+phasor histogram pixel-for-pixel. (The button was previously labeled
+"Apply Visible as Mask"; the handler ``_on_apply_mask`` and ``mask_applied``
+signal kept their internal names through the rename.)
 """
 
 from __future__ import annotations
@@ -88,7 +90,7 @@ def test_apply_respects_active_mask_filter(phasor_window, session_with_dataset):
     assert binary.shape == (16, 16)
     # Every emitted "1" pixel must lie inside the active mask.
     assert np.all(binary[sparse == 0] == 0), (
-        "Apply Visible as Mask leaked pixels outside the active mask"
+        "Apply ROIs as Masks leaked pixels outside the active mask"
     )
     # And the ROI is wide enough to actually catch some of those pixels.
     assert binary.sum() > 0
@@ -140,7 +142,7 @@ def test_apply_respects_filter_ids(phasor_window, session_with_dataset):
     _name, binary, _color = emitted[0]
 
     assert np.all(binary[labels == 2] == 0), (
-        "Apply Visible as Mask included pixels from a filtered-out cell label"
+        "Apply ROIs as Masks included pixels from a filtered-out cell label"
     )
     assert binary[labels == 1].sum() > 0
 
@@ -173,7 +175,7 @@ def test_apply_respects_reference_circle(phasor_window):
     s = phasor_window._s_map
     inside = (g - 0.5) ** 2 + (s - 0.25) ** 2 <= 0.1 ** 2
     assert np.all(binary[~inside] == 0), (
-        "Apply Visible as Mask leaked pixels outside the reference circle"
+        "Apply ROIs as Masks leaked pixels outside the reference circle"
     )
 
 
@@ -235,7 +237,7 @@ def test_apply_respects_cleared_mask(phasor_window):
     _name, binary, _color = emitted[0]
 
     assert np.all(binary[cleared] == 0), (
-        "Apply Visible as Mask leaked pixels from the cleared region"
+        "Apply ROIs as Masks leaked pixels from the cleared region"
     )
     assert binary.sum() > 0, "Apply emitted nothing — wide ROI should still cover plenty"
 

@@ -234,7 +234,7 @@ class PhasorPlotWindow(QMainWindow):
     - preview_roi_upserted: emitted when an ROI's preview needs creation/update
     - preview_roi_removed: emitted when an ROI's preview should be removed
     - preview_all_cleared: emitted when every preview should be removed
-    - mask_applied: emitted when user clicks "Apply Visible as Mask"
+    - mask_applied: emitted when user clicks "Apply ROIs as Masks"
     The launcher connects these to mediate viewer + HDF5 access.
     """
 
@@ -292,7 +292,7 @@ class PhasorPlotWindow(QMainWindow):
 
         # Manual exclusion bitmap for "Clear within ROI" feature.
         # Pixels marked True are subtracted from the visible histogram and
-        # from any "Apply Visible as Mask" output. Lazy-allocated on first
+        # from any "Apply ROIs as Masks" output. Lazy-allocated on first
         # Clear; reset to None whenever set_phasor_data installs a new
         # (g, s) frame (the bitmap is bound to the frame, not to abstract
         # pixel indices) and on explicit Reset.
@@ -586,7 +586,7 @@ class PhasorPlotWindow(QMainWindow):
         right_layout.addWidget(sel_group)
 
         # Apply + Save/Load buttons
-        btn_apply = QPushButton("Apply Visible as Mask")
+        btn_apply = QPushButton("Apply ROIs as Masks")
         btn_apply.clicked.connect(self._on_apply_mask)
         right_layout.addWidget(btn_apply)
 
@@ -892,7 +892,7 @@ class PhasorPlotWindow(QMainWindow):
 
         Synchronous refresh + preview update (no debounce). Clear is a
         discrete user action; debouncing creates a race window in which
-        the user could click Apply Visible as Mask before the preview
+        the user could click Apply ROIs as Masks before the preview
         catches up to the new cleared state.
         """
         if self._selected_roi_index is None or not self._roi_widgets:
@@ -1594,7 +1594,7 @@ class PhasorPlotWindow(QMainWindow):
         Drops any cached mask array so the next refresh re-loads from the
         repo. Does not auto-engage the filter — the user must opt in via
         the checkbox to avoid the feedback loop with phasor ROI's
-        "Apply Visible as Mask" (which itself sets active_mask).
+        "Apply ROIs as Masks" (which itself sets active_mask).
         """
         active = self._session.active_mask
         self._active_mask_array = None
