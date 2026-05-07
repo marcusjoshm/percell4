@@ -6,10 +6,12 @@ plus Label Cleanup. Embedded as a sidebar tab in the launcher.
 
 from __future__ import annotations
 
+import logging
+import weakref
 from pathlib import Path
 
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -26,6 +28,13 @@ from qtpy.QtWidgets import (
 
 from percell4.config import viewer_presets as vp
 from percell4.model import CellDataModel
+
+logger = logging.getLogger(__name__)
+
+# Delay between the last paint event and the HDF5 flush. Long enough to
+# coalesce a single brush stroke (napari emits `paint` per drag frame),
+# short enough that pressing close right after a stroke still saves.
+_PAINT_AUTOSAVE_DEBOUNCE_MS = 200
 
 
 class SegmentationPanel(QWidget):
@@ -45,6 +54,18 @@ class SegmentationPanel(QWidget):
         self.data_model = data_model
         self._launcher = launcher
 
+        # Auto-save state: a single debounced timer + the most recently
+        # modified Labels layer (held weakly so a removed layer can GC).
+        # We track which viewer instance we've already wired so reopening
+        # the same viewer doesn't double-subscribe.
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(_PAINT_AUTOSAVE_DEBOUNCE_MS)
+        self._autosave_timer.timeout.connect(self._flush_pending_autosave)
+        self._pending_autosave_layer: "weakref.ref | None" = None
+        self._wired_viewer_id: int | None = None
+        self._wired_layer_ids: set[int] = set()
+
         self._build_ui()
 
         # Update channel label when dataset loads or channel changes
@@ -53,6 +74,12 @@ class SegmentationPanel(QWidget):
     def _on_state_changed(self, change) -> None:
         if change.data or change.channel:
             self.update_channel_label()
+        if change.data:
+            # A dataset was loaded (or cleared). Wire auto-save so that any
+            # napari-level paint/erase or in-place mutations on Labels
+            # layers get persisted without the user remembering to click
+            # "Save Labels to HDF5".
+            self._wire_paint_autosave()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -228,6 +255,118 @@ class SegmentationPanel(QWidget):
         if self._launcher is not None:
             self._launcher.statusBar().showMessage(msg)
 
+    # ── Auto-save (manual edits → HDF5) ───────────────────────
+    #
+    # The Manual Editing group, napari's own paint/erase tools, and the
+    # Label Cleanup section all mutate ``labels_layer.data`` in memory.
+    # Without auto-save, those edits are lost when the dataset is closed.
+    # This panel persists every mutation: button-driven edits write
+    # synchronously inside the handler; brush/erase strokes are coalesced
+    # by ``_autosave_timer`` to avoid one HDF5 write per drag frame.
+
+    def _persist_labels_layer(self, layer) -> bool:
+        """Write a Labels layer's current data to HDF5. Returns True on success."""
+        if layer is None:
+            return False
+        store = (
+            getattr(self._launcher, "_current_store", None)
+            if self._launcher is not None
+            else None
+        )
+        if store is None:
+            return False
+        try:
+            store.write_labels(
+                layer.name, np.asarray(layer.data, dtype=np.int32)
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.exception("auto-save of labels '%s' failed", layer.name)
+            self._show_status(f"Auto-save failed for '{layer.name}': {e}")
+            return False
+
+    def _wire_paint_autosave(self) -> None:
+        """Subscribe to the viewer's layer-add events and to existing Labels.
+
+        Idempotent per viewer instance — re-runs are cheap. Called when the
+        ``data`` slice of ``state_changed`` fires (i.e., a dataset was loaded
+        or cleared).
+        """
+        viewer_win = (
+            self._launcher._windows.get("viewer") if self._launcher else None
+        )
+        if viewer_win is None:
+            return
+        try:
+            napari_viewer = viewer_win.viewer
+        except Exception:  # noqa: BLE001
+            return
+        if napari_viewer is None:
+            return
+
+        viewer_id = id(napari_viewer)
+        if self._wired_viewer_id != viewer_id:
+            # New (or first-ever) viewer instance — drop stale per-layer
+            # subscriptions and subscribe to its insertion stream.
+            self._wired_layer_ids.clear()
+            try:
+                napari_viewer.layers.events.inserted.connect(
+                    self._on_viewer_layer_inserted
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("could not connect viewer layers.inserted", exc_info=True)
+            self._wired_viewer_id = viewer_id
+
+        # Subscribe to any Labels layers already present (the load path
+        # adds them before this method runs on the same `change.data`).
+        import napari
+
+        for layer in napari_viewer.layers:
+            if isinstance(layer, napari.layers.Labels):
+                self._subscribe_labels_layer(layer)
+
+    def _on_viewer_layer_inserted(self, event) -> None:
+        """Wire a freshly added Labels layer for paint auto-save."""
+        import napari
+
+        layer = event.value
+        if isinstance(layer, napari.layers.Labels):
+            self._subscribe_labels_layer(layer)
+
+    def _subscribe_labels_layer(self, layer) -> None:
+        """Connect a Labels layer's paint events to the debounced save slot."""
+        layer_id = id(layer)
+        if layer_id in self._wired_layer_ids:
+            return
+        try:
+            layer.events.paint.connect(self._on_labels_paint)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "labels layer %r missing paint event", getattr(layer, "name", "?"),
+                exc_info=True,
+            )
+            return
+        self._wired_layer_ids.add(layer_id)
+
+    def _on_labels_paint(self, event) -> None:
+        """Coalesce paint events; the timer fires after the user pauses."""
+        try:
+            layer = event.source
+        except AttributeError:
+            return
+        self._pending_autosave_layer = weakref.ref(layer)
+        self._autosave_timer.start()
+
+    def _flush_pending_autosave(self) -> None:
+        """Timer callback — write the most recently painted layer to HDF5."""
+        if self._pending_autosave_layer is None:
+            return
+        layer = self._pending_autosave_layer()
+        self._pending_autosave_layer = None
+        if layer is None:
+            return
+        self._persist_labels_layer(layer)
+
     # ── Channel tracking ──────────────────────────────────────
 
     def update_channel_label(self) -> None:
@@ -345,6 +484,11 @@ class SegmentationPanel(QWidget):
         labels = np.zeros(shape, dtype=np.int32)
         viewer_win.add_labels(labels, name="manual")
         self.data_model.set_active_segmentation("manual")
+        # Persist immediately so the labels/manual entry exists in HDF5
+        # even if the user closes the dataset before painting anything.
+        new_layer = self._get_active_labels_layer()
+        if new_layer is not None and new_layer.name == "manual":
+            self._persist_labels_layer(new_layer)
         self._show_status("Empty labels layer created — use napari tools to draw cells")
 
     def _get_active_labels_layer(self):
@@ -390,6 +534,7 @@ class SegmentationPanel(QWidget):
         labels_layer.data = data
         labels_layer.selected_label = 0
         labels_layer.refresh()
+        self._persist_labels_layer(labels_layer)
         self._show_status(f"Deleted label {selected_id} ({count} pixels removed)")
 
     def _on_add_new_label(self) -> None:
@@ -437,6 +582,7 @@ class SegmentationPanel(QWidget):
         n_cells = int(new_data.max())
         labels_layer.data = new_data
         labels_layer.refresh()
+        self._persist_labels_layer(labels_layer)
         self._show_status(f"Relabeled to {n_cells} sequential cells")
 
     # ── Label Cleanup ─────────────────────────────────────────
@@ -526,6 +672,7 @@ class SegmentationPanel(QWidget):
 
         labels_layer.data = filtered
         labels_layer.refresh()
+        self._persist_labels_layer(labels_layer)
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is not None and viewer_win.viewer is not None:
