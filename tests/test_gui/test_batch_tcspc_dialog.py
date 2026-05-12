@@ -373,6 +373,65 @@ def test_best_match_picks_highest_score(tmp_path: Path) -> None:
     assert score > 0.5
 
 
+def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
+    """Origin, rotate, and flip combos must match add_layer_dialog.py's
+    TCSPC tab and compress_dialog.py — drift between the single-dataset
+    and batch dialogs is a recurring footgun (PR #9 review)."""
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+
+    pattern_items = [
+        dlg._grid_type_combo.itemText(i)
+        for i in range(dlg._grid_type_combo.count())
+    ]
+    assert pattern_items == [
+        "row_by_row",
+        "column_by_column",
+        "snake_by_row",
+        "snake_by_column",
+    ]
+
+    origin_items = [
+        dlg._order_combo.itemText(i) for i in range(dlg._order_combo.count())
+    ]
+    assert origin_items == [
+        "right_down", "right_up", "left_down", "left_up",
+        "top_left", "top_right", "bottom_left", "bottom_right",
+    ]
+
+    rotate_items = [
+        (dlg._rotate_combo.itemText(i), dlg._rotate_combo.itemData(i))
+        for i in range(dlg._rotate_combo.count())
+    ]
+    assert rotate_items == [
+        ("None", 0),
+        ("90° CCW", 1),
+        ("180°", 2),
+        ("90° CW", 3),
+    ]
+
+    flip_items = [
+        (dlg._flip_combo.itemText(i), dlg._flip_combo.itemData(i))
+        for i in range(dlg._flip_combo.count())
+    ]
+    assert flip_items == [
+        ("None", -1),
+        ("Vertical (top ↔ bottom)", 0),
+        ("Horizontal (left ↔ right)", 1),
+    ]
+
+
+def test_flip_axis_value_maps_userdata_correctly(qtbot) -> None:
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._flip_combo.setCurrentIndex(0)  # None
+    assert dlg._flip_axis_value() is None
+    dlg._flip_combo.setCurrentIndex(1)  # vertical, data = 0
+    assert dlg._flip_axis_value() == 0
+    dlg._flip_combo.setCurrentIndex(2)  # horizontal, data = 1
+    assert dlg._flip_axis_value() == 1
+
+
 def test_render_summary_text_covers_every_status() -> None:
     """Summary text mentions each status bucket and totals correctly."""
     items = (

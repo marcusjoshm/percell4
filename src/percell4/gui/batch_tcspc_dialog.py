@@ -281,26 +281,42 @@ class BatchTCSPCDialog(QDialog):
         grid_row.addStretch()
         layout.addRow("Grid:", grid_row)
 
+        # Mirrors the single-dataset TCSPC tab in add_layer_dialog.py
+        # (and compress_dialog.py): same item lists, same item-data carrier
+        # pattern, same labels. Drift between batch and single-shot
+        # dialogs is a recurring footgun — see PR #9 review.
         self._grid_type_combo = QComboBox()
         self._grid_type_combo.addItems(
             ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
         )
-        self._grid_type_combo.setCurrentText("snake_by_row")
-        layout.addRow("Scan pattern:", self._grid_type_combo)
+        layout.addRow("Pattern:", self._grid_type_combo)
 
         self._order_combo = QComboBox()
         self._order_combo.addItems(
-            ["right_down", "right_up", "left_down", "left_up"]
+            [
+                "right_down", "right_up", "left_down", "left_up",
+                "top_left", "top_right", "bottom_left", "bottom_right",
+            ]
         )
-        layout.addRow("Origin:", self._order_combo)
+        layout.addRow("Start:", self._order_combo)
 
+        # Rotation/flip combos carry their semantic value via itemData
+        # rather than by list-index. Same convention as
+        # add_layer_dialog.py:_tcspc_rotation_combo / _tcspc_flip_combo.
         self._rotate_combo = QComboBox()
-        self._rotate_combo.addItems(["0°", "90° CCW", "180°", "270° CCW (90° CW)"])
-        layout.addRow("Rotate .bin:", self._rotate_combo)
+        self._rotate_combo.addItem("None", 0)
+        self._rotate_combo.addItem("90° CCW", 1)
+        self._rotate_combo.addItem("180°", 2)
+        self._rotate_combo.addItem("90° CW", 3)
+        layout.addRow("Rotate stitched array:", self._rotate_combo)
 
         self._flip_combo = QComboBox()
-        self._flip_combo.addItems(["none", "vertical (axis 0)", "horizontal (axis 1)"])
-        layout.addRow("Flip .bin:", self._flip_combo)
+        # ``-1`` = no flip; ``0`` = vertical (top↔bottom, np.flipud);
+        # ``1`` = horizontal (left↔right, np.fliplr).
+        self._flip_combo.addItem("None", -1)
+        self._flip_combo.addItem("Vertical (top ↔ bottom)", 0)
+        self._flip_combo.addItem("Horizontal (left ↔ right)", 1)
+        layout.addRow("Flip:", self._flip_combo)
 
         # Settings changes invalidate Run.
         for w in (
@@ -687,7 +703,9 @@ class BatchTCSPCDialog(QDialog):
         tile_config = self._build_tile_config()
         flim_config = FlimConfig()
         cross_format_rule: CrossFormatRule = BaseStemRule()
-        rotate_k = self._rotate_combo.currentIndex() if self._rotate_combo else 0
+        rotate_k = (
+            int(self._rotate_combo.currentData()) if self._rotate_combo else 0
+        )
         flip_axis = self._flip_axis_value()
         force = bool(self._conflict_overwrite_radio and self._conflict_overwrite_radio.isChecked())
 
@@ -728,12 +746,13 @@ class BatchTCSPCDialog(QDialog):
         self._show_summary(report)
 
     def _flip_axis_value(self) -> int | None:
+        """Read flip combo's itemData. ``-1`` (no flip) → ``None``; ``0`` / ``1`` → that axis."""
         if self._flip_combo is None:
             return None
-        idx = self._flip_combo.currentIndex()
-        if idx == 0:
+        data = self._flip_combo.currentData()
+        if data is None or int(data) < 0:
             return None
-        return idx - 1  # 1 -> axis 0, 2 -> axis 1
+        return int(data)
 
     def _build_tile_config(self) -> TileConfig:
         assert (
