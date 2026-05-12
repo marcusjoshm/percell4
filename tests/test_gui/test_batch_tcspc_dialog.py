@@ -373,6 +373,85 @@ def test_best_match_picks_highest_score(tmp_path: Path) -> None:
     assert score > 0.5
 
 
+def test_channel_token_section_discovers_bin_tokens(qtbot, tmp_path: Path) -> None:
+    """After a pairing is set, the channel-tokens table populates with the
+    distinct ``_ch(\\d+)`` tokens scanned from the paired group's .bin files."""
+    h5 = _make_h5(tmp_path / "WT_60min.h5", ["CA-SiR", "mNG", "mTQ2"])
+    root = tmp_path / "scan"
+    group = root / "Dish 1 - WT 60min"
+    group.mkdir(parents=True)
+    for tile in range(1, 4):
+        for ch in (1, 2, 3):
+            (group / f"Dish 1 - WT 60min_s{tile}_ch{ch}.bin").write_bytes(b"")
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    assert dlg._available_bin_tokens == ["1", "2", "3"]
+    # Three channel-name rows.
+    assert dlg._channel_tokens_table.rowCount() == 3
+    # The semantic-only channels start unmapped; mTQ2 happens to end in "2"
+    # and "2" is in the discovered token list, so it gets seeded.
+    assert dlg._channel_token_overrides.get("mTQ2") == "2"
+    assert "CA-SiR" not in dlg._channel_token_overrides
+    assert "mNG" not in dlg._channel_token_overrides
+
+
+def test_channel_token_override_picks_propagate_to_run(qtbot, tmp_path: Path) -> None:
+    """User-picked tokens flow into intensity_channels_overrides at Run time."""
+    h5 = _make_h5(tmp_path / "WT_60min.h5", ["CA-SiR", "mNG", "mTQ2"])
+    root = tmp_path / "scan"
+    group = root / "Dish 1 - WT 60min"
+    group.mkdir(parents=True)
+    for tile in range(1, 4):
+        for ch in (1, 2, 3):
+            (group / f"Dish 1 - WT 60min_s{tile}_ch{ch}.bin").write_bytes(b"")
+
+    captured: dict[str, Any] = {}
+
+    def fake_orchestrator(items, **kwargs):
+        captured["overrides"] = kwargs.get("intensity_channels_overrides")
+        return BatchAppendReport(items=())
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=fake_orchestrator,
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    # Set the explicit mapping: CA-SiR=1, mNG=2, mTQ2=3.
+    dlg._channel_token_overrides = {"CA-SiR": "1", "mNG": "2", "mTQ2": "3"}
+    dlg._calibration = _bcal(
+        {
+            "WT_60min": {
+                "CA-SiR": ChannelCalibration(80.0, 0.1, 0.9),
+                "mNG": ChannelCalibration(80.0, 0.2, 0.9),
+                "mTQ2": ChannelCalibration(80.0, 0.3, 0.9),
+            }
+        }
+    )
+    dlg._on_validate()
+    dlg._on_run()
+
+    overrides = captured["overrides"]
+    assert overrides is not None
+    assert h5 in overrides
+    name_to_token = {c.name: c.token for c in overrides[h5]}
+    assert name_to_token == {"CA-SiR": "1", "mNG": "2", "mTQ2": "3"}
+
+
 def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     """Origin, rotate, and flip combos must match add_layer_dialog.py's
     TCSPC tab and compress_dialog.py — drift between the single-dataset

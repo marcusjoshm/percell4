@@ -20,6 +20,7 @@ frozen — the trade-off matches the compress flow.
 from __future__ import annotations
 
 import difflib
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -64,14 +65,15 @@ from percell4.domain.io.calibration_csv import (
     BatchCalibration,
     parse_calibration_csv,
 )
+from percell4.domain.io.cross_format import IntensityChannel
 from percell4.domain.io.models import (
-    BaseStemRule,
     CrossFormatRule,
     FlimConfig,
     TileConfig,
     TokenConfig,
 )
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui.tcspc_tab_state import build_rule_from_preset
 from percell4.store import DatasetStore
 
 _NO_PAIR_LABEL = "— select —"
@@ -116,6 +118,11 @@ class BatchTCSPCDialog(QDialog):
         self._calibration: BatchCalibration | None = None
         self._validated: bool = False
         self._suppress_pair_signal: bool = False
+        # channel_name -> .bin token string (e.g. "CA-SiR" -> "1"). Required
+        # when channel names don't parse via the digit-suffix heuristic.
+        self._channel_token_overrides: dict[str, str] = {}
+        # Set of tokens discovered in the first paired group's .bin filenames.
+        self._available_bin_tokens: list[str] = []
 
         # ── Widgets ──
         self._dataset_table: QTableWidget | None = None
@@ -123,6 +130,8 @@ class BatchTCSPCDialog(QDialog):
         self._groups_label: QLabel | None = None
         self._pairing_table: QTableWidget | None = None
         self._csv_status_label: QLabel | None = None
+        self._channel_tokens_table: QTableWidget | None = None
+        self._channel_tokens_status_label: QLabel | None = None
         self._validate_log: QPlainTextEdit | None = None
         self._run_btn: QPushButton | None = None
         self._validate_btn: QPushButton | None = None
@@ -160,6 +169,7 @@ class BatchTCSPCDialog(QDialog):
         body.addWidget(self._build_section_datasets())
         body.addWidget(self._build_section_source_root())
         body.addWidget(self._build_section_pairing())
+        body.addWidget(self._build_section_channel_tokens())
         body.addWidget(self._build_section_csv())
         body.addWidget(self._build_section_stitching())
         body.addWidget(self._build_section_conflict_policy())
@@ -257,6 +267,43 @@ class BatchTCSPCDialog(QDialog):
         row.addWidget(auto_btn)
         row.addStretch()
         layout.addLayout(row)
+
+        return box
+
+    def _build_section_channel_tokens(self) -> QGroupBox:
+        """One row per unique channel name across the selected ``.h5`` files,
+        with a combo of ``.bin`` tokens discovered from the first paired group.
+
+        Mirrors the per-channel token override UI in
+        :class:`add_layer_dialog.AddLayerDialog` (``_tcspc_render_table`` →
+        ``_on_tcspc_token_picked``). For semantic channel names (``mNG``,
+        ``CA-SiR``) where the digit-suffix heuristic yields an empty token,
+        the user maps each name to the correct ``.bin`` channel number here.
+        """
+        box = QGroupBox(
+            "4. Channel → .bin token mapping (one row per channel name; "
+            "applies to every dataset)"
+        )
+        layout = QVBoxLayout(box)
+
+        self._channel_tokens_status_label = QLabel(
+            "Pair at least one dataset with a group folder to discover "
+            "available .bin channel tokens."
+        )
+        self._channel_tokens_status_label.setWordWrap(True)
+        layout.addWidget(self._channel_tokens_status_label)
+
+        self._channel_tokens_table = QTableWidget(0, 2)
+        self._channel_tokens_table.setHorizontalHeaderLabels(
+            [".h5 channel name", ".bin channel token"]
+        )
+        self._channel_tokens_table.horizontalHeader().setStretchLastSection(True)
+        self._channel_tokens_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._channel_tokens_table.verticalHeader().setVisible(False)
+        self._channel_tokens_table.setMinimumHeight(140)
+        layout.addWidget(self._channel_tokens_table)
 
         return box
 
@@ -397,6 +444,7 @@ class BatchTCSPCDialog(QDialog):
                 continue
             self._add_dataset_row(path, checked=True)
         self._refresh_pairing_table()
+        self._refresh_channel_tokens_table()
         self._invalidate_run()
 
     def _on_remove_datasets(self) -> None:
@@ -409,6 +457,7 @@ class BatchTCSPCDialog(QDialog):
             self._dataset_table.removeRow(row)
             del self._datasets[row]
         self._refresh_pairing_table()
+        self._refresh_channel_tokens_table()
         self._invalidate_run()
 
     def _add_dataset_row(self, path: Path, *, checked: bool) -> None:
@@ -531,6 +580,9 @@ class BatchTCSPCDialog(QDialog):
             # Uniqueness invariant: any other dataset that holds this group
             # gets reset to "— select —".
             self._enforce_pairing_uniqueness(dataset_path, chosen)
+        # Pairing changed → re-scan available .bin tokens from whichever
+        # group is now first-paired, then re-render the channel-tokens table.
+        self._refresh_channel_tokens_table()
         self._invalidate_run()
 
     def _enforce_pairing_uniqueness(
@@ -586,7 +638,148 @@ class BatchTCSPCDialog(QDialog):
                         self._suppress_pair_signal = True
                         combo.setCurrentIndex(idx)
                         self._suppress_pair_signal = False
+        self._refresh_channel_tokens_table()
         self._invalidate_run()
+
+    # ────────────────────────────────────────────────────────────
+    # Channel-token override section (Section 4)
+    # ────────────────────────────────────────────────────────────
+
+    def _discover_bin_tokens(self, group_folder: Path) -> list[str]:
+        """Scan a group's ``.bin`` files for distinct ``_ch(\\d+)`` tokens.
+
+        Returns sorted-by-numeric-value list of tokens (so ``"1"`` comes
+        before ``"10"`` for typical LAS X exports).
+        """
+        if group_folder is None or not group_folder.exists():
+            return []
+        tokens: set[str] = set()
+        for p in group_folder.rglob("*.bin"):
+            m = re.search(r"_ch(\d+)", p.stem)
+            if m:
+                tokens.add(m.group(1))
+        try:
+            return sorted(tokens, key=int)
+        except ValueError:
+            return sorted(tokens)
+
+    def _all_selected_channel_names(self) -> list[str]:
+        """Distinct channel names across every checked dataset, preserving
+        first-seen order so the UI is deterministic."""
+        seen: list[str] = []
+        seen_set: set[str] = set()
+        for path in self._checked_datasets():
+            try:
+                channel_names, _ = self._read_store_summary(path)
+            except Exception:  # noqa: BLE001
+                continue
+            for name in channel_names:
+                if name not in seen_set:
+                    seen.append(name)
+                    seen_set.add(name)
+        return seen
+
+    def _refresh_channel_tokens_table(self) -> None:
+        """Rebuild the channel-tokens table from the current dataset selection
+        and the first available paired group.
+
+        Default-mapping rule per channel name: if the digit-suffix heuristic
+        produces a token that's in the discovered list, use it. Otherwise
+        leave it at ``(unmapped)`` for the user to pick. The user's previous
+        explicit picks are preserved across refreshes.
+        """
+        assert self._channel_tokens_table is not None
+        assert self._channel_tokens_status_label is not None
+
+        # 1. Pick the first paired group to scan for available tokens.
+        first_group: Path | None = next(
+            (g for g in self._pairings.values() if g is not None), None
+        )
+        self._available_bin_tokens = (
+            self._discover_bin_tokens(first_group) if first_group else []
+        )
+        if first_group is None:
+            self._channel_tokens_status_label.setText(
+                "Pair at least one dataset with a group folder to discover "
+                "available .bin channel tokens."
+            )
+        elif not self._available_bin_tokens:
+            self._channel_tokens_status_label.setText(
+                f"No '_ch(N)' tokens found in {first_group.name}/*.bin — "
+                "the .bin filenames may use a different naming convention."
+            )
+        else:
+            self._channel_tokens_status_label.setText(
+                f"Discovered .bin tokens (from {first_group.name}): "
+                f"{', '.join(self._available_bin_tokens)}"
+            )
+
+        # 2. Rebuild rows from the union of channel names across selected .h5.
+        channel_names = self._all_selected_channel_names()
+        self._channel_tokens_table.setRowCount(0)
+        for ch in channel_names:
+            row = self._channel_tokens_table.rowCount()
+            self._channel_tokens_table.insertRow(row)
+            name_item = QTableWidgetItem(ch)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            self._channel_tokens_table.setItem(row, 0, name_item)
+
+            combo = QComboBox()
+            combo.addItem("(unmapped)", "")
+            for tok in self._available_bin_tokens:
+                combo.addItem(tok, tok)
+            # Default mapping: prefer the user's previous explicit pick,
+            # else the digit-suffix heuristic if it lands in the discovered
+            # token list, else (unmapped).
+            seeded = self._channel_token_overrides.get(ch, "")
+            if not seeded:
+                m = re.search(r"(\d+)$", ch)
+                if m and m.group(1) in self._available_bin_tokens:
+                    seeded = m.group(1)
+            if seeded:
+                idx = combo.findData(seeded)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            combo.currentIndexChanged.connect(
+                lambda _i, c=ch, w=combo: self._on_channel_token_picked(c, w)
+            )
+            self._channel_tokens_table.setCellWidget(row, 1, combo)
+            # Persist seeded default so Validate / Run pick it up.
+            if seeded:
+                self._channel_token_overrides[ch] = seeded
+
+    def _on_channel_token_picked(self, channel_name: str, combo: QComboBox) -> None:
+        token = combo.currentData() or ""
+        if token:
+            self._channel_token_overrides[channel_name] = token
+        else:
+            self._channel_token_overrides.pop(channel_name, None)
+        self._invalidate_run()
+
+    def _build_intensity_channels_overrides(self) -> dict[Path, list[IntensityChannel]]:
+        """Translate ``_channel_token_overrides`` into per-item override lists.
+
+        Reads each item's ``channel_names`` and builds an
+        ``IntensityChannel`` for every channel, threading the user's token
+        pick into the matcher. Channel names without a pick are left with
+        an empty token (they'll fail to bind, which is intentional — the
+        user opted out for that channel).
+        """
+        overrides: dict[Path, list[IntensityChannel]] = {}
+        for path in self._checked_datasets():
+            try:
+                channel_names, _ = self._read_store_summary(path)
+            except Exception:  # noqa: BLE001
+                continue
+            overrides[path] = [
+                IntensityChannel(
+                    name=ch,
+                    token=self._channel_token_overrides.get(ch, ""),
+                    base_stem=None,
+                )
+                for ch in channel_names
+            ]
+        return overrides
 
     # ────────────────────────────────────────────────────────────
     # Slots — section 4 (CSV)
@@ -710,7 +903,10 @@ class BatchTCSPCDialog(QDialog):
         token_config = TokenConfig()
         tile_config = self._build_tile_config()
         flim_config = FlimConfig()
-        cross_format_rule: CrossFormatRule = BaseStemRule()
+        # Same preset the single-dataset TCSPC tab uses: direct token equality
+        # first (driven by the per-channel-name overrides set in Section 4),
+        # base-stem fallback for .bin files without a channel token.
+        cross_format_rule: CrossFormatRule = build_rule_from_preset()
         rotate_k = (
             int(self._rotate_combo.currentData()) if self._rotate_combo else 0
         )
@@ -738,6 +934,7 @@ class BatchTCSPCDialog(QDialog):
             if result.status in ("succeeded", "skipped_no_changes"):
                 self._sync_active_session_metadata(item)
 
+        overrides = self._build_intensity_channels_overrides()
         report = self._orchestrator(
             items,
             token_config=token_config,
@@ -749,6 +946,7 @@ class BatchTCSPCDialog(QDialog):
             force=force,
             progress_callback=progress_cb,
             cancel_check=lambda: progress.wasCanceled(),
+            intensity_channels_overrides=overrides or None,
         )
         progress.setValue(len(items))
         self._show_summary(report)
