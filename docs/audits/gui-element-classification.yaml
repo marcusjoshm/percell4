@@ -15,7 +15,7 @@ counts:
 #                criterion_combo, cov_f_spin, shift_spin, run_gmm_button (11)
 #     PhasorPlotWindow: selected_cov_f_spin, selected_shift_spin,
 #                       selected_reset_to_fit_button (3)
-#   No new Selectors or Creators. The downstream Apply Visible as Mask remains
+#   No new Selectors or Creators. The downstream Apply ROIs as Masks remains
 #   the existing Creator that writes /masks/<roi_name> when GMM-origin ROIs are
 #   committed.
 
@@ -437,7 +437,7 @@ widgets:
 
   # Phasor Segmentation group (added 2026-05-03). Run GMM does not write to
   # Session or HDF5 directly; it appends ROIs to PhasorPlotWindow's local list.
-  # The downstream Apply Visible as Mask (existing) is the Creator that writes
+  # The downstream Apply ROIs as Masks (existing) is the Creator that writes
   # /masks/<roi_name>.
   - id: flim_panel.shape_combo
     class: Action
@@ -507,7 +507,7 @@ widgets:
     reads: [active_channel]
     writes: []
     keystroke: null
-    notes: "Spawns a Worker(QThread) running RunPhasorGMM.execute. On worker.finished, calls phasor_win.place_gmm_rois (appends to local _roi_widgets only). No Session write; no HDF5 write — Action under the taxonomy. The downstream Apply Visible as Mask (phasor_plot.apply_mask_button) remains the Creator that writes /masks/<name>."
+    notes: "Spawns a Worker(QThread) running RunPhasorGMM.execute. On worker.finished, calls phasor_win.place_gmm_rois (appends to local _roi_widgets only). No Session write; no HDF5 write — Action under the taxonomy. The downstream Apply ROIs as Masks (phasor_plot.apply_rois_as_masks_button) remains the Creator that writes /masks/<name>."
 
   # ── io_panel.py ──────────────────────────────────────────────
   - id: io_panel.import_button
@@ -802,7 +802,7 @@ widgets:
   # GMM-origin ROI controls (added 2026-05-03 as part of feat/phasor-gmm-segmentation U5).
   # Mutate PhasorROI.gmm_fit dataclass state held in _roi_widgets — that is
   # GUI-local, not Session state — so the Selector/Creator/Action taxonomy
-  # treats these as Actions. Downstream Apply Visible as Mask reads
+  # treats these as Actions. Downstream Apply ROIs as Masks reads
   # phasor_roi.center / radii to write the mask.
   - id: phasor_plot.selected_cov_f_spin
     class: Action
@@ -834,16 +834,28 @@ widgets:
     keystroke: null
     notes: "Snaps the selected GMM ROI's center back to the cluster mean (overrides any manual drag). Disabled for manual ROIs."
 
-  - id: phasor_plot.apply_visible_as_mask_button
+  - id: phasor_plot.apply_rois_as_masks_button
     class: Creator
     path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
-    lines: "299-301, 794-827"
     widget_type: QPushButton
     handler: _on_apply_mask
     reads: []
     writes: []
     keystroke: null
-    notes: "BORDERLINE — emits mask_applied signal carrying per-ROI binary masks. The launcher subscriber writes those masks to HDF5 and (per launcher logic) auto-selects one via session.set_active_mask. Within THIS file: no direct resource or session write — just signal emission. Closest fit: Creator (the resource-write side of its contract lives in the launcher subscriber); reads/writes lists reflect the in-file behavior only."
+    notes: "Labeled 'Apply ROIs as Masks' (renamed 2026-05-06 from 'Apply Visible as Mask'). BORDERLINE — emits mask_applied signal carrying per-ROI binary masks. The launcher subscriber writes those masks to HDF5 and (per launcher logic) auto-selects one via session.set_active_mask. Within THIS file: no direct resource or session write — just signal emission. Closest fit: Creator (the resource-write side of its contract lives in the launcher subscriber); reads/writes lists reflect the in-file behavior only."
+
+  - id: phasor_plot.apply_current_phasor_as_mask_button
+    class: Creator
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QPushButton
+    handler: _on_apply_current_phasor_as_mask
+    reads: [active_channel, filter_ids, active_mask]
+    writes: []
+    keystroke: null
+    notes: |
+      Emits phasor_mask_applied(name, binary). Launcher subscriber
+      writes /masks/<name> and sets session.active_mask. Same Creator
+      contract as apply_rois_as_masks_button.
 
   - id: phasor_plot.save_rois_button
     class: Action
@@ -875,7 +887,7 @@ widgets:
     reads: []
     writes: []
     keystroke: null
-    notes: "Consumes the selected ROI: OR's its inside-mask into PhasorPlotWindow._cleared_mask (peer-local field, NOT a session field), then routes through _remove_roi_widget (same path as Remove). Cleared pixels disappear from the histogram, the per-ROI Apply preview, and any subsequent Apply Visible as Mask output via the cleared_mask_flat term in compute_valid_phasor_pixels. No session selection field is written. Greyed when no ROI is selected. Strict Action under the taxonomy."
+    notes: "Consumes the selected ROI: OR's its inside-mask into PhasorPlotWindow._cleared_mask (peer-local field, NOT a session field), then routes through _remove_roi_widget (same path as Remove). Cleared pixels disappear from the histogram, the per-ROI Apply preview, and any subsequent Apply ROIs as Masks output via the cleared_mask_flat term in compute_valid_phasor_pixels. No session selection field is written. Greyed when no ROI is selected. Strict Action under the taxonomy."
 
   - id: phasor_plot.reset_cleared_button
     class: Action

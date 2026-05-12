@@ -1,10 +1,12 @@
-"""Apply Visible as Mask must equal what the histogram renders.
+"""Apply ROIs as Masks must equal what the histogram renders.
 
 Regression coverage for the bug where ``_on_apply_mask`` emitted the raw
 ROI-membership mask, ignoring every FLIM-tab filter (active mask,
 filter_ids, intensity threshold, reference circle). The user expectation
 is "function literally": the saved binary mask must match the visible
-phasor histogram pixel-for-pixel.
+phasor histogram pixel-for-pixel. (The button was previously labeled
+"Apply Visible as Mask"; the handler ``_on_apply_mask`` and ``mask_applied``
+signal kept their internal names through the rename.)
 """
 
 from __future__ import annotations
@@ -12,54 +14,16 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
-from percell4.application.session import Session
-from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.phasor_plot import (
     PhasorPlotWindow,
     PhasorROI,
 )
 
-
-@pytest.fixture
-def session_with_dataset(tmp_path) -> Session:
-    sess = Session()
-    sess._dataset = DatasetHandle(path=tmp_path / "fake.h5", metadata={})
-    return sess
-
-
-def _wide_phasor_maps(shape=(16, 16)) -> tuple[np.ndarray, np.ndarray]:
-    """Build deterministic g/s maps that span a wide phasor region."""
-    h, w = shape
-    gs = np.linspace(0.05, 0.95, h * w, dtype=np.float32).reshape(shape)
-    ss = np.linspace(0.05, 0.45, h * w, dtype=np.float32).reshape(shape)
-    return gs, ss
-
-
-def _add_wide_roi(window: PhasorPlotWindow, name: str = "ROI_test") -> None:
-    """Place a single ROI big enough to enclose the entire phasor cloud."""
-    roi = PhasorROI(
-        name=name,
-        center=(0.5, 0.25),
-        radii=(0.6, 0.4),
-        angle_deg=0,
-        label=1,
-        color="#ff00ff",
-    )
-    window._create_roi_widget(roi)
-
-
-@pytest.fixture
-def phasor_window(qtbot, session_with_dataset) -> PhasorPlotWindow:
-    repo = MagicMock()
-    win = PhasorPlotWindow(session_with_dataset, get_repo=lambda: repo)
-    qtbot.addWidget(win)
-    g, s = _wide_phasor_maps()
-    win._g_map = g
-    win._s_map = s
-    win._total_valid_pixels = int((np.isfinite(g) & (g != 0)).sum())
-    return win
+# Shared fixtures (`session_with_dataset`, `phasor_window`) and helpers
+# (`_wide_phasor_maps`, `_add_wide_roi`) live in
+# `tests/test_gui_workflows/conftest.py`.
+from .conftest import _add_wide_roi, _wide_phasor_maps  # noqa: F401
 
 
 def _capture_apply(window: PhasorPlotWindow):
@@ -88,7 +52,7 @@ def test_apply_respects_active_mask_filter(phasor_window, session_with_dataset):
     assert binary.shape == (16, 16)
     # Every emitted "1" pixel must lie inside the active mask.
     assert np.all(binary[sparse == 0] == 0), (
-        "Apply Visible as Mask leaked pixels outside the active mask"
+        "Apply ROIs as Masks leaked pixels outside the active mask"
     )
     # And the ROI is wide enough to actually catch some of those pixels.
     assert binary.sum() > 0
@@ -140,7 +104,7 @@ def test_apply_respects_filter_ids(phasor_window, session_with_dataset):
     _name, binary, _color = emitted[0]
 
     assert np.all(binary[labels == 2] == 0), (
-        "Apply Visible as Mask included pixels from a filtered-out cell label"
+        "Apply ROIs as Masks included pixels from a filtered-out cell label"
     )
     assert binary[labels == 1].sum() > 0
 
@@ -173,7 +137,7 @@ def test_apply_respects_reference_circle(phasor_window):
     s = phasor_window._s_map
     inside = (g - 0.5) ** 2 + (s - 0.25) ** 2 <= 0.1 ** 2
     assert np.all(binary[~inside] == 0), (
-        "Apply Visible as Mask leaked pixels outside the reference circle"
+        "Apply ROIs as Masks leaked pixels outside the reference circle"
     )
 
 
@@ -235,7 +199,7 @@ def test_apply_respects_cleared_mask(phasor_window):
     _name, binary, _color = emitted[0]
 
     assert np.all(binary[cleared] == 0), (
-        "Apply Visible as Mask leaked pixels from the cleared region"
+        "Apply ROIs as Masks leaked pixels from the cleared region"
     )
     assert binary.sum() > 0, "Apply emitted nothing — wide ROI should still cover plenty"
 

@@ -111,3 +111,65 @@ def collect_events():
             events.append(event)
         return events, _slot
     return _factory
+
+
+# ── Phasor-plot fixtures (shared across phasor test files) ──────────
+
+import numpy as np  # noqa: E402
+
+from percell4.application.session import Session  # noqa: E402
+from percell4.domain.dataset import DatasetHandle  # noqa: E402
+from percell4.interfaces.gui.peer_views.phasor_plot import (  # noqa: E402
+    PhasorPlotWindow,
+    PhasorROI,
+)
+
+
+@pytest.fixture
+def session_with_dataset(tmp_path) -> Session:
+    sess = Session()
+    sess._dataset = DatasetHandle(path=tmp_path / "fake.h5", metadata={})
+    return sess
+
+
+def _wide_phasor_maps(shape=(16, 16)) -> tuple[np.ndarray, np.ndarray]:
+    """Build deterministic g/s maps that span a wide phasor region."""
+    h, w = shape
+    gs = np.linspace(0.05, 0.95, h * w, dtype=np.float32).reshape(shape)
+    ss = np.linspace(0.05, 0.45, h * w, dtype=np.float32).reshape(shape)
+    return gs, ss
+
+
+def _add_wide_roi(window: PhasorPlotWindow, name: str = "ROI_test") -> None:
+    """Place a single ROI big enough to enclose the entire phasor cloud."""
+    roi = PhasorROI(
+        name=name,
+        center=(0.5, 0.25),
+        radii=(0.6, 0.4),
+        angle_deg=0,
+        label=1,
+        color="#ff00ff",
+    )
+    window._create_roi_widget(roi)
+
+
+@pytest.fixture
+def phasor_window(qtbot, session_with_dataset) -> PhasorPlotWindow:
+    """PhasorPlotWindow pre-loaded with deterministic g/s maps.
+
+    Patches ``_g_map`` / ``_s_map`` directly (bypassing
+    ``set_phasor_data``) and pushes the apply-button gate by hand, so
+    callers can drive filter behavior without going through dataset
+    machinery.
+    """
+    repo = MagicMock()
+    win = PhasorPlotWindow(session_with_dataset, get_repo=lambda: repo)
+    qtbot.addWidget(win)
+    g, s = _wide_phasor_maps()
+    win._g_map = g
+    win._s_map = s
+    win._total_valid_pixels = int((np.isfinite(g) & (g != 0)).sum())
+    # set_phasor_data normally runs the gate; we patched _g_map directly
+    # so push it by hand. Idempotent for tests that don't care.
+    win._refresh_apply_buttons_enabled()
+    return win

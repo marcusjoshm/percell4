@@ -589,6 +589,9 @@ class LauncherWindow(QMainWindow):
                     window.preview_roi_removed.connect(self._on_phasor_preview_removed)
                     window.preview_all_cleared.connect(self._on_phasor_preview_cleared)
                     window.mask_applied.connect(self._on_phasor_mask_applied)
+                    window.phasor_mask_applied.connect(
+                        self._on_phasor_current_mask_applied
+                    )
                 # The viewer's `multi_select_requested` signal is
                 # available for any callers that want a per-instance
                 # subscription; the launcher itself receives `M`
@@ -1129,6 +1132,97 @@ class LauncherWindow(QMainWindow):
                     mask_names=store.list_masks(),
                 )
             self.data_model.set_active_mask(last_name)
+
+    def _on_phasor_current_mask_applied(self, payload) -> None:
+        """Persist the "Apply Current Phasor as Mask" payload.
+
+        Mirrors :meth:`_on_phasor_mask_applied` for a single
+        ``(name, binary)`` tuple. Writes /masks/<name>, adds a napari
+        layer when a viewer is alive, persists filter-state attributes
+        on the new dataset for provenance, refreshes the session's
+        mask list, sets ``session.active_mask`` to the new name, and
+        surfaces the auto-select via the launcher status bar.
+
+        Filter-state attributes are read back from the live
+        ``PhasorPlotWindow`` rather than carried in the payload — this
+        is an explicit launcher → window coupling on a handful of
+        private fields (``_intensity_threshold``, ``_ref_circle_*``,
+        ``_cleared_mask``). The signal payload stays minimal at
+        ``(name, binary)``; if the coupling becomes a problem, extend
+        the payload with a filter-state dict.
+        """
+        from datetime import datetime, timezone
+
+        from percell4.store import (
+            PHASOR_MASK_ATTR_ACTIVE_CHANNEL,
+            PHASOR_MASK_ATTR_ACTIVE_MASK,
+            PHASOR_MASK_ATTR_CAPTURE_ISO,
+            PHASOR_MASK_ATTR_CLEARED_PIXEL_COUNT,
+            PHASOR_MASK_ATTR_INTENSITY_THRESHOLD,
+            PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_G,
+            PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_S,
+            PHASOR_MASK_ATTR_REF_CIRCLE_RADIUS,
+        )
+
+        name, binary = payload
+
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            return
+
+        store.write_mask(name, binary)
+
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is not None and viewer_win._is_alive():
+            viewer_win.add_mask(binary, name=name)
+
+        # Sentinel values stand in for None because HDF5 attrs cannot
+        # hold None: 0.0 for unset center, -1.0 for unset radius (so
+        # readers can distinguish "no circle" from "radius 0").
+        phasor_win = self._windows.get("phasor_plot")
+        attrs: dict[str, object] = {
+            PHASOR_MASK_ATTR_CAPTURE_ISO: (
+                datetime.now(timezone.utc)
+                .replace(tzinfo=None)
+                .isoformat()
+                + "Z"
+            ),
+        }
+        if phasor_win is not None:
+            session = phasor_win._session
+            threshold = phasor_win._intensity_threshold
+            attrs[PHASOR_MASK_ATTR_INTENSITY_THRESHOLD] = (
+                float(threshold) if threshold is not None else 0.0
+            )
+            center = phasor_win._ref_circle_center
+            if center is not None:
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_G] = float(center[0])
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_S] = float(center[1])
+            else:
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_G] = 0.0
+                attrs[PHASOR_MASK_ATTR_REF_CIRCLE_CENTER_S] = 0.0
+            radius = phasor_win._ref_circle_radius
+            attrs[PHASOR_MASK_ATTR_REF_CIRCLE_RADIUS] = (
+                float(radius) if radius is not None else -1.0
+            )
+            attrs[PHASOR_MASK_ATTR_ACTIVE_MASK] = session.active_mask or ""
+            cleared = phasor_win._cleared_mask
+            attrs[PHASOR_MASK_ATTR_CLEARED_PIXEL_COUNT] = (
+                int(cleared.sum()) if cleared is not None else 0
+            )
+            attrs[PHASOR_MASK_ATTR_ACTIVE_CHANNEL] = session.active_channel or ""
+        store.set_mask_attrs(name, attrs)
+
+        self.data_model.session.refresh_resource_lists(
+            mask_names=store.list_masks(),
+        )
+        self.data_model.set_active_mask(name)
+
+        self.statusBar().showMessage(
+            f"Saved {name} (now active — next save will be filtered "
+            f"against this mask)",
+            5000,
+        )
 
     # ── Analysis + FLIM handlers moved to task panels ──────
     # See: interfaces/gui/task_panels/analysis_panel.py
