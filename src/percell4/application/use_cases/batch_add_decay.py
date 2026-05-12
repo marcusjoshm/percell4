@@ -411,11 +411,32 @@ def _classify_append_report(
         return BatchItemResult(
             item=item, status="skipped_no_changes", append_report=report
         )
-    # Surface the first error message so the dialog has something to show.
-    first_error = (
-        next(iter(error_messages), None)
-        or "add_decay_to_dataset wrote no channels and reported no errors"
-    )
+    # Surface the first error message so the dialog has something useful to
+    # show. If ``add_decay_to_dataset`` produced neither ``written`` channels
+    # nor ``errors`` entries, the matcher most likely returned zero bindings —
+    # that case lands in ``report.unmatched`` / ``report.ambiguous``, which we
+    # explicitly surface here. Without this, semantic channel names (mNG,
+    # mTQ2, CA-SiR) produce the cryptic "wrote no channels and reported no
+    # errors" message.
+    first_error: str | None = next(iter(error_messages), None)
+    if first_error is None:
+        unmatched = getattr(report, "unmatched", ()) or ()
+        ambiguous = getattr(report, "ambiguous", ()) or ()
+        if unmatched or ambiguous:
+            parts = []
+            if unmatched:
+                parts.append(f"{len(unmatched)} .bin unmatched")
+            if ambiguous:
+                parts.append(f"{len(ambiguous)} .bin ambiguous")
+            first_error = (
+                "no .bin files matched any channel ("
+                + ", ".join(parts)
+                + "). Channel names may not parse via the digit-suffix "
+                "heuristic (e.g. mNG, mTQ2, CA-SiR) — see "
+                "intensity_channels_overrides on the batch orchestrator."
+            )
+        else:
+            first_error = "add_decay_to_dataset wrote no channels and reported no errors"
     return BatchItemResult(
         item=item, status="failed", append_report=report, error=first_error
     )

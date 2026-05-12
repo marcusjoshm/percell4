@@ -166,7 +166,11 @@ class BatchTCSPCDialog(QDialog):
         body.addWidget(self._build_section_validation())
         body.addStretch()
 
-        outer.addWidget(wrap_in_scroll(content))
+        # Keep a reference to the scroll wrapper so _show_summary can swap
+        # it out cleanly. Hiding only `content` leaves the scroll viewport
+        # visible and the summary view appends below it — see PR #9.
+        self._form_scroll = wrap_in_scroll(content)
+        outer.addWidget(self._form_scroll, 1)
 
         # Pinned button row outside the scroll area.
         btn_row = QHBoxLayout()
@@ -845,12 +849,20 @@ class BatchTCSPCDialog(QDialog):
     # ────────────────────────────────────────────────────────────
 
     def _show_summary(self, report: BatchAppendReport) -> None:
-        """Replace the form widget with a results summary view."""
-        if self._content_widget is not None:
-            self._content_widget.hide()
+        """Replace the form view with a results summary view.
+
+        The form lives in ``self._form_scroll`` (a ``QScrollArea`` wrapping
+        the section widgets) plus the pinned button row beneath it. Hiding
+        only the inner content widget leaves the scroll viewport visible
+        and the summary appends below it (PR #9 review). We hide the scroll
+        wrapper itself and insert the summary in its place.
+        """
+        if self._form_scroll is not None:
+            self._form_scroll.hide()
 
         summary = QWidget()
         layout = QVBoxLayout(summary)
+        layout.setContentsMargins(0, 0, 0, 0)
         title = QLabel("Batch TCSPC Append — Summary")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(title)
@@ -872,7 +884,10 @@ class BatchTCSPCDialog(QDialog):
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-        self.layout().addWidget(summary)
+        # Insert above the existing pinned [Validate] [Run] [Close] row so
+        # the summary occupies the same space the form's scroll wrapper did.
+        outer = self.layout()
+        outer.insertWidget(0, summary, 1)
         self._summary_widget = summary
 
         # Status bar message via the injected callable.
@@ -983,6 +998,24 @@ def _render_summary_text(report: BatchAppendReport) -> str:
                 )
             for ch, err in result.append_report.errors.items():
                 lines.append(f"    {ch}: {err}")
+            # Surface matcher diagnostics — these explain "wrote no channels"
+            # when channel names don't parse via the digit-suffix heuristic.
+            unmatched = getattr(result.append_report, "unmatched", ()) or ()
+            if unmatched:
+                lines.append(f"    unmatched .bin files: {len(unmatched)}")
+                for p in list(unmatched)[:5]:
+                    lines.append(f"      • {p.name}")
+                if len(unmatched) > 5:
+                    lines.append(f"      … and {len(unmatched) - 5} more")
+            ambiguous = getattr(result.append_report, "ambiguous", ()) or ()
+            if ambiguous:
+                lines.append(f"    ambiguous .bin files: {len(ambiguous)}")
+                for entry in list(ambiguous)[:5]:
+                    # entry is (Path, tuple[str, ...]) — path + matching names
+                    p, names = entry
+                    lines.append(f"      • {p.name} → {', '.join(names)}")
+                if len(ambiguous) > 5:
+                    lines.append(f"      … and {len(ambiguous) - 5} more")
         if result.error:
             lines.append(f"    error: {result.error}")
     succeeded = len(report.by_status("succeeded"))

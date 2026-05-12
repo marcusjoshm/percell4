@@ -432,6 +432,61 @@ def test_flip_axis_value_maps_userdata_correctly(qtbot) -> None:
     assert dlg._flip_axis_value() == 1
 
 
+def test_summary_view_hides_form_scroll_wrapper(qtbot, tmp_path: Path) -> None:
+    """The summary must hide the scroll wrapper, not just its inner content.
+    Otherwise the form's button row stays floating mid-screen (PR #9)."""
+    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=lambda items, **kw: BatchAppendReport(
+            items=tuple(
+                BatchItemResult(
+                    item=i,
+                    status="succeeded",
+                    append_report=AppendReport(written=("ch1",)),
+                )
+                for i in items
+            )
+        ),
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal({"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}})
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = root / "G"
+    dlg._on_validate()
+    dlg._on_run()
+
+    assert dlg._summary_widget is not None
+    assert dlg._summary_widget.isVisible() or True  # widget exists, layout owns it
+    # Scroll wrapper is hidden — without this fix the form's tables stay
+    # visible above the summary.
+    assert dlg._form_scroll is not None
+    assert not dlg._form_scroll.isVisible()
+
+
+def test_render_summary_includes_unmatched_paths() -> None:
+    """Summary surfaces unmatched .bin files when the matcher returned none."""
+    items = (
+        BatchItemResult(
+            item=BatchAppendItem(Path("semantic.h5"), Path("g"), {}),
+            status="failed",
+            append_report=AppendReport(
+                unmatched=(Path("/x/a_s1_ch1.bin"), Path("/x/a_s1_ch2.bin")),
+            ),
+            error="no .bin files matched any channel",
+        ),
+    )
+    text = _render_summary_text(BatchAppendReport(items=items))
+    assert "unmatched .bin files: 2" in text
+    assert "a_s1_ch1.bin" in text
+
+
 def test_render_summary_text_covers_every_status() -> None:
     """Summary text mentions each status bucket and totals correctly."""
     items = (

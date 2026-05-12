@@ -320,6 +320,31 @@ def test_empty_channel_names_in_metadata_classifies_failed(
     assert "channel_names" in (report.items[0].error or "")
 
 
+def test_zero_bindings_surfaces_unmatched_count_not_catchall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the matcher returns zero bindings (semantic channel-name case),
+    the orchestrator must surface the unmatched/ambiguous diagnostics
+    rather than the cryptic 'wrote no channels and reported no errors'."""
+    h5 = _make_h5(tmp_path / "semantic.h5", ["mNG", "mTQ2"])
+    unmatched_paths = (
+        tmp_path / "src" / "stub_s1_ch1.bin",
+        tmp_path / "src" / "stub_s1_ch2.bin",
+    )
+    monkeypatch.setattr(
+        bad,
+        "add_decay_to_dataset",
+        lambda **_: AppendReport(unmatched=unmatched_paths),
+    )
+    item = BatchAppendItem(h5, tmp_path / "src", {"mNG": _cal(80.0, 0.1, 0.9)})
+    report = batch_add_decay([item], **_empty_args())
+    assert report.items[0].status == "failed"
+    err = report.items[0].error or ""
+    assert "no .bin files matched" in err
+    assert "2 .bin unmatched" in err
+    assert "wrote no channels and reported no errors" not in err
+
+
 def test_scan_error_from_use_case_propagates_as_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
