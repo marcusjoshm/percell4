@@ -196,6 +196,9 @@ class BatchTCSPCDialog(QDialog):
             1, QHeaderView.Stretch
         )
         self._dataset_table.verticalHeader().setVisible(False)
+        # Default to ~6 visible rows so typical 3–12-dish batches fit
+        # without scrolling per-row inside the table.
+        self._dataset_table.setMinimumHeight(200)
         layout.addWidget(self._dataset_table)
 
         btn_row = QHBoxLayout()
@@ -241,6 +244,7 @@ class BatchTCSPCDialog(QDialog):
             0, QHeaderView.Stretch
         )
         self._pairing_table.verticalHeader().setVisible(False)
+        self._pairing_table.setMinimumHeight(200)
         layout.addWidget(self._pairing_table)
 
         auto_btn = QPushButton("Auto-pair by name")
