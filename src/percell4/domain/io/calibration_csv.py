@@ -75,7 +75,11 @@ def parse_calibration_csv(path: Path | str) -> BatchCalibration:
     errors: list[str] = []
     rows: dict[str, dict[str, ChannelCalibration]] = {}
 
-    with open(path, newline="") as f:
+    # ``utf-8-sig`` transparently strips a UTF-8 BOM if present — Excel adds
+    # one when saving as "CSV UTF-8", and without this the first column name
+    # reads as ``﻿dataset`` and the "required column" check fails on
+    # files that visibly start with ``dataset,…``.
+    with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             raise CalibrationCSVError(["empty CSV — no header row"])
@@ -87,7 +91,11 @@ def parse_calibration_csv(path: Path | str) -> BatchCalibration:
 
         # csv.DictReader yields rows starting at file line 2 (after the header).
         for line_no, row in enumerate(reader, start=2):
+            # Strip a trailing ``.h5`` so users can write either ``Dish 1`` or
+            # ``Dish 1.h5`` — the dialog matches by ``Path.stem`` either way.
             dataset = (row.get("dataset") or "").strip()
+            if dataset.lower().endswith(".h5"):
+                dataset = dataset[:-3]
             channel = (row.get("channel") or "").strip()
             if not dataset:
                 errors.append(f"row {line_no}: 'dataset' is empty")

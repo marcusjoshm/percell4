@@ -167,6 +167,32 @@ def test_frequency_consistency_flags_mixed_frequency_in_one_dataset(tmp_path: Pa
     assert "80.0" in errors[0] and "40.0" in errors[0]
 
 
+def test_excel_utf8_bom_is_silently_stripped(tmp_path: Path) -> None:
+    """Excel-saved 'CSV UTF-8' files start with a BOM; the parser must not
+    let that contaminate the first column name."""
+    p = tmp_path / "cal.csv"
+    p.write_bytes(
+        b"\xef\xbb\xbf"
+        + b"dataset,channel,frequency_mhz,phase,modulation\n"
+        + b"Dish 1,ch1,80.0,0.10,0.95\n"
+    )
+    cal = parse_calibration_csv(p)
+    assert cal.get("Dish 1", "ch1") == ChannelCalibration(80.0, 0.10, 0.95)
+
+
+def test_dataset_with_h5_suffix_is_normalised_to_stem(tmp_path: Path) -> None:
+    """Users write either ``Dish 1`` or ``Dish 1.h5``; both reach the same key."""
+    p = tmp_path / "cal.csv"
+    p.write_text(
+        "dataset,channel,frequency_mhz,phase,modulation\n"
+        "Dish 1.h5,ch1,80.0,0.10,0.95\n"
+        "Dish 2.H5,ch1,80.0,0.11,0.94\n"
+    )
+    cal = parse_calibration_csv(p)
+    assert cal.get("Dish 1", "ch1") == ChannelCalibration(80.0, 0.10, 0.95)
+    assert cal.get("Dish 2", "ch1") == ChannelCalibration(80.0, 0.11, 0.94)
+
+
 def test_batch_calibration_is_immutable() -> None:
     """The nested mapping view rejects in-place mutation."""
     cal = BatchCalibration()
