@@ -79,7 +79,13 @@ class SegmentationPanel(QWidget):
             # napari-level paint/erase or in-place mutations on Labels
             # layers get persisted without the user remembering to click
             # "Save Labels to HDF5".
-            self._wire_paint_autosave()
+            # Defer to the next event-loop tick: ``Session.set_dataset``
+            # emits ``state_changed.data`` *before* the launcher's load path
+            # creates the viewer window and adds Labels layers, so wiring
+            # synchronously would bail out with viewer_win=None and miss the
+            # ``layers.events.inserted`` events for layers added later in
+            # the same call.
+            QTimer.singleShot(0, self._wire_paint_autosave)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)

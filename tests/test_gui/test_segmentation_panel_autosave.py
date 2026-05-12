@@ -187,3 +187,73 @@ def test_persist_is_noop_with_no_store(qtbot):
 
     # Must return False but never raise.
     assert panel._persist_labels_layer(layer) is False
+
+
+def test_paint_autosave_wires_when_viewer_appears_after_data_event(qtbot, tmp_path):
+    """Polygon paints persist on first dataset load.
+
+    Regression for the load-order bug: ``Session.set_dataset`` emits
+    ``state_changed.data`` synchronously, but the launcher's load path
+    only creates the viewer window and adds Labels layers *after* that
+    emit returns. If the panel tries to wire its paint subscriber
+    synchronously inside the data handler, the viewer is still None and
+    every later polygon/brush edit silently fails to write to HDF5.
+    The headline symptom: "Add New Label (next ID)" appears to work in
+    the viewer (label visible) but disappears on close+reload.
+    """
+    from napari.layers import Labels
+    from qtpy.QtCore import QTimer
+
+    from percell4.model import StateChange
+
+    path = tmp_path / "exp.h5"
+    store = DatasetStore(path)
+    initial = np.zeros((50, 50), dtype=np.int32)
+    initial[5:10, 5:10] = 1
+    store.write_labels("cellpose", initial)
+
+    session = Session()
+    model = CellDataModel(session=session)
+
+    # Launcher with NO viewer window yet — mirrors first load before
+    # ``_show_window("viewer")`` runs.
+    launcher = SimpleNamespace(
+        _current_store=store,
+        _windows={},
+        statusBar=lambda: SimpleNamespace(showMessage=lambda _msg: None),
+    )
+    panel = SegmentationPanel(model, launcher=launcher)
+    qtbot.addWidget(panel)
+
+    # Sync data event — wiring must NOT bail out permanently here.
+    panel._on_state_changed(StateChange(data=True))
+
+    # Now the launcher creates the viewer and adds the cellpose layer
+    # (same order the real ``_load_h5_into_viewer`` uses).
+    labels_layer = Labels(initial.copy(), name="cellpose")
+    fake_layers = _FakeLayerList([labels_layer])
+    launcher._windows["viewer"] = SimpleNamespace(
+        viewer=SimpleNamespace(layers=fake_layers)
+    )
+
+    # Let the deferred wire run.
+    qtbot.wait(20)
+    assert id(labels_layer) in panel._wired_layer_ids, (
+        "paint subscription was never installed after the viewer appeared"
+    )
+
+    # Simulate the live "Add New Label" → polygon paint flow.
+    labels_layer.selected_label = int(labels_layer.data.max()) + 1
+    labels_layer.paint_polygon(
+        [[20, 20], [20, 40], [40, 40], [40, 20]],
+        labels_layer.selected_label,
+    )
+    assert panel._autosave_timer.isActive(), "events.paint did not arm the autosave timer"
+
+    # Wait for the debounce window to elapse and the flush to run.
+    qtbot.wait(int(panel._autosave_timer.interval()) + 100)
+
+    on_disk = store.read_labels("cellpose")
+    assert (on_disk == 2).any(), (
+        "polygon paint did not round-trip to HDF5 — autosave wiring missed it"
+    )
