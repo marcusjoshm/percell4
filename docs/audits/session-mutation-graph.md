@@ -291,3 +291,25 @@ list fires the appropriate list event. The Data tab combos and any
 peer-view that subscribes re-list immediately without an app restart
 (closes Anchor Bug C3 from
 `docs/brainstorms/2026-05-01-dataset-lifecycle-and-resource-list-events-requirements.md`).
+
+## 2026-05-12 — Batch TCSPC Append dialog
+
+`BatchTCSPCDialog` (added under `feat/batch-tcspc-append`, plan
+`docs/plans/2026-05-12-001-feat-batch-tcspc-append-plan.md`) **writes no
+session selection field**. The dialog operates on user-picked `.h5`
+files that are not loaded into the active session, so
+`session.active_channel`, `active_segmentation`, `active_mask`,
+`filter_ids`, and `selection` are all untouched. It also does not call
+`Session.refresh_resource_lists` — by design, since the dialog never
+mutates the active dataset's resource inventory.
+
+The dialog **does** defensively update `session.dataset.metadata` in
+place after each successful per-item append, but only when
+`session.dataset.path == item.h5_path`. This is the documented defense
+against the h5py library-level metadata cache (see
+`docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md`),
+not a session-selection mutation: the frozen `DatasetHandle` is unchanged;
+only its `metadata` dict — which is a mutable field on the frozen
+dataclass — is updated in place.
+
+No new edges in this mutation graph.
