@@ -237,6 +237,7 @@ class LauncherWindow(QMainWindow):
             on_import=self._on_import_dataset,
             on_load=self._on_load_dataset,
             on_add_layer=self._on_add_layer_to_dataset,
+            on_batch_tcspc=self._on_batch_tcspc_append,
             on_close=self._on_close_dataset,
             on_export_csv=self._on_export_csv,
             on_export_images=self._on_export_images,
@@ -812,6 +813,25 @@ class LauncherWindow(QMainWindow):
 
         viewer_win = self._windows.get("viewer")
         dlg = AddLayerDialog(self, store, self.data_model, viewer_win)
+        dlg.exec_()
+        dlg.deleteLater()
+
+    def _on_batch_tcspc_append(self) -> None:
+        """Open the Batch TCSPC Append dialog.
+
+        Operates on user-picked ``.h5`` files (does not require a loaded
+        dataset). ``get_project_index`` is omitted — the launcher does not
+        yet expose a ``ProjectIndex`` (the dialog's ``Add datasets…`` button
+        is the entry path). See the plan's Scope Boundaries for the deferred
+        project-awareness wiring.
+        """
+        from percell4.gui.batch_tcspc_dialog import BatchTCSPCDialog
+
+        dlg = BatchTCSPCDialog(
+            self,
+            session=self.data_model.session,
+            show_status=lambda msg: self.statusBar().showMessage(msg),
+        )
         dlg.exec_()
         dlg.deleteLater()
 
