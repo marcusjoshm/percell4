@@ -245,7 +245,8 @@ def test_settings_change_disables_run(qtbot, tmp_path: Path) -> None:
     assert dlg._run_btn.isEnabled()
 
     # Touching a stitching widget should re-disable Run.
-    dlg._grid_rows_spin.setValue(dlg._grid_rows_spin.value() + 1)
+    form = dlg._stitching_form
+    form.stitch_rows.setValue(form.stitch_rows.value() + 1)
     assert dlg._validated is False
     assert not dlg._run_btn.isEnabled()
 
@@ -453,15 +454,16 @@ def test_channel_token_override_picks_propagate_to_run(qtbot, tmp_path: Path) ->
 
 
 def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
-    """Origin, rotate, and flip combos must match add_layer_dialog.py's
-    TCSPC tab and compress_dialog.py — drift between the single-dataset
-    and batch dialogs is a recurring footgun (PR #9 review)."""
+    """Origin, rotate, flip, and bin-geometry combos must match the
+    single-dataset TCSPC tab and compress_dialog. Both dialogs share the
+    StitchingFlimForm widget, so this also pins the canonical lists."""
     dlg = BatchTCSPCDialog()
     qtbot.addWidget(dlg)
+    form = dlg._stitching_form
+    assert form is not None
 
     pattern_items = [
-        dlg._grid_type_combo.itemText(i)
-        for i in range(dlg._grid_type_combo.count())
+        form.stitch_type.itemText(i) for i in range(form.stitch_type.count())
     ]
     assert pattern_items == [
         "row_by_row",
@@ -471,7 +473,7 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     ]
 
     origin_items = [
-        dlg._order_combo.itemText(i) for i in range(dlg._order_combo.count())
+        form.stitch_order.itemText(i) for i in range(form.stitch_order.count())
     ]
     assert origin_items == [
         "right_down", "right_up", "left_down", "left_up",
@@ -479,8 +481,8 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     ]
 
     rotate_items = [
-        (dlg._rotate_combo.itemText(i), dlg._rotate_combo.itemData(i))
-        for i in range(dlg._rotate_combo.count())
+        (form.rotation_combo.itemText(i), form.rotation_combo.itemData(i))
+        for i in range(form.rotation_combo.count())
     ]
     assert rotate_items == [
         ("None", 0),
@@ -490,8 +492,8 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     ]
 
     flip_items = [
-        (dlg._flip_combo.itemText(i), dlg._flip_combo.itemData(i))
-        for i in range(dlg._flip_combo.count())
+        (form.flip_combo.itemText(i), form.flip_combo.itemData(i))
+        for i in range(form.flip_combo.count())
     ]
     assert flip_items == [
         ("None", -1),
@@ -499,16 +501,69 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
         ("Horizontal (left ↔ right)", 1),
     ]
 
+    dtype_items = [
+        form.bin_dtype.itemText(i) for i in range(form.bin_dtype.count())
+    ]
+    assert dtype_items == ["uint32", "uint16", "float32", "uint8"]
 
-def test_flip_axis_value_maps_userdata_correctly(qtbot) -> None:
+    dim_order_items = [
+        form.bin_dim_order.itemText(i)
+        for i in range(form.bin_dim_order.count())
+    ]
+    assert dim_order_items == ["YXT", "XYT", "TYX"]
+
+    # Header spinbox shows "Auto-detect" when value is 0 (matches compress).
+    assert form.bin_header.specialValueText() == "Auto-detect"
+    assert form.bin_header.value() == 0
+
+
+def test_flip_axis_helper_maps_userdata_correctly(qtbot) -> None:
     dlg = BatchTCSPCDialog()
     qtbot.addWidget(dlg)
-    dlg._flip_combo.setCurrentIndex(0)  # None
-    assert dlg._flip_axis_value() is None
-    dlg._flip_combo.setCurrentIndex(1)  # vertical, data = 0
-    assert dlg._flip_axis_value() == 0
-    dlg._flip_combo.setCurrentIndex(2)  # horizontal, data = 1
-    assert dlg._flip_axis_value() == 1
+    form = dlg._stitching_form
+    form.flip_combo.setCurrentIndex(0)  # None
+    assert form.flip_axis() is None
+    form.flip_combo.setCurrentIndex(1)  # vertical, data = 0
+    assert form.flip_axis() == 0
+    form.flip_combo.setCurrentIndex(2)  # horizontal, data = 1
+    assert form.flip_axis() == 1
+
+
+def test_flim_group_checked_propagates_dtype_to_run(qtbot, tmp_path: Path) -> None:
+    """When the FLIM group is checked, the user's dtype pick reaches the
+    orchestrator's FlimConfig (this is what fixes the uint32 .bin case)."""
+    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+
+    captured: dict[str, Any] = {}
+
+    def fake_orchestrator(items, **kwargs):
+        captured["flim_config"] = kwargs.get("flim_config")
+        return BatchAppendReport(items=())
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=fake_orchestrator,
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal({"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}})
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = root / "G"
+
+    # Check the FLIM group and set dtype to uint32 (the user's real case).
+    form = dlg._stitching_form
+    form.flim_group.setChecked(True)
+    form.bin_dtype.setCurrentText("uint32")
+    form.bin_header.setValue(20)
+
+    dlg._on_validate()
+    dlg._on_run()
+    assert captured["flim_config"].bin_dtype == "uint32"
+    assert captured["flim_config"].bin_header_bytes == 20
 
 
 def test_summary_view_hides_form_scroll_wrapper(qtbot, tmp_path: Path) -> None:

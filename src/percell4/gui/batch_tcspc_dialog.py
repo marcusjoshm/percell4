@@ -32,7 +32,6 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -45,7 +44,6 @@ from qtpy.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QRadioButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -68,11 +66,10 @@ from percell4.domain.io.calibration_csv import (
 from percell4.domain.io.cross_format import IntensityChannel
 from percell4.domain.io.models import (
     CrossFormatRule,
-    FlimConfig,
-    TileConfig,
     TokenConfig,
 )
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._stitching_flim_form import StitchingFlimForm
 from percell4.gui.tcspc_tab_state import build_rule_from_preset
 from percell4.store import DatasetStore
 
@@ -136,13 +133,9 @@ class BatchTCSPCDialog(QDialog):
         self._run_btn: QPushButton | None = None
         self._validate_btn: QPushButton | None = None
 
-        # Stitching widgets
-        self._grid_rows_spin: QSpinBox | None = None
-        self._grid_cols_spin: QSpinBox | None = None
-        self._grid_type_combo: QComboBox | None = None
-        self._order_combo: QComboBox | None = None
-        self._rotate_combo: QComboBox | None = None
-        self._flip_combo: QComboBox | None = None
+        # Section 5 widgets — owned by the shared StitchingFlimForm so
+        # the batch dialog and single-dataset TCSPC tab stay in lockstep.
+        self._stitching_form: StitchingFlimForm | None = None
         self._conflict_skip_radio: QRadioButton | None = None
         self._conflict_overwrite_radio: QRadioButton | None = None
 
@@ -318,75 +311,18 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_stitching(self) -> QGroupBox:
+        """Section 5 — Stitching + orientation + raw ``.bin`` geometry.
+
+        All widgets live in the shared :class:`StitchingFlimForm` so the
+        batch dialog inherits any future fixes made to the single-dataset
+        TCSPC tab's widget set. Drift between the two dialogs was the
+        recurring root cause of every regression in PR #9.
+        """
         box = QGroupBox("5. Stitching & orientation (applied to every dataset)")
-        layout = QFormLayout(box)
-
-        grid_row = QHBoxLayout()
-        self._grid_rows_spin = QSpinBox()
-        self._grid_rows_spin.setRange(1, 32)
-        self._grid_rows_spin.setValue(4)
-        self._grid_cols_spin = QSpinBox()
-        self._grid_cols_spin.setRange(1, 32)
-        self._grid_cols_spin.setValue(4)
-        grid_row.addWidget(QLabel("rows"))
-        grid_row.addWidget(self._grid_rows_spin)
-        grid_row.addSpacing(12)
-        grid_row.addWidget(QLabel("cols"))
-        grid_row.addWidget(self._grid_cols_spin)
-        grid_row.addStretch()
-        layout.addRow("Grid:", grid_row)
-
-        # Mirrors the single-dataset TCSPC tab in add_layer_dialog.py
-        # (and compress_dialog.py): same item lists, same item-data carrier
-        # pattern, same labels. Drift between batch and single-shot
-        # dialogs is a recurring footgun — see PR #9 review.
-        self._grid_type_combo = QComboBox()
-        self._grid_type_combo.addItems(
-            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
-        )
-        layout.addRow("Pattern:", self._grid_type_combo)
-
-        self._order_combo = QComboBox()
-        self._order_combo.addItems(
-            [
-                "right_down", "right_up", "left_down", "left_up",
-                "top_left", "top_right", "bottom_left", "bottom_right",
-            ]
-        )
-        layout.addRow("Start:", self._order_combo)
-
-        # Rotation/flip combos carry their semantic value via itemData
-        # rather than by list-index. Same convention as
-        # add_layer_dialog.py:_tcspc_rotation_combo / _tcspc_flip_combo.
-        self._rotate_combo = QComboBox()
-        self._rotate_combo.addItem("None", 0)
-        self._rotate_combo.addItem("90° CCW", 1)
-        self._rotate_combo.addItem("180°", 2)
-        self._rotate_combo.addItem("90° CW", 3)
-        layout.addRow("Rotate stitched array:", self._rotate_combo)
-
-        self._flip_combo = QComboBox()
-        # ``-1`` = no flip; ``0`` = vertical (top↔bottom, np.flipud);
-        # ``1`` = horizontal (left↔right, np.fliplr).
-        self._flip_combo.addItem("None", -1)
-        self._flip_combo.addItem("Vertical (top ↔ bottom)", 0)
-        self._flip_combo.addItem("Horizontal (left ↔ right)", 1)
-        layout.addRow("Flip:", self._flip_combo)
-
-        # Settings changes invalidate Run.
-        for w in (
-            self._grid_rows_spin,
-            self._grid_cols_spin,
-        ):
-            w.valueChanged.connect(self._invalidate_run)
-        for w in (
-            self._grid_type_combo,
-            self._order_combo,
-            self._rotate_combo,
-            self._flip_combo,
-        ):
-            w.currentIndexChanged.connect(self._invalidate_run)
-
+        layout = QVBoxLayout(box)
+        self._stitching_form = StitchingFlimForm()
+        self._stitching_form.changed.connect(self._invalidate_run)
+        layout.addWidget(self._stitching_form)
         return box
 
     def _build_section_conflict_policy(self) -> QGroupBox:
@@ -900,17 +836,19 @@ class BatchTCSPCDialog(QDialog):
             QMessageBox.critical(self, "Cannot run", "\n".join(errors))
             return
 
+        assert self._stitching_form is not None
         token_config = TokenConfig()
-        tile_config = self._build_tile_config()
-        flim_config = FlimConfig()
+        tile_config = self._stitching_form.tile_config()
+        # Frequency is per-dataset (from CSV) and lands in /metadata via
+        # _calibration_attrs; the shared form's FlimConfig only carries
+        # geometry. Picking 80.0 here is a no-op for the actual write path.
+        flim_config = self._stitching_form.flim_config(frequency_mhz=80.0)
         # Same preset the single-dataset TCSPC tab uses: direct token equality
         # first (driven by the per-channel-name overrides set in Section 4),
         # base-stem fallback for .bin files without a channel token.
         cross_format_rule: CrossFormatRule = build_rule_from_preset()
-        rotate_k = (
-            int(self._rotate_combo.currentData()) if self._rotate_combo else 0
-        )
-        flip_axis = self._flip_axis_value()
+        rotate_k = self._stitching_form.rotation_k()
+        flip_axis = self._stitching_form.flip_axis()
         force = bool(self._conflict_overwrite_radio and self._conflict_overwrite_radio.isChecked())
 
         progress = QProgressDialog(
@@ -950,29 +888,6 @@ class BatchTCSPCDialog(QDialog):
         )
         progress.setValue(len(items))
         self._show_summary(report)
-
-    def _flip_axis_value(self) -> int | None:
-        """Read flip combo's itemData. ``-1`` (no flip) → ``None``; ``0`` / ``1`` → that axis."""
-        if self._flip_combo is None:
-            return None
-        data = self._flip_combo.currentData()
-        if data is None or int(data) < 0:
-            return None
-        return int(data)
-
-    def _build_tile_config(self) -> TileConfig:
-        assert (
-            self._grid_rows_spin is not None
-            and self._grid_cols_spin is not None
-            and self._grid_type_combo is not None
-            and self._order_combo is not None
-        )
-        return TileConfig(
-            grid_rows=self._grid_rows_spin.value(),
-            grid_cols=self._grid_cols_spin.value(),
-            grid_type=self._grid_type_combo.currentText(),
-            order=self._order_combo.currentText(),
-        )
 
     def _build_items_and_metadata(
         self,
