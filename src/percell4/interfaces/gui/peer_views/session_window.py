@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -28,18 +29,14 @@ from percell4.model import CellDataModel
 _QSETTINGS_ORG = "LeeLabPerCell4"
 _QSETTINGS_APP = "PerCell4"
 _GEOMETRY_KEY = "session_window/geometry"
+_PIN_KEY = "session_window/pin_on_top"
 _NO_DATASET_TEXT = "(no dataset)"
 _DEFAULT_WIDTH = 720
 _DEFAULT_HEIGHT = 80
 
 
 class SessionWindow(QMainWindow):
-    """Canonical Selector window for the three session active fields.
-
-    Always-on-top is hardcoded; there is no toggle. The window is meant
-    to be visible at all times so the user can pick what they're working
-    on without tab-navigating away from whatever else they're doing.
-    """
+    """Canonical Selector window for the three session active fields."""
 
     def __init__(self, data_model: CellDataModel) -> None:
         super().__init__()
@@ -48,11 +45,8 @@ class SessionWindow(QMainWindow):
         self._loading = False
 
         self.setWindowTitle("PerCell4 — Session")
-        # Always-on-top is a permanent property of this window. Set the
-        # flag here, before the window is ever shown, so no flag-change
-        # side effects can hide it later.
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self._build_ui()
+        self._restore_pin_on_top()
         self._restore_geometry()
 
         self._unsubs = [
@@ -119,6 +113,17 @@ class SessionWindow(QMainWindow):
         row.addWidget(self._seg_combo)
 
         row.addStretch()
+
+        # Always-on-top toggle (right). Controls Z-order — when checked,
+        # the window stays above other PerCell4 windows even when they
+        # have focus. Does NOT control screen position.
+        self._pin_check = QCheckBox("Always on top")
+        self._pin_check.setToolTip(
+            "Keep this window above other PerCell4 windows even when they "
+            "have focus. Does not move the window — drag it where you want."
+        )
+        self._pin_check.toggled.connect(self._on_pin_toggled)
+        row.addWidget(self._pin_check)
 
     # ── Combo population ────────────────────────────────────────────
 
@@ -241,6 +246,41 @@ class SessionWindow(QMainWindow):
         if self._loading:
             return
         self.data_model.set_active_segmentation(text or None)
+
+    # ── Pin-on-top ──────────────────────────────────────────────────
+
+    def _restore_pin_on_top(self) -> None:
+        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        raw = qs.value(_PIN_KEY, True)
+        # QSettings stores booleans as strings on some backends.
+        if isinstance(raw, str):
+            pinned = raw.lower() in ("true", "1", "yes")
+        else:
+            pinned = bool(raw)
+        self._apply_pin_on_top(pinned)
+        # Reflect in checkbox without firing the toggle slot back.
+        was_blocked = self._pin_check.blockSignals(True)
+        self._pin_check.setChecked(pinned)
+        self._pin_check.blockSignals(was_blocked)
+
+    def _apply_pin_on_top(self, pinned: bool) -> None:
+        # ``setWindowFlag`` hides the widget as a side effect when called
+        # on a visible window, so we capture visibility BEFORE the flag
+        # change and re-show after. Reading ``isVisible()`` after the call
+        # always returns False and would silently drop the window for the
+        # user every time they toggle the pin.
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, pinned)
+        if was_visible:
+            self.show()
+            if pinned:
+                # macOS doesn't always re-stack the window on flag change.
+                # Force it forward so the toggle has a visible effect.
+                self.raise_()
+
+    def _on_pin_toggled(self, pinned: bool) -> None:
+        self._apply_pin_on_top(pinned)
+        QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(_PIN_KEY, pinned)
 
     # ── Geometry persistence ────────────────────────────────────────
 

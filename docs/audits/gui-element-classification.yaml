@@ -3,11 +3,11 @@ audit_unit: [U1, U2]
 date: 2026-05-01
 last_updated: 2026-05-13
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 204
+total_widgets: 205
 counts:
   selector: 16
   creator: 17
-  action: 171
+  action: 172
 # 2026-05-13 update (feat/session-selection-window):
 #   Retires the per-panel channel-override pattern (PR #11 era) and the
 #   three Data-tab Selector combos in favor of a single canonical
@@ -2354,8 +2354,13 @@ widgets:
     keystroke: null
     notes: "Canonical Selector for active_segmentation. Writes via data_model.set_active_segmentation."
 
-  # Note: a session_window.pin_check QCheckBox briefly existed between
-  # 2026-05-13 morning and afternoon. It was removed once the user
-  # confirmed always-on-top should be a hardcoded property of the window,
-  # not a toggle. There is no replacement widget — the flag is set in
-  # SessionWindow.__init__ and never changes.
+  - id: session_window.pin_check
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/session_window.py
+    lines: "115-117, 252-254"
+    widget_type: QCheckBox
+    handler: _on_pin_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "User-facing toggle for Qt.WindowStaysOnTopHint. Pure window-state operation; no session write. Persisted via QSettings('LeeLabPerCell4','PerCell4') key 'session_window/pin_on_top'."
