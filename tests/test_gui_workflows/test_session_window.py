@@ -306,66 +306,29 @@ def test_channel_list_changed_refreshes_channel_combo(qtbot, tmp_path):
     assert win._channel_combo.currentText() == "A"
 
 
-# ── Pin-on-top toggle ───────────────────────────────────────────────
+# ── Always-on-top (hardcoded, no toggle) ────────────────────────────
 
 
-def test_pin_on_top_defaults_to_true(qtbot, isolated_settings):
-    """Fresh window with no saved preference defaults to always-on-top."""
+def test_window_has_always_on_top_flag(qtbot, isolated_settings):
+    """Always-on-top is a permanent property of the SessionWindow."""
     model = CellDataModel()
     win = SessionWindow(data_model=model)
     qtbot.addWidget(win)
 
-    assert win._pin_check.isChecked() is True
     assert bool(win.windowFlags() & Qt.WindowStaysOnTopHint)
 
 
-def test_pin_on_top_toggle_off_clears_flag(qtbot, isolated_settings):
-    model = CellDataModel()
-    win = SessionWindow(data_model=model)
-    qtbot.addWidget(win)
+def test_window_has_no_pin_checkbox(qtbot, isolated_settings):
+    """The SessionWindow does not expose a Pin / Always-on-top toggle.
 
-    win._pin_check.setChecked(False)
-    assert not bool(win.windowFlags() & Qt.WindowStaysOnTopHint)
-
-
-def test_pin_on_top_toggle_keeps_window_visible(qtbot, isolated_settings):
-    """Toggling pin-on-top must NOT hide the window.
-
-    Regression: ``QWidget.setWindowFlag`` hides the widget as a side effect.
-    The toggle handler must re-show after flipping the flag so the user
-    doesn't lose the window every time they toggle the pin.
+    Always-on-top is hardcoded — there is no way to turn it off through
+    the UI. Guards against accidental re-introduction of the toggle.
     """
     model = CellDataModel()
     win = SessionWindow(data_model=model)
     qtbot.addWidget(win)
-    win.show()
-    qtbot.waitExposed(win)
-    assert win.isVisible()
 
-    # Toggle off
-    win._pin_check.setChecked(False)
-    assert win.isVisible(), "Window vanished after toggling Pin-on-top OFF"
-
-    # Toggle back on
-    win._pin_check.setChecked(True)
-    assert win.isVisible(), "Window vanished after toggling Pin-on-top ON"
-
-
-def test_pin_on_top_state_persists_across_construction(qtbot, isolated_settings):
-    """Toggling off and reopening preserves the off state."""
-    model = CellDataModel()
-    win1 = SessionWindow(data_model=model)
-    qtbot.addWidget(win1)
-    win1._pin_check.setChecked(False)
-    win1.close()
-
-    # New window, same settings store
-    model2 = CellDataModel()
-    win2 = SessionWindow(data_model=model2)
-    qtbot.addWidget(win2)
-
-    assert win2._pin_check.isChecked() is False
-    assert not bool(win2.windowFlags() & Qt.WindowStaysOnTopHint)
+    assert not hasattr(win, "_pin_check")
 
 
 # ── Geometry persistence ────────────────────────────────────────────
