@@ -55,9 +55,8 @@ def _build_panel(qtbot, *, channel="ch0", active_seg="seg", existing_masks=None)
         show_status=lambda _msg: None,
     )
     qtbot.addWidget(panel)
-    # Populate the channel/metric combos used by _on_run.
-    panel._channel_combo.addItem(channel)
-    panel._channel_combo.setCurrentText(channel)
+    # The Run handler reads session.active_channel (the SessionWindow is
+    # the only Selector site). The model fixture above already seeds it.
     return panel, store
 
 

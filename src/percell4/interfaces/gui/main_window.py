@@ -608,36 +608,6 @@ class LauncherWindow(QMainWindow):
                 # `__init__` so this connect is not strictly needed.
         return self._windows.get(key)
 
-    def _wire_viewer_layer_selection(self) -> None:
-        """Connect napari's active layer change to the channel label.
-
-        Re-wires if the viewer was recreated (old Qt window was deleted).
-        """
-        viewer_win = self._windows.get("viewer")
-        if viewer_win is None:
-            return
-        try:
-            viewer_id = id(viewer_win.viewer)
-        except Exception:
-            return
-
-        if getattr(self, "_wired_viewer_id", None) == viewer_id:
-            return  # already wired to this viewer instance
-
-        def _on_layer_selection_changed(event):
-            self._update_active_channel_label()
-            if hasattr(self, "_seg_panel"):
-                self._seg_panel.update_channels()
-            if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
-                self._analysis_panel._grouped_seg_panel.update_channels()
-            if hasattr(self, "_flim_panel"):
-                self._flim_panel.update_channels()
-
-        viewer_win.viewer.layers.selection.events.active.connect(
-            _on_layer_selection_changed
-        )
-        self._wired_viewer_id = viewer_id
-
     def _show_window(self, key: str) -> None:
         """Show/raise a managed window, creating it if needed."""
         window = self._get_or_create_window(key)
@@ -936,13 +906,6 @@ class LauncherWindow(QMainWindow):
             )
             return
 
-        # Wire napari layer selection events
-        self._wire_viewer_layer_selection()
-        self._update_active_channel_label()
-        if hasattr(self, "_seg_panel"):
-            self._seg_panel.update_channels()
-        if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
-            self._analysis_panel._grouped_seg_panel.update_channels()
 
     def _update_data_tab_from_store(self) -> None:
         """Update the Data tab info label and dropdowns from the current store."""
@@ -978,15 +941,6 @@ class LauncherWindow(QMainWindow):
         if hasattr(self, "_data_panel"):
             self._data_panel.clear_ui()
         self.statusBar().showMessage("Dataset closed")
-
-    def _update_active_channel_label(self) -> None:
-        """No-op. Channel labels are now Session-backed.
-
-        Data tab: QComboBox populated from Session on dataset load.
-        Seg panel: subscribes to state_changed and reads Session.
-        Analysis panel: reads Session.active_channel on state_changed.
-        """
-        pass
 
     def _apply_cell_filter(self, labels: np.ndarray) -> np.ndarray | None:
         """Zero out non-filtered cells in the labels array.

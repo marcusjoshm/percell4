@@ -69,12 +69,10 @@ class SegmentationPanel(QWidget):
 
         self._build_ui()
 
-        # Update channel label when dataset loads or channel changes
+        # Wire auto-save on dataset load
         self.data_model.state_changed.connect(self._on_state_changed)
 
     def _on_state_changed(self, change) -> None:
-        if change.data or change.channel:
-            self.update_channels()
         if change.data:
             # A dataset was loaded (or cleared). Wire auto-save so that any
             # napari-level paint/erase or in-place mutations on Labels
@@ -103,18 +101,6 @@ class SegmentationPanel(QWidget):
             f" border-bottom: 1px solid {theme.BORDER};"
         )
         layout.addWidget(title)
-
-        # Channel override (mirrors the Grouped Thresholding pattern at
-        # gui/grouped_seg_panel.py:67-72). The combo seeds from
-        # session.active_channel via update_channels(); the user's pick
-        # is a local override read by _on_run_cellpose and does not
-        # write back to session.
-        chan_row = QHBoxLayout()
-        chan_row.addWidget(QLabel("Channel:"))
-        self._channel_combo = QComboBox()
-        chan_row.addWidget(self._channel_combo)
-        chan_row.addStretch()
-        layout.addLayout(chan_row)
 
         # ── Cellpose section ──────────────────────────────────
         cp_group = QGroupBox("Cellpose")
@@ -377,52 +363,17 @@ class SegmentationPanel(QWidget):
             return
         self._persist_labels_layer(layer)
 
-    # ── Channel tracking ──────────────────────────────────────
-
-    def update_channels(self) -> None:
-        """Refresh the channel-override combo from session metadata.
-
-        Mirrors ``gui/grouped_seg_panel.py:update_channels`` byte-for-byte
-        (the canonical implementation). Default-seeds the combo to
-        ``session.active_channel`` and falls back to viewer Image layers
-        when session metadata is absent. Called from ``_on_state_changed``
-        and from the launcher's napari layer-selection wire.
-        """
-        self._channel_combo.clear()
-
-        # Prefer Session metadata (works without viewer open)
-        session = self.data_model.session
-        if session.dataset is not None:
-            ch_names = list(session.dataset.metadata.get("channel_names", []))
-            for name in ch_names:
-                self._channel_combo.addItem(name)
-            if session.active_channel:
-                self._channel_combo.setCurrentText(session.active_channel)
-            if ch_names:
-                return
-
-        # Fallback: viewer layers (legacy path)
-        viewer_win = (
-            self._launcher._windows.get("viewer") if self._launcher else None
-        )
-        if viewer_win is None or viewer_win.viewer is None:
-            return
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Image":
-                self._channel_combo.addItem(layer.name)
-
     # ── Cellpose ──────────────────────────────────────────────
 
     def _on_run_cellpose(self) -> None:
         if self._launcher is None:
             return
 
-        # Read channel from the override combo (local; does not write back
-        # to session.active_channel). Combo seeds from session via
-        # update_channels() so the default matches the global active.
-        channel_name = self._channel_combo.currentText() or None
+        # Read the active channel from Session (the canonical source —
+        # the SessionWindow is the only Selector site for active_channel).
+        channel_name = self.data_model.session.active_channel
         if not channel_name:
-            self._show_status("Select a channel in the Data tab first")
+            self._show_status("Select a channel in the Session window first")
             return
 
         viewer_win = self._launcher._windows.get("viewer")

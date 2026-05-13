@@ -112,13 +112,9 @@ def _build_panel(qtbot, monkeypatch, *, channel="ch0", existing_labels=None):
 
     panel = SegmentationPanel(data_model=model, launcher=launcher)
     qtbot.addWidget(panel)
-    # Populate the channel-override combo so _on_run_cellpose reads it.
-    # The combo replaced the read-only label in the channel-override PR;
-    # tests that previously set session.active_channel alone now must
-    # also seed the combo.
-    if channel:
-        panel._channel_combo.addItem(channel)
-        panel._channel_combo.setCurrentText(channel)
+    # The Cellpose Run handler reads the canonical Session active_channel
+    # (the SessionWindow is the only Selector site). The model fixture
+    # above already seeds session.active_channel.
     return panel, store
 
 
