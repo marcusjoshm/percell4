@@ -63,42 +63,6 @@ class DataPanel(QWidget):
         )
         layout.addWidget(title)
 
-        # ── Active layers ──
-        layers_group = QGroupBox("Active Layers")
-        layers_layout = QVBoxLayout(layers_group)
-
-        chan_row = QHBoxLayout()
-        chan_row.addWidget(QLabel("Active Channel:"))
-        self._active_channel_combo = QComboBox()
-        self._active_channel_combo.setPlaceholderText("None")
-        self._active_channel_combo.currentTextChanged.connect(
-            self._on_active_channel_combo_changed
-        )
-        chan_row.addWidget(self._active_channel_combo)
-        layers_layout.addLayout(chan_row)
-
-        seg_row = QHBoxLayout()
-        seg_row.addWidget(QLabel("Active Segmentation:"))
-        self._active_seg_combo = QComboBox()
-        self._active_seg_combo.setPlaceholderText("None")
-        self._active_seg_combo.currentTextChanged.connect(
-            self._on_active_seg_combo_changed
-        )
-        seg_row.addWidget(self._active_seg_combo)
-        layers_layout.addLayout(seg_row)
-
-        mask_row = QHBoxLayout()
-        mask_row.addWidget(QLabel("Active Mask:"))
-        self._active_mask_combo = QComboBox()
-        self._active_mask_combo.setPlaceholderText("None")
-        self._active_mask_combo.currentTextChanged.connect(
-            self._on_active_mask_combo_changed
-        )
-        mask_row.addWidget(self._active_mask_combo)
-        layers_layout.addLayout(mask_row)
-
-        layout.addWidget(layers_group)
-
         # ── Layer Management ──
         mgmt_group = QGroupBox("Layer Management")
         mgmt_layout = QVBoxLayout(mgmt_group)
@@ -162,11 +126,10 @@ class DataPanel(QWidget):
     # ─�� State change routing ─────────────────────────────────
 
     def _on_state_changed(self, change) -> None:
-        # List events run first so subscribers re-list before the
-        # active-* branches look up the new selection in the (now-current)
-        # combo items.
+        # List events refresh the management dropdowns. Active-selection
+        # display lives in the SessionWindow now; this panel handles only
+        # rename/delete/metadata.
         if change.channel_list:
-            self._populate_channel_combo()
             self.refresh_management_combos()
         if change.segmentation_list:
             self._refresh_seg_combos()
@@ -174,40 +137,12 @@ class DataPanel(QWidget):
         if change.mask_list:
             self._refresh_mask_combos()
             self.refresh_dataset_info()
-        if change.segmentation:
-            self._on_model_active_seg_changed(self.data_model.active_segmentation)
-        if change.mask:
-            self._on_model_active_mask_changed(self.data_model.active_mask)
-        if change.data:
-            # Backwards-compat: legacy DATASET_CHANGED carries data=True.
-            # The list events above already refreshed the combos; this
-            # branch is a no-op when the channel_list flag also fired,
-            # otherwise it's a fallback.
-            if not change.channel_list:
-                self._populate_channel_combo()
+        if change.segmentation or change.mask:
+            self.refresh_dataset_info()
 
     def _refresh_seg_combos(self) -> None:
-        """Re-list the Active Segmentation combo and the Management Segmentations dropdown.
-
-        Items come from the store; selection follows session.active_segmentation.
-        Carries no currentText across the clear+repopulate.
-        """
+        """Re-list the Management Segmentations dropdown from the store."""
         store = self._get_store()
-        mask_set = set(store.list_masks()) if store is not None else set()
-        active = self.data_model.active_segmentation or ""
-
-        self._active_seg_combo.blockSignals(True)
-        self._active_seg_combo.clear()
-        if store is not None:
-            for name in store.list_labels():
-                if name not in mask_set:
-                    self._active_seg_combo.addItem(name)
-        if active and self._active_seg_combo.findText(active) >= 0:
-            self._active_seg_combo.setCurrentText(active)
-        else:
-            self._active_seg_combo.setCurrentText("")
-        self._active_seg_combo.blockSignals(False)
-
         self._mgmt_seg_combo.blockSignals(True)
         self._mgmt_seg_combo.clear()
         if store is not None:
@@ -216,71 +151,14 @@ class DataPanel(QWidget):
         self._mgmt_seg_combo.blockSignals(False)
 
     def _refresh_mask_combos(self) -> None:
-        """Re-list the Active Mask combo and the Management Masks dropdown."""
+        """Re-list the Management Masks dropdown from the store."""
         store = self._get_store()
-        active = self.data_model.active_mask or ""
-
-        self._active_mask_combo.blockSignals(True)
-        self._active_mask_combo.clear()
-        if store is not None:
-            for name in store.list_masks():
-                self._active_mask_combo.addItem(name)
-        if active and self._active_mask_combo.findText(active) >= 0:
-            self._active_mask_combo.setCurrentText(active)
-        else:
-            self._active_mask_combo.setCurrentText("")
-        self._active_mask_combo.blockSignals(False)
-
         self._mgmt_mask_combo.blockSignals(True)
         self._mgmt_mask_combo.clear()
         if store is not None:
             for name in store.list_masks():
                 self._mgmt_mask_combo.addItem(name)
         self._mgmt_mask_combo.blockSignals(False)
-
-    # ── Active layer sync ────────────────────────────────────
-
-    def _on_active_seg_combo_changed(self, name: str) -> None:
-        if name:
-            self.data_model.set_active_segmentation(name)
-
-    def _on_active_mask_combo_changed(self, name: str) -> None:
-        if name:
-            self.data_model.set_active_mask(name)
-
-    def _on_active_channel_combo_changed(self, name: str) -> None:
-        if name:
-            self.data_model.session.set_active_channel(name)
-
-    def _on_model_active_seg_changed(self, name: str) -> None:
-        """Sync the Active Segmentation combo to the session's active value.
-
-        Items list is normally owned by the list-event handler
-        (_refresh_seg_combos). The addItem fallback covers in-memory-only
-        Creators (e.g., Create Empty Labels) whose resource is not on disk
-        and therefore not in store.list_labels().
-        """
-        self._active_seg_combo.blockSignals(True)
-        if name:
-            if self._active_seg_combo.findText(name) < 0:
-                self._active_seg_combo.addItem(name)
-            self._active_seg_combo.setCurrentText(name)
-        else:
-            self._active_seg_combo.setCurrentText("")
-        self._active_seg_combo.blockSignals(False)
-        self.refresh_dataset_info()
-
-    def _on_model_active_mask_changed(self, name: str) -> None:
-        """Sync the Active Mask combo to the session's active value."""
-        self._active_mask_combo.blockSignals(True)
-        if name:
-            if self._active_mask_combo.findText(name) < 0:
-                self._active_mask_combo.addItem(name)
-            self._active_mask_combo.setCurrentText(name)
-        else:
-            self._active_mask_combo.setCurrentText("")
-        self._active_mask_combo.blockSignals(False)
-        self.refresh_dataset_info()
 
     # ── Layer Management ─────────────────────────────────────
 
@@ -323,17 +201,6 @@ class DataPanel(QWidget):
                     self._mgmt_chan_combo.addItem(layer.name)
                     seen.add(layer.name)
 
-    def refresh_active_combos(self) -> None:
-        """Refresh the active segmentation/mask dropdowns from store + session.
-
-        Items come from the store; selection follows session.active_*.
-        Carries no currentText across the clear+repopulate so a stale name
-        from a previous dataset cannot survive (closes the C2 mask-combo
-        carry-over symptom).
-        """
-        self._refresh_seg_combos()
-        self._refresh_mask_combos()
-
     def refresh_dataset_info(self) -> None:
         """Refresh the Dataset Info label from the current store."""
         store = self._get_store()
@@ -355,31 +222,9 @@ class DataPanel(QWidget):
         except Exception:
             pass
 
-    def _populate_channel_combo(self) -> None:
-        """Populate the active channel dropdown from dataset metadata."""
-        self._active_channel_combo.blockSignals(True)
-        self._active_channel_combo.clear()
-        session = self.data_model.session
-        if session.dataset is not None:
-            ch_names = list(session.dataset.metadata.get("channel_names", []))
-            for name in ch_names:
-                self._active_channel_combo.addItem(name)
-            if session.active_channel:
-                self._active_channel_combo.setCurrentText(session.active_channel)
-        self._active_channel_combo.blockSignals(False)
-
     def clear_ui(self) -> None:
         """Reset all UI state (called on dataset close)."""
         self._info_label.setText("No dataset loaded")
-        self._active_seg_combo.blockSignals(True)
-        self._active_seg_combo.clear()
-        self._active_seg_combo.blockSignals(False)
-        self._active_mask_combo.blockSignals(True)
-        self._active_mask_combo.clear()
-        self._active_mask_combo.blockSignals(False)
-        self._active_channel_combo.blockSignals(True)
-        self._active_channel_combo.clear()
-        self._active_channel_combo.blockSignals(False)
         self._mgmt_seg_combo.clear()
         self._mgmt_mask_combo.clear()
         self._mgmt_chan_combo.clear()
@@ -413,7 +258,8 @@ class DataPanel(QWidget):
                     break
 
         self.refresh_management_combos()
-        self.refresh_active_combos()
+        self._refresh_seg_combos()
+        self._refresh_mask_combos()
         self._show_status(f"Renamed '{old_name}' → '{new_name}'")
 
     def _on_delete_layer(self, prefix: str) -> None:
@@ -443,7 +289,8 @@ class DataPanel(QWidget):
                     break
 
         self.refresh_management_combos()
-        self.refresh_active_combos()
+        self._refresh_seg_combos()
+        self._refresh_mask_combos()
         self._show_status(f"Deleted '{name}'")
 
     def _on_rename_channel(self) -> None:
@@ -637,7 +484,6 @@ class DataPanel(QWidget):
                     break
 
         self.refresh_management_combos()
-        self._populate_channel_combo()
         if in_metadata:
             self._show_status(f"Deleted channel '{name}' permanently")
         else:

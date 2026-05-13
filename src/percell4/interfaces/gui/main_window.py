@@ -911,7 +911,8 @@ class LauncherWindow(QMainWindow):
         """Update the Data tab info label and dropdowns from the current store."""
         if hasattr(self, "_data_panel"):
             self._data_panel.refresh_dataset_info()
-            self._data_panel.refresh_active_combos()
+            self._data_panel._refresh_seg_combos()
+            self._data_panel._refresh_mask_combos()
             self._data_panel.refresh_management_combos()
 
     def _on_close_dataset(self) -> None:
