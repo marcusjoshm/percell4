@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.config import viewer_presets as vp
+from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
@@ -407,6 +408,29 @@ class SegmentationPanel(QWidget):
             self._show_status(f"Channel '{channel_name}' not found in viewer")
             return
 
+        # Prompt for the segmentation name BEFORE starting Cellpose — cancel
+        # is cheap up front, expensive after the worker has run for minutes.
+        # Default "cellpose"; refuse-and-re-prompt on collision with any
+        # existing /labels/<name> segmentation. Mirrors the Apply Current
+        # Phasor as Mask flow via the shared helper.
+        store = getattr(self._launcher, "_current_store", None)
+        existing_seg: set[str] = set()
+        if store is not None:
+            try:
+                existing_seg = set(store.list_labels()) - set(store.list_masks())
+            except Exception:  # noqa: BLE001 — best-effort; collision check is advisory
+                existing_seg = set()
+        chosen_name = prompt_for_resource_name(
+            self,
+            title="Save Segmentation",
+            label="Segmentation name:",
+            default="cellpose",
+            existing_names=existing_seg,
+        )
+        if chosen_name is None:
+            return
+        self._cellpose_pending_name = chosen_name
+
         image = active_layer.data
         model_type = self._cp_model.currentText()
         diameter = self._cp_diameter.value() if self._cp_diameter.value() > 0 else None
@@ -439,11 +463,16 @@ class SegmentationPanel(QWidget):
             repo = Hdf5DatasetRepository()
             uc = SegmentCells(repo, self.data_model.session)
             result = uc.finalize(
-                masks, remove_edge_cells=self._cp_remove_edges.isChecked()
+                masks,
+                remove_edge_cells=self._cp_remove_edges.isChecked(),
+                name=getattr(self, "_cellpose_pending_name", None),
             )
         except ValueError as e:
             self._show_status(f"Error: {e}")
             return
+        finally:
+            # Always clear the stash so a subsequent Run gets a fresh prompt.
+            self._cellpose_pending_name = None
 
         self._show_status(
             f"Done: {result.n_cells} cells "

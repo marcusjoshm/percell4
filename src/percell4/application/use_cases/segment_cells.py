@@ -75,10 +75,15 @@ class SegmentCells:
         raw_masks: NDArray[np.int32],
         min_area: int = 15,
         remove_edge_cells: bool = True,
+        name: str | None = None,
     ) -> SegmentationResult:
         """Post-process masks, write to store, update session.
 
-        Call on the main thread after inference completes.
+        Call on the main thread after inference completes. When ``name``
+        is supplied, the segmentation lands at ``/labels/<name>``;
+        otherwise the historical auto-derived ``f"cellpose_{n_cells}"``
+        name is used so non-GUI callers (workflow runners, tests) keep
+        working unchanged.
         """
         handle = self._session.dataset
         if handle is None:
@@ -93,7 +98,7 @@ class SegmentCells:
         labels = relabel_sequential(labels)
         n_cells = int(labels.max())
 
-        seg_name = f"cellpose_{n_cells}"
+        seg_name = name if name is not None else f"cellpose_{n_cells}"
 
         # Store-before-viewer: write to HDF5 first
         self._repo.write_labels(handle, seg_name, labels)
