@@ -1,15 +1,17 @@
 ---
 title: Per-panel channel-override combo — extract on the fourth site
 date: 2026-05-13
+status: superseded
+superseded_by:
+  - docs/plans/2026-05-13-001-feat-session-selection-window-plan.md
+  - docs/brainstorms/2026-05-13-session-selection-window-requirements.md
+superseded_on: 2026-05-13
 category: conventions
 module: gui
 problem_type: convention
 component: development_workflow
 severity: medium
-applies_when:
-  - adding a new task-panel that runs work against a single channel
-  - migrating an existing panel from reading session.active_channel directly to a per-panel override
-  - reviewing a PR that copies update_channels into a new panel
+applies_when: []
 tags:
   - qt
   - channel
@@ -17,9 +19,22 @@ tags:
   - panel
   - shared-helper
   - extract-threshold
+  - superseded
 ---
 
 # Per-panel channel-override combo — extract on the fourth site
+
+> **Superseded — 2026-05-13.** The per-panel channel-override pattern this
+> document codified was retired the same day. The three panels it referenced
+> (Cellpose, Grouped Segmentation, FLIM) no longer have local `_channel_combo`
+> overrides; they read `session.active_channel` directly. The canonical
+> Selector for the three active session fields is the always-visible
+> `SessionWindow` at
+> `src/percell4/interfaces/gui/peer_views/session_window.py`. The
+> "fourth site triggers extract" rule no longer applies because there is
+> no first/second/third site to extract from. Preserved as historical
+> context — do not use this pattern in new work. See the requirements
+> doc and plan listed in `superseded_by` for the replacement model.
 
 ## Context
 

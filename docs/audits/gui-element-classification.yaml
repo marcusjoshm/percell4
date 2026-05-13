@@ -1,13 +1,23 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
-last_updated: 2026-05-12
+last_updated: 2026-05-13
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 206
+total_widgets: 205
 counts:
   selector: 16
   creator: 17
-  action: 173
+  action: 172
+# 2026-05-13 update (feat/session-selection-window):
+#   Retires the per-panel channel-override pattern (PR #11 era) and the
+#   three Data-tab Selector combos in favor of a single canonical
+#   SessionWindow at src/percell4/interfaces/gui/peer_views/session_window.py.
+#   Net widget change: -1 (remove grouped_seg_panel.channel_combo Action;
+#   data_panel removes 3 Selectors; SessionWindow adds 3 Selectors).
+#   Resolves audit OQ-3: there are no per-module Selectors for
+#   active_channel / active_segmentation / active_mask; the SessionWindow
+#   is the sole non-Data-tab Selector site and the Data tab no longer
+#   contains Selectors at all.
 # 2026-05-12 update (feat/batch-tcspc-append U5):
 #   +13 widgets on the new Batch TCSPC Append surface:
 #     io_panel.batch_tcspc_append_button (Action — launcher entry).
@@ -49,38 +59,9 @@ counts:
 
 widgets:
   # ── data_panel.py ────────────────────────────────────────────
-  - id: data_panel.active_channel_combo
-    class: Selector
-    path: src/percell4/interfaces/gui/task_panels/data_panel.py
-    lines: "72-77, 184-186"
-    widget_type: QComboBox
-    handler: _on_active_channel_combo_changed
-    reads: [active_channel]
-    writes: [active_channel]
-    keystroke: null
-    notes: "Canonical Selector pattern. Calls session.set_active_channel via data_model.session."
-
-  - id: data_panel.active_seg_combo
-    class: Selector
-    path: src/percell4/interfaces/gui/task_panels/data_panel.py
-    lines: "82-87, 176-178"
-    widget_type: QComboBox
-    handler: _on_active_seg_combo_changed
-    reads: [active_segmentation]
-    writes: [active_segmentation]
-    keystroke: null
-    notes: "Canonical Selector pattern (data_model.set_active_segmentation)."
-
-  - id: data_panel.active_mask_combo
-    class: Selector
-    path: src/percell4/interfaces/gui/task_panels/data_panel.py
-    lines: "92-97, 180-182"
-    widget_type: QComboBox
-    handler: _on_active_mask_combo_changed
-    reads: [active_mask]
-    writes: [active_mask]
-    keystroke: null
-    notes: "Canonical Selector pattern (data_model.set_active_mask)."
+  # Note: data_panel.active_channel_combo / active_seg_combo / active_mask_combo
+  # were removed on 2026-05-13. Canonical Selectors now live on the
+  # SessionWindow (see entries below).
 
   - id: data_panel.mgmt_seg_combo
     class: Action
@@ -1070,16 +1051,9 @@ widgets:
     notes: "BORDERLINE — writes the napari Labels layer's data to HDF5 via store.write_labels (line 560). This persists an existing in-memory resource rather than minting a new one — does not call session.set_active_segmentation. Closest fit: Action with HDF5-write side effect; Save-vs-Create distinction matters per channel-deletion-permanence pattern. Flag for U3."
 
   # ── gui/grouped_seg_panel.py ─────────────────────────────────
-  - id: grouped_seg_panel.channel_combo
-    class: Action
-    path: src/percell4/gui/grouped_seg_panel.py
-    lines: "68-71"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Operand for Run Grouped Thresholding (channel selection). No callback connected; populated by update_channels() from session metadata."
+  # Note: grouped_seg_panel.channel_combo was removed on 2026-05-13. The
+  # Run handler now reads session.active_channel directly; the SessionWindow
+  # is the only Selector site for active_channel.
 
   - id: grouped_seg_panel.metric_combo
     class: Action
@@ -2339,13 +2313,54 @@ widgets:
     notes: "Zero `bind_key` registrations exist in gui/viewer.py today (grep -n 'bind_key' /Users/leelab/percell4/src/percell4/gui/viewer.py returns empty). Recorded as an explicit absence per U2 task spec; matches plan §Problem Frame point 3 ('PerCell4 has zero `viewer.bind_key` registrations'). U11 will add a `Labels.bind_key('M', …)` here."
 
   # ── interfaces/gui/main_window.py — events.active closure (out of tree) ──
-  - id: main_window.events_active_closure
-    class: Action
-    path: src/percell4/interfaces/gui/main_window.py
-    lines: "593-605, 917-925, 926-969"
-    widget_type: napari layers.selection.events.active subscription closure
-    handler: _on_layer_selection_changed → _sync_active_layers_from_viewer
-    reads: [active_mask, active_segmentation]
-    writes: [active_mask, active_segmentation]
+  # Note: the _wire_viewer_layer_selection / _on_layer_selection_changed
+  # closure was removed on 2026-05-13 as part of the session-selection-window
+  # plan. The closure's only remaining live side effect (driving panel
+  # `update_channels` calls) became dead code when the panel-channel-override
+  # widgets themselves were removed. The SessionWindow subscribes to Session
+  # events directly, decoupling Session truth from napari layer-list events.
+
+  # ── interfaces/gui/peer_views/session_window.py — canonical Selector ──
+  - id: session_window.channel_combo
+    class: Selector
+    path: src/percell4/interfaces/gui/peer_views/session_window.py
+    lines: "94-97, 228-231"
+    widget_type: QComboBox
+    handler: _on_channel_combo_changed
+    reads: [active_channel]
+    writes: [active_channel]
     keystroke: null
-    notes: "Out-of-tree: launcher-owned lifecycle handler. Surfaces in U3 mutation graph. Removed in U9. I1 VIOLATION (the `_sync_active_layers_from_viewer()` call inside the closure writes session.set_active_mask / set_active_segmentation from napari's layer-list selection events at lines 947, 951, 957, 961). Per plan OQ-1 resolution, this is the structural cause of 'napari side-effects rewrite domain state' bug class. The closure also drives _update_active_channel_label (no-op today) and seg-panel / grouped-seg-panel channel-label refreshes — those side effects are preserved by U9; only the _sync_active_layers_from_viewer() call is deleted."
+    notes: "Canonical Selector for active_channel. The SessionWindow is the only non-Data-tab Selector site after 2026-05-13; the Data tab no longer contains active-* Selectors at all."
+
+  - id: session_window.mask_combo
+    class: Selector
+    path: src/percell4/interfaces/gui/peer_views/session_window.py
+    lines: "101-104, 233-236"
+    widget_type: QComboBox
+    handler: _on_mask_combo_changed
+    reads: [active_mask]
+    writes: [active_mask]
+    keystroke: null
+    notes: "Canonical Selector for active_mask. Writes via data_model.set_active_mask."
+
+  - id: session_window.seg_combo
+    class: Selector
+    path: src/percell4/interfaces/gui/peer_views/session_window.py
+    lines: "108-111, 238-241"
+    widget_type: QComboBox
+    handler: _on_seg_combo_changed
+    reads: [active_segmentation]
+    writes: [active_segmentation]
+    keystroke: null
+    notes: "Canonical Selector for active_segmentation. Writes via data_model.set_active_segmentation."
+
+  - id: session_window.pin_check
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/session_window.py
+    lines: "115-117, 252-254"
+    widget_type: QCheckBox
+    handler: _on_pin_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "User-facing toggle for Qt.WindowStaysOnTopHint. Pure window-state operation; no session write. Persisted via QSettings('LeeLabPerCell4','PerCell4') key 'session_window/pin_on_top'."
