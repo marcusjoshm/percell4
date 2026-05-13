@@ -114,8 +114,14 @@ class SessionWindow(QMainWindow):
 
         row.addStretch()
 
-        # Pin-on-top toggle (right).
-        self._pin_check = QCheckBox("Pin on top")
+        # Always-on-top toggle (right). Controls Z-order — when checked,
+        # the window stays above other PerCell4 windows even when they
+        # have focus. Does NOT control screen position.
+        self._pin_check = QCheckBox("Always on top")
+        self._pin_check.setToolTip(
+            "Keep this window above other PerCell4 windows even when they "
+            "have focus. Does not move the window — drag it where you want."
+        )
         self._pin_check.toggled.connect(self._on_pin_toggled)
         row.addWidget(self._pin_check)
 
@@ -267,6 +273,10 @@ class SessionWindow(QMainWindow):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, pinned)
         if was_visible:
             self.show()
+            if pinned:
+                # macOS doesn't always re-stack the window on flag change.
+                # Force it forward so the toggle has a visible effect.
+                self.raise_()
 
     def _on_pin_toggled(self, pinned: bool) -> None:
         self._apply_pin_on_top(pinned)
