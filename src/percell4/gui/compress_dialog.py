@@ -160,6 +160,11 @@ class CompressDialog(QDialog):
         ds_layout.addLayout(ds_btn_row)
 
         self._ds_list = QListWidget()
+        # itemChanged fires on every checkbox toggle — without this wire the
+        # Compress button only refreshes via the Select All / Deselect All
+        # paths, so a user who tries to enable Compress by ticking a single
+        # dataset sees no effect.
+        self._ds_list.itemChanged.connect(self._update_compress_button)
         ds_layout.addWidget(self._ds_list)
         lists_row.addWidget(ds_group, 3)
 
@@ -178,6 +183,10 @@ class CompressDialog(QDialog):
         ch_layout.addLayout(ch_btn_row)
 
         self._ch_list = QListWidget()
+        # See note on _ds_list.itemChanged — the channel list has the same
+        # symmetry: a single-channel toggle must refresh Compress's
+        # enablement.
+        self._ch_list.itemChanged.connect(self._update_compress_button)
         ch_layout.addWidget(self._ch_list)
 
         # Manual mode: channel config panel (hidden in auto mode)
