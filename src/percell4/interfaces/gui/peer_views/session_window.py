@@ -258,10 +258,14 @@ class SessionWindow(QMainWindow):
         self._pin_check.blockSignals(was_blocked)
 
     def _apply_pin_on_top(self, pinned: bool) -> None:
+        # ``setWindowFlag`` hides the widget as a side effect when called
+        # on a visible window, so we capture visibility BEFORE the flag
+        # change and re-show after. Reading ``isVisible()`` after the call
+        # always returns False and would silently drop the window for the
+        # user every time they toggle the pin.
+        was_visible = self.isVisible()
         self.setWindowFlag(Qt.WindowStaysOnTopHint, pinned)
-        # Flipping a window flag after show() requires show() again on most
-        # platforms. If the window has never been shown yet, this is a no-op.
-        if self.isVisible():
+        if was_visible:
             self.show()
 
     def _on_pin_toggled(self, pinned: bool) -> None:

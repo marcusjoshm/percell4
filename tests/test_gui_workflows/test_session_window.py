@@ -328,6 +328,29 @@ def test_pin_on_top_toggle_off_clears_flag(qtbot, isolated_settings):
     assert not bool(win.windowFlags() & Qt.WindowStaysOnTopHint)
 
 
+def test_pin_on_top_toggle_keeps_window_visible(qtbot, isolated_settings):
+    """Toggling pin-on-top must NOT hide the window.
+
+    Regression: ``QWidget.setWindowFlag`` hides the widget as a side effect.
+    The toggle handler must re-show after flipping the flag so the user
+    doesn't lose the window every time they toggle the pin.
+    """
+    model = CellDataModel()
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+    win.show()
+    qtbot.waitExposed(win)
+    assert win.isVisible()
+
+    # Toggle off
+    win._pin_check.setChecked(False)
+    assert win.isVisible(), "Window vanished after toggling Pin-on-top OFF"
+
+    # Toggle back on
+    win._pin_check.setChecked(True)
+    assert win.isVisible(), "Window vanished after toggling Pin-on-top ON"
+
+
 def test_pin_on_top_state_persists_across_construction(qtbot, isolated_settings):
     """Toggling off and reopening preserves the off state."""
     model = CellDataModel()
