@@ -1,7 +1,7 @@
 ---
 title: "feat: Batch TCSPC (.bin) append to existing datasets"
 type: feat
-status: active
+status: completed
 date: 2026-05-12
 origin: docs/brainstorms/2026-05-12-batch-tcspc-append-requirements.md
 ---
