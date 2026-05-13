@@ -117,6 +117,14 @@ class LauncherWindow(QMainWindow):
 
         self._restore_geometry()
 
+        # Always-visible Session window — canonical Selector for the three
+        # active session fields. Sibling of the Launcher.
+        from percell4.interfaces.gui.peer_views.session_window import SessionWindow
+
+        session_win = SessionWindow(data_model=self.data_model)
+        self._windows["session"] = session_win
+        session_win.show()
+
     # ── Menu bar ──────────────────────────────────────────────
 
     def _create_menu_bar(self) -> None:
