@@ -619,7 +619,7 @@ class LauncherWindow(QMainWindow):
         def _on_layer_selection_changed(event):
             self._update_active_channel_label()
             if hasattr(self, "_seg_panel"):
-                self._seg_panel.update_channel_label()
+                self._seg_panel.update_channels()
             if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
                 self._analysis_panel._grouped_seg_panel.update_channels()
 
@@ -929,6 +929,8 @@ class LauncherWindow(QMainWindow):
         # Wire napari layer selection events
         self._wire_viewer_layer_selection()
         self._update_active_channel_label()
+        if hasattr(self, "_seg_panel"):
+            self._seg_panel.update_channels()
         if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
             self._analysis_panel._grouped_seg_panel.update_channels()
 
