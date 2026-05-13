@@ -1,7 +1,7 @@
 ---
 title: "feat: Prompt for layer name on Run Cellpose and grouped thresholding"
 type: feat
-status: active
+status: completed
 date: 2026-05-12
 ---
 
