@@ -30,6 +30,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.domain.measure.metrics import BUILTIN_METRICS
+from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
@@ -237,24 +238,20 @@ class GroupedSegPanel(QWidget):
             return
         seg_labels = labels_layer.data.astype(np.int32)
 
-        # Re-run detection
-        mask_name = f"grouped_{channel}_{metric}"
+        # Prompt for mask name. Default "grouped"; refuse-and-re-prompt on
+        # collision with any existing /masks/<name>. Mirrors the Apply
+        # Current Phasor as Mask flow via the shared helper. Cancel aborts
+        # the run before any measurement / grouping worker starts.
         existing_masks = store.list_masks() if hasattr(store, "list_masks") else []
-        if mask_name in existing_masks:
-            reply = QMessageBox.question(
-                self,
-                "Grouped Thresholding",
-                f"Mask '{mask_name}' already exists.\n\nOverwrite it?",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            )
-            if reply == QMessageBox.Cancel:
-                return
-            if reply == QMessageBox.No:
-                # Auto-increment name
-                i = 2
-                while f"{mask_name}_v{i}" in existing_masks:
-                    i += 1
-                mask_name = f"{mask_name}_v{i}"
+        mask_name = prompt_for_resource_name(
+            self,
+            title="Save Grouped Thresholding Mask",
+            label="Mask name:",
+            default="grouped",
+            existing_names=existing_masks,
+        )
+        if mask_name is None:
+            return
 
         # Check if measurement exists, auto-compute if needed
         col_name = f"{channel}_{metric}"

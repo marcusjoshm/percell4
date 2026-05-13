@@ -37,6 +37,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.domain.flim.phasor_display import (
     compute_valid_phasor_pixels,
     mask_shape_matches,
@@ -1871,31 +1872,16 @@ class PhasorPlotWindow(QMainWindow):
         binary = visible.astype(np.uint8)
 
         existing = self._existing_mask_names()
-        current_default = self._default_phasor_mask_name(existing)
-
-        while True:
-            name, ok = QInputDialog.getText(
-                self,
-                "Save Phasor as Mask",
-                "Mask name:",
-                text=current_default,
-            )
-            if not ok:
-                return
-            if name.strip() == "":
-                # Re-prompt with the original computed default — not the
-                # blank string the user just submitted.
-                continue
-            if name in existing:
-                QMessageBox.warning(
-                    self,
-                    "Name in use",
-                    f"A mask named '{name}' already exists. "
-                    "Please enter a different name below.",
-                )
-                current_default = name
-                continue
-            break
+        default = self._default_phasor_mask_name(existing)
+        name = prompt_for_resource_name(
+            self,
+            title="Save Phasor as Mask",
+            label="Mask name:",
+            default=default,
+            existing_names=existing,
+        )
+        if name is None:
+            return
 
         if int(binary.sum()) == 0:
             response = QMessageBox.question(
