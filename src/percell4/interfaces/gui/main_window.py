@@ -622,6 +622,8 @@ class LauncherWindow(QMainWindow):
                 self._seg_panel.update_channels()
             if hasattr(self, "_analysis_panel") and hasattr(self._analysis_panel, "_grouped_seg_panel"):
                 self._analysis_panel._grouped_seg_panel.update_channels()
+            if hasattr(self, "_flim_panel"):
+                self._flim_panel.update_channels()
 
         viewer_win.viewer.layers.selection.events.active.connect(
             _on_layer_selection_changed

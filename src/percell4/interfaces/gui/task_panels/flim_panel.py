@@ -62,7 +62,15 @@ class FlimPanel(QWidget):
         self.data_model.session.subscribe(
             Event.DATASET_CHANGED, self._refresh_ref_circle_enabled
         )
+        # Re-seed the channel-override combo on dataset switch. The
+        # launcher's napari-layer-selection wire also calls this so the
+        # combo follows active-channel changes (matches the Grouped
+        # Thresholding pattern).
+        self.data_model.session.subscribe(
+            Event.DATASET_CHANGED, self.update_channels
+        )
         self._refresh_ref_circle_enabled()
+        self.update_channels()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -77,6 +85,18 @@ class FlimPanel(QWidget):
             f" border-bottom: 1px solid {theme.BORDER};"
         )
         layout.addWidget(title)
+
+        # ── Channel override (mirrors Grouped Thresholding at
+        # gui/grouped_seg_panel.py:67-72). Combo seeds from
+        # session.active_channel via update_channels(); the user's pick
+        # is a local override read by _get_active_channel — it does not
+        # write back to session.
+        chan_row = QHBoxLayout()
+        chan_row.addWidget(QLabel("Channel:"))
+        self._channel_combo = QComboBox()
+        chan_row.addWidget(self._channel_combo)
+        chan_row.addStretch()
+        layout.addLayout(chan_row)
 
         # ── Phasor Analysis ──
         phasor_group = QGroupBox("Phasor Analysis")
@@ -241,7 +261,43 @@ class FlimPanel(QWidget):
         self._show_window_cb(name)
 
     def _get_active_channel(self) -> str | None:
-        return self.data_model.session.active_channel
+        """Read the channel-override combo. Empty string → ``None``.
+
+        Defaulted to ``session.active_channel`` via ``update_channels``;
+        the user's pick is a local override that does not write back to
+        the session (matches the Grouped Thresholding contract).
+        """
+        return self._channel_combo.currentText() or None
+
+    def update_channels(self) -> None:
+        """Refresh the channel-override combo from session metadata.
+
+        Mirrors ``gui/grouped_seg_panel.py:update_channels`` byte-for-byte
+        (the canonical implementation). Default-seeds the combo to
+        ``session.active_channel`` and falls back to viewer Image layers
+        when session metadata is absent. Called from the launcher's
+        napari layer-selection wire and from ``Event.DATASET_CHANGED``.
+        """
+        self._channel_combo.clear()
+
+        # Prefer Session metadata (works without viewer open)
+        session = self.data_model.session
+        if session.dataset is not None:
+            ch_names = list(session.dataset.metadata.get("channel_names", []))
+            for name in ch_names:
+                self._channel_combo.addItem(name)
+            if session.active_channel:
+                self._channel_combo.setCurrentText(session.active_channel)
+            if ch_names:
+                return
+
+        # Fallback: viewer layers (legacy path)
+        viewer_win = self._get_viewer_window()
+        if viewer_win is None or viewer_win.viewer is None:
+            return
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == "Image":
+                self._channel_combo.addItem(layer.name)
 
     def _get_active_seg_labels(self):
         return self._get_active_seg_labels_cb()
