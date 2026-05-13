@@ -1,7 +1,7 @@
 ---
 title: "feat: Channel-override combo in Cellpose and FLIM panels"
 type: feat
-status: active
+status: completed
 date: 2026-05-12
 ---
 
