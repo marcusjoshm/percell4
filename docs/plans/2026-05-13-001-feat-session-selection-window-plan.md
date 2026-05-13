@@ -1,7 +1,7 @@
 ---
 title: Always-Visible Session Selection Window
 type: feat
-status: active
+status: completed
 date: 2026-05-13
 origin: docs/brainstorms/2026-05-13-session-selection-window-requirements.md
 ---
