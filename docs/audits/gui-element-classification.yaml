@@ -1,13 +1,24 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
-last_updated: 2026-05-03
+last_updated: 2026-05-12
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 190
+total_widgets: 206
 counts:
   selector: 16
-  creator: 15
-  action: 159
+  creator: 17
+  action: 173
+# 2026-05-12 update (feat/batch-tcspc-append U5):
+#   +13 widgets on the new Batch TCSPC Append surface:
+#     io_panel.batch_tcspc_append_button (Action — launcher entry).
+#     batch_tcspc.* (12 dialog widgets) — every internal control is Action
+#       except batch_tcspc.run_button, which is Creator (writes /decay/<ch>
+#       and flat FLIM calibration keys to /metadata for each paired .h5).
+#   No new Selectors. The dialog never writes session.active_* / filter_ids /
+#   selection: it operates on user-picked .h5 files, not the active session.
+#   After each successful item, the dialog defensively syncs
+#   session.dataset.metadata in place IFF the active session points at the
+#   same .h5 path (h5py library-cache staleness defense).
 # 2026-05-03 update (feat/phasor-gmm-segmentation U7):
 #   +14 Actions on the FlimPanel and PhasorPlotWindow surfaces:
 #     FlimPanel: intensity_threshold_spin, ref_circle_check, ref_circle_tau_spin,
@@ -542,6 +553,17 @@ widgets:
     writes: []
     keystroke: null
     notes: "Callback delegate; opens the AddLayerDialog (Creator) from the launcher."
+
+  - id: io_panel.batch_tcspc_append_button
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/io_panel.py
+    lines: "85-91"
+    widget_type: QPushButton
+    handler: lambda → injected on_batch_tcspc callback
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Callback delegate; opens the BatchTCSPCDialog (Creator at the dialog level — its Run button writes /decay/<ch> and /metadata for each selected .h5)."
 
   - id: io_panel.close_button
     class: Action
@@ -1690,6 +1712,143 @@ widgets:
     writes: []
     keystroke: null
     notes: "BORDERLINE Creator — writes /decay/<ch> via add_decay_to_dataset use case. Also persists FLIM calibration metadata. No direct session.set_active_* write here. Closest fit: Creator (no auto-select since /decay isn't a session-tracked resource). Flag for U3."
+
+  # ── gui/batch_tcspc_dialog.py — Batch TCSPC Append ───────────
+  # Sibling of the single-dataset TCSPC tab above. Operates on user-picked
+  # .h5 files; no current-session dependency. Dialog as a whole is a Creator
+  # (writes /decay/<ch> and /metadata for many .h5 files); every internal
+  # widget is Action except the terminal Run button.
+  - id: batch_tcspc.dataset_table.checkbox_per_row
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "289-296"
+    widget_type: QCheckBox (in QTableWidget cell)
+    handler: lambda → _invalidate_run
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Per-row inclusion toggle. Disables the Run button on change."
+
+  - id: batch_tcspc.dataset_table.add_button
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "187-191"
+    widget_type: QPushButton
+    handler: _on_add_datasets
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "File picker for .h5 paths; appends rows to the dataset table."
+
+  - id: batch_tcspc.dataset_table.remove_button
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "192-194"
+    widget_type: QPushButton
+    handler: _on_remove_datasets
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Removes the currently-selected dataset rows."
+
+  - id: batch_tcspc.source_root_browse_button
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "208-213"
+    widget_type: QPushButton
+    handler: _on_browse_root
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Directory picker; triggers group discovery (immediate subfolders)."
+
+  - id: batch_tcspc.pairing_table.combo_per_row
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "350-364"
+    widget_type: QComboBox (in QTableWidget cell)
+    handler: _on_pair_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Per-dataset group picker. Enforces uniqueness across rows (claiming a group resets any other row holding it)."
+
+  - id: batch_tcspc.pairing_table.auto_pair_button
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "237-242"
+    widget_type: QPushButton
+    handler: _on_auto_pair
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Fills pairing combos by name-similarity (SequenceMatcher ratio ≥ 0.6)."
+
+  - id: batch_tcspc.csv_browse_button
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "250-253"
+    widget_type: QPushButton
+    handler: _on_load_csv
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Loads a long-format calibration CSV via parse_calibration_csv. Shows row-numbered errors on failure."
+
+  - id: batch_tcspc.stitching.grid_rows_spin
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "262-269"
+    widget_type: QSpinBox
+    handler: valueChanged → _invalidate_run
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "One of several stitching/orientation controls (grid_cols_spin, grid_type_combo, order_combo, rotate_combo, flip_combo). All are Action and re-disable Run on change."
+
+  - id: batch_tcspc.conflict_policy_radios
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "302-314"
+    widget_type: QButtonGroup (QRadioButton × 2)
+    handler: toggled → _invalidate_run
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Skip-existing (default) vs Overwrite-all. Maps to add_decay_to_dataset's `force` flag."
+
+  - id: batch_tcspc.validate_button
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "153-155"
+    widget_type: QPushButton
+    handler: _on_validate
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Pre-flight check; populates the report pane and gates the Run button. Does not write to any .h5 file."
+
+  - id: batch_tcspc.run_button
+    class: Creator
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "156-159, 421-481"
+    widget_type: QPushButton
+    handler: _on_run
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Creator — writes /decay/<ch> via add_decay_to_dataset and flat FLIM calibration keys to /metadata for every paired .h5. Disabled until Validate has succeeded for the current state. Does NOT auto-select any session resource (datasets aren't loaded into the active session). After each successful item, the dialog updates `session.dataset.metadata` in place IFF the active session matches that .h5 path (h5py library-cache learning)."
+
+  - id: batch_tcspc.summary.copy_to_clipboard_button
+    class: Action
+    path: src/percell4/gui/batch_tcspc_dialog.py
+    lines: "555-558"
+    widget_type: QPushButton
+    handler: lambda → _copy_text_to_clipboard
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Copies the plain-text summary of the last run to the system clipboard."
 
   # ── gui/add_layer_dialog.py — ImageJ ROIs tab ─────────────────
   - id: add_layer.roi_tab.browse_button

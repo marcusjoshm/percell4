@@ -37,6 +37,7 @@ class IoPanel(QWidget):
         on_export_csv: Callable[[], None],
         on_export_images: Callable[[], None],
         on_export_phasor_npz: Callable[[], None],
+        on_batch_tcspc: Callable[[], None] = lambda: None,
         show_status: Callable[[str], None] = lambda _: None,
         parent: QWidget | None = None,
     ) -> None:
@@ -44,6 +45,7 @@ class IoPanel(QWidget):
         self._on_import = on_import
         self._on_load = on_load
         self._on_add_layer = on_add_layer
+        self._on_batch_tcspc = on_batch_tcspc
         self._on_close = on_close
         self._on_export_csv = on_export_csv
         self._on_export_images = on_export_images
@@ -80,6 +82,14 @@ class IoPanel(QWidget):
         btn_add_layer = QPushButton("Add Layer to Dataset...")
         btn_add_layer.clicked.connect(lambda: self._on_add_layer())
         import_layout.addWidget(btn_add_layer)
+
+        btn_batch_tcspc = QPushButton("Batch TCSPC Append...")
+        btn_batch_tcspc.setToolTip(
+            "Append .bin decay layers to many existing datasets at once "
+            "(uses one calibration CSV)."
+        )
+        btn_batch_tcspc.clicked.connect(lambda: self._on_batch_tcspc())
+        import_layout.addWidget(btn_batch_tcspc)
 
         btn_close = QPushButton("Close Dataset")
         btn_close.clicked.connect(lambda: self._on_close())

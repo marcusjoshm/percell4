@@ -33,3 +33,17 @@ class NoCachedPhasorError(PercellError):
     auto-load) catch this to fall through to compute or to leave the
     phasor window empty.
     """
+
+
+class CalibrationCSVError(PercellError):
+    """The FLIM calibration CSV failed to parse or validate.
+
+    Carries a list of human-readable error messages — one per failing
+    row or global check — so the caller can show every problem at once
+    instead of bailing on the first. ``str(error)`` joins them with
+    semicolons; ``error.errors`` is the original tuple.
+    """
+
+    def __init__(self, errors: list[str] | tuple[str, ...]) -> None:
+        self.errors: tuple[str, ...] = tuple(errors)
+        super().__init__("; ".join(self.errors))
