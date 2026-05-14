@@ -64,13 +64,6 @@ class GroupedSegPanel(QWidget):
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
 
-        # ── Channel selector ──
-        chan_row = QHBoxLayout()
-        chan_row.addWidget(QLabel("Channel:"))
-        self._channel_combo = QComboBox()
-        chan_row.addWidget(self._channel_combo)
-        layout.addLayout(chan_row)
-
         # ── Metric selector ──
         metric_row = QHBoxLayout()
         metric_row.addWidget(QLabel("Metric:"))
@@ -165,29 +158,6 @@ class GroupedSegPanel(QWidget):
         self._gmm_group.setVisible(text == "GMM")
         self._kmeans_group.setVisible(text == "K-means")
 
-    def update_channels(self) -> None:
-        """Refresh channel dropdown from Session metadata (preferred) or viewer layers."""
-        self._channel_combo.clear()
-
-        # Prefer Session metadata (works without viewer open)
-        session = self.data_model.session
-        if session.dataset is not None:
-            ch_names = list(session.dataset.metadata.get("channel_names", []))
-            for name in ch_names:
-                self._channel_combo.addItem(name)
-            if session.active_channel:
-                self._channel_combo.setCurrentText(session.active_channel)
-            if ch_names:
-                return
-
-        # Fallback: viewer layers (legacy path)
-        viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
-            return
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Image":
-                self._channel_combo.addItem(layer.name)
-
     def _show_status(self, msg: str) -> None:
         self._status.setText(msg)
         self._show_status_cb(msg)
@@ -205,9 +175,11 @@ class GroupedSegPanel(QWidget):
             self._show_status("No dataset loaded")
             return
 
-        channel = self._channel_combo.currentText()
+        # Read the active channel from Session (canonical — SessionWindow
+        # is the only Selector site).
+        channel = self.data_model.session.active_channel
         if not channel:
-            self._show_status("Select a channel")
+            self._show_status("Select a channel in the Session window first")
             return
 
         metric = self._metric_combo.currentText()

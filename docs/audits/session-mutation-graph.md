@@ -1,11 +1,20 @@
 ---
 audit_unit: U3
 date: 2026-05-01
+last_updated: 2026-05-13
 inputs: docs/audits/gui-element-classification.yaml
 deliverable_of_plan: docs/plans/2026-05-01-refactor-gui-state-handling-audit-plan.md
 ---
 
 # Session Mutation Graph
+
+> **2026-05-13 update.** The Data-tab Selector combos and the per-panel
+> channel-override combos were retired in favor of a single canonical
+> SessionWindow. The Selector entries below for `active_channel`,
+> `active_segmentation`, and `active_mask` were moved from the Data tab
+> to the SessionWindow. Audit OQ-3 (per-module vs Data-tab Selector
+> synchronization) is resolved by eliminating per-module Selectors entirely.
+>
 
 Every code path that writes any of the five session selection fields, with
 classification under the Selector / Creator / Action / Lifecycle taxonomy
@@ -57,7 +66,7 @@ coupling). No new todos are filed in this unit.
 
 | File:line | Caller | YAML id | Class | Verdict | Notes |
 |---|---|---|---|---|---|
-| `src/percell4/interfaces/gui/task_panels/data_panel.py:186` | `_on_active_channel_combo_changed` (combo change) | `data_panel.active_channel_combo` | Selector | Compliant | Canonical Selector for `active_channel` (Data tab combo). |
+| `src/percell4/interfaces/gui/peer_views/session_window.py:230` | `_on_channel_combo_changed` (SessionWindow combo change) | `session_window.channel_combo` | Selector | Compliant | Canonical Selector for `active_channel`. Replaced `data_panel.active_channel_combo` on 2026-05-13. |
 | `src/percell4/interfaces/gui/task_panels/data_panel.py:409` | `_on_rename_channel` (rename button) | `data_panel.rename_channel_button` | Creator (rename-cleanup) | Compliant | See "Borderline: rename_channel_button" below. |
 | `src/percell4/interfaces/gui/task_panels/data_panel.py:546` | `_on_delete_channel` (delete button) | `data_panel.delete_channel_button` | Creator (delete-cleanup) | Compliant | See "Borderline: delete_channel_button" below. |
 | `src/percell4/application/session.py:153` | `Session.set_dataset` (auto-select first channel on load) | (n/a — application layer) | Lifecycle handler | Compliant | Auto-selection on dataset load; emits `ACTIVE_CHANNEL_CHANGED` implicitly via subsequent `DATASET_CHANGED` re-population. |
@@ -68,7 +77,7 @@ coupling). No new todos are filed in this unit.
 
 | File:line | Caller | YAML id | Class | Verdict | Notes |
 |---|---|---|---|---|---|
-| `src/percell4/interfaces/gui/task_panels/data_panel.py:178` | `_on_active_seg_combo_changed` | `data_panel.active_seg_combo` | Selector | Compliant | Canonical Selector for `active_segmentation` (Data tab combo). |
+| `src/percell4/interfaces/gui/peer_views/session_window.py:235` | `_on_seg_combo_changed` | `session_window.seg_combo` | Selector | Compliant | Canonical Selector for `active_segmentation`. Replaced `data_panel.active_seg_combo` on 2026-05-13. |
 | `src/percell4/application/use_cases/segment_cells.py:95` | `SegmentCells` use case (auto-select after Cellpose) | `segmentation_panel.run_cellpose_button` | Creator | Compliant | Writes new `/labels/<name>` resource and auto-selects per OQ-2. |
 | `src/percell4/gui/segmentation_panel.py:335` | `_on_create_empty_labels` | `segmentation_panel.create_empty_labels_button` | Creator | Compliant | Auto-selects new in-memory `manual` labels layer; HDF5 persistence deferred to Save Labels. |
 | `src/percell4/gui/add_layer_dialog.py:637` | ROI tab `_on_import_roi` | `add_layer.roi_tab.import_button` | Creator | Compliant | Imports ImageJ ROI → labels resource; auto-selects. |
@@ -81,7 +90,7 @@ coupling). No new todos are filed in this unit.
 
 | File:line | Caller | YAML id | Class | Verdict | Notes |
 |---|---|---|---|---|---|
-| `src/percell4/interfaces/gui/task_panels/data_panel.py:182` | `_on_active_mask_combo_changed` | `data_panel.active_mask_combo` | Selector | Compliant | Canonical Selector for `active_mask` (Data tab combo). |
+| `src/percell4/interfaces/gui/peer_views/session_window.py:240` | `_on_mask_combo_changed` | `session_window.mask_combo` | Selector | Compliant | Canonical Selector for `active_mask`. Replaced `data_panel.active_mask_combo` on 2026-05-13. |
 | `src/percell4/application/use_cases/accept_threshold.py:70` | `AcceptThreshold` use case (single-cell threshold accept) | `analysis_panel.accept_threshold_button` | Creator | Compliant | Writes new `/masks/<name>` resource and auto-selects per OQ-2. |
 | `src/percell4/gui/threshold_qc.py:760` | `_finalize` (grouped threshold completion) | `grouped_seg_panel.run_button` | Creator | Compliant | Combined per-group masks → single `/masks/<name>` resource; auto-selects after the multi-group flow. Cross-linked to `grouped_seg_panel.run_button`. |
 | `src/percell4/interfaces/gui/main_window.py:1083` | `_on_phasor_mask_applied` (Apply ROIs as Masks handler) | `phasor_plot.apply_rois_as_masks_button` | Creator | Compliant | Writes one mask per ROI; auto-selects the last one. Per OQ-2 per-slot emission. Button renamed 2026-05-06 from "Apply Visible as Mask"; handler/signal names unchanged. |
