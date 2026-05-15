@@ -603,6 +603,7 @@ def write_decay_streaming(
     out_w: int,
     positions: dict[int, tuple[int, int]],
     use_tiling: bool,
+    spatial_bin: int = 1,
 ) -> None:
     """Stream-write a TCSPC decay channel to ``/decay/<channel_name>`` in an
     .h5 file, tile by tile.
@@ -618,10 +619,20 @@ def write_decay_streaming(
     ``DatasetStore.append_decay_layers`` raises ``LayerAlreadyExists`` for
     that, but this helper sits below that check by design — it's the
     write primitive).
+
+    ``spatial_bin`` sums non-overlapping k×k blocks per tile after read,
+    before placement (T-axis untouched). Use to match a higher-resolution
+    TCSPC source to a downsampled TIFF /intensity — e.g., k=3 reduces a
+    512×512 tile to 170×170, dropping the 2 residual pixels per axis.
+    Sum (not mean) preserves Poisson photon counts. ``tile_h``, ``tile_w``,
+    ``out_h`` and ``out_w`` are the POST-binning dimensions.
     """
     import h5py
 
     from percell4.adapters.readers import read_flim_bin
+
+    if spatial_bin < 1:
+        raise ValueError(f"spatial_bin must be >= 1, got {spatial_bin}")
 
     decay_path = f"decay/{channel_name}"
     with h5py.File(h5_path, "a") as f:
@@ -643,6 +654,8 @@ def write_decay_streaming(
         )
         dset.attrs["dims"] = ["H", "W", "T"]
         dset.attrs["channel"] = channel_name
+        if spatial_bin > 1:
+            dset.attrs["spatial_bin"] = spatial_bin
 
         for tile_idx, bin_path in sorted(tile_bins.items()):
             tile_data = read_flim_bin(
@@ -655,6 +668,9 @@ def write_decay_streaming(
                 header_bytes=bin_dims.get("header_bytes", 0),
             )["array"].astype(np.float32)
 
+            if spatial_bin > 1:
+                tile_data = _spatial_bin_tile(tile_data, spatial_bin)
+
             if use_tiling and tile_idx in positions:
                 row, col = positions[tile_idx]
                 y0 = row * tile_h
@@ -663,3 +679,21 @@ def write_decay_streaming(
             else:
                 dset[:, :, :] = tile_data
             del tile_data
+
+
+def _spatial_bin_tile(tile: np.ndarray, k: int) -> np.ndarray:
+    """Sum non-overlapping k×k spatial blocks of a (H, W, T) tile.
+
+    Truncates any leftover pixels (H % k, W % k) so the result is
+    (H // k, W // k, T). Sum-binning preserves total photon counts —
+    required for valid Poisson statistics downstream in phasor
+    computation. T-axis untouched.
+    """
+    if k <= 1:
+        return tile
+    h, w = tile.shape[:2]
+    h_trunc = (h // k) * k
+    w_trunc = (w // k) * k
+    truncated = tile[:h_trunc, :w_trunc]
+    h_b, w_b = h_trunc // k, w_trunc // k
+    return truncated.reshape(h_b, k, w_b, k, -1).sum(axis=(1, 3))

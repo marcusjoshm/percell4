@@ -702,3 +702,207 @@ def test_add_decay_progress_callback_called(tmp_path, mock_read_flim_bin):
 
     # At least one message should have been delivered
     assert len(messages) > 0
+
+
+# ── Spatial binning ─────────────────────────────────────────────────────
+
+
+def test_add_decay_spatial_bin_k1_is_noop(tmp_path, mock_read_flim_bin):
+    """spatial_bin=1 produces byte-identical output to omitting the kwarg."""
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    store_a = _h5_with_intensity(tmp_path / "a", channel_names=("ch00",))
+    add_decay_to_dataset(
+        h5_path=store_a.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+    )
+    store_b = _h5_with_intensity(tmp_path / "b", channel_names=("ch00",))
+    add_decay_to_dataset(
+        h5_path=store_b.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        spatial_bin=1,
+    )
+    with h5py.File(store_a.path, "r") as fa, h5py.File(store_b.path, "r") as fb:
+        assert np.array_equal(fa["decay/ch00"][...], fb["decay/ch00"][...])
+
+
+def test_add_decay_spatial_bin_k3_floor_divides_tile_dims(tmp_path, monkeypatch):
+    """spatial_bin=3 reduces a 9×9 tile to 3×3; T-axis untouched."""
+    def _ones_read(path, **kwargs):
+        return {
+            "array": np.ones((9, 9, 4), dtype=np.uint16),
+            "intensity": np.zeros((9, 9), dtype=np.uint16),
+            "metadata": {"shape": (9, 9, 4)},
+        }
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _ones_read,
+    )
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", _ones_read)
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+    add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=9, bin_y=9, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        spatial_bin=3,
+    )
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+        assert decay.shape == (3, 3, 4)
+        # Each output pixel sums 3×3 input ones → 9
+        assert np.all(decay == 9.0)
+        assert f["decay/ch00"].attrs["spatial_bin"] == 3
+
+
+def test_add_decay_spatial_bin_truncates_residual_pixels(tmp_path, monkeypatch):
+    """spatial_bin=3 on a 10×10 tile drops the last row+col (10 % 3 = 1)."""
+    def _ones_read(path, **kwargs):
+        return {
+            "array": np.ones((10, 10, 2), dtype=np.uint16),
+            "intensity": np.zeros((10, 10), dtype=np.uint16),
+            "metadata": {"shape": (10, 10, 2)},
+        }
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _ones_read,
+    )
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", _ones_read)
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+    add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=10, bin_y=10, bin_t=2),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        spatial_bin=3,
+    )
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+        # floor(10 / 3) = 3 → output shape (3, 3, 2)
+        assert decay.shape == (3, 3, 2)
+
+
+def test_add_decay_spatial_bin_sum_preserves_total_counts(tmp_path, monkeypatch):
+    """Sum-binning preserves total photon counts (Poisson statistics)."""
+    rng = np.random.default_rng(0)
+    fake = rng.integers(0, 100, size=(6, 6, 3), dtype=np.uint16)
+
+    def _patterned_read(path, **kwargs):
+        return {
+            "array": fake.copy(),
+            "intensity": fake[..., 0].copy(),
+            "metadata": {"shape": fake.shape},
+        }
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _patterned_read,
+    )
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", _patterned_read)
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+    add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=6, bin_y=6, bin_t=3),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        spatial_bin=3,
+    )
+    with h5py.File(store.path, "r") as f:
+        binned = f["decay/ch00"][...]
+        assert binned.shape == (2, 2, 3)
+        # Total photon counts preserved across spatial dims, per T-bin
+        assert np.allclose(binned.sum(axis=(0, 1)), fake.astype(np.float64).sum(axis=(0, 1)))
+
+
+def test_add_decay_spatial_bin_combined_with_tile_stitching(tmp_path, monkeypatch):
+    """2×2 grid × 6×6 tiles × spatial_bin=3 → (4, 4, T) stitched output."""
+    def _ones_read(path, **kwargs):
+        return {
+            "array": np.ones((6, 6, 2), dtype=np.uint16),
+            "intensity": np.zeros((6, 6), dtype=np.uint16),
+            "metadata": {"shape": (6, 6, 2)},
+        }
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _ones_read,
+    )
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", _ones_read)
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, [
+        "exp_s1_ch1.bin", "exp_s2_ch1.bin", "exp_s3_ch1.bin", "exp_s4_ch1.bin",
+    ])
+    add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=2, grid_cols=2),
+        flim_config=FlimConfig(bin_x=6, bin_y=6, bin_t=2),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        spatial_bin=3,
+    )
+    with h5py.File(store.path, "r") as f:
+        # Each 6×6 tile → 2×2 after bin; 2×2 grid → 4×4 stitched.
+        assert f["decay/ch00"].shape == (4, 4, 2)
+
+
+def test_add_decay_spatial_bin_too_large_reports_per_channel_error(
+    tmp_path, mock_read_flim_bin,
+):
+    """spatial_bin larger than tile dims reports per-channel error, no write."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        spatial_bin=16,
+    )
+    assert report.written == ()
+    assert "ch00" in report.errors
+    assert "larger than tile dims" in report.errors["ch00"]
+
+
+def test_add_decay_spatial_bin_invalid_raises(tmp_path, mock_read_flim_bin):
+    """spatial_bin < 1 raises before any work happens."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+    with pytest.raises(ValueError, match="spatial_bin"):
+        add_decay_to_dataset(
+            h5_path=store.path,
+            source_dir=src,
+            token_config=TokenConfig(),
+            tile_config=TileConfig(grid_rows=1, grid_cols=1),
+            flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+            cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+            spatial_bin=0,
+        )

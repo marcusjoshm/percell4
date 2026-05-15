@@ -71,6 +71,7 @@ def add_decay_to_dataset(
     *,
     rotate_k: int = 0,
     flip_axis: int | None = None,
+    spatial_bin: int = 1,
     force: bool = False,
     progress_callback: Callable[[str], None] | None = None,
     intensity_channels: list[IntensityChannel] | None = None,
@@ -93,6 +94,12 @@ def add_decay_to_dataset(
     (horizontal flip / fliplr). T-axis untouched. Both rotation and flip
     only touch /decay/<ch> — /intensity is never modified.
 
+    ``spatial_bin`` sums non-overlapping k×k pixel blocks per tile before
+    stitching, so a TCSPC source at higher spatial resolution can be
+    reduced to match a downsampled /intensity. ``k=1`` is no binning.
+    Truncates residual pixels (e.g., 512 with k=3 → 170, dropping 2 px).
+    Applied at read-time, so the stored /decay is at the binned dims.
+
     ``intensity_channels`` lets the caller supply the IntensityChannel
     records directly, bypassing token derivation from the channel-name
     digit suffix. Required when channels carry semantic names (e.g.,
@@ -103,6 +110,9 @@ def add_decay_to_dataset(
     h5_path = Path(h5_path)
     source_dir = Path(source_dir)
     progress = progress_callback or (lambda _: None)
+
+    if spatial_bin < 1:
+        raise ValueError(f"spatial_bin must be >= 1, got {spatial_bin}")
 
     progress("Scanning source directory")
     bin_files = sorted(p for p in source_dir.rglob("*.bin") if p.is_file())
@@ -202,8 +212,19 @@ def add_decay_to_dataset(
             # Read first tile to determine dimensions (compress does the same)
             first_path = next(iter(tile_to_path.values()))
             first_result = read_flim_bin(first_path, **bin_dims)
-            tile_h, tile_w, n_bins = first_result["array"].shape
+            raw_tile_h, raw_tile_w, n_bins = first_result["array"].shape
             del first_result
+
+            # Bin-aware tile dims — write_decay_streaming truncates each
+            # tile's residual pixels (H % k, W % k) before summing, so the
+            # post-bin dims here must match that floor division.
+            tile_h = raw_tile_h // spatial_bin
+            tile_w = raw_tile_w // spatial_bin
+            if tile_h == 0 or tile_w == 0:
+                raise ValueError(
+                    f"spatial_bin={spatial_bin} larger than tile dims "
+                    f"({raw_tile_h}×{raw_tile_w}); no pixels would remain"
+                )
 
             use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
             if use_tiling:
@@ -233,6 +254,7 @@ def add_decay_to_dataset(
                 out_w=out_w,
                 positions=positions,
                 use_tiling=use_tiling,
+                spatial_bin=spatial_bin,
             )
 
         except Exception as e:  # noqa: BLE001

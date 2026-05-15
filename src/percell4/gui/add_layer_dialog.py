@@ -911,6 +911,28 @@ class AddLayerDialog(QDialog):
         rot_row.addStretch()
         layout.addLayout(rot_row)
 
+        # ── Spatial bin factor (match .bin resolution to /intensity) ─
+        # Sums non-overlapping k×k pixel blocks per tile before stitching.
+        # Use when the TCSPC source is at higher spatial resolution than
+        # the TIFF /intensity already in the dataset — e.g., 512×512 .bin
+        # tiles vs. 170×170 (3×3-binned) TIFF tiles. Sum (not mean)
+        # preserves Poisson photon counts. T-axis untouched.
+        bin_row = QHBoxLayout()
+        bin_row.addWidget(QLabel("Spatial bin factor:"))
+        self._tcspc_spatial_bin_spin = QSpinBox()
+        self._tcspc_spatial_bin_spin.setRange(1, 16)
+        self._tcspc_spatial_bin_spin.setValue(1)
+        self._tcspc_spatial_bin_spin.setToolTip(
+            "Sum k×k pixel blocks per .bin tile before stitching. Use k=3 "
+            "if your TCSPC was acquired at 3× the TIFF /intensity "
+            "resolution (e.g., 512×512 .bin → 170×170 to match a "
+            "3×3-binned TIFF). Preserves photon counts. Residual pixels "
+            "(H % k, W % k) are truncated. Default 1 = no binning."
+        )
+        bin_row.addWidget(self._tcspc_spatial_bin_spin)
+        bin_row.addStretch()
+        layout.addLayout(bin_row)
+
         # ── Debug: write .bin-derived intensity as napari layers ────
         # Off by default — when checked, after Append the dialog computes
         # the per-pixel sum over T for each /decay/<ch> just written and
@@ -1464,6 +1486,7 @@ class AddLayerDialog(QDialog):
             if flip_axis_value is not None and int(flip_axis_value) in (0, 1)
             else None
         )
+        spatial_bin = int(self._tcspc_spatial_bin_spin.value())
         # Any conflict-row marked for replace forces force=True for that append
         force = any(self._tcspc_replace_state.values()) if hasattr(
             self, "_tcspc_replace_state"
@@ -1485,6 +1508,7 @@ class AddLayerDialog(QDialog):
                 cross_format_rule=rule,
                 rotate_k=rotate_k,
                 flip_axis=flip_axis,
+                spatial_bin=spatial_bin,
                 force=force,
                 intensity_channels=intensity_channels,
             )
