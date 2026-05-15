@@ -29,7 +29,7 @@ root_cause: >
   repopulation.
 severity: high
 date: 2026-03-31
-last_refreshed: 2026-05-03
+last_refreshed: 2026-05-15
 ---
 
 # Mask Layers Incorrectly Classified as Segmentation
@@ -69,7 +69,7 @@ Seven distinct failure modes combined:
 
 Each layer addresses a distinct failure mode. Removing any one reintroduces the bug through a different path.
 
-### 1. Idempotent `add_mask()` (`viewer.py`)
+### 1. Collision-blocking `add_mask()` (`viewer.py`)
 
 ```python
 # Constants at module level
@@ -78,20 +78,25 @@ LAYER_TYPE_MASK = "mask"
 LAYER_TYPE_SEGMENTATION = "segmentation"
 
 def add_mask(self, data, name, color_dict=None, **kwargs):
-    cmap = DirectLabelColormap(color_dict=color_dict)
     if name in self.viewer.layers:
-        layer = self.viewer.layers[name]
-        layer.data = data
-        layer.colormap = cmap
-        layer.metadata[PERCELL_TYPE_KEY] = LAYER_TYPE_MASK  # ensure correct tag
-    else:
-        self.viewer.add_labels(
-            data, name=name, colormap=cmap,
-            metadata={PERCELL_TYPE_KEY: LAYER_TYPE_MASK}, **kwargs,
+        existing = self.viewer.layers[name]
+        QMessageBox.warning(
+            self._qt_window,
+            "Mask name conflict",
+            f"Can't add mask {name!r}: a "
+            f"{type(existing).__name__} layer with that name already "
+            f"exists. Rename the new mask or remove the existing "
+            f"layer before retrying.",
         )
+        return
+    cmap = DirectLabelColormap(color_dict=color_dict)
+    self.viewer.add_labels(
+        data, name=name, colormap=cmap,
+        metadata={PERCELL_TYPE_KEY: LAYER_TYPE_MASK}, **kwargs,
+    )
 ```
 
-**Why in-place update is safe:** Setting `.data` emits `layer.events.data` but NOT `layers.selection.events.active` — so the sync callback is not triggered. No `_coerce_name` (no rename), no `layers.events.inserted`.
+**Why hard-block, not in-place refresh:** The original refresh path (`layer.data = data; layer.colormap = cmap`) avoided the `[1]` auto-rename but assumed every same-name layer was a Labels layer. That assumption broke when a user-named phasor ROI collided with an intensity channel — assigning a `DirectLabelColormap` to the existing `Image` layer crashed deep inside napari's thumbnail update with `TypeError: DirectLabelColormap can only be used with int`. Hard-blocking on any same-name collision still prevents the `[1]` suffix bug AND surfaces cross-type collisions as a naming error rather than a crash. See [add_mask cross-type name collision](add-mask-name-collision-image-layer-crash-2026-05-15.md) for the full incident.
 
 ### 2. Metadata tagging on all Labels layers (`viewer.py`)
 
@@ -144,7 +149,7 @@ self._active_seg_combo.blockSignals(False)
 | **Never assume unknown layers are segmentations** | The FALLBACK pattern is the core of this bug | Any layer not identified by metadata or store should be ignored |
 | **Block signals during combo repopulation** | Qt fires `currentTextChanged` during `clear()`/`addItem()` | Wrap `clear()` + `addItem()` loops with `blockSignals(True/False)` |
 | **Filter masks from segmentation lists** | HDF5 can have names under both `/labels/` and `/masks/` | Always compute `mask_set` and exclude from segmentation queries |
-| **Update metadata on in-place layer updates** | Layer may have been created with wrong metadata | Always set `layer.metadata[PERCELL_TYPE_KEY]` in the update path too |
+| **Hard-block, never coerce, on same-name layer collision** | napari's layer namespace is flat across types — same-name layer can be Image, Labels, anything | In `add_mask`, refuse and surface a `QMessageBox.warning` rather than assigning a `DirectLabelColormap` to a non-Labels layer |
 
 ## Key Pattern: Napari Layer Metadata Tagging
 
@@ -167,32 +172,35 @@ When adding a new type of Labels layer (tracking overlay, classification mask, e
 
 - [ ] Define a new `LAYER_TYPE_*` constant in `viewer.py`
 - [ ] Create a dedicated `add_*()` method in `ViewerWindow` that sets metadata
-- [ ] Make the method idempotent (check `if name in self.viewer.layers`)
+- [ ] Decide collision policy explicitly — hard-block (recommended, mirrors `add_mask`) or type-narrowed refresh — and never silently coerce across types
 - [ ] Use a new HDF5 group (e.g., `/tracking/`), not `/labels/`
 - [ ] Add to `_get_active_labels_layer()` skip logic
 - [ ] Add to `_hide_mask_layers()` logic if needed
 - [ ] Add to `_sync_active_layers_from_viewer()` metadata dispatch
 - [ ] Exclude from segmentation dropdown in `_refresh_active_combos()`
-- [ ] Test: add twice by name — no `[1]` suffix
+- [ ] Test: add twice by name — collision is surfaced (warning/refuse), never a silent `[1]` suffix
+- [ ] Test: pre-existing layer of a *different* type with the same name — collision is surfaced, no crash inside `intensity_mixin._update_thumbnail`
 - [ ] Test: click in napari — does NOT set `active_segmentation`
 - [ ] Test: close/reopen dataset — correct metadata survives
 
 ## Warning Signs of Recurrence
 
-1. **Layer names with `[1]` suffixes** — non-idempotent add called twice
-2. **Sync logging "unknown layer ... ignoring"** — metadata missing, likely bypassed ViewerWindow API
-3. **Clicking mask changes active segmentation** — direct symptom of original bug
-4. **Segmentation combo contains mask names after load** — `list_labels()` returning masks, filter incomplete
-5. **Combo flickers during dataset load** — `blockSignals` not used during repopulation
-6. **`isinstance(layer, Labels)` without metadata check** — code smell, grep and verify
+1. **Layer names with `[1]` suffixes** — `add_mask` was bypassed; collision-block not in effect
+2. **`TypeError: DirectLabelColormap can only be used with int` in a load stack** — same-name collision between a mask and a non-Labels layer; check that `add_mask`'s hard-block is still present and that `_populate_viewer_from_store`'s `clear()` ran
+3. **Sync logging "unknown layer ... ignoring"** — metadata missing, likely bypassed ViewerWindow API
+4. **Clicking mask changes active segmentation** — direct symptom of original bug
+5. **Segmentation combo contains mask names after load** — `list_labels()` returning masks, filter incomplete
+6. **Combo flickers during dataset load** — `blockSignals` not used during repopulation
+7. **`isinstance(layer, Labels)` without metadata check** — code smell, grep and verify
 
 ## Files Modified
 
-- `src/percell4/gui/viewer.py` — Constants, idempotent `add_mask`, metadata tagging in `add_labels`/`add_mask`, metadata-based skip sets in `_hide_mask_layers` and `_get_active_labels_layer`
+- `src/percell4/gui/viewer.py` — Constants, collision-blocking `add_mask` (hard-blocks any same-name layer with `QMessageBox.warning`), metadata tagging in `add_labels`/`add_mask`, metadata-based skip sets in `_hide_mask_layers` and `_get_active_labels_layer`
 - `src/percell4/gui/launcher.py` — Three-tier sync, store-before-layer ordering (phasor + threshold), mask filtering in combo population, `blockSignals` in `_refresh_active_combos`, logging setup
 
 ## Related Documentation
 
+- [add_mask cross-type name collision crash](add-mask-name-collision-image-layer-crash-2026-05-15.md) — The follow-on incident that motivated the hard-block collision policy in Section 1
 - [DirectLabelColormap rendering blocked by events](napari-direct-label-colormap-rendering-blocked-by-events.md) — Mask layer rendering and colormap assignment patterns
 - [PerCell4 phases 0-6 napari/Qt learnings](percell4-phases-0-6-napari-qt-learnings.md) — Layer lifecycle, signal timing, viewer recreation
 - [FLIM phasor cross-layer alignment](../logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md) — Extends "Write store before adding layer" to the deletion mirror, plus invalidating `/phasor/<ch>` whenever `/decay/<ch>` is rewritten so cached derived layers can't be displayed against fresh source.
