@@ -257,6 +257,17 @@ class DataPanel(QWidget):
                     layer.name = new_name
                     break
 
+        session = self.data_model.session
+        if session.dataset is not None and store is not None:
+            if prefix == "masks":
+                session.refresh_resource_lists(mask_names=store.list_masks())
+                if session.active_mask == old_name:
+                    session.set_active_mask(new_name)
+            else:  # prefix == "labels"
+                session.refresh_resource_lists(segmentation_names=store.list_labels())
+                if session.active_segmentation == old_name:
+                    session.set_active_segmentation(new_name)
+
         self.refresh_management_combos()
         self._refresh_seg_combos()
         self._refresh_mask_combos()
@@ -287,6 +298,17 @@ class DataPanel(QWidget):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
                     break
+
+        session = self.data_model.session
+        if session.dataset is not None and store is not None:
+            if prefix == "masks":
+                session.refresh_resource_lists(mask_names=store.list_masks())
+                if session.active_mask == name:
+                    session.set_active_mask(None)
+            else:  # prefix == "labels"
+                session.refresh_resource_lists(segmentation_names=store.list_labels())
+                if session.active_segmentation == name:
+                    session.set_active_segmentation(None)
 
         self.refresh_management_combos()
         self._refresh_seg_combos()
