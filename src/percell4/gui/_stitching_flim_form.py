@@ -111,6 +111,27 @@ class StitchingFlimForm(QWidget):
         rot_row.addStretch()
         outer.addLayout(rot_row)
 
+        # ── Spatial bin factor (match .bin resolution to /intensity) ─
+        # Sums non-overlapping k×k pixel blocks per tile before stitching.
+        # Use when the TCSPC source is at higher spatial resolution than
+        # the TIFF /intensity already in the dataset. Sum (not mean)
+        # preserves Poisson photon counts. T-axis untouched.
+        bin_row = QHBoxLayout()
+        bin_row.addWidget(QLabel("Spatial bin factor:"))
+        self.spatial_bin_spin = QSpinBox()
+        self.spatial_bin_spin.setRange(1, 16)
+        self.spatial_bin_spin.setValue(1)
+        self.spatial_bin_spin.setToolTip(
+            "Sum k×k pixel blocks per .bin tile before stitching. Use k=3 "
+            "if your TCSPC was acquired at 3× the TIFF /intensity "
+            "resolution (e.g., 512×512 .bin → 170×170 to match a "
+            "3×3-binned TIFF). Preserves photon counts. Residual pixels "
+            "(H % k, W % k) are truncated. Default 1 = no binning."
+        )
+        bin_row.addWidget(self.spatial_bin_spin)
+        bin_row.addStretch()
+        outer.addLayout(bin_row)
+
         # ── FLIM .bin Parameters (raw binary geometry) ──
         # Checkable: when unchecked, callers should treat the FLIM config
         # as defaulted (every numeric field zero, dtype/dim_order empty —
@@ -166,6 +187,7 @@ class StitchingFlimForm(QWidget):
             self.bin_y,
             self.bin_t,
             self.bin_header,
+            self.spatial_bin_spin,
         ):
             spin.valueChanged.connect(self.changed.emit)
         for combo in (
@@ -201,6 +223,10 @@ class StitchingFlimForm(QWidget):
         if data is None or int(data) < 0:
             return None
         return int(data)
+
+    def spatial_bin(self) -> int:
+        """Spatial bin factor (k ≥ 1). ``1`` = no binning."""
+        return int(self.spatial_bin_spin.value())
 
     def flim_config(self, *, frequency_mhz: float = 80.0) -> FlimConfig:
         """Build the ``FlimConfig`` from the raw-``.bin`` fields.
