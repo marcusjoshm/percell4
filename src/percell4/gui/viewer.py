@@ -311,11 +311,20 @@ class ViewerWindow(QObject):
     def add_mask(
         self, data, name: str, color_dict: dict | None = None, **kwargs
     ) -> None:
-        """Add a mask as a labels layer (idempotent).
+        """Add a mask as a labels layer.
 
-        If a layer with the same name already exists, updates its data and
-        colormap in-place instead of creating a duplicate (which would trigger
-        napari's auto-rename to ``name [1]``).
+        Refuses to add the layer if any layer with the same name already
+        exists — including non-Labels layers like an intensity channel
+        sharing the mask name. The old idempotent in-place refresh was
+        unsafe because assigning a ``DirectLabelColormap`` to a
+        non-Labels layer raises ``TypeError`` inside napari's thumbnail
+        update; in practice the only same-name collision we ever saw was
+        a user-named phasor ROI matching a channel name, which is a
+        naming bug worth surfacing rather than silently masking.
+
+        On collision, pops up a QMessageBox warning naming the existing
+        layer's type so the user can rename the new mask or remove the
+        existing layer. Returns without adding or modifying any layer.
 
         Args:
             color_dict: optional {label_value: color} for multi-label masks.
@@ -324,30 +333,36 @@ class ViewerWindow(QObject):
         """
         from napari.utils.colormaps import DirectLabelColormap
 
+        if name in self.viewer.layers:
+            existing = self.viewer.layers[name]
+            from qtpy.QtWidgets import QMessageBox
+
+            QMessageBox.warning(
+                self._qt_window,
+                "Mask name conflict",
+                f"Can't add mask {name!r}: a "
+                f"{type(existing).__name__} layer with that name already "
+                f"exists. Rename the new mask or remove the existing "
+                f"layer before retrying.",
+            )
+            return
+
         if color_dict is None:
             color_dict = dict(vp.BINARY_MASK_COLOR_DICT)
         kwargs.pop("colormap", None)  # color_dict takes precedence
         cmap = DirectLabelColormap(color_dict=color_dict)
 
         blending = kwargs.pop("blending", vp.MASK_DEFAULT_BLENDING)
-
-        if name in self.viewer.layers:
-            layer = self.viewer.layers[name]
-            layer.data = data
-            layer.colormap = cmap
-            layer.blending = blending
-            layer.metadata[PERCELL_TYPE_KEY] = LAYER_TYPE_MASK
-        else:
-            if "opacity" not in kwargs:
-                kwargs["opacity"] = vp.MASK_DEFAULT_OPACITY
-            self.viewer.add_labels(
-                data,
-                name=name,
-                colormap=cmap,
-                blending=blending,
-                metadata={PERCELL_TYPE_KEY: LAYER_TYPE_MASK},
-                **kwargs,
-            )
+        if "opacity" not in kwargs:
+            kwargs["opacity"] = vp.MASK_DEFAULT_OPACITY
+        self.viewer.add_labels(
+            data,
+            name=name,
+            colormap=cmap,
+            blending=blending,
+            metadata={PERCELL_TYPE_KEY: LAYER_TYPE_MASK},
+            **kwargs,
+        )
 
     def clear(self) -> None:
         """Remove all layers."""
