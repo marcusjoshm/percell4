@@ -195,9 +195,10 @@ def test_add_decay_rotates_stitched_array(tmp_path, monkeypatch):
         assert f["decay/ch00"].shape == (4, 8, 2)
 
     # With rotate_k=1 (90° CCW): (H=4, W=8, T=2) → (W=8, H=4, T=2).
-    # Validation fires on pre-rotation stitched shape (4, 8).
+    # Validation fires on the POST-rotation shape, so native_shape must
+    # match the final on-disk (8, 4) output.
     store1 = _h5_with_intensity(
-        tmp_path / "rot", channel_names=("ch00",), shape=(4, 8)
+        tmp_path / "rot", channel_names=("ch00",), shape=(8, 4)
     )
     add_decay_to_dataset(
         h5_path=store1.path,
@@ -750,6 +751,55 @@ def test_add_decay_native_shape_mismatch_reports_error(tmp_path, mock_read_flim_
     # No decay was written.
     with h5py.File(store.path, "r") as f:
         assert "decay" not in f
+
+
+def test_add_decay_native_shape_match_with_rotate_k1_transpose(tmp_path, monkeypatch):
+    """rotate_k=1 transposes (H, W) post-stitch; the validation must
+    compare against the POST-rotation shape, not the pre-rotation shape.
+
+    Regression: prior to this fix, U6's native-shape validation fired
+    against (out_h, out_w) before Phase 2 rotation ran. A user whose
+    .bin tiles stitched to (2048, 2560) and TIFF intensity at (2560, 2048)
+    with rotate_k=1 to align was rejected even though the post-rotation
+    decay would have matched native_shape exactly.
+    """
+    # Patterned reader returns non-square (4, 8, 2) tiles so the stitch
+    # is intentionally not square — exercises the transpose code path.
+    def _patterned_read(path, **kwargs):
+        h, w, t = 4, 8, 2
+        arr = np.zeros((h, w, t), dtype=np.uint16)
+        return {"array": arr, "intensity": arr[..., 0].copy(),
+                "metadata": {"shape": (h, w, t)}}
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _patterned_read,
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _patterned_read,
+    )
+
+    # 1x1 grid of (4, 8) -> stitched (4, 8). rotate_k=1 (90° CCW) -> (8, 4).
+    # native_shape declares the POST-rotation orientation: (8, 4).
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 4))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=1),
+        flim_config=FlimConfig(bin_x=8, bin_y=4, bin_t=2),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        rotate_k=1,
+    )
+
+    assert report.written == ("ch00",)
+    assert report.errors == {}
+    # Final stored shape matches native_shape after rotation.
+    with h5py.File(store.path, "r") as f:
+        assert f["decay/ch00"].shape == (8, 4, 2)
 
 
 def test_add_decay_native_shape_match_succeeds(tmp_path, mock_read_flim_bin):

@@ -226,19 +226,32 @@ def add_decay_to_dataset(
                 out_h, out_w = tile_h, tile_w
                 positions = {0: (0, 0)}
 
-            # Source-shape validation: the stitched (H, W) must equal
-            # /metadata.native_shape. Mismatched ancillary imports are
-            # the user's signal to re-import via Compress with a
-            # different creation_bin -- the .h5 declares its own native
-            # at compress and we don't accept layers at any other size.
+            # Source-shape validation: the FINAL stored (H, W) must equal
+            # /metadata.native_shape. Phase 2 below rotates each stitched
+            # /decay in place; odd ``rotate_k`` values transpose (H, W).
+            # The validation must therefore check the POST-rotation shape
+            # so the canonical "stitch + rotate to fit native" workflow
+            # (e.g. .bin tiles stitched at (2048, 2560) with rotate_k=1
+            # to land at native (2560, 2048)) isn't rejected pre-rotation.
+            # flip_axis is shape-invariant -- only rotate_k matters here.
             native_shape = metadata.get("native_shape")
-            if native_shape is not None and tuple(native_shape) != (out_h, out_w):
-                raise LayerSizeMismatchError(
-                    f"Source TCSPC stitched shape is ({out_h}, {out_w}); "
-                    f"dataset native_shape is {tuple(native_shape)}. "
-                    "Re-import via Compress dialog with the matching "
-                    "creation_bin, or pre-bin the .bin files externally."
-                )
+            if native_shape is not None:
+                if (int(rotate_k) % 2) == 0:
+                    final_h, final_w = out_h, out_w
+                else:
+                    final_h, final_w = out_w, out_h
+                if tuple(native_shape) != (final_h, final_w):
+                    raise LayerSizeMismatchError(
+                        f"Source TCSPC stitched shape is ({out_h}, {out_w})"
+                        + (
+                            f" -> ({final_h}, {final_w}) after rotate_k={rotate_k}"
+                            if rotate_k
+                            else ""
+                        )
+                        + f"; dataset native_shape is {tuple(native_shape)}. "
+                        "Re-import via Compress dialog with the matching "
+                        "creation_bin, or pre-bin the .bin files externally."
+                    )
 
             # Delegate the actual decay write to the shared helper --
             # compress and add-layer go through the SAME streaming write.
