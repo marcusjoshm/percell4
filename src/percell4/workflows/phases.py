@@ -101,12 +101,18 @@ def compress_one(
         from percell4.domain.io.models import DiscoveredFile
 
         discovered = [DiscoveredFile(path=Path(p)) for p in files_paths]
+        # Single-cell workflow inherits creation_bin from the captured
+        # CompressDialog plan if present; otherwise defaults to 1 (no
+        # binning), keeping existing single-cell runs byte-identical
+        # apart from the two new /metadata keys.
+        creation_bin = int(plan.get("creation_bin", 1))
         import_dataset(
             source_dir=source_dir or str(output_path.parent),
             output_h5=output_path,
             z_project_method=z_project_method,
             selected_channels=selected_channels or None,
             files=discovered or None,
+            creation_bin=creation_bin,
         )
     except Exception as e:
         logger.exception("compress_one failed for %s", entry.name)

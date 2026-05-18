@@ -137,6 +137,18 @@ class LayerSizeMismatchError(Exception):
     """
 
 
+class SourceShapeMismatchError(Exception):
+    """Raised at compress time when source channels disagree on (H, W).
+
+    The dataset-wide binning model requires all source files in one
+    compress operation to share the same pre-bin (H, W); native_shape
+    is computed as (H // creation_bin, W // creation_bin) from that
+    agreed shape. If one source TIFF or .bin is at a different
+    resolution than its peers, the run aborts before writing -- silent
+    partial imports would corrupt the native_shape invariant.
+    """
+
+
 class CrossFormatRuleConflictError(Exception):
     """Raised when an append would persist a rule different from one already stored."""
 

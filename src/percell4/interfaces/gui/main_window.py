@@ -751,6 +751,7 @@ class LauncherWindow(QMainWindow):
                     selected_channels=config.selected_channels or None,
                     layer_assignments=config.layer_assignments,
                     files=ds.files,
+                    creation_bin=config.creation_bin,
                 )
                 completed.append(display_name)
             except Exception as e:

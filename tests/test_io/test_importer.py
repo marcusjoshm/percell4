@@ -187,3 +187,101 @@ def test_import_progress_callback(tmp_path):
 
     assert len(calls) >= 2  # at least start and end
     assert calls[-1][0] == calls[-1][1]  # last call: current == total
+
+
+# ── creation_bin (U7) ──────────────────────────────────────────────────
+
+
+def test_import_creation_bin_default_one_writes_native_metadata(tmp_path):
+    """Default creation_bin=1 still writes native_shape and creation_bin=1
+    to /metadata. Array payloads byte-identical to pre-binning behavior."""
+    src = _create_tiff_dir(tmp_path, n_channels=1, n_z=1)
+    h5_path = tmp_path / "output.h5"
+
+    import_dataset(src, h5_path)
+
+    store = DatasetStore(h5_path)
+    meta = store.metadata
+    assert meta["native_shape"] == (64, 64)
+    assert meta["creation_bin"] == 1
+    # Array shape unchanged at k=1.
+    assert store.read_array("intensity").shape == (64, 64)
+
+
+def test_import_creation_bin_2_halves_shape(tmp_path):
+    """creation_bin=2 sum-bins the 64x64 TIFF to a 32x32 stored intensity."""
+    src = _create_tiff_dir(tmp_path, n_channels=1, n_z=1)
+    h5_path = tmp_path / "output.h5"
+
+    import_dataset(src, h5_path, creation_bin=2)
+
+    store = DatasetStore(h5_path)
+    meta = store.metadata
+    assert meta["native_shape"] == (32, 32)
+    assert meta["creation_bin"] == 2
+    intensity = store.read_array("intensity")
+    assert intensity.shape == (32, 32)
+    # Each binned pixel is the sum of 4 source pixels (all == 100).
+    np.testing.assert_allclose(intensity, np.full((32, 32), 400.0))
+
+
+def test_import_creation_bin_multichannel(tmp_path):
+    """creation_bin works on multichannel 3D /intensity (sum-bin per channel)."""
+    src = _create_tiff_dir(tmp_path, n_channels=2, n_z=1)
+    h5_path = tmp_path / "output.h5"
+
+    import_dataset(src, h5_path, creation_bin=2)
+
+    store = DatasetStore(h5_path)
+    intensity = store.read_array("intensity")
+    assert intensity.shape == (2, 32, 32)
+    assert store.metadata["native_shape"] == (32, 32)
+
+
+def test_import_creation_bin_zero_raises(tmp_path):
+    """creation_bin < 1 is rejected before any work happens."""
+    import pytest
+    src = _create_tiff_dir(tmp_path, n_channels=1, n_z=1)
+    h5_path = tmp_path / "output.h5"
+
+    with pytest.raises(ValueError, match="creation_bin must be >= 1"):
+        import_dataset(src, h5_path, creation_bin=0)
+
+    # No file should have been written.
+    assert not h5_path.exists()
+
+
+def test_import_creation_bin_truncates_residual(tmp_path):
+    """A source that isn't divisible by creation_bin truncates residual rows/cols."""
+    # 7x7 TIFF, creation_bin=3 -> 2x2 stored intensity (last row+col dropped).
+    src = tmp_path / "raw"
+    src.mkdir()
+    data = np.ones((7, 7), dtype=np.uint16)
+    tifffile.imwrite(str(src / "image_ch00_z00.tif"), data)
+
+    h5_path = tmp_path / "output.h5"
+    import_dataset(src, h5_path, creation_bin=3)
+
+    store = DatasetStore(h5_path)
+    assert store.metadata["native_shape"] == (2, 2)
+    assert store.read_array("intensity").shape == (2, 2)
+    # Each binned pixel = 3*3 = 9 source ones summed.
+    np.testing.assert_allclose(store.read_array("intensity"), np.full((2, 2), 9.0))
+
+
+def test_import_source_shape_mismatch_raises(tmp_path):
+    """When two TIFFs at the same level disagree on (H, W), abort cleanly."""
+    import pytest
+    from percell4.store import SourceShapeMismatchError
+
+    src = tmp_path / "raw"
+    src.mkdir()
+    tifffile.imwrite(str(src / "image_ch00_z00.tif"), np.ones((32, 32), dtype=np.uint16))
+    tifffile.imwrite(str(src / "image_ch01_z00.tif"), np.ones((40, 40), dtype=np.uint16))
+
+    h5_path = tmp_path / "output.h5"
+    with pytest.raises(SourceShapeMismatchError):
+        import_dataset(src, h5_path)
+
+    # No partial file written.
+    assert not h5_path.exists()
