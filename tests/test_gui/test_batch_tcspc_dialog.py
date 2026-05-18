@@ -607,6 +607,44 @@ def test_spatial_bin_spinner_propagates_to_run(qtbot, tmp_path: Path) -> None:
     assert captured["spatial_bin"] == 3
 
 
+def test_unchecking_dataset_refreshes_pairing_table_immediately(
+    qtbot, tmp_path: Path
+) -> None:
+    """Reactive pairing refresh: unchecking a dataset row removes its pairing
+    entry without waiting for a Remove or Add click.
+
+    Without this, the pairing table only refreshes on add/remove/browse-root.
+    A user who unchecks a row sees pairing stay stale until the NEXT trigger
+    runs — which made "Remove selected" appear to operate on checkbox state."""
+    h5_a = _make_h5(tmp_path / "A.h5", ["ch1"])
+    h5_b = _make_h5(tmp_path / "B.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G1").mkdir(parents=True)
+    (root / "G2").mkdir(parents=True)
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5_a, checked=True)
+    dlg._add_dataset_row(h5_b, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    assert dlg._pairing_table.rowCount() == 2
+
+    # Uncheck the first dataset by toggling its real QCheckBox.
+    wrapper = dlg._dataset_table.cellWidget(0, 0)
+    check: QCheckBox = wrapper.property("checkbox")
+    assert isinstance(check, QCheckBox)
+    check.setChecked(False)
+
+    assert dlg._pairing_table.rowCount() == 1, (
+        "Pairing must refresh immediately on uncheck, not wait for "
+        "the next add/remove click"
+    )
+    # The remaining pairing row is for the still-checked dataset.
+    assert dlg._pairing_table.item(0, 0).text() == "B"
+
+
 def test_summary_view_hides_form_scroll_wrapper(qtbot, tmp_path: Path) -> None:
     """The summary must hide the scroll wrapper, not just its inner content.
     Otherwise the form's button row stays floating mid-screen (PR #9)."""

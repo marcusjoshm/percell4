@@ -396,6 +396,17 @@ class BatchTCSPCDialog(QDialog):
         self._refresh_channel_tokens_table()
         self._invalidate_run()
 
+    def _on_dataset_check_changed(self) -> None:
+        """React to an Include-column checkbox toggle.
+
+        Pairing and channel-tokens tables read from ``_checked_datasets()``,
+        so they have to rebuild whenever the checked set changes — otherwise
+        they stay stale until the next add/remove triggers a refresh.
+        """
+        self._refresh_pairing_table()
+        self._refresh_channel_tokens_table()
+        self._invalidate_run()
+
     def _add_dataset_row(self, path: Path, *, checked: bool) -> None:
         assert self._dataset_table is not None
         try:
@@ -414,7 +425,11 @@ class BatchTCSPCDialog(QDialog):
 
         check = QCheckBox()
         check.setChecked(checked)
-        check.stateChanged.connect(self._invalidate_run)
+        # Pairing + channel-tokens tables are rebuilt from _checked_datasets(),
+        # so they go stale the instant a checkbox flips. Refreshing here keeps
+        # the dialog coherent — otherwise the next add/remove click triggers
+        # a refresh whose side effect looks like the button did extra work.
+        check.stateChanged.connect(self._on_dataset_check_changed)
         # Wrap checkbox in a tiny widget so it centers in the cell.
         wrapper = QWidget()
         wlay = QHBoxLayout(wrapper)
