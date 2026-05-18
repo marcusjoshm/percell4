@@ -301,6 +301,152 @@ def test_creation_bin_stored_value_preserved(store):
     assert meta["creation_bin"] == 3
 
 
+# ── view_bin dispatch (U3) ────────────────────────────────────
+
+
+def test_read_array_view_bin_1_byte_identical(store):
+    """At view_bin=1 every read is byte-identical to the array written
+    (R5 round-trip)."""
+    data = np.random.rand(40, 40).astype(np.float32)
+    store.write_array("intensity", data)
+    np.testing.assert_array_equal(
+        store.read_array("intensity", view_bin=1), data
+    )
+
+
+def test_read_array_intensity_sum_bin_at_k2(store):
+    """/intensity at view_bin=2 sum-bins on (H, W)."""
+    data = np.ones((6, 6), dtype=np.float32)
+    store.write_array("intensity", data)
+    out = store.read_array("intensity", view_bin=2)
+    assert out.shape == (3, 3)
+    np.testing.assert_array_equal(out, np.full((3, 3), 4.0))
+
+
+def test_read_array_intensity_3d_view_bin(store):
+    """3D /intensity (C, H, W) bins each channel's trailing two axes."""
+    data = np.ones((2, 6, 6), dtype=np.float32)
+    store.write_array("intensity", data, attrs={"dims": ["C", "H", "W"]})
+    out = store.read_array("intensity", view_bin=2)
+    assert out.shape == (2, 3, 3)
+    assert np.all(out == 4)
+
+
+def test_read_array_decay_uses_sum_bin_decay(store):
+    """/decay/<ch> at view_bin=2 sum-bins (H, W); T axis untouched."""
+    decay = np.ones((6, 6, 4), dtype=np.float32)
+    store.write_array("decay/ch0", decay, is_decay=True)
+    out = store.read_array("decay/ch0", view_bin=2)
+    assert out.shape == (3, 3, 4)
+    assert np.all(out == 4)
+
+
+def test_read_array_labels_uses_mode(store):
+    """/labels/<name> at view_bin=2 mode-downsamples (ties -> 0)."""
+    # 4x4 block: top-left 2x2 has three 1s, one 2 -> mode 1
+    #             top-right 2x2 has two 1s, two 2s -> tie -> 0
+    arr = np.array(
+        [
+            [1, 1, 1, 2],
+            [1, 2, 1, 2],
+            [3, 3, 4, 4],
+            [3, 3, 4, 4],
+        ],
+        dtype=np.int32,
+    )
+    store.write_labels("seg", arr)
+    out = store.read_array("labels/seg", view_bin=2)
+    assert out.shape == (2, 2)
+    assert out[0, 0] == 1
+    assert out[0, 1] == 0  # tie
+    assert out[1, 0] == 3
+    assert out[1, 1] == 4
+
+
+def test_read_array_masks_uses_majority(store):
+    """/masks/<name> at view_bin=2 majority-votes."""
+    # k=2 -> need >=2 of 4 set
+    arr = np.array(
+        [
+            [1, 1, 1, 0],
+            [1, 0, 0, 0],
+            [0, 0, 1, 1],
+            [0, 0, 1, 1],
+        ],
+        dtype=np.uint8,
+    )
+    store.write_mask("mask1", arr)
+    out = store.read_array("masks/mask1", view_bin=2)
+    assert out.shape == (2, 2)
+    np.testing.assert_array_equal(out, [[1, 0], [0, 1]])
+
+
+def test_read_array_phasor_uses_mean_bin(store):
+    """/phasor/<ch>/g at view_bin=2 mean-bins (intensive, not sum)."""
+    g = np.full((4, 4), 0.5, dtype=np.float32)
+    store.write_array("phasor/ch0/g", g)
+    out = store.read_array("phasor/ch0/g", view_bin=2)
+    assert out.shape == (2, 2)
+    # Mean of 0.5s is still 0.5, not 2.0.
+    np.testing.assert_allclose(out, np.full((2, 2), 0.5))
+
+
+def test_read_array_unknown_path_passes_through(store):
+    """Paths without a known prefix are returned at native shape even
+    when view_bin > 1 — we don't guess a rule."""
+    data = np.arange(16).reshape(4, 4).astype(np.float32)
+    store.write_array("custom/whatever", data)
+    out = store.read_array("custom/whatever", view_bin=2)
+    np.testing.assert_array_equal(out, data)
+
+
+def test_read_array_rejects_view_bin_zero(store):
+    data = np.ones((4, 4), dtype=np.float32)
+    store.write_array("intensity", data)
+    with pytest.raises(ValueError, match="view_bin must be >= 1"):
+        store.read_array("intensity", view_bin=0)
+
+
+def test_read_channel_view_bin(store):
+    """read_channel respects view_bin (always /intensity, always sum-bin)."""
+    data = np.ones((2, 6, 6), dtype=np.float32)
+    store.write_array("intensity", data, attrs={"dims": ["C", "H", "W"]})
+    out = store.read_channel("intensity", 1, view_bin=2)
+    assert out.shape == (3, 3)
+    assert np.all(out == 4)
+
+
+def test_read_labels_view_bin_wrapper(store):
+    """read_labels(name, view_bin) reaches mode_labels."""
+    arr = np.zeros((4, 4), dtype=np.int32)
+    arr[0:2, 0:2] = 5
+    store.write_labels("seg", arr)
+    out = store.read_labels("seg", view_bin=2)
+    assert out.shape == (2, 2)
+    assert out[0, 0] == 5
+    assert out[1, 1] == 0
+
+
+def test_read_mask_view_bin_wrapper(store):
+    """read_mask(name, view_bin) reaches majority_vote_mask."""
+    arr = np.ones((4, 4), dtype=np.uint8)
+    store.write_mask("mask", arr)
+    out = store.read_mask("mask", view_bin=2)
+    assert out.shape == (2, 2)
+    assert np.all(out == 1)
+
+
+def test_read_decay_helper(store):
+    """read_decay(channel) is sugar over read_array('decay/<ch>')."""
+    decay = np.ones((6, 6, 4), dtype=np.float32) * 3
+    store.write_array("decay/ch0", decay, is_decay=True)
+    out_k1 = store.read_decay("ch0")
+    np.testing.assert_array_equal(out_k1, decay)
+    out_k2 = store.read_decay("ch0", view_bin=2)
+    assert out_k2.shape == (3, 3, 4)
+    assert np.all(out_k2 == 12)  # sum of 4 threes
+
+
 # ── Session reads ─────────────────────────────────────────────
 
 

@@ -56,18 +56,27 @@ class ComputePhasor:
                 )
         return dict(handle.metadata)
 
-    def execute(self, channel: str, harmonic: int = 1) -> PhasorResult:
+    def execute(
+        self, channel: str, harmonic: int = 1, view_bin: int = 1
+    ) -> PhasorResult:
+        """Compute phasor G/S maps for ``channel``.
+
+        ``view_bin`` is the session-level view bin (>= 1). Decay is read
+        from the repository at the binned resolution. At k=1 behavior is
+        byte-identical to before the binning model existed.
+        """
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
-        # Read decay data
+        # Read decay data (view_bin applied by the store dispatch on
+        # /decay/* paths via sum_bin_decay).
         decay_path = f"decay/{channel}"
         try:
-            decay = self._repo.read_array(handle, decay_path)
+            decay = self._repo.read_array(handle, decay_path, view_bin=view_bin)
         except KeyError:
             try:
-                decay = self._repo.read_array(handle, "decay")
+                decay = self._repo.read_array(handle, "decay", view_bin=view_bin)
             except KeyError:
                 raise ValueError(
                     f"No TCSPC data found for '{channel}'. Import with FLIM enabled."

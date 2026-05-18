@@ -26,9 +26,44 @@ from percell4.domain.io.models import (
     ExplicitRule,
     ProvenanceRecord,
 )
+from percell4.domain.io.view_bin import (
+    majority_vote_mask,
+    mean_bin_2d,
+    mode_labels,
+    sum_bin_2d,
+    sum_bin_decay,
+)
 
 # Chunk cache size for session reads (64 MB)
 _READ_CACHE_BYTES = 64 * 1024 * 1024
+
+
+def _apply_view_bin(hdf5_path: str, arr: NDArray, view_bin: int) -> NDArray:
+    """Dispatch view-bin downsampling by HDF5 path prefix.
+
+    Pure function; takes the already-materialized array. See the table on
+    :meth:`DatasetStore.read_array` for the per-prefix rule.
+    """
+    if view_bin == 1:
+        return arr
+    # Normalize the path (drop leading slash for consistent prefix checks).
+    p = hdf5_path.lstrip("/")
+    if p == "intensity" or p.startswith("intensity/"):
+        return sum_bin_2d(arr, view_bin)
+    if p.startswith("decay/"):
+        return sum_bin_decay(arr, view_bin)
+    if p.startswith("labels/"):
+        return mode_labels(arr, view_bin)
+    if p.startswith("masks/"):
+        return majority_vote_mask(arr, view_bin)
+    if p.startswith("phasor/"):
+        # Every leaf under /phasor/<ch>/ is intensive (g, s, lifetime, and
+        # their *_filtered counterparts). Mean-bin so magnitudes don't
+        # scale with k.
+        return mean_bin_2d(arr, view_bin)
+    # Unknown path -- pass through. Callers asking for a view bin on a
+    # path with no defined rule get raw data; safer than guessing.
+    return arr
 
 
 def _infer_bin_metadata(f: h5py.File) -> dict[str, Any]:
@@ -205,8 +240,31 @@ class DatasetStore:
                     f[hdf5_path].attrs[key] = val
         return array.size
 
-    def read_array(self, hdf5_path: str) -> NDArray:
-        """Read a numpy array from the specified HDF5 path."""
+    def read_array(self, hdf5_path: str, view_bin: int = 1) -> NDArray:
+        """Read a numpy array from the specified HDF5 path.
+
+        ``view_bin`` is the session-level view bin (k >= 1). At k=1 the
+        array is returned byte-identical to what was written. At k>1 the
+        array is downsampled in-memory by the rule appropriate for its
+        path:
+
+        ===================================== =====================
+        Path prefix                            Rule
+        ===================================== =====================
+        ``/intensity`` (any rank)              ``sum_bin_2d``
+        ``/decay/<ch>``                        ``sum_bin_decay``
+        ``/labels/<name>``                     ``mode_labels``
+        ``/masks/<name>``                      ``majority_vote_mask``
+        ``/phasor/<ch>/{g,s,*_filtered,...}``  ``mean_bin_2d`` (intensive)
+        anything else                          pass-through
+        ===================================== =====================
+
+        See ``src/percell4/domain/io/view_bin.py`` for the full per-rule
+        contract. The on-disk array is unchanged -- this is a read-time
+        view only.
+        """
+        if view_bin < 1:
+            raise ValueError(f"view_bin must be >= 1, got {view_bin}")
         f = self._open_read()
         try:
             if hdf5_path not in f:
@@ -214,18 +272,41 @@ class DatasetStore:
             obj = f[hdf5_path]
             if not isinstance(obj, h5py.Dataset):
                 raise KeyError(f"{hdf5_path} is a group, not a dataset")
-            return obj[()]
+            arr = obj[()]
+            if view_bin == 1:
+                return arr
+            return _apply_view_bin(hdf5_path, arr, view_bin)
         finally:
             self._close_if_not_session(f)
 
-    def read_channel(self, hdf5_path: str, channel_idx: int) -> NDArray:
+    def read_decay(self, channel: str, view_bin: int = 1) -> NDArray:
+        """Read ``/decay/<channel>`` with optional view-bin downsampling.
+
+        Sugar over :meth:`read_array` that exists so callers don't have
+        to build the ``f"decay/{channel}"`` path themselves -- and so a
+        single grep for ``read_decay`` enumerates every decay-read
+        callsite (closes the Single-Write-Boundary gap where decay reads
+        used to open ``h5py.File`` directly).
+        """
+        return self.read_array(f"decay/{channel}", view_bin=view_bin)
+
+    def read_channel(
+        self, hdf5_path: str, channel_idx: int, view_bin: int = 1
+    ) -> NDArray:
         """Read a single channel plane from a 2D or 3D array.
 
         For 2D arrays, ``channel_idx`` must be 0 and the full array is returned.
         For 3D ``(C, H, W)`` arrays, returns only ``array[channel_idx]`` without
         loading the other channels — useful for phases that only need one channel
         on each dataset.
+
+        ``view_bin`` follows the same rule as :meth:`read_array`. Only
+        ``/intensity`` paths are expected here, so the downsampler is
+        ``sum_bin_2d`` regardless of the leading 2D-vs-3D shape (the slice
+        is 2D by the time we apply the bin).
         """
+        if view_bin < 1:
+            raise ValueError(f"view_bin must be >= 1, got {view_bin}")
         f = self._open_read()
         try:
             if hdf5_path not in f:
@@ -236,17 +317,19 @@ class DatasetStore:
                     raise IndexError(
                         f"channel_idx={channel_idx} out of range for 2D array"
                     )
-                return ds[()]
-            if ds.ndim == 3:
+                arr = ds[()]
+            elif ds.ndim == 3:
                 n_channels = ds.shape[0]
                 if not 0 <= channel_idx < n_channels:
                     raise IndexError(
                         f"channel_idx={channel_idx} out of range [0, {n_channels})"
                     )
-                return ds[channel_idx, ...]
-            raise ValueError(
-                f"read_channel expects 2D or 3D array, got {ds.ndim}D at {hdf5_path}"
-            )
+                arr = ds[channel_idx, ...]
+            else:
+                raise ValueError(
+                    f"read_channel expects 2D or 3D array, got {ds.ndim}D at {hdf5_path}"
+                )
+            return arr if view_bin == 1 else sum_bin_2d(arr, view_bin)
         finally:
             self._close_if_not_session(f)
 
@@ -293,9 +376,13 @@ class DatasetStore:
             f"labels/{name}", array, attrs={"dims": ["H", "W"]}
         )
 
-    def read_labels(self, name: str) -> NDArray[np.int32]:
-        """Read a segmentation label array from /labels/<name>."""
-        return self.read_array(f"labels/{name}")
+    def read_labels(self, name: str, view_bin: int = 1) -> NDArray[np.int32]:
+        """Read a segmentation label array from /labels/<name>.
+
+        ``view_bin`` follows the same rule as :meth:`read_array`. Labels
+        downsample via block mode (ties resolve to 0).
+        """
+        return self.read_array(f"labels/{name}", view_bin=view_bin)
 
     def list_labels(self) -> list[str]:
         """List all label set names under /labels/."""
@@ -318,9 +405,13 @@ class DatasetStore:
             f"masks/{name}", array, attrs={"dims": ["H", "W"]}
         )
 
-    def read_mask(self, name: str) -> NDArray[np.uint8]:
-        """Read a mask from /masks/<name>."""
-        return self.read_array(f"masks/{name}")
+    def read_mask(self, name: str, view_bin: int = 1) -> NDArray[np.uint8]:
+        """Read a mask from /masks/<name>.
+
+        ``view_bin`` follows the same rule as :meth:`read_array`. Masks
+        downsample via majority vote (>= ceil(k**2 / 2)).
+        """
+        return self.read_array(f"masks/{name}", view_bin=view_bin)
 
     def list_masks(self) -> list[str]:
         """List all mask names under /masks/."""

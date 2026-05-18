@@ -41,7 +41,13 @@ class ComputeLifetime:
                 pass
         return dict(handle.metadata)
 
-    def execute(self, channel: str) -> LifetimeResult:
+    def execute(self, channel: str, view_bin: int = 1) -> LifetimeResult:
+        """Compute lifetime from phasor g/s for ``channel``.
+
+        ``view_bin`` is the session-level view bin (>= 1). G and S are
+        read at the binned resolution via the store dispatch (mean_bin
+        for intensive phasor quantities).
+        """
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
@@ -55,13 +61,21 @@ class ComputeLifetime:
 
         # Try filtered phasor first, fall back to unfiltered
         try:
-            g = self._repo.read_array(handle, f"phasor/{channel}/g_filtered")
-            s = self._repo.read_array(handle, f"phasor/{channel}/s_filtered")
+            g = self._repo.read_array(
+                handle, f"phasor/{channel}/g_filtered", view_bin=view_bin
+            )
+            s = self._repo.read_array(
+                handle, f"phasor/{channel}/s_filtered", view_bin=view_bin
+            )
             source = "filtered"
         except KeyError:
             try:
-                g = self._repo.read_array(handle, f"phasor/{channel}/g")
-                s = self._repo.read_array(handle, f"phasor/{channel}/s")
+                g = self._repo.read_array(
+                    handle, f"phasor/{channel}/g", view_bin=view_bin
+                )
+                s = self._repo.read_array(
+                    handle, f"phasor/{channel}/s", view_bin=view_bin
+                )
                 source = "unfiltered"
             except KeyError:
                 raise ValueError(

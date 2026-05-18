@@ -97,11 +97,15 @@ class Hdf5DatasetRepository:
 
     # ── Channel images ───────────────────────────────────────
 
-    def read_channel_images(self, handle: DatasetHandle) -> dict[str, NDArray[np.float32]]:
+    def read_channel_images(
+        self,
+        handle: DatasetHandle,
+        view_bin: int = 1,
+    ) -> dict[str, NDArray[np.float32]]:
         store = self._store(handle)
         result: dict[str, np.ndarray] = {}
         with store.open_read() as s:
-            intensity = s.read_array("intensity")
+            intensity = s.read_array("intensity", view_bin=view_bin)
             channel_names = list(handle.metadata.get("channel_names", []))
 
             if intensity.ndim == 2:
@@ -117,8 +121,10 @@ class Hdf5DatasetRepository:
 
     # ── Segmentation labels ──────────────────────────────────
 
-    def read_labels(self, handle: DatasetHandle, name: str) -> NDArray[np.int32]:
-        return self._store(handle).read_labels(name)
+    def read_labels(
+        self, handle: DatasetHandle, name: str, view_bin: int = 1
+    ) -> NDArray[np.int32]:
+        return self._store(handle).read_labels(name, view_bin=view_bin)
 
     def write_labels(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
         self._store(handle).write_labels(name, data)
@@ -128,8 +134,10 @@ class Hdf5DatasetRepository:
 
     # ── Masks ────────────────────────────────────────────────
 
-    def read_mask(self, handle: DatasetHandle, name: str) -> NDArray[np.uint8]:
-        return self._store(handle).read_mask(name)
+    def read_mask(
+        self, handle: DatasetHandle, name: str, view_bin: int = 1
+    ) -> NDArray[np.uint8]:
+        return self._store(handle).read_mask(name, view_bin=view_bin)
 
     def write_mask(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
         self._store(handle).write_mask(name, data)
@@ -159,8 +167,10 @@ class Hdf5DatasetRepository:
     ) -> None:
         self._store(handle).write_array(path, data, attrs=attrs)
 
-    def read_array(self, handle: DatasetHandle, path: str) -> NDArray:
-        return self._store(handle).read_array(path)
+    def read_array(
+        self, handle: DatasetHandle, path: str, view_bin: int = 1
+    ) -> NDArray:
+        return self._store(handle).read_array(path, view_bin=view_bin)
 
     def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
         """Read /metadata attrs fresh from disk (not the handle's snapshot)."""

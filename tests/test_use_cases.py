@@ -60,10 +60,10 @@ class FakeRepo:
     def build_view(self, handle):
         pass
 
-    def read_channel_images(self, handle):
+    def read_channel_images(self, handle, view_bin=1):
         return self.channel_images
 
-    def read_labels(self, handle, name):
+    def read_labels(self, handle, name, view_bin=1):
         if name not in self.labels:
             raise KeyError(f"Labels not found: {name}")
         return self.labels[name]
@@ -71,7 +71,7 @@ class FakeRepo:
     def list_labels(self, handle):
         return list(self.labels.keys())
 
-    def read_mask(self, handle, name):
+    def read_mask(self, handle, name, view_bin=1):
         if name not in self.masks:
             raise KeyError(f"Mask not found: {name}")
         return self.masks[name]
@@ -91,7 +91,7 @@ class FakeRepo:
     def write_array(self, handle, path, data, attrs=None):
         self.written_arrays[path] = data
 
-    def read_array(self, handle, path):
+    def read_array(self, handle, path, view_bin=1):
         if path not in self.written_arrays:
             raise KeyError(f"Array not found: {path}")
         return self.written_arrays[path]
@@ -348,7 +348,7 @@ class TestComputePhasorFreshMetadata:
                     (4, 4, 64),
                 ).astype(np.float32).copy()
 
-            def read_array(self, handle, path):
+            def read_array(self, handle, path, view_bin=1):
                 if path not in self.written_arrays:
                     raise KeyError(path)
                 return self.written_arrays[path]

@@ -48,15 +48,28 @@ class ApplyWavelet:
                 pass
         return dict(handle.metadata)
 
-    def execute(self, channel: str, filter_level: int = 9) -> WaveletResult:
+    def execute(
+        self, channel: str, filter_level: int = 9, view_bin: int = 1
+    ) -> WaveletResult:
+        """Apply wavelet denoising to phasor G/S maps for ``channel``.
+
+        ``view_bin`` is the session-level view bin (>= 1). G, S, and the
+        decay used for intensity weighting are all read at the binned
+        resolution -- the store dispatch handles the per-path rule
+        (mean_bin for /phasor/*, sum_bin_decay for /decay/*).
+        """
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
         # Read phasor G/S maps
         try:
-            g_map = self._repo.read_array(handle, f"phasor/{channel}/g")
-            s_map = self._repo.read_array(handle, f"phasor/{channel}/s")
+            g_map = self._repo.read_array(
+                handle, f"phasor/{channel}/g", view_bin=view_bin
+            )
+            s_map = self._repo.read_array(
+                handle, f"phasor/{channel}/s", view_bin=view_bin
+            )
         except KeyError:
             raise ValueError(
                 f"No phasor data for '{channel}'. Compute Phasor first."
@@ -72,7 +85,9 @@ class ApplyWavelet:
         # makes the alignment guaranteed by construction. compute_phasor
         # already follows the same pattern (compute_phasor.py:60).
         try:
-            decay = self._repo.read_array(handle, f"decay/{channel}")
+            decay = self._repo.read_array(
+                handle, f"decay/{channel}", view_bin=view_bin
+            )
         except KeyError:
             raise ValueError(
                 f"No /decay/{channel} layer for wavelet filter intensity weighting."
