@@ -117,14 +117,38 @@ class ComputePhasor:
         g_map = median_filter(g_map, size=3).astype(np.float32)
         s_map = median_filter(s_map, size=3).astype(np.float32)
 
+        # Bin-aware write: upsample to native_shape so the canonical
+        # /phasor/<ch>/{g,s} stays at native regardless of the bin the
+        # caller computed at. The created_at_bin attr records which bin
+        # was used so a downstream toggle to a different bin can still
+        # surface 'this phasor was produced at k=3' to the UI.
+        write_attrs: dict = {
+            "dims": ["H", "W"], "channel": channel, "harmonic": harmonic,
+        }
+        if view_bin > 1:
+            from percell4.domain.io.view_bin import nn_upsample_2d
+            meta_for_shape = self._read_fresh_metadata(handle)
+            native = meta_for_shape.get("native_shape")
+            if native is None:
+                raise ValueError(
+                    "Cannot write a binned phasor: /metadata.native_shape "
+                    "is missing. Re-compress the dataset to populate it."
+                )
+            target = (int(native[0]), int(native[1]))
+            g_map = nn_upsample_2d(g_map, view_bin, target_hw=target).astype(
+                np.float32, copy=False
+            )
+            s_map = nn_upsample_2d(s_map, view_bin, target_hw=target).astype(
+                np.float32, copy=False
+            )
+            write_attrs["created_at_bin"] = int(view_bin)
+
         # Write to store
         self._repo.write_array(
-            handle, f"phasor/{channel}/g", g_map,
-            attrs={"dims": ["H", "W"], "channel": channel, "harmonic": harmonic},
+            handle, f"phasor/{channel}/g", g_map, attrs=write_attrs,
         )
         self._repo.write_array(
-            handle, f"phasor/{channel}/s", s_map,
-            attrs={"dims": ["H", "W"], "channel": channel, "harmonic": harmonic},
+            handle, f"phasor/{channel}/s", s_map, attrs=write_attrs,
         )
 
         # Invalidate downstream wavelet output and lifetime maps. Each of

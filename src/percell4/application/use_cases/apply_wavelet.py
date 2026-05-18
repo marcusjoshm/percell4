@@ -116,22 +116,54 @@ class ApplyWavelet:
 
         g_filtered = result["G"]
         s_filtered = result["S"]
+        lifetime = result.get("T")
+
+        # Bin-aware write: derived datasets stay at native_shape so the
+        # canonical /phasor/<ch>/{g_filtered,s_filtered,lifetime_filtered}
+        # paths follow the same storage-at-native invariant as g/s.
+        write_attrs: dict = {
+            "dims": ["H", "W"], "channel": channel, "filter_level": filter_level,
+        }
+        if view_bin > 1:
+            from percell4.domain.io.view_bin import nn_upsample_2d
+            native = meta.get("native_shape")
+            if native is None:
+                raise ValueError(
+                    "Cannot write a binned wavelet result: "
+                    "/metadata.native_shape is missing."
+                )
+            target = (int(native[0]), int(native[1]))
+            g_filtered = nn_upsample_2d(
+                g_filtered, view_bin, target_hw=target
+            ).astype(g_filtered.dtype, copy=False)
+            s_filtered = nn_upsample_2d(
+                s_filtered, view_bin, target_hw=target
+            ).astype(s_filtered.dtype, copy=False)
+            if lifetime is not None:
+                lifetime = nn_upsample_2d(
+                    lifetime, view_bin, target_hw=target
+                ).astype(lifetime.dtype, copy=False)
+            write_attrs["created_at_bin"] = int(view_bin)
 
         # Write filtered results
         self._repo.write_array(
             handle, f"phasor/{channel}/g_filtered", g_filtered,
-            attrs={"dims": ["H", "W"], "channel": channel, "filter_level": filter_level},
+            attrs=write_attrs,
         )
         self._repo.write_array(
             handle, f"phasor/{channel}/s_filtered", s_filtered,
-            attrs={"dims": ["H", "W"], "channel": channel, "filter_level": filter_level},
+            attrs=write_attrs,
         )
 
-        lifetime = result.get("T")
         if lifetime is not None:
+            lifetime_attrs: dict = {
+                "dims": ["H", "W"], "channel": channel,
+            }
+            if view_bin > 1:
+                lifetime_attrs["created_at_bin"] = int(view_bin)
             self._repo.write_array(
                 handle, f"phasor/{channel}/lifetime_filtered", lifetime,
-                attrs={"dims": ["H", "W"], "channel": channel},
+                attrs=lifetime_attrs,
             )
 
         n_valid = int(np.isfinite(g_filtered).sum())

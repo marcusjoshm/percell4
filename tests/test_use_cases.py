@@ -90,6 +90,10 @@ class FakeRepo:
 
     def write_array(self, handle, path, data, attrs=None):
         self.written_arrays[path] = data
+        if attrs is not None:
+            if not hasattr(self, "array_attrs"):
+                self.array_attrs: dict[str, dict] = {}
+            self.array_attrs[path] = dict(attrs)
 
     def read_array(self, handle, path, view_bin=1):
         if path not in self.written_arrays:
@@ -843,3 +847,133 @@ class TestRunPhasorGMM:
         # Sanity check the fit landed despite large sums — the precision
         # invariant matters most for the sampling weight distribution.
         assert result.chosen_n == 2
+
+
+# ── ComputePhasor / ApplyWavelet / ComputeLifetime: view_bin (U14) ──
+
+
+class TestPhasorWritesViewBin:
+    """ComputePhasor at view_bin > 1 NN-upsamples to native_shape and
+    stamps created_at_bin so the canonical /phasor/<ch>/{g,s} paths stay
+    at native (storage-at-native invariant)."""
+
+    def _make_decay_at_binned_shape(self, h, w, t=64):
+        return np.broadcast_to(
+            np.exp(-np.arange(t, dtype=np.float32) / 8.0),
+            (h, w, t),
+        ).astype(np.float32).copy()
+
+    def test_compute_phasor_default_view_bin_one_no_attr(self):
+        """At view_bin=1, no created_at_bin attr is stamped (back-compat)."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {"native_shape": (4, 4)}
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1, view_bin=1)
+
+        attrs = getattr(repo, "array_attrs", {}).get("phasor/ch0/g", {})
+        assert "created_at_bin" not in attrs
+
+    def test_compute_phasor_view_bin_3_stamps_attr_and_upsamples(self):
+        """At view_bin=3, g and s are NN-upsampled to native_shape and
+        carry created_at_bin=3."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        # Native is 12x12; the decay we feed in is at the binned 4x4 shape.
+        repo.disk_metadata = {"native_shape": (12, 12)}
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1, view_bin=3)
+
+        # g and s written at native (12, 12).
+        assert repo.written_arrays["phasor/ch0/g"].shape == (12, 12)
+        assert repo.written_arrays["phasor/ch0/s"].shape == (12, 12)
+        # Both carry the attr.
+        attrs_g = repo.array_attrs["phasor/ch0/g"]
+        attrs_s = repo.array_attrs["phasor/ch0/s"]
+        assert attrs_g["created_at_bin"] == 3
+        assert attrs_s["created_at_bin"] == 3
+
+    def test_apply_wavelet_view_bin_3_stamps_attr_and_upsamples(self, monkeypatch):
+        """ApplyWavelet outputs (g_filtered, s_filtered, lifetime_filtered)
+        all NN-upsample to native and carry created_at_bin.
+
+        denoise_phasor is mocked to return the input unchanged -- the
+        underlying DTCWT implementation pulls in a numpy-2-incompatible
+        library, and we only care about the upsample/attr discipline
+        added in U14 around it, not the wavelet math itself."""
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+        import percell4.domain.flim.wavelet_filter as wf
+
+        # Replace denoise_phasor with a passthrough.
+        def fake_denoise(g, s, intensity, filter_level=1, omega=None):
+            return {"G": g.copy(), "S": s.copy(), "T": np.zeros_like(g)}
+
+        monkeypatch.setattr(wf, "denoise_phasor", fake_denoise)
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {
+            "native_shape": (12, 12),
+            "flim_frequency_mhz": 80.0,
+        }
+        # G, S, decay all live at the binned 4x4 shape.
+        repo.written_arrays["phasor/ch0/g"] = np.full((4, 4), 0.5, dtype=np.float32)
+        repo.written_arrays["phasor/ch0/s"] = np.full((4, 4), 0.3, dtype=np.float32)
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ApplyWavelet(repo, session)
+        uc.execute(channel="ch0", filter_level=2, view_bin=3)
+
+        # Outputs at native.
+        assert repo.written_arrays["phasor/ch0/g_filtered"].shape == (12, 12)
+        assert repo.written_arrays["phasor/ch0/s_filtered"].shape == (12, 12)
+        # Attrs stamped.
+        assert repo.array_attrs["phasor/ch0/g_filtered"]["created_at_bin"] == 3
+        assert repo.array_attrs["phasor/ch0/s_filtered"]["created_at_bin"] == 3
+
+    def test_compute_lifetime_view_bin_3_stamps_attr_and_upsamples(self):
+        """ComputeLifetime upsamples lifetime to native + stamps attr."""
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {
+            "native_shape": (12, 12),
+            "flim_frequency_mhz": 80.0,
+        }
+        # Filtered g/s at binned shape; no filtered path -> falls back.
+        repo.written_arrays["phasor/ch0/g"] = np.full((4, 4), 0.5, dtype=np.float32)
+        repo.written_arrays["phasor/ch0/s"] = np.full((4, 4), 0.3, dtype=np.float32)
+
+        uc = ComputeLifetime(repo, session)
+        uc.execute(channel="ch0", view_bin=3)
+
+        assert repo.written_arrays["phasor/ch0/lifetime"].shape == (12, 12)
+        assert repo.array_attrs["phasor/ch0/lifetime"]["created_at_bin"] == 3
+
+    def test_compute_phasor_view_bin_gt_one_no_native_shape_raises(self):
+        """Missing native_shape with view_bin > 1 is an error."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        # No native_shape on disk metadata.
+        repo.disk_metadata = {}
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ComputePhasor(repo, session)
+        with pytest.raises(ValueError, match="native_shape"):
+            uc.execute(channel="ch0", harmonic=1, view_bin=3)

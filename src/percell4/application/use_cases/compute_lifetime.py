@@ -84,9 +84,28 @@ class ComputeLifetime:
 
         lifetime = phasor_to_lifetime(g, s, frequency_mhz=freq)
 
+        # Bin-aware write: lifetime stays at native_shape so the canonical
+        # /phasor/<ch>/lifetime path doesn't shrink at higher view bins.
+        write_attrs: dict = {
+            "dims": ["H", "W"], "channel": channel, "source": source,
+        }
+        if view_bin > 1:
+            from percell4.domain.io.view_bin import nn_upsample_2d
+            native = meta.get("native_shape")
+            if native is None:
+                raise ValueError(
+                    "Cannot write a binned lifetime: "
+                    "/metadata.native_shape is missing."
+                )
+            target = (int(native[0]), int(native[1]))
+            lifetime = nn_upsample_2d(
+                lifetime, view_bin, target_hw=target
+            ).astype(lifetime.dtype, copy=False)
+            write_attrs["created_at_bin"] = int(view_bin)
+
         self._repo.write_array(
             handle, f"phasor/{channel}/lifetime", lifetime,
-            attrs={"dims": ["H", "W"], "channel": channel, "source": source},
+            attrs=write_attrs,
         )
 
         valid = np.isfinite(lifetime)
