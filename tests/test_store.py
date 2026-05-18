@@ -193,6 +193,114 @@ def test_set_metadata(store):
     assert meta["laser_freq"] == 80.0
 
 
+# ── Bin metadata: native_shape + creation_bin (U1) ────────────
+
+
+def test_metadata_infers_native_shape_from_intensity(store):
+    """native_shape and creation_bin are populated on read even when the
+    file was written before the keys existed."""
+    data = np.random.rand(50, 50).astype(np.float32)
+    store.write_array("intensity", data)
+
+    meta = store.metadata
+    assert meta["native_shape"] == (50, 50)
+    assert meta["creation_bin"] == 1
+
+
+def test_metadata_infers_native_shape_from_3d_intensity(store):
+    """Trailing two dims are the spatial dims."""
+    data = np.random.rand(3, 64, 80).astype(np.float32)
+    store.write_array("intensity", data, attrs={"dims": ["C", "H", "W"]})
+
+    meta = store.metadata
+    assert meta["native_shape"] == (64, 80)
+
+
+def test_metadata_infers_native_shape_from_decay_only(store):
+    """Decay-only files (bin-only TCSPC imports) infer from /decay."""
+    # No /intensity — directly poke a /decay/<ch> array onto disk.
+    with h5py.File(store.path, "a") as f:
+        decay_grp = f.require_group("decay")
+        decay_grp.create_dataset("ch0", data=np.zeros((128, 128, 8)))
+
+    meta = store.metadata
+    assert meta["native_shape"] == (128, 128)
+    assert meta["creation_bin"] == 1
+
+
+def test_metadata_native_shape_none_when_no_arrays(store):
+    """Empty .h5 (no /intensity, no /decay) exposes native_shape=None."""
+    meta = store.metadata
+    assert meta["native_shape"] is None
+    assert meta["creation_bin"] == 1
+
+
+def test_metadata_stored_native_shape_overrides_inference(store):
+    """Writer's intent wins when /metadata.native_shape is explicit."""
+    data = np.random.rand(50, 50).astype(np.float32)
+    store.write_array("intensity", data)
+    # Set an explicit native_shape that disagrees with /intensity (legal
+    # only if it was the actual native at compress and /intensity was
+    # subsequently rewritten -- contrived but tests the precedence).
+    with h5py.File(store.path, "a") as f:
+        f["metadata"].attrs["native_shape"] = (200, 200)
+
+    meta = store.metadata
+    assert meta["native_shape"] == (200, 200)  # stored wins
+
+
+def test_set_metadata_persists_inferred_native_shape(store):
+    """First set_metadata call after a write_array persists the inferred
+    bin metadata to /metadata.attrs."""
+    data = np.random.rand(40, 40).astype(np.float32)
+    store.write_array("intensity", data)
+
+    # Confirm not on disk yet.
+    with h5py.File(store.path, "r") as f:
+        assert "native_shape" not in f["metadata"].attrs
+
+    store.set_metadata({"unrelated": 1})
+
+    with h5py.File(store.path, "r") as f:
+        assert tuple(f["metadata"].attrs["native_shape"]) == (40, 40)
+        assert int(f["metadata"].attrs["creation_bin"]) == 1
+        assert f["metadata"].attrs["unrelated"] == 1
+
+
+def test_set_metadata_raises_on_inconsistent_stored_shape(store):
+    """Stored /metadata.native_shape disagreeing with /intensity shape
+    raises MetadataConsistencyError -- never silently overwritten."""
+    from percell4.store import MetadataConsistencyError
+
+    data = np.random.rand(40, 40).astype(np.float32)
+    store.write_array("intensity", data)
+    # Plant a disagreeing native_shape (513x513 on a 40x40 array).
+    with h5py.File(store.path, "a") as f:
+        f["metadata"].attrs["native_shape"] = (513, 513)
+
+    with pytest.raises(MetadataConsistencyError):
+        store.set_metadata({"some_other_key": 1})
+
+
+def test_creation_bin_default_is_one(store):
+    """creation_bin defaults to 1 when not explicitly set."""
+    data = np.random.rand(50, 50).astype(np.float32)
+    store.write_array("intensity", data)
+
+    meta = store.metadata
+    assert meta["creation_bin"] == 1
+
+
+def test_creation_bin_stored_value_preserved(store):
+    """An explicit creation_bin attr is preserved by set_metadata."""
+    data = np.random.rand(50, 50).astype(np.float32)
+    store.write_array("intensity", data)
+    store.set_metadata({"creation_bin": 3})
+
+    meta = store.metadata
+    assert meta["creation_bin"] == 3
+
+
 # ── Session reads ─────────────────────────────────────────────
 
 

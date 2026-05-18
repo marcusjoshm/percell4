@@ -31,6 +31,36 @@ from percell4.domain.io.models import (
 _READ_CACHE_BYTES = 64 * 1024 * 1024
 
 
+def _infer_bin_metadata(f: h5py.File) -> dict[str, Any]:
+    """Return ``{"native_shape": ..., "creation_bin": ...}`` inferred from
+    an open HDF5 file's array contents.
+
+    ``native_shape`` is the last two dims of ``/intensity`` if it exists,
+    else the first two dims of the first ``/decay/<ch>`` array, else
+    ``None``. ``creation_bin`` defaults to ``1`` when absent from
+    ``/metadata.attrs``.
+
+    Pure read of the open file handle -- does not mutate or close.
+    """
+    native_shape: tuple[int, int] | None = None
+    if "intensity" in f:
+        shape = f["intensity"].shape
+        if len(shape) >= 2:
+            native_shape = (int(shape[-2]), int(shape[-1]))
+    elif "decay" in f:
+        decay_grp = f["decay"]
+        children = list(decay_grp.keys())
+        if children:
+            first = decay_grp[children[0]]
+            shape = first.shape
+            if len(shape) >= 2:
+                native_shape = (int(shape[0]), int(shape[1]))
+    creation_bin = 1
+    if "metadata" in f and "creation_bin" in f["metadata"].attrs:
+        creation_bin = int(f["metadata"].attrs["creation_bin"])
+    return {"native_shape": native_shape, "creation_bin": creation_bin}
+
+
 # Provenance-attribute keys for masks captured by "Apply Current Phasor
 # as Mask". Single source of truth so future readers cannot drift from
 # the writer in main_window.py.
@@ -46,6 +76,18 @@ PHASOR_MASK_ATTR_CAPTURE_ISO = "phasor_capture_iso8601"
 
 class LayerAlreadyExistsError(Exception):
     """Raised when a payload group already exists and force=False."""
+
+
+class MetadataConsistencyError(Exception):
+    """Raised when /metadata.native_shape disagrees with on-disk array shape.
+
+    The dataset-wide spatial-binning model treats ``/metadata.native_shape``
+    as the authoritative native resolution. If a stored value disagrees
+    with what we can infer from ``/intensity`` (or ``/decay/<first_ch>``
+    when intensity is absent), we refuse to silently overwrite -- a real
+    schema bug or a corrupted file is more likely than a benign
+    transient. Callers must inspect and decide.
+    """
 
 
 class CrossFormatRuleConflictError(Exception):
@@ -318,19 +360,69 @@ class DatasetStore:
 
     @property
     def metadata(self) -> dict[str, Any]:
-        """Read /metadata/ group attributes as a dict."""
+        """Read /metadata/ group attributes as a dict.
+
+        Two keys are guaranteed to be present whenever the dataset has any
+        spatial array on disk, even on files written before the
+        dataset-wide binning model existed:
+
+        * ``native_shape`` -- ``(H, W)`` at k=1. Inferred from
+          ``/intensity.shape[-2:]`` when absent. If neither ``/intensity``
+          nor any ``/decay/<ch>`` exists, this key is set to ``None``.
+        * ``creation_bin`` -- defaults to ``1`` when absent.
+
+        Inference is in-memory only here -- the file is not rewritten.
+        The next :meth:`set_metadata` call persists the inferred values
+        (see that method for the consistency-check rule).
+        """
         f = self._open_read()
         try:
-            if "metadata" not in f:
-                return {}
-            return dict(f["metadata"].attrs)
+            if "metadata" in f:
+                attrs = dict(f["metadata"].attrs)
+            else:
+                attrs = {}
+            inferred = _infer_bin_metadata(f)
+            for key, val in inferred.items():
+                attrs.setdefault(key, val)
+            # Normalize native_shape to a Python tuple regardless of source
+            # (h5py returns numpy arrays for sequence attrs).
+            if attrs.get("native_shape") is not None:
+                ns = attrs["native_shape"]
+                if hasattr(ns, "tolist"):
+                    ns = ns.tolist()
+                attrs["native_shape"] = tuple(int(x) for x in ns)
+            if "creation_bin" in attrs:
+                attrs["creation_bin"] = int(attrs["creation_bin"])
+            return attrs
         finally:
             self._close_if_not_session(f)
 
     def set_metadata(self, attrs: dict[str, Any]) -> int:
-        """Write attributes to the /metadata/ group. Returns count written."""
+        """Write attributes to the /metadata/ group. Returns count written.
+
+        As a side effect, persists inferred ``native_shape`` and
+        ``creation_bin`` from :attr:`metadata` if they aren't on disk yet.
+        Raises :class:`MetadataConsistencyError` if a stored
+        ``native_shape`` disagrees with what we infer from the actual
+        array on disk -- we never silently overwrite an explicit value.
+        """
         with h5py.File(self.path, "a") as f:
             grp = f.require_group("metadata")
+            inferred = _infer_bin_metadata(f)
+            if "native_shape" in grp.attrs:
+                stored = tuple(int(x) for x in grp.attrs["native_shape"])
+                if (
+                    inferred["native_shape"] is not None
+                    and stored != inferred["native_shape"]
+                ):
+                    raise MetadataConsistencyError(
+                        f"Stored /metadata.native_shape={stored} disagrees "
+                        f"with on-disk shape={inferred['native_shape']}."
+                    )
+            else:
+                if inferred["native_shape"] is not None:
+                    grp.attrs["native_shape"] = inferred["native_shape"]
+            grp.attrs.setdefault("creation_bin", inferred["creation_bin"])
             for key, val in attrs.items():
                 grp.attrs[key] = val
         return len(attrs)
