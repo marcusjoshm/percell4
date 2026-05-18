@@ -125,6 +125,18 @@ class MetadataConsistencyError(Exception):
     """
 
 
+class LayerSizeMismatchError(Exception):
+    """Raised when an Add-Layer source shape doesn't equal /metadata.native_shape.
+
+    The dataset-wide binning model locks the dataset's native shape at
+    compress time. Subsequent layers added through the Add-Layer path
+    (Add-Layer dialog TIFFs, TCSPC append, ROI imports) must match
+    exactly -- the .h5 doesn't tolerate mixed-resolution storage.
+    Mismatches are the user's signal that they need to either pre-bin
+    the source externally or re-compress with a different creation_bin.
+    """
+
+
 class CrossFormatRuleConflictError(Exception):
     """Raised when an append would persist a rule different from one already stored."""
 
