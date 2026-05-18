@@ -26,6 +26,35 @@ from percell4.gui import theme
 from percell4.model import CellDataModel
 
 
+def _read_layer_bin_attrs(store, group: str) -> dict[str, int | None]:
+    """Read each ``/{group}/<name>``'s ``created_at_bin`` attr, if present.
+
+    Returns ``{name: created_at_bin or None}``. A single h5py open
+    avoids one read per item (which mattered on real-user datasets
+    with dozens of segmentations / masks). Failures are silent --
+    annotation is a UX detail; missing attrs shouldn't break the list.
+    """
+    import h5py
+
+    result: dict[str, int | None] = {}
+    try:
+        with h5py.File(store.path, "r") as f:
+            if group not in f:
+                return result
+            for name in f[group]:
+                attrs = f[f"{group}/{name}"].attrs
+                if "created_at_bin" in attrs:
+                    try:
+                        result[name] = int(attrs["created_at_bin"])
+                    except (TypeError, ValueError):
+                        result[name] = None
+                else:
+                    result[name] = None
+    except Exception:
+        pass
+    return result
+
+
 class DataPanel(QWidget):
     """Panel for active layers, layer management, and dataset info."""
 
@@ -139,26 +168,66 @@ class DataPanel(QWidget):
             self.refresh_dataset_info()
         if change.segmentation or change.mask:
             self.refresh_dataset_info()
+        if change.bin:
+            # The view-bin display lives in the info label, and the
+            # combo annotations (display "[k=N]" for results created at
+            # a different bin) are bin-relative -- both refresh on a
+            # bin change. DataPanel does NOT write session.active_bin:
+            # the SessionWindow SpinBox owns that.
+            self.refresh_dataset_info()
+            self.refresh_management_combos()
 
     def _refresh_seg_combos(self) -> None:
-        """Re-list the Management Segmentations dropdown from the store."""
+        """Re-list the Management Segmentations dropdown from the store.
+
+        Each item's display text is suffixed with ``[k=N]`` when the
+        underlying ``/labels/<name>`` carries a ``created_at_bin`` attr
+        (U5 naming convention). The combo's userData stores the clean
+        underlying name so rename/delete handlers don't need to parse
+        the annotation off.
+        """
         store = self._get_store()
         self._mgmt_seg_combo.blockSignals(True)
         self._mgmt_seg_combo.clear()
         if store is not None:
+            attrs_by_name = _read_layer_bin_attrs(store, "labels")
             for name in store.list_labels():
-                self._mgmt_seg_combo.addItem(name)
+                self._add_combo_item_with_bin_annotation(
+                    self._mgmt_seg_combo, name, attrs_by_name.get(name)
+                )
         self._mgmt_seg_combo.blockSignals(False)
 
     def _refresh_mask_combos(self) -> None:
-        """Re-list the Management Masks dropdown from the store."""
+        """Re-list the Management Masks dropdown from the store.
+
+        Annotates each item with ``[k=N]`` when the underlying mask
+        carries a ``created_at_bin`` attr; see :meth:`_refresh_seg_combos`.
+        """
         store = self._get_store()
         self._mgmt_mask_combo.blockSignals(True)
         self._mgmt_mask_combo.clear()
         if store is not None:
+            attrs_by_name = _read_layer_bin_attrs(store, "masks")
             for name in store.list_masks():
-                self._mgmt_mask_combo.addItem(name)
+                self._add_combo_item_with_bin_annotation(
+                    self._mgmt_mask_combo, name, attrs_by_name.get(name)
+                )
         self._mgmt_mask_combo.blockSignals(False)
+
+    def _add_combo_item_with_bin_annotation(
+        self, combo, name: str, created_at_bin: int | None
+    ) -> None:
+        """Add ``name`` to ``combo`` with the canonical name as userData
+        and a display string that suffixes ``[k=N]`` when the layer was
+        produced at a non-default bin.
+        """
+        from qtpy.QtCore import Qt
+        if created_at_bin is not None and int(created_at_bin) > 1:
+            display = f"{name}  [k={int(created_at_bin)}]"
+        else:
+            display = name
+        combo.addItem(display)
+        combo.setItemData(combo.count() - 1, name, Qt.UserRole)
 
     # ── Layer Management ─────────────────────────────────────
 
@@ -178,13 +247,19 @@ class DataPanel(QWidget):
 
         self._mgmt_seg_combo.clear()
         if store is not None:
+            attrs_by_name = _read_layer_bin_attrs(store, "labels")
             for name in store.list_labels():
-                self._mgmt_seg_combo.addItem(name)
+                self._add_combo_item_with_bin_annotation(
+                    self._mgmt_seg_combo, name, attrs_by_name.get(name)
+                )
 
         self._mgmt_mask_combo.clear()
         if store is not None:
+            attrs_by_name = _read_layer_bin_attrs(store, "masks")
             for name in store.list_masks():
-                self._mgmt_mask_combo.addItem(name)
+                self._add_combo_item_with_bin_annotation(
+                    self._mgmt_mask_combo, name, attrs_by_name.get(name)
+                )
 
         self._mgmt_chan_combo.clear()
         seen: set[str] = set()
@@ -202,7 +277,13 @@ class DataPanel(QWidget):
                     seen.add(layer.name)
 
     def refresh_dataset_info(self) -> None:
-        """Refresh the Dataset Info label from the current store."""
+        """Refresh the Dataset Info label from the current store.
+
+        Shows the canonical on-disk shape, the dataset's native (k=1)
+        H, W from /metadata.native_shape (U1), and the current session
+        view bin from session.active_bin (U4). The active-bin line is
+        read-only here -- the SessionWindow SpinBox owns the toggle.
+        """
         store = self._get_store()
         h5_path = self._get_h5_path()
         if store is None or h5_path is None:
@@ -214,9 +295,24 @@ class DataPanel(QWidget):
             with store.open_read() as s:
                 intensity = s.read_array("intensity")
                 shape = intensity.shape
+            session = self.data_model.session
+            meta = store.metadata
+            native_shape = meta.get("native_shape")
+            creation_bin = meta.get("creation_bin", 1)
+            active_bin = session.active_bin
+            native_line = (
+                f"Native: {tuple(native_shape)}"
+                if native_shape is not None
+                else "Native: (unknown)"
+            )
+            bin_line = (
+                f"Creation bin: {creation_bin}  |  View bin: {active_bin}"
+            )
             self._info_label.setText(
                 f"File: {Path(h5_path).name}\n"
                 f"Shape: {shape}\n"
+                f"{native_line}\n"
+                f"{bin_line}\n"
                 f"Labels: {n_labels}  |  Masks: {n_masks}"
             )
         except Exception:
@@ -231,7 +327,10 @@ class DataPanel(QWidget):
 
     def _on_rename_layer(self, prefix: str) -> None:
         combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo
-        old_name = combo.currentText()
+        # Read the clean underlying name from Qt.UserRole, falling back to
+        # display text for the channel combo (which doesn't carry a [k=N]
+        # annotation) and for items added before this change.
+        old_name = combo.currentData(Qt.UserRole) or combo.currentText()
         if not old_name:
             self._show_status("Nothing selected to rename")
             return
@@ -275,7 +374,9 @@ class DataPanel(QWidget):
 
     def _on_delete_layer(self, prefix: str) -> None:
         combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo
-        name = combo.currentText()
+        # Clean name from Qt.UserRole (annotations like "[k=3]" must not
+        # leak into the HDF5 path).
+        name = combo.currentData(Qt.UserRole) or combo.currentText()
         if not name:
             self._show_status("Nothing selected to delete")
             return
