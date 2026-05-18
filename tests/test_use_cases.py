@@ -60,10 +60,10 @@ class FakeRepo:
     def build_view(self, handle):
         pass
 
-    def read_channel_images(self, handle):
+    def read_channel_images(self, handle, view_bin=1):
         return self.channel_images
 
-    def read_labels(self, handle, name):
+    def read_labels(self, handle, name, view_bin=1):
         if name not in self.labels:
             raise KeyError(f"Labels not found: {name}")
         return self.labels[name]
@@ -71,7 +71,7 @@ class FakeRepo:
     def list_labels(self, handle):
         return list(self.labels.keys())
 
-    def read_mask(self, handle, name):
+    def read_mask(self, handle, name, view_bin=1):
         if name not in self.masks:
             raise KeyError(f"Mask not found: {name}")
         return self.masks[name]
@@ -90,8 +90,12 @@ class FakeRepo:
 
     def write_array(self, handle, path, data, attrs=None):
         self.written_arrays[path] = data
+        if attrs is not None:
+            if not hasattr(self, "array_attrs"):
+                self.array_attrs: dict[str, dict] = {}
+            self.array_attrs[path] = dict(attrs)
 
-    def read_array(self, handle, path):
+    def read_array(self, handle, path, view_bin=1):
         if path not in self.written_arrays:
             raise KeyError(f"Array not found: {path}")
         return self.written_arrays[path]
@@ -233,6 +237,76 @@ class TestMeasureCells:
 
         assert order == ["store", "session"]
 
+    # ── view_bin handling (U13) ──────────────────────────────
+
+    def test_default_view_bin_one_no_bin_at_measure_scaling(
+        self, session, sample_labels, sample_image
+    ):
+        """At k=1 (default), the DataFrame still gains a bin_at_measure
+        column for forward-compatibility (downstream filters can ignore
+        the default), and pixel-count metrics are NOT scaled."""
+        repo = FakeRepo()
+        repo.channel_images = {"GFP": sample_image}
+        repo.labels = {"cellpose": sample_labels}
+        session.set_active_segmentation("cellpose")
+
+        uc = MeasureCells(repo, session)
+        df = uc.execute(metrics=["area"])
+        assert "bin_at_measure" in df.columns
+        assert (df["bin_at_measure"] == 1).all()
+
+    def test_view_bin_three_tags_rows(
+        self, session, sample_labels, sample_image
+    ):
+        """Explicit view_bin=3 stamps bin_at_measure=3 on every row."""
+        repo = FakeRepo()
+        repo.channel_images = {"GFP": sample_image}
+        repo.labels = {"cellpose": sample_labels}
+        session.set_active_segmentation("cellpose")
+
+        uc = MeasureCells(repo, session)
+        df = uc.execute(metrics=["area"], view_bin=3)
+        assert (df["bin_at_measure"] == 3).all()
+
+    def test_view_bin_picks_up_session_active_bin(
+        self, session, sample_labels, sample_image
+    ):
+        """When view_bin is None, the use case reads session.active_bin."""
+        repo = FakeRepo()
+        repo.channel_images = {"GFP": sample_image}
+        repo.labels = {"cellpose": sample_labels}
+        session.set_active_segmentation("cellpose")
+        session.set_active_bin(2)
+
+        uc = MeasureCells(repo, session)
+        df = uc.execute(metrics=["area"])
+        assert (df["bin_at_measure"] == 2).all()
+
+    def test_view_bin_scales_pixel_area_by_k_squared(
+        self, session, sample_labels, sample_image
+    ):
+        """area_pixels at view_bin=3 reports k**2=9 times the binned count
+        so the value is comparable to a k=1 measurement (k=1-equivalent units)."""
+        repo = FakeRepo()
+        repo.channel_images = {"GFP": sample_image}
+        repo.labels = {"cellpose": sample_labels}
+        session.set_active_segmentation("cellpose")
+
+        uc = MeasureCells(repo, session)
+        df_k1 = uc.execute(metrics=["area"], view_bin=1)
+
+        # Re-measure with the same data at view_bin=3 -- the FakeRepo
+        # returns the same labels regardless of view_bin (it has no view
+        # bin dispatch), so the count is identical; only the scaling
+        # post-step differs.
+        df_k3 = uc.execute(metrics=["area"], view_bin=3)
+        if "area_pixels" in df_k1.columns:
+            # Each row's area_pixels at k=3 equals 9x the k=1 value.
+            np.testing.assert_allclose(
+                df_k3["area_pixels"].values,
+                df_k1["area_pixels"].values * 9,
+            )
+
 
 # ── AcceptThreshold ──────────────────────────────────────────
 
@@ -348,7 +422,7 @@ class TestComputePhasorFreshMetadata:
                     (4, 4, 64),
                 ).astype(np.float32).copy()
 
-            def read_array(self, handle, path):
+            def read_array(self, handle, path, view_bin=1):
                 if path not in self.written_arrays:
                     raise KeyError(path)
                 return self.written_arrays[path]
@@ -773,3 +847,133 @@ class TestRunPhasorGMM:
         # Sanity check the fit landed despite large sums — the precision
         # invariant matters most for the sampling weight distribution.
         assert result.chosen_n == 2
+
+
+# ── ComputePhasor / ApplyWavelet / ComputeLifetime: view_bin (U14) ──
+
+
+class TestPhasorWritesViewBin:
+    """ComputePhasor at view_bin > 1 NN-upsamples to native_shape and
+    stamps created_at_bin so the canonical /phasor/<ch>/{g,s} paths stay
+    at native (storage-at-native invariant)."""
+
+    def _make_decay_at_binned_shape(self, h, w, t=64):
+        return np.broadcast_to(
+            np.exp(-np.arange(t, dtype=np.float32) / 8.0),
+            (h, w, t),
+        ).astype(np.float32).copy()
+
+    def test_compute_phasor_default_view_bin_one_no_attr(self):
+        """At view_bin=1, no created_at_bin attr is stamped (back-compat)."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {"native_shape": (4, 4)}
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1, view_bin=1)
+
+        attrs = getattr(repo, "array_attrs", {}).get("phasor/ch0/g", {})
+        assert "created_at_bin" not in attrs
+
+    def test_compute_phasor_view_bin_3_stamps_attr_and_upsamples(self):
+        """At view_bin=3, g and s are NN-upsampled to native_shape and
+        carry created_at_bin=3."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        # Native is 12x12; the decay we feed in is at the binned 4x4 shape.
+        repo.disk_metadata = {"native_shape": (12, 12)}
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1, view_bin=3)
+
+        # g and s written at native (12, 12).
+        assert repo.written_arrays["phasor/ch0/g"].shape == (12, 12)
+        assert repo.written_arrays["phasor/ch0/s"].shape == (12, 12)
+        # Both carry the attr.
+        attrs_g = repo.array_attrs["phasor/ch0/g"]
+        attrs_s = repo.array_attrs["phasor/ch0/s"]
+        assert attrs_g["created_at_bin"] == 3
+        assert attrs_s["created_at_bin"] == 3
+
+    def test_apply_wavelet_view_bin_3_stamps_attr_and_upsamples(self, monkeypatch):
+        """ApplyWavelet outputs (g_filtered, s_filtered, lifetime_filtered)
+        all NN-upsample to native and carry created_at_bin.
+
+        denoise_phasor is mocked to return the input unchanged -- the
+        underlying DTCWT implementation pulls in a numpy-2-incompatible
+        library, and we only care about the upsample/attr discipline
+        added in U14 around it, not the wavelet math itself."""
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+        import percell4.domain.flim.wavelet_filter as wf
+
+        # Replace denoise_phasor with a passthrough.
+        def fake_denoise(g, s, intensity, filter_level=1, omega=None):
+            return {"G": g.copy(), "S": s.copy(), "T": np.zeros_like(g)}
+
+        monkeypatch.setattr(wf, "denoise_phasor", fake_denoise)
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {
+            "native_shape": (12, 12),
+            "flim_frequency_mhz": 80.0,
+        }
+        # G, S, decay all live at the binned 4x4 shape.
+        repo.written_arrays["phasor/ch0/g"] = np.full((4, 4), 0.5, dtype=np.float32)
+        repo.written_arrays["phasor/ch0/s"] = np.full((4, 4), 0.3, dtype=np.float32)
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ApplyWavelet(repo, session)
+        uc.execute(channel="ch0", filter_level=2, view_bin=3)
+
+        # Outputs at native.
+        assert repo.written_arrays["phasor/ch0/g_filtered"].shape == (12, 12)
+        assert repo.written_arrays["phasor/ch0/s_filtered"].shape == (12, 12)
+        # Attrs stamped.
+        assert repo.array_attrs["phasor/ch0/g_filtered"]["created_at_bin"] == 3
+        assert repo.array_attrs["phasor/ch0/s_filtered"]["created_at_bin"] == 3
+
+    def test_compute_lifetime_view_bin_3_stamps_attr_and_upsamples(self):
+        """ComputeLifetime upsamples lifetime to native + stamps attr."""
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {
+            "native_shape": (12, 12),
+            "flim_frequency_mhz": 80.0,
+        }
+        # Filtered g/s at binned shape; no filtered path -> falls back.
+        repo.written_arrays["phasor/ch0/g"] = np.full((4, 4), 0.5, dtype=np.float32)
+        repo.written_arrays["phasor/ch0/s"] = np.full((4, 4), 0.3, dtype=np.float32)
+
+        uc = ComputeLifetime(repo, session)
+        uc.execute(channel="ch0", view_bin=3)
+
+        assert repo.written_arrays["phasor/ch0/lifetime"].shape == (12, 12)
+        assert repo.array_attrs["phasor/ch0/lifetime"]["created_at_bin"] == 3
+
+    def test_compute_phasor_view_bin_gt_one_no_native_shape_raises(self):
+        """Missing native_shape with view_bin > 1 is an error."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        # No native_shape on disk metadata.
+        repo.disk_metadata = {}
+        repo.written_arrays["decay/ch0"] = self._make_decay_at_binned_shape(4, 4)
+
+        uc = ComputePhasor(repo, session)
+        with pytest.raises(ValueError, match="native_shape"):
+            uc.execute(channel="ch0", harmonic=1, view_bin=3)

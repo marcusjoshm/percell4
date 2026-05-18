@@ -566,47 +566,6 @@ def test_flim_group_checked_propagates_dtype_to_run(qtbot, tmp_path: Path) -> No
     assert captured["flim_config"].bin_header_bytes == 20
 
 
-def test_spatial_bin_spinner_propagates_to_run(qtbot, tmp_path: Path) -> None:
-    """The Spatial bin factor spinner value reaches the orchestrator on Run.
-
-    Default is k=1 (no binning); the test bumps it to k=3 to mirror the
-    canonical "downsampled-TIFF, full-res TCSPC" use case."""
-    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
-    root = tmp_path / "scan"
-    (root / "G").mkdir(parents=True)
-
-    captured: dict[str, Any] = {}
-
-    def fake_orchestrator(items, **kwargs):
-        captured["spatial_bin"] = kwargs.get("spatial_bin")
-        return BatchAppendReport(items=())
-
-    dlg = BatchTCSPCDialog(
-        validator=lambda *a, **kw: _passing_report(),
-        orchestrator=fake_orchestrator,
-    )
-    qtbot.addWidget(dlg)
-    dlg._add_dataset_row(h5, checked=True)
-    dlg._calibration = _bcal({"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}})
-    dlg._source_root = root
-    dlg._refresh_groups()
-    dlg._refresh_pairing_table()
-    dlg._pairings[h5] = root / "G"
-
-    # Default — k=1 reaches the orchestrator.
-    dlg._on_validate()
-    dlg._on_run()
-    assert captured["spatial_bin"] == 1
-
-    # Bump the spinner; re-validate; re-run; new value reaches the orchestrator.
-    form = dlg._stitching_form
-    form.spatial_bin_spin.setValue(3)
-    # Spinner edit invalidates Run gate — re-validate before re-running.
-    dlg._on_validate()
-    dlg._on_run()
-    assert captured["spatial_bin"] == 3
-
-
 def test_unchecking_dataset_refreshes_pairing_table_immediately(
     qtbot, tmp_path: Path
 ) -> None:

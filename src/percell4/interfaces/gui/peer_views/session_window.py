@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QSpinBox,
     QWidget,
 )
 
@@ -60,6 +61,9 @@ class SessionWindow(QMainWindow):
             self._session.subscribe(
                 Event.ACTIVE_SEGMENTATION_CHANGED,
                 self._on_active_segmentation_changed,
+            ),
+            self._session.subscribe(
+                Event.ACTIVE_BIN_CHANGED, self._on_active_bin_changed
             ),
             self._session.subscribe(
                 Event.CHANNEL_LIST_CHANGED, self._refresh_channel_combo
@@ -112,6 +116,24 @@ class SessionWindow(QMainWindow):
         self._seg_combo.currentTextChanged.connect(self._on_seg_combo_changed)
         row.addWidget(self._seg_combo)
 
+        # View-bin selector. The canonical (and only) Selector for
+        # session.active_bin. DataPanel mirrors the value display but
+        # never writes it (consolidate-canonical-state).
+        row.addSpacing(6)
+        row.addWidget(QLabel("View bin (k):"))
+        self._bin_spin = QSpinBox()
+        self._bin_spin.setRange(1, 16)
+        self._bin_spin.setValue(1)
+        self._bin_spin.setMinimumWidth(60)
+        self._bin_spin.setToolTip(
+            "Session-level view bin: every store read downsamples by "
+            "k×k at this setting (sum for intensity/decay, mean for "
+            "phasor, majority-vote for masks, mode for labels). "
+            "Native (k=1) storage is unchanged. Resets to 1 on dataset switch."
+        )
+        self._bin_spin.valueChanged.connect(self._on_bin_spin_changed)
+        row.addWidget(self._bin_spin)
+
         row.addStretch()
 
         # Always-on-top toggle (right). Controls Z-order — when checked,
@@ -132,6 +154,7 @@ class SessionWindow(QMainWindow):
         self._refresh_channel_combo()
         self._refresh_mask_combo()
         self._refresh_seg_combo()
+        self._refresh_bin_spin()
 
     def _refresh_dataset_header(self) -> None:
         ds = self._session.dataset
@@ -191,6 +214,15 @@ class SessionWindow(QMainWindow):
             self._seg_combo, self._seg_names(), self._session.active_segmentation
         )
 
+    def _refresh_bin_spin(self) -> None:
+        """Sync the SpinBox to ``session.active_bin`` without firing the
+        valueChanged echo (which would re-write Session)."""
+        self._loading = True
+        try:
+            self._bin_spin.setValue(self._session.active_bin)
+        finally:
+            self._loading = False
+
     # ── Session event handlers ──────────────────────────────────────
 
     def _on_dataset_changed(self) -> None:
@@ -229,6 +261,12 @@ class SessionWindow(QMainWindow):
             finally:
                 self._loading = False
 
+    def _on_active_bin_changed(self) -> None:
+        if self._loading:
+            return
+        if self._bin_spin.value() != self._session.active_bin:
+            self._refresh_bin_spin()
+
     # ── Combo change → Session write ────────────────────────────────
 
     def _on_channel_combo_changed(self, text: str) -> None:
@@ -246,6 +284,11 @@ class SessionWindow(QMainWindow):
         if self._loading:
             return
         self.data_model.set_active_segmentation(text or None)
+
+    def _on_bin_spin_changed(self, value: int) -> None:
+        if self._loading:
+            return
+        self._session.set_active_bin(int(value))
 
     # ── Pin-on-top ──────────────────────────────────────────────────
 

@@ -328,6 +328,9 @@ class PhasorPlotWindow(QMainWindow):
             self._session.subscribe(
                 Event.ACTIVE_CHANNEL_CHANGED, self._on_active_channel_changed,
             ),
+            self._session.subscribe(
+                Event.ACTIVE_BIN_CHANGED, self._on_active_bin_changed,
+            ),
         ]
         # Sync checkbox state for whatever mask is already active when the
         # window is created (e.g., re-opening the phasor plot after a
@@ -2061,6 +2064,58 @@ class PhasorPlotWindow(QMainWindow):
             return
         self._try_auto_load_cached()
 
+    def _on_active_bin_changed(self) -> None:
+        """Invalidate every ndarray cache + derived computation when the
+        session view bin toggles.
+
+        Every cached array on this window is bin-relative -- it was
+        materialized against a specific decay sampling. After a bin
+        toggle, those arrays are stale (wrong shape / wrong content)
+        and any future visible-mask compute would mix shapes.
+
+        Enumerated caches (cross-referenced against the 5-vector
+        in-session-staleness compound learning so future cache additions
+        update this function):
+
+          * _g_map, _g_map_unfiltered, _s_map, _s_map_unfiltered
+          * _intensity (decay.sum(-1) derived)
+          * _labels, _labels_flat
+          * _active_mask_array, _active_mask_flat
+          * _cleared_mask
+          * per-ROI cached_mask (shape-dependent)
+
+        After invalidation, if the window is visible, re-trigger the
+        same auto-load flow that fires on dataset/channel change so the
+        user sees the binned-view histogram immediately.
+        """
+        self._invalidate_for_bin_change()
+        if self.isVisible():
+            self._try_auto_load_cached()
+
+    def _invalidate_for_bin_change(self) -> None:
+        """Single chokepoint for bin-change cache invalidation.
+
+        Listed as one function so any future cache addition only needs
+        to update this method (and so the U14 audit has a single anchor
+        for verification).
+        """
+        self._g_map = None
+        self._s_map = None
+        self._g_map_unfiltered = None
+        self._s_map_unfiltered = None
+        self._intensity = None
+        self._labels = None
+        self._labels_flat = None
+        self._active_mask_array = None
+        self._active_mask_flat = None
+        self._cleared_mask = None
+        # Per-ROI cached_mask: each ROI widget owns one. Iterate and clear.
+        for w in getattr(self, "_roi_widgets", []):
+            try:
+                w.cached_mask = None
+            except AttributeError:
+                pass
+
     def _try_auto_load_cached(self) -> None:
         """Read /phasor/<active_channel> via LoadCachedPhasor; populate window if cached.
 
@@ -2084,8 +2139,11 @@ class PhasorPlotWindow(QMainWindow):
             return
 
         try:
+            # Session view bin propagates through the cache load so the
+            # hydrated g/s arrive at the binned shape the phasor plot
+            # should display after a bin toggle (U14 caller-wiring fix).
             cached = LoadCachedPhasor(self._get_repo(), self._session).execute(
-                active_channel,
+                active_channel, view_bin=self._session.active_bin,
             )
         except (NoCachedPhasorError, NoDatasetError):
             # Clear prior channel's display so the user sees the new

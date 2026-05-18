@@ -41,7 +41,13 @@ class ComputeLifetime:
                 pass
         return dict(handle.metadata)
 
-    def execute(self, channel: str) -> LifetimeResult:
+    def execute(self, channel: str, view_bin: int = 1) -> LifetimeResult:
+        """Compute lifetime from phasor g/s for ``channel``.
+
+        ``view_bin`` is the session-level view bin (>= 1). G and S are
+        read at the binned resolution via the store dispatch (mean_bin
+        for intensive phasor quantities).
+        """
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
@@ -55,13 +61,21 @@ class ComputeLifetime:
 
         # Try filtered phasor first, fall back to unfiltered
         try:
-            g = self._repo.read_array(handle, f"phasor/{channel}/g_filtered")
-            s = self._repo.read_array(handle, f"phasor/{channel}/s_filtered")
+            g = self._repo.read_array(
+                handle, f"phasor/{channel}/g_filtered", view_bin=view_bin
+            )
+            s = self._repo.read_array(
+                handle, f"phasor/{channel}/s_filtered", view_bin=view_bin
+            )
             source = "filtered"
         except KeyError:
             try:
-                g = self._repo.read_array(handle, f"phasor/{channel}/g")
-                s = self._repo.read_array(handle, f"phasor/{channel}/s")
+                g = self._repo.read_array(
+                    handle, f"phasor/{channel}/g", view_bin=view_bin
+                )
+                s = self._repo.read_array(
+                    handle, f"phasor/{channel}/s", view_bin=view_bin
+                )
                 source = "unfiltered"
             except KeyError:
                 raise ValueError(
@@ -70,9 +84,28 @@ class ComputeLifetime:
 
         lifetime = phasor_to_lifetime(g, s, frequency_mhz=freq)
 
+        # Bin-aware write: lifetime stays at native_shape so the canonical
+        # /phasor/<ch>/lifetime path doesn't shrink at higher view bins.
+        write_attrs: dict = {
+            "dims": ["H", "W"], "channel": channel, "source": source,
+        }
+        if view_bin > 1:
+            from percell4.domain.io.view_bin import nn_upsample_2d
+            native = meta.get("native_shape")
+            if native is None:
+                raise ValueError(
+                    "Cannot write a binned lifetime: "
+                    "/metadata.native_shape is missing."
+                )
+            target = (int(native[0]), int(native[1]))
+            lifetime = nn_upsample_2d(
+                lifetime, view_bin, target_hw=target
+            ).astype(lifetime.dtype, copy=False)
+            write_attrs["created_at_bin"] = int(view_bin)
+
         self._repo.write_array(
             handle, f"phasor/{channel}/lifetime", lifetime,
-            attrs={"dims": ["H", "W"], "channel": channel, "source": source},
+            attrs=write_attrs,
         )
 
         valid = np.isfinite(lifetime)

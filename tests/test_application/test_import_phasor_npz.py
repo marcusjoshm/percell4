@@ -33,7 +33,7 @@ class FakeRepo:
     def write_array(self, handle, path, data, attrs=None):
         self.arrays[path] = data
 
-    def read_array(self, handle, path):
+    def read_array(self, handle, path, view_bin=1):
         if path not in self.arrays:
             raise KeyError(f"Array not found: {path}")
         return self.arrays[path]

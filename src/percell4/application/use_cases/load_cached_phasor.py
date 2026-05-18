@@ -65,19 +65,35 @@ class LoadCachedPhasor:
         self._repo = repo
         self._session = session
 
-    def execute(self, channel: str) -> CachedPhasorResult:
+    def execute(self, channel: str, view_bin: int = 1) -> CachedPhasorResult:
+        """Load cached phasor at the session view bin.
+
+        ``view_bin`` is the session-level view bin (>= 1). All reads
+        forward it to the store's per-path dispatch:
+
+          * ``phasor/<ch>/{g,s,g_filtered,s_filtered}`` -> mean_bin_2d
+            (intensive quantities; magnitudes preserved at any k)
+          * ``decay/<ch>`` -> sum_bin_decay (T axis preserved)
+
+        So the returned (g, s) and intensity-from-decay are all at the
+        binned shape that the phasor plot expects to display.
+        """
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
         # Required: raw g, s. KeyError on either is a missing-cache signal.
         try:
-            g_map = self._repo.read_array(handle, f"phasor/{channel}/g")
+            g_map = self._repo.read_array(
+                handle, f"phasor/{channel}/g", view_bin=view_bin
+            )
         except KeyError as exc:
             raise NoCachedPhasorError(channel) from exc
 
         try:
-            s_map = self._repo.read_array(handle, f"phasor/{channel}/s")
+            s_map = self._repo.read_array(
+                handle, f"phasor/{channel}/s", view_bin=view_bin
+            )
         except KeyError as exc:
             # Asymmetric cache: g present, s missing. Should not happen
             # under normal compute_phasor write order but defend against
@@ -94,10 +110,10 @@ class LoadCachedPhasor:
         s_filtered: NDArray[np.float32] | None = None
         try:
             g_filtered = self._repo.read_array(
-                handle, f"phasor/{channel}/g_filtered",
+                handle, f"phasor/{channel}/g_filtered", view_bin=view_bin,
             )
             s_filtered = self._repo.read_array(
-                handle, f"phasor/{channel}/s_filtered",
+                handle, f"phasor/{channel}/s_filtered", view_bin=view_bin,
             )
         except KeyError:
             # Asymmetric filtered cache: g_filtered present without
@@ -117,7 +133,9 @@ class LoadCachedPhasor:
         # acceptable — the phasor window's set_phasor_data accepts None.
         intensity: NDArray[np.float32] | None = None
         try:
-            decay = self._repo.read_array(handle, f"decay/{channel}")
+            decay = self._repo.read_array(
+                handle, f"decay/{channel}", view_bin=view_bin
+            )
             intensity = decay.sum(axis=-1).astype(np.float32)
         except KeyError:
             pass

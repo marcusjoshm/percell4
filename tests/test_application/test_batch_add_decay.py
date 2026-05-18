@@ -361,49 +361,6 @@ def test_scan_error_from_use_case_propagates_as_failed(
     assert "no .bin files" in (report.items[0].error or "")
 
 
-def test_spatial_bin_kwarg_threads_through_to_use_case(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The batch orchestrator forwards ``spatial_bin`` verbatim into every
-    per-item ``add_decay_to_dataset`` call."""
-    h5_1 = _make_h5(tmp_path / "1.h5", ["ch1"])
-    h5_2 = _make_h5(tmp_path / "2.h5", ["ch1"])
-
-    captured: list[int] = []
-
-    def fake_add(**kwargs: Any) -> AppendReport:
-        captured.append(kwargs["spatial_bin"])
-        return _ok_report(("ch1",))
-
-    monkeypatch.setattr(bad, "add_decay_to_dataset", fake_add)
-
-    items = [
-        BatchAppendItem(p, tmp_path / "src", {"ch1": _cal(80.0, 0.1, 0.9)})
-        for p in (h5_1, h5_2)
-    ]
-    batch_add_decay(items, **_empty_args(), spatial_bin=3)
-    assert captured == [3, 3]
-
-
-def test_spatial_bin_default_is_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Omitting ``spatial_bin`` forwards the no-bin default (1) to the use case."""
-    h5 = _make_h5(tmp_path / "x.h5", ["ch1"])
-
-    captured: list[int] = []
-
-    def fake_add(**kwargs: Any) -> AppendReport:
-        captured.append(kwargs["spatial_bin"])
-        return _ok_report(("ch1",))
-
-    monkeypatch.setattr(bad, "add_decay_to_dataset", fake_add)
-
-    item = BatchAppendItem(h5, tmp_path / "src", {"ch1": _cal(80.0, 0.1, 0.9)})
-    batch_add_decay([item], **_empty_args())
-    assert captured == [1]
-
-
 def test_progress_callback_fires_after_every_item(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -403,16 +403,23 @@ class SegmentationPanel(QWidget):
                 existing_seg = set(store.list_labels()) - set(store.list_masks())
             except Exception:  # noqa: BLE001 — best-effort; collision check is advisory
                 existing_seg = set()
+        # Capture the session view bin at the moment the worker is queued
+        # (BEFORE the user can toggle the SpinBox mid-flight). The captured
+        # value travels with the worker results so finalize() upsamples and
+        # names against the correct bin, even if the user has since toggled.
+        active_bin = self.data_model.session.active_bin
         chosen_name = prompt_for_resource_name(
             self,
             title="Save Segmentation",
             label="Segmentation name:",
             default="cellpose",
             existing_names=existing_seg,
+            bin=active_bin,
         )
         if chosen_name is None:
             return
         self._cellpose_pending_name = chosen_name
+        self._cellpose_pending_bin = active_bin
 
         image = active_layer.data
         model_type = self._cp_model.currentText()
@@ -441,7 +448,10 @@ class SegmentationPanel(QWidget):
         from percell4.application.use_cases.segment_cells import SegmentCells
         from percell4.adapters.hdf5_store import Hdf5DatasetRepository
 
-        # Delegate post-processing + store write to the use case
+        # Delegate post-processing + store write to the use case. The
+        # captured bin (set at queue time) is what the finalize call uses
+        # for upsampling -- a mid-flight session.set_active_bin must NOT
+        # alter the resolution of an in-flight worker's result.
         try:
             repo = Hdf5DatasetRepository()
             uc = SegmentCells(repo, self.data_model.session)
@@ -449,13 +459,15 @@ class SegmentationPanel(QWidget):
                 masks,
                 remove_edge_cells=self._cp_remove_edges.isChecked(),
                 name=getattr(self, "_cellpose_pending_name", None),
+                view_bin=getattr(self, "_cellpose_pending_bin", 1),
             )
         except ValueError as e:
             self._show_status(f"Error: {e}")
             return
         finally:
-            # Always clear the stash so a subsequent Run gets a fresh prompt.
+            # Always clear both stashes so a subsequent Run gets a fresh prompt.
             self._cellpose_pending_name = None
+            self._cellpose_pending_bin = 1
 
         self._show_status(
             f"Done: {result.n_cells} cells "

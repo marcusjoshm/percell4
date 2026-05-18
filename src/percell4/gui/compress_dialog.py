@@ -258,6 +258,31 @@ class CompressDialog(QDialog):
         self._stitch_widget.setVisible(False)
         settings_layout.addWidget(self._stitch_widget)
 
+        # Creation spatial bin -- locks the dataset's native_shape at
+        # compress time. Cannot change after.
+        bin_row = QHBoxLayout()
+        bin_row.addWidget(QLabel("Creation spatial bin (k):"))
+        self._creation_bin_spin = QSpinBox()
+        self._creation_bin_spin.setRange(1, 16)
+        self._creation_bin_spin.setValue(1)
+        self._creation_bin_spin.setToolTip(
+            "Sum-bin every source channel and .bin tile k×k at import. "
+            "Defines /metadata.native_shape for the new dataset. The view-bin "
+            "spinner on SessionWindow can downsample further at read time, "
+            "but creation_bin cannot be changed after compress. Default 1 = "
+            "no binning."
+        )
+        # Wire valueChanged at construction even though no listener cares
+        # right now -- ensures any later test that drives the user-edit
+        # signal path doesn't bypass the controller (per
+        # docs/solutions/conventions/qt-wire-user-edit-signals-2026-05-12.md).
+        self._creation_bin_spin.valueChanged.connect(
+            self._on_creation_bin_changed
+        )
+        bin_row.addWidget(self._creation_bin_spin)
+        bin_row.addStretch()
+        settings_layout.addLayout(bin_row)
+
         layout.addWidget(settings_group)
 
         # ── FLIM .bin Parameters (auto-shown when .bin files detected) ──
@@ -472,6 +497,7 @@ class CompressDialog(QDialog):
             layer_assignments=layer_assignments,
             dataset_name_overrides=dataset_name_overrides,
             flim_params=flim_params,
+            creation_bin=int(self._creation_bin_spin.value()),
         )
 
     # ------------------------------------------------------------------
@@ -514,6 +540,15 @@ class CompressDialog(QDialog):
                 item.setFlags(flags | Qt.ItemIsEditable)
             else:
                 item.setFlags(flags & ~Qt.ItemIsEditable)
+
+    def _on_creation_bin_changed(self, _value: int) -> None:
+        """Placeholder slot for the creation-bin spinner.
+
+        The value is read in ``compress_config`` at Compress time, so no
+        cross-widget side effect is needed here today. The slot exists so
+        the user-edit signal is wired at construction (per the
+        qt-wire-user-edit-signals convention).
+        """
 
     def _on_stitch_toggled(self, checked: bool) -> None:
         self._stitch_widget.setVisible(checked)

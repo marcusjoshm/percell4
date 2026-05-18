@@ -186,9 +186,10 @@ def test_run_cellpose_helper_called_with_existing_segmentation_set(
 
     captured: dict[str, Any] = {}
 
-    def fake_prompt(parent, *, title, label, default, existing_names):  # noqa: ARG001
+    def fake_prompt(parent, *, title, label, default, existing_names, bin=1):  # noqa: ARG001
         captured["existing"] = set(existing_names)
         captured["default"] = default
+        captured["bin"] = bin
         return None  # cancel out — we only care about the args
 
     monkeypatch.setattr(sp_module, "prompt_for_resource_name", fake_prompt)

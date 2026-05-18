@@ -25,6 +25,7 @@ class Event(Enum):
     ACTIVE_SEGMENTATION_CHANGED = auto()
     ACTIVE_MASK_CHANGED = auto()
     ACTIVE_CHANNEL_CHANGED = auto()
+    ACTIVE_BIN_CHANGED = auto()
     MEASUREMENTS_UPDATED = auto()
     CHANNEL_LIST_CHANGED = auto()
     SEGMENTATION_LIST_CHANGED = auto()
@@ -50,6 +51,7 @@ class Session:
     _active_segmentation: LayerName | None = field(default=None, repr=False)
     _active_mask: LayerName | None = field(default=None, repr=False)
     _active_channel: ChannelName | None = field(default=None, repr=False)
+    _active_bin: int = field(default=1, repr=False)
     _selection: frozenset[CellId] = field(default_factory=frozenset, repr=False)
     _filter_ids: frozenset[CellId] | None = field(default=None, repr=False)
     _measurements: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
@@ -102,6 +104,20 @@ class Session:
         return self._active_channel
 
     @property
+    def active_bin(self) -> int:
+        """Session-level view bin (k >= 1).
+
+        Acts as a read-time lens on the dataset: at ``active_bin > 1``,
+        every store read downsamples by the per-kind rule (see
+        ``DatasetStore.read_array``). On-disk arrays are unchanged --
+        this is purely an observation setting that callers thread into
+        their reads.
+
+        Default is 1. ``set_dataset`` and ``clear`` reset it to 1.
+        """
+        return self._active_bin
+
+    @property
     def df(self) -> pd.DataFrame:
         """Current per-cell measurements. Read-only — do not modify."""
         return self._measurements
@@ -141,12 +157,14 @@ class Session:
         prev_mask = self._active_mask
         prev_filter = self._filter_ids
         prev_selection = self._selection
+        prev_bin = self._active_bin
 
         self._dataset = handle
         self._selection = frozenset()
         self._filter_ids = None
         self._measurements = pd.DataFrame()
         self._filtered_df_cache = None
+        self._active_bin = 1
         if handle is not None:
             ch_names = list(handle.metadata.get("channel_names", []))
             seg_names = list(handle.metadata.get("segmentation_names", []))
@@ -173,6 +191,8 @@ class Session:
             self._emit(Event.FILTER_CHANGED)
         if prev_selection:
             self._emit(Event.SELECTION_CHANGED)
+        if prev_bin != 1:
+            self._emit(Event.ACTIVE_BIN_CHANGED)
 
     def set_selection(self, ids: frozenset[CellId]) -> None:
         if ids == self._selection:
@@ -217,6 +237,23 @@ class Session:
         self._active_channel = name
         self._emit(Event.ACTIVE_CHANNEL_CHANGED)
 
+    def set_active_bin(self, k: int) -> None:
+        """Set the session view bin (1 <= k <= 16).
+
+        Idempotent: no-op when the value is unchanged. Raises
+        ``ValueError`` outside the [1, 16] range -- the upper bound
+        mirrors the spinner range in SessionWindow and the importer
+        path.
+        """
+        if not isinstance(k, int) or isinstance(k, bool):
+            raise ValueError(f"active_bin must be an int in [1, 16], got {k!r}")
+        if k < 1 or k > 16:
+            raise ValueError(f"active_bin must be in [1, 16], got {k}")
+        if k == self._active_bin:
+            return
+        self._active_bin = k
+        self._emit(Event.ACTIVE_BIN_CHANGED)
+
     def refresh_resource_lists(
         self,
         *,
@@ -249,10 +286,12 @@ class Session:
 
     def clear(self) -> None:
         """Reset all state. Called when closing a dataset."""
+        prev_bin = self._active_bin
         self._dataset = None
         self._active_segmentation = None
         self._active_mask = None
         self._active_channel = None
+        self._active_bin = 1
         self._selection = frozenset()
         self._filter_ids = None
         self._measurements = pd.DataFrame()
@@ -261,3 +300,5 @@ class Session:
         self._emit(Event.CHANNEL_LIST_CHANGED)
         self._emit(Event.SEGMENTATION_LIST_CHANGED)
         self._emit(Event.MASK_LIST_CHANGED)
+        if prev_bin != 1:
+            self._emit(Event.ACTIVE_BIN_CHANGED)

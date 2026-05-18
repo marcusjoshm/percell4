@@ -109,6 +109,7 @@ class RunPhasorGMM:
         use_filtered_gs: bool = True,
         harmonic: int = 1,
         n_max: int = 4,
+        view_bin: int = 1,
     ) -> RunPhasorGMMResult:
         # Lazy imports — keep this module's import-time cost low and avoid
         # pulling sklearn during application/ load (mirrors the pattern at
@@ -134,8 +135,12 @@ class RunPhasorGMM:
         # two error messages so the user knows which step is missing.
         if use_filtered_gs:
             try:
-                g = self._repo.read_array(handle, f"phasor/{channel}/g_filtered")
-                s = self._repo.read_array(handle, f"phasor/{channel}/s_filtered")
+                g = self._repo.read_array(
+                    handle, f"phasor/{channel}/g_filtered", view_bin=view_bin
+                )
+                s = self._repo.read_array(
+                    handle, f"phasor/{channel}/s_filtered", view_bin=view_bin
+                )
             except KeyError:
                 raise ValueError(
                     f"Wavelet-filtered phasor not found for channel '{channel}'. "
@@ -143,8 +148,12 @@ class RunPhasorGMM:
                 )
         else:
             try:
-                g = self._repo.read_array(handle, f"phasor/{channel}/g")
-                s = self._repo.read_array(handle, f"phasor/{channel}/s")
+                g = self._repo.read_array(
+                    handle, f"phasor/{channel}/g", view_bin=view_bin
+                )
+                s = self._repo.read_array(
+                    handle, f"phasor/{channel}/s", view_bin=view_bin
+                )
             except KeyError:
                 raise ValueError(
                     f"Phasor data not found for channel '{channel}'. Compute Phasor first."
@@ -157,7 +166,9 @@ class RunPhasorGMM:
         # sum prevents precision loss for high-photon-count pixels (sums
         # > 2^24 ≈ 1.7e7 lose precision in float32).
         try:
-            decay = self._repo.read_array(handle, f"decay/{channel}")
+            decay = self._repo.read_array(
+                handle, f"decay/{channel}", view_bin=view_bin
+            )
         except KeyError:
             raise ValueError(
                 f"No /decay/{channel} layer — cannot derive intensity weights."
@@ -168,7 +179,9 @@ class RunPhasorGMM:
         mask_array: NDArray[np.uint8] | None = None
         if mask_filter_active and self._session.active_mask is not None:
             try:
-                mask_array = self._repo.read_mask(handle, self._session.active_mask)
+                mask_array = self._repo.read_mask(
+                    handle, self._session.active_mask, view_bin=view_bin
+                )
             except (KeyError, ValueError, OSError):
                 mask_array = None  # silent bypass — pure helper handles None
 

@@ -751,6 +751,7 @@ class LauncherWindow(QMainWindow):
                     selected_channels=config.selected_channels or None,
                     layer_assignments=config.layer_assignments,
                     files=ds.files,
+                    creation_bin=config.creation_bin,
                 )
                 completed.append(display_name)
             except Exception as e:
@@ -850,10 +851,15 @@ class LauncherWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
 
-    def _populate_viewer_from_store(self) -> None:
+    def _populate_viewer_from_store(self, view_bin: int | None = None) -> None:
         """Populate the napari viewer from the current dataset store.
 
-        Called when loading a dataset and when re-opening the viewer.
+        Called when loading a dataset, re-opening the viewer, and on every
+        ``change.bin`` toggle through ``_on_state_changed``.
+
+        ``view_bin`` defaults to ``session.active_bin`` so the viewer
+        always reflects the current session lens. Pass an explicit value
+        to override (e.g., debugging at native while session is at k>1).
         """
         store = getattr(self, "_current_store", None)
         h5_path = getattr(self, "_current_h5_path", None)
@@ -864,13 +870,16 @@ class LauncherWindow(QMainWindow):
         if viewer_win is None:
             return
 
+        if view_bin is None:
+            view_bin = self.data_model.session.active_bin
+
         # Clear viewer layers
         viewer_win.clear()
 
         # Read and display intensity data
         try:
             with store.open_read() as s:
-                intensity = s.read_array("intensity")
+                intensity = s.read_array("intensity", view_bin=view_bin)
                 meta = s.metadata
                 channel_names = meta.get("channel_names", [])
 
@@ -892,12 +901,12 @@ class LauncherWindow(QMainWindow):
                 mask_names = set(s.list_masks())
                 for label_name in s.list_labels():
                     if label_name not in mask_names:
-                        labels = s.read_labels(label_name)
+                        labels = s.read_labels(label_name, view_bin=view_bin)
                         viewer_win.add_labels(labels, name=label_name)
 
                 # Load existing masks
                 for mask_name in s.list_masks():
-                    mask = s.read_mask(mask_name)
+                    mask = s.read_mask(mask_name, view_bin=view_bin)
                     viewer_win.add_mask(mask, name=mask_name)
 
         except KeyError:
@@ -1001,10 +1010,56 @@ class LauncherWindow(QMainWindow):
     # ── Model state change handler ─────────────────────────────
 
     def _on_state_changed(self, change) -> None:
-        """Handle model state changes relevant to the launcher."""
-        # Filter changes handled by AnalysisPanel
-        # Segmentation/mask changes handled by DataPanel
-        pass  # Launcher no longer needs to handle state changes directly
+        """Handle model state changes relevant to the launcher.
+
+        Most changes route to the per-panel handlers (AnalysisPanel,
+        DataPanel, ViewerWindow). Bin toggles are a launcher concern
+        because they require a wholesale viewer rebuild against the
+        store -- the launcher owns the store handle and the populate
+        routine.
+        """
+        if change.bin:
+            self._rebuild_viewer_for_bin_change()
+
+    def _rebuild_viewer_for_bin_change(self) -> None:
+        """Tear down and re-populate every layer at the new view bin.
+
+        Wrapped in viewer's ``_is_originator`` so napari's layer-list
+        callbacks cannot write back into Session during the rebuild.
+        After the layers land we restore the active mask/segmentation
+        via the viewer's strict matcher (the same path
+        ``_push_active_layer_to_napari`` takes). The selection restore
+        sets ``viewer.layers.selection.active`` directly rather than
+        calling ``session.set_active_*`` -- that avoids the N+1
+        ``state_changed`` cascade that would otherwise re-fire on every
+        toggle (each set_active_* would fire ACTIVE_*_CHANGED ->
+        StateChange -> back into this handler).
+        """
+        viewer_win = self._windows.get("viewer")
+        if viewer_win is None or not viewer_win._is_alive():
+            return
+
+        session = self.data_model.session
+        view_bin = session.active_bin
+
+        viewer_win._is_originator = True
+        try:
+            self._populate_viewer_from_store(view_bin=view_bin)
+            # Restore active selections via napari layer selection (NOT
+            # via session.set_active_*). Session's active_* fields are
+            # already correct; we just need napari to reflect them.
+            if session.active_segmentation:
+                from percell4.gui.viewer import LAYER_TYPE_SEGMENTATION
+                viewer_win._push_active_layer_to_napari(
+                    session.active_segmentation, LAYER_TYPE_SEGMENTATION
+                )
+            if session.active_mask:
+                from percell4.gui.viewer import LAYER_TYPE_MASK
+                viewer_win._push_active_layer_to_napari(
+                    session.active_mask, LAYER_TYPE_MASK
+                )
+        finally:
+            viewer_win._is_originator = False
 
     # ── Phasor plot signal handlers ─────────────────────────────
 

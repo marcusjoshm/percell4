@@ -372,11 +372,15 @@ def test_pin_on_top_state_persists_across_construction(qtbot, isolated_settings)
 
 
 def test_geometry_round_trip_via_close_and_reopen(qtbot, isolated_settings):
-    """Closing the window saves geometry; reopening restores it."""
+    """Closing the window saves geometry; reopening restores it.
+
+    Width chosen to comfortably exceed the natural minimum of the row of
+    Selectors so Qt does not clamp.
+    """
     model = CellDataModel()
     win1 = SessionWindow(data_model=model)
     qtbot.addWidget(win1)
-    win1.setGeometry(150, 50, 900, 90)
+    win1.setGeometry(150, 50, 1100, 90)
     # Allow geometry to apply
     win1.show()
     qtbot.waitExposed(win1)
@@ -391,7 +395,7 @@ def test_geometry_round_trip_via_close_and_reopen(qtbot, isolated_settings):
 
     g = win2.geometry()
     # restoreGeometry may adjust by 1-2 px on some platforms; use loose equality
-    assert abs(g.width() - 900) <= 5
+    assert abs(g.width() - 1100) <= 5
     assert abs(g.height() - 90) <= 5
 
 
@@ -405,3 +409,93 @@ def test_module_does_not_import_viewer_layers(qtbot):
     source = inspect.getsource(SessionWindow)
     assert "viewer.layers" not in source
     assert "napari" not in source.lower()
+
+
+# ── View-bin SpinBox (U9) ───────────────────────────────────────────
+
+
+def test_bin_spin_defaults_to_one_on_construct(qtbot, tmp_path):
+    """SpinBox displays 1 (session.active_bin default) at startup."""
+    model = _make_model(channel_names=["A"], tmp_path=tmp_path)
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+    assert win._bin_spin.value() == 1
+
+
+def test_bin_spin_range_is_one_to_sixteen(qtbot, tmp_path):
+    model = _make_model(channel_names=["A"], tmp_path=tmp_path)
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+    assert win._bin_spin.minimum() == 1
+    assert win._bin_spin.maximum() == 16
+
+
+def test_bin_spin_value_writes_to_session(qtbot, tmp_path):
+    """User changes spinner → session.active_bin updates, event fires once."""
+    model = _make_model(channel_names=["A"], tmp_path=tmp_path)
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+
+    events: list[int] = []
+    model.session.subscribe(Event.ACTIVE_BIN_CHANGED, lambda: events.append(1))
+
+    win._bin_spin.setValue(3)
+    assert model.session.active_bin == 3
+    assert events == [1]
+
+
+def test_session_set_active_bin_pushes_into_spinner(qtbot, tmp_path):
+    """External mutation (Session.set_active_bin) syncs the SpinBox display."""
+    model = _make_model(channel_names=["A"], tmp_path=tmp_path)
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+
+    model.session.set_active_bin(5)
+    assert win._bin_spin.value() == 5
+
+
+def test_session_set_active_bin_does_not_echo_back(qtbot, tmp_path):
+    """The session-driven push uses the loading guard so Session writes
+    do not bounce back through valueChanged into another set_active_bin."""
+    model = _make_model(channel_names=["A"], tmp_path=tmp_path)
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+
+    events: list[int] = []
+    model.session.subscribe(Event.ACTIVE_BIN_CHANGED, lambda: events.append(1))
+
+    model.session.set_active_bin(7)
+    # Exactly ONE event -- the one fired by set_active_bin itself.
+    # An echo through the SpinBox's valueChanged would fire a second.
+    assert events == [1]
+
+
+def test_dataset_switch_resets_bin_spin_to_one(qtbot, tmp_path):
+    """Dataset switch resets session.active_bin to 1; SpinBox follows."""
+    model = _make_model(channel_names=["A"], tmp_path=tmp_path)
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+
+    model.session.set_active_bin(3)
+    assert win._bin_spin.value() == 3
+
+    new_handle = DatasetHandle(
+        path=tmp_path / "new.h5",
+        metadata={"channel_names": ["B"]},
+    )
+    model.session.set_dataset(new_handle)
+    assert model.session.active_bin == 1
+    assert win._bin_spin.value() == 1
+
+
+def test_bin_spin_idempotent_set_no_event_storm(qtbot, tmp_path):
+    """Calling setValue with the current value fires no Session event."""
+    model = _make_model(channel_names=["A"], tmp_path=tmp_path)
+    win = SessionWindow(data_model=model)
+    qtbot.addWidget(win)
+
+    events: list[int] = []
+    model.session.subscribe(Event.ACTIVE_BIN_CHANGED, lambda: events.append(1))
+
+    win._bin_spin.setValue(1)  # same as current
+    assert events == []

@@ -26,9 +26,74 @@ from percell4.domain.io.models import (
     ExplicitRule,
     ProvenanceRecord,
 )
+from percell4.domain.io.view_bin import (
+    majority_vote_mask,
+    mean_bin_2d,
+    mode_labels,
+    sum_bin_2d,
+    sum_bin_decay,
+)
 
 # Chunk cache size for session reads (64 MB)
 _READ_CACHE_BYTES = 64 * 1024 * 1024
+
+
+def _apply_view_bin(hdf5_path: str, arr: NDArray, view_bin: int) -> NDArray:
+    """Dispatch view-bin downsampling by HDF5 path prefix.
+
+    Pure function; takes the already-materialized array. See the table on
+    :meth:`DatasetStore.read_array` for the per-prefix rule.
+    """
+    if view_bin == 1:
+        return arr
+    # Normalize the path (drop leading slash for consistent prefix checks).
+    p = hdf5_path.lstrip("/")
+    if p == "intensity" or p.startswith("intensity/"):
+        return sum_bin_2d(arr, view_bin)
+    if p.startswith("decay/"):
+        return sum_bin_decay(arr, view_bin)
+    if p.startswith("labels/"):
+        return mode_labels(arr, view_bin)
+    if p.startswith("masks/"):
+        return majority_vote_mask(arr, view_bin)
+    if p.startswith("phasor/"):
+        # Every leaf under /phasor/<ch>/ is intensive (g, s, lifetime, and
+        # their *_filtered counterparts). Mean-bin so magnitudes don't
+        # scale with k.
+        return mean_bin_2d(arr, view_bin)
+    # Unknown path -- pass through. Callers asking for a view bin on a
+    # path with no defined rule get raw data; safer than guessing.
+    return arr
+
+
+def _infer_bin_metadata(f: h5py.File) -> dict[str, Any]:
+    """Return ``{"native_shape": ..., "creation_bin": ...}`` inferred from
+    an open HDF5 file's array contents.
+
+    ``native_shape`` is the last two dims of ``/intensity`` if it exists,
+    else the first two dims of the first ``/decay/<ch>`` array, else
+    ``None``. ``creation_bin`` defaults to ``1`` when absent from
+    ``/metadata.attrs``.
+
+    Pure read of the open file handle -- does not mutate or close.
+    """
+    native_shape: tuple[int, int] | None = None
+    if "intensity" in f:
+        shape = f["intensity"].shape
+        if len(shape) >= 2:
+            native_shape = (int(shape[-2]), int(shape[-1]))
+    elif "decay" in f:
+        decay_grp = f["decay"]
+        children = list(decay_grp.keys())
+        if children:
+            first = decay_grp[children[0]]
+            shape = first.shape
+            if len(shape) >= 2:
+                native_shape = (int(shape[0]), int(shape[1]))
+    creation_bin = 1
+    if "metadata" in f and "creation_bin" in f["metadata"].attrs:
+        creation_bin = int(f["metadata"].attrs["creation_bin"])
+    return {"native_shape": native_shape, "creation_bin": creation_bin}
 
 
 # Provenance-attribute keys for masks captured by "Apply Current Phasor
@@ -46,6 +111,42 @@ PHASOR_MASK_ATTR_CAPTURE_ISO = "phasor_capture_iso8601"
 
 class LayerAlreadyExistsError(Exception):
     """Raised when a payload group already exists and force=False."""
+
+
+class MetadataConsistencyError(Exception):
+    """Raised when /metadata.native_shape disagrees with on-disk array shape.
+
+    The dataset-wide spatial-binning model treats ``/metadata.native_shape``
+    as the authoritative native resolution. If a stored value disagrees
+    with what we can infer from ``/intensity`` (or ``/decay/<first_ch>``
+    when intensity is absent), we refuse to silently overwrite -- a real
+    schema bug or a corrupted file is more likely than a benign
+    transient. Callers must inspect and decide.
+    """
+
+
+class LayerSizeMismatchError(Exception):
+    """Raised when an Add-Layer source shape doesn't equal /metadata.native_shape.
+
+    The dataset-wide binning model locks the dataset's native shape at
+    compress time. Subsequent layers added through the Add-Layer path
+    (Add-Layer dialog TIFFs, TCSPC append, ROI imports) must match
+    exactly -- the .h5 doesn't tolerate mixed-resolution storage.
+    Mismatches are the user's signal that they need to either pre-bin
+    the source externally or re-compress with a different creation_bin.
+    """
+
+
+class SourceShapeMismatchError(Exception):
+    """Raised at compress time when source channels disagree on (H, W).
+
+    The dataset-wide binning model requires all source files in one
+    compress operation to share the same pre-bin (H, W); native_shape
+    is computed as (H // creation_bin, W // creation_bin) from that
+    agreed shape. If one source TIFF or .bin is at a different
+    resolution than its peers, the run aborts before writing -- silent
+    partial imports would corrupt the native_shape invariant.
+    """
 
 
 class CrossFormatRuleConflictError(Exception):
@@ -163,8 +264,31 @@ class DatasetStore:
                     f[hdf5_path].attrs[key] = val
         return array.size
 
-    def read_array(self, hdf5_path: str) -> NDArray:
-        """Read a numpy array from the specified HDF5 path."""
+    def read_array(self, hdf5_path: str, view_bin: int = 1) -> NDArray:
+        """Read a numpy array from the specified HDF5 path.
+
+        ``view_bin`` is the session-level view bin (k >= 1). At k=1 the
+        array is returned byte-identical to what was written. At k>1 the
+        array is downsampled in-memory by the rule appropriate for its
+        path:
+
+        ===================================== =====================
+        Path prefix                            Rule
+        ===================================== =====================
+        ``/intensity`` (any rank)              ``sum_bin_2d``
+        ``/decay/<ch>``                        ``sum_bin_decay``
+        ``/labels/<name>``                     ``mode_labels``
+        ``/masks/<name>``                      ``majority_vote_mask``
+        ``/phasor/<ch>/{g,s,*_filtered,...}``  ``mean_bin_2d`` (intensive)
+        anything else                          pass-through
+        ===================================== =====================
+
+        See ``src/percell4/domain/io/view_bin.py`` for the full per-rule
+        contract. The on-disk array is unchanged -- this is a read-time
+        view only.
+        """
+        if view_bin < 1:
+            raise ValueError(f"view_bin must be >= 1, got {view_bin}")
         f = self._open_read()
         try:
             if hdf5_path not in f:
@@ -172,18 +296,41 @@ class DatasetStore:
             obj = f[hdf5_path]
             if not isinstance(obj, h5py.Dataset):
                 raise KeyError(f"{hdf5_path} is a group, not a dataset")
-            return obj[()]
+            arr = obj[()]
+            if view_bin == 1:
+                return arr
+            return _apply_view_bin(hdf5_path, arr, view_bin)
         finally:
             self._close_if_not_session(f)
 
-    def read_channel(self, hdf5_path: str, channel_idx: int) -> NDArray:
+    def read_decay(self, channel: str, view_bin: int = 1) -> NDArray:
+        """Read ``/decay/<channel>`` with optional view-bin downsampling.
+
+        Sugar over :meth:`read_array` that exists so callers don't have
+        to build the ``f"decay/{channel}"`` path themselves -- and so a
+        single grep for ``read_decay`` enumerates every decay-read
+        callsite (closes the Single-Write-Boundary gap where decay reads
+        used to open ``h5py.File`` directly).
+        """
+        return self.read_array(f"decay/{channel}", view_bin=view_bin)
+
+    def read_channel(
+        self, hdf5_path: str, channel_idx: int, view_bin: int = 1
+    ) -> NDArray:
         """Read a single channel plane from a 2D or 3D array.
 
         For 2D arrays, ``channel_idx`` must be 0 and the full array is returned.
         For 3D ``(C, H, W)`` arrays, returns only ``array[channel_idx]`` without
         loading the other channels — useful for phases that only need one channel
         on each dataset.
+
+        ``view_bin`` follows the same rule as :meth:`read_array`. Only
+        ``/intensity`` paths are expected here, so the downsampler is
+        ``sum_bin_2d`` regardless of the leading 2D-vs-3D shape (the slice
+        is 2D by the time we apply the bin).
         """
+        if view_bin < 1:
+            raise ValueError(f"view_bin must be >= 1, got {view_bin}")
         f = self._open_read()
         try:
             if hdf5_path not in f:
@@ -194,17 +341,19 @@ class DatasetStore:
                     raise IndexError(
                         f"channel_idx={channel_idx} out of range for 2D array"
                     )
-                return ds[()]
-            if ds.ndim == 3:
+                arr = ds[()]
+            elif ds.ndim == 3:
                 n_channels = ds.shape[0]
                 if not 0 <= channel_idx < n_channels:
                     raise IndexError(
                         f"channel_idx={channel_idx} out of range [0, {n_channels})"
                     )
-                return ds[channel_idx, ...]
-            raise ValueError(
-                f"read_channel expects 2D or 3D array, got {ds.ndim}D at {hdf5_path}"
-            )
+                arr = ds[channel_idx, ...]
+            else:
+                raise ValueError(
+                    f"read_channel expects 2D or 3D array, got {ds.ndim}D at {hdf5_path}"
+                )
+            return arr if view_bin == 1 else sum_bin_2d(arr, view_bin)
         finally:
             self._close_if_not_session(f)
 
@@ -239,21 +388,35 @@ class DatasetStore:
 
     # ── Convenience: labels ───────────────────────────────────
 
-    def write_labels(self, name: str, array: NDArray) -> int:
+    def write_labels(
+        self,
+        name: str,
+        array: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> int:
         """Write a segmentation label array at /labels/<name>.
 
         Enforces int32 dtype. Returns element count.
+
+        ``attrs`` (optional) are merged onto the canonical ``{"dims":
+        ["H", "W"]}`` so Phase-6 Creators can stamp ``created_at_bin``
+        without bypassing the chokepoint.
         """
         if array.ndim != 2:
             raise ValueError(f"Labels must be 2D, got {array.ndim}D")
         array = array.astype(np.int32, copy=False)
-        return self.write_array(
-            f"labels/{name}", array, attrs={"dims": ["H", "W"]}
-        )
+        merged_attrs: dict[str, Any] = {"dims": ["H", "W"]}
+        if attrs:
+            merged_attrs.update(attrs)
+        return self.write_array(f"labels/{name}", array, attrs=merged_attrs)
 
-    def read_labels(self, name: str) -> NDArray[np.int32]:
-        """Read a segmentation label array from /labels/<name>."""
-        return self.read_array(f"labels/{name}")
+    def read_labels(self, name: str, view_bin: int = 1) -> NDArray[np.int32]:
+        """Read a segmentation label array from /labels/<name>.
+
+        ``view_bin`` follows the same rule as :meth:`read_array`. Labels
+        downsample via block mode (ties resolve to 0).
+        """
+        return self.read_array(f"labels/{name}", view_bin=view_bin)
 
     def list_labels(self) -> list[str]:
         """List all label set names under /labels/."""
@@ -261,24 +424,38 @@ class DatasetStore:
 
     # ── Convenience: masks ────────────────────────────────────
 
-    def write_mask(self, name: str, array: NDArray) -> int:
+    def write_mask(
+        self,
+        name: str,
+        array: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> int:
         """Write a mask (binary or multi-label) at /masks/<name>.
 
         Enforces uint8 dtype. Values 0-255 supported:
         - Binary: 0=outside, 1=inside
         - Multi-label: 0=outside, 1..N=ROI labels
         Returns element count.
+
+        ``attrs`` (optional) are merged onto the canonical ``{"dims":
+        ["H", "W"]}`` so Phase-6 Creators can stamp ``created_at_bin``
+        and any provenance keys without bypassing the chokepoint.
         """
         if array.ndim != 2:
             raise ValueError(f"Mask must be 2D, got {array.ndim}D")
         array = array.astype(np.uint8, copy=False)
-        return self.write_array(
-            f"masks/{name}", array, attrs={"dims": ["H", "W"]}
-        )
+        merged_attrs: dict[str, Any] = {"dims": ["H", "W"]}
+        if attrs:
+            merged_attrs.update(attrs)
+        return self.write_array(f"masks/{name}", array, attrs=merged_attrs)
 
-    def read_mask(self, name: str) -> NDArray[np.uint8]:
-        """Read a mask from /masks/<name>."""
-        return self.read_array(f"masks/{name}")
+    def read_mask(self, name: str, view_bin: int = 1) -> NDArray[np.uint8]:
+        """Read a mask from /masks/<name>.
+
+        ``view_bin`` follows the same rule as :meth:`read_array`. Masks
+        downsample via majority vote (>= ceil(k**2 / 2)).
+        """
+        return self.read_array(f"masks/{name}", view_bin=view_bin)
 
     def list_masks(self) -> list[str]:
         """List all mask names under /masks/."""
@@ -318,19 +495,69 @@ class DatasetStore:
 
     @property
     def metadata(self) -> dict[str, Any]:
-        """Read /metadata/ group attributes as a dict."""
+        """Read /metadata/ group attributes as a dict.
+
+        Two keys are guaranteed to be present whenever the dataset has any
+        spatial array on disk, even on files written before the
+        dataset-wide binning model existed:
+
+        * ``native_shape`` -- ``(H, W)`` at k=1. Inferred from
+          ``/intensity.shape[-2:]`` when absent. If neither ``/intensity``
+          nor any ``/decay/<ch>`` exists, this key is set to ``None``.
+        * ``creation_bin`` -- defaults to ``1`` when absent.
+
+        Inference is in-memory only here -- the file is not rewritten.
+        The next :meth:`set_metadata` call persists the inferred values
+        (see that method for the consistency-check rule).
+        """
         f = self._open_read()
         try:
-            if "metadata" not in f:
-                return {}
-            return dict(f["metadata"].attrs)
+            if "metadata" in f:
+                attrs = dict(f["metadata"].attrs)
+            else:
+                attrs = {}
+            inferred = _infer_bin_metadata(f)
+            for key, val in inferred.items():
+                attrs.setdefault(key, val)
+            # Normalize native_shape to a Python tuple regardless of source
+            # (h5py returns numpy arrays for sequence attrs).
+            if attrs.get("native_shape") is not None:
+                ns = attrs["native_shape"]
+                if hasattr(ns, "tolist"):
+                    ns = ns.tolist()
+                attrs["native_shape"] = tuple(int(x) for x in ns)
+            if "creation_bin" in attrs:
+                attrs["creation_bin"] = int(attrs["creation_bin"])
+            return attrs
         finally:
             self._close_if_not_session(f)
 
     def set_metadata(self, attrs: dict[str, Any]) -> int:
-        """Write attributes to the /metadata/ group. Returns count written."""
+        """Write attributes to the /metadata/ group. Returns count written.
+
+        As a side effect, persists inferred ``native_shape`` and
+        ``creation_bin`` from :attr:`metadata` if they aren't on disk yet.
+        Raises :class:`MetadataConsistencyError` if a stored
+        ``native_shape`` disagrees with what we infer from the actual
+        array on disk -- we never silently overwrite an explicit value.
+        """
         with h5py.File(self.path, "a") as f:
             grp = f.require_group("metadata")
+            inferred = _infer_bin_metadata(f)
+            if "native_shape" in grp.attrs:
+                stored = tuple(int(x) for x in grp.attrs["native_shape"])
+                if (
+                    inferred["native_shape"] is not None
+                    and stored != inferred["native_shape"]
+                ):
+                    raise MetadataConsistencyError(
+                        f"Stored /metadata.native_shape={stored} disagrees "
+                        f"with on-disk shape={inferred['native_shape']}."
+                    )
+            else:
+                if inferred["native_shape"] is not None:
+                    grp.attrs["native_shape"] = inferred["native_shape"]
+            grp.attrs.setdefault("creation_bin", inferred["creation_bin"])
             for key, val in attrs.items():
                 grp.attrs[key] = val
         return len(attrs)

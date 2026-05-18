@@ -30,12 +30,21 @@ class MeasureCells:
         self,
         metrics: list[str],
         roi_names: dict[int, str] | None = None,
+        view_bin: int | None = None,
     ) -> pd.DataFrame:
         """Run measurement and return the resulting DataFrame.
 
         Args:
             metrics: List of metric names to compute (keys from BUILTIN_METRICS).
             roi_names: Optional label→name mapping for multi-ROI masks.
+            view_bin: Session view bin to measure at (Phase 6 binning).
+                ``None`` reads ``session.active_bin``. At ``view_bin > 1``,
+                images, labels, and masks are read at the binned shape;
+                the measurer computes against those; and pixel-count metrics
+                are multiplied by ``k**2`` so the output is in
+                k=1-equivalent units (areas at k=3 are comparable to areas
+                at k=1 with k**2 resolution coarsening). Each row carries
+                ``bin_at_measure = view_bin``.
 
         Raises:
             ValueError: If no dataset loaded, no active segmentation, or
@@ -49,9 +58,12 @@ class MeasureCells:
         if not seg_name:
             raise NoSegmentationError("No active segmentation")
 
-        # Read data from repository
-        images = self._repo.read_channel_images(handle)
-        labels = self._repo.read_labels(handle, seg_name)
+        if view_bin is None:
+            view_bin = self._session.active_bin
+
+        # Read data from repository at the captured bin
+        images = self._repo.read_channel_images(handle, view_bin=view_bin)
+        labels = self._repo.read_labels(handle, seg_name, view_bin=view_bin)
 
         if labels.max() == 0:
             raise ValueError("Segmentation has no cells")
@@ -69,7 +81,7 @@ class MeasureCells:
         mask_name = self._session.active_mask
         if mask_name:
             try:
-                mask = self._repo.read_mask(handle, mask_name)
+                mask = self._repo.read_mask(handle, mask_name, view_bin=view_bin)
             except KeyError:
                 logger.warning("Mask '%s' not found, proceeding without mask", mask_name)
 
@@ -84,6 +96,20 @@ class MeasureCells:
             )
         else:
             df = measure_multichannel(images, labels, mask=mask, metrics=metrics)
+
+        # Bin-aware unit conversion: pixel-count metrics scale by k**2
+        # so areas measured at view_bin=3 are reported in k=1-equivalent
+        # pixels (a binned pixel = k**2 source pixels). This makes
+        # cross-bin comparison physically meaningful in the same
+        # DataFrame.
+        if view_bin > 1:
+            scale = view_bin * view_bin
+            for col in list(df.columns):
+                if col == "area_pixels" or col.endswith("_area"):
+                    df[col] = df[col] * scale
+
+        # Tag every row so downstream plots can group/filter by bin.
+        df["bin_at_measure"] = int(view_bin)
 
         # Merge stored group columns (survive re-measurement)
         groups_df = self._repo.read_group_columns(handle)

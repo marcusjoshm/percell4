@@ -29,8 +29,55 @@ from percell4.domain.io.models import (
     ZeroPadOffsetRule,
 )
 from percell4.domain.io.scanner import FileScanner
+from percell4.domain.io.view_bin import (
+    majority_vote_mask,
+    mode_labels,
+    sum_bin_2d,
+)
 from percell4.project import ProjectIndex
-from percell4.store import DatasetStore
+from percell4.store import DatasetStore, SourceShapeMismatchError
+
+
+def _validate_and_collect_source_shape(
+    channel_images: list,
+    label_layers: list,
+    mask_layers: list,
+) -> tuple[int, int] | None:
+    """Validate that every source array shares a single ``(H, W)``.
+
+    Returns the agreed shape, or ``None`` when there are no source arrays.
+    Raises :class:`SourceShapeMismatchError` listing the disagreeing
+    layers when at least one source disagrees.
+
+    Channel arrays may be 2D ``(H, W)`` or 3D (rare; ``stitched_intensity``
+    sometimes carries a leading singleton). Labels and masks are always
+    2D. We compare on the trailing two axes uniformly.
+    """
+    shapes: list[tuple[str, tuple[int, int]]] = []
+    for i, arr in enumerate(channel_images):
+        if arr.ndim < 2:
+            raise SourceShapeMismatchError(
+                f"channel[{i}] has ndim={arr.ndim}; expected >= 2"
+            )
+        shapes.append((f"channel[{i}]", (arr.shape[-2], arr.shape[-1])))
+    for name, arr in label_layers:
+        shapes.append((f"labels/{name}", (arr.shape[-2], arr.shape[-1])))
+    for name, arr in mask_layers:
+        shapes.append((f"masks/{name}", (arr.shape[-2], arr.shape[-1])))
+    if not shapes:
+        return None
+    reference = shapes[0][1]
+    mismatches = [s for s in shapes if s[1] != reference]
+    if mismatches:
+        lines = [f"  {n}: {s}" for n, s in shapes]
+        raise SourceShapeMismatchError(
+            "Compress aborted: source layers disagree on (H, W).\n"
+            + "\n".join(lines)
+            + "\nAll source TIFFs and .bin tiles in one compress run must "
+            "stitch + z-project to the same (H, W). Resolve the offending "
+            "files and re-run."
+        )
+    return reference
 
 
 def import_dataset(
@@ -46,6 +93,7 @@ def import_dataset(
     selected_channels: set[str] | None = None,
     layer_assignments: dict[str, Any] | None = None,
     files: list | None = None,
+    creation_bin: int = 1,
 ) -> int:
     """Import a directory of TIFFs into a single .h5 dataset.
 
@@ -62,11 +110,29 @@ def import_dataset(
     flim_params : FLIM parameters dict with keys:
         'frequency_mhz', 'calibration_phase', 'calibration_modulation',
         'bin_dimensions' (for .bin files: x_dim, y_dim, t_dim, dim_order)
+    creation_bin : sum-bin every source layer by ``creation_bin`` × ``creation_bin``
+        on the post-z-project, post-stitch (H, W) plane before writing.
+        Defines the dataset's ``/metadata.native_shape``. ``1`` = no
+        binning (byte-identical to the pre-binning behavior for the
+        array payloads; only the two new metadata keys are added).
 
     Returns
     -------
     Number of channels imported.
+
+    Raises
+    ------
+    SourceShapeMismatchError
+        When source layers (channels, labels, masks, .bin synthesized
+        intensity) disagree on pre-bin (H, W). Stitch + z-project must
+        bring every source into agreement before the bin step.
+    ValueError
+        On bad inputs (no files, ``creation_bin < 1``).
     """
+    if creation_bin < 1:
+        raise ValueError(
+            f"creation_bin must be >= 1, got {creation_bin}"
+        )
     source_dir = Path(source_dir)
     output_h5 = Path(output_h5)
 
@@ -364,19 +430,54 @@ def import_dataset(
                 channel_images.append(stitched_intensity.astype(np.float32))
                 channel_names.append(ch_name)
 
-            # Store info for deferred decay write (tile-by-tile to HDF5)
+            # Store info for deferred decay write (tile-by-tile to HDF5).
+            # write_decay_streaming expects POST-bin dims (its kwarg
+            # ``spatial_bin`` drives the per-tile bin during streaming),
+            # so we floor-divide here to match the validate-and-bin step
+            # 4b ran on the synthesized intensity.
             tcspc_data[ch_name] = {
                 "_streaming": True,
                 "tile_bins": tile_bins,
                 "bin_dims": bin_dims,
-                "tile_h": tile_h,
-                "tile_w": tile_w,
+                "tile_h": tile_h // creation_bin,
+                "tile_w": tile_w // creation_bin,
                 "n_bins": n_bins,
-                "out_h": out_h,
-                "out_w": out_w,
+                "out_h": out_h // creation_bin,
+                "out_w": out_w // creation_bin,
                 "positions": positions,
                 "use_tiling": use_tiling,
+                "creation_bin": creation_bin,
             }
+
+    # 4b. Source-shape validation + creation_bin application.
+    # Every TIFF channel, label, mask, and .bin-synthesized intensity
+    # must agree on (H, W) post-z-project, post-stitch and pre-bin. If
+    # the user runs Compress over a directory containing mixed
+    # resolutions, we abort before any write -- silent partial imports
+    # would corrupt the native_shape invariant declared in /metadata.
+    pre_bin_shape = _validate_and_collect_source_shape(
+        channel_images, label_layers, mask_layers
+    )
+    if creation_bin > 1 and pre_bin_shape is not None:
+        channel_images = [
+            sum_bin_2d(arr, creation_bin) for arr in channel_images
+        ]
+        label_layers = [
+            (name, mode_labels(arr.astype(np.int32, copy=False), creation_bin))
+            for name, arr in label_layers
+        ]
+        mask_layers = [
+            (name, majority_vote_mask(
+                (arr > 0).astype(np.uint8), creation_bin
+            ))
+            for name, arr in mask_layers
+        ]
+
+    # native_shape is the post-bin (H, W) of any of the above arrays.
+    native_shape: tuple[int, int] | None = None
+    if pre_bin_shape is not None:
+        h, w = pre_bin_shape
+        native_shape = (h // creation_bin, w // creation_bin)
 
     # 5. Write to HDF5 (before updating CSV!)
     _progress(4, 5, "Writing HDF5...")
@@ -386,7 +487,10 @@ def import_dataset(
         "source_dir": str(source_dir),
         "channel_names": channel_names,
         "n_channels": len(channel_images),
+        "creation_bin": int(creation_bin),
     }
+    if native_shape is not None:
+        all_metadata["native_shape"] = native_shape
     if metadata:
         all_metadata.update(metadata)
 
@@ -454,6 +558,7 @@ def import_dataset(
                 out_w=info["out_w"],
                 positions=info["positions"],
                 use_tiling=info["use_tiling"],
+                spatial_bin=info.get("creation_bin", 1),
             )
             continue
 

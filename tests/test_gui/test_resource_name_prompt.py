@@ -142,3 +142,82 @@ def test_existing_names_accepts_any_iterable(
             )
             == "name"
         )
+
+
+# ── bin kwarg (U5) ────────────────────────────────────────────
+
+
+def test_bin_one_default_unchanged(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    """bin=1 (the default) seeds the prompt with the raw default."""
+    fake, calls = _make_input_dialog_stub([("cellpose", True)])
+    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+
+    result = prompt_for_resource_name(
+        None,
+        title="t",
+        label="l",
+        default="cellpose",
+        existing_names=[],
+        bin=1,
+    )
+    assert result == "cellpose"
+    assert calls[0]["text"] == "cellpose"
+
+
+def test_bin_greater_than_one_seeds_suffixed_default(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bin=3 seeds the prompt with ``cellpose_bin3``."""
+    fake, calls = _make_input_dialog_stub([("cellpose_bin3", True)])
+    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+
+    result = prompt_for_resource_name(
+        None,
+        title="t",
+        label="l",
+        default="cellpose",
+        existing_names=[],
+        bin=3,
+    )
+    assert result == "cellpose_bin3"
+    assert calls[0]["text"] == "cellpose_bin3"
+
+
+def test_bin_idempotency_when_caller_passes_already_suffixed_default(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the caller passes ``cellpose_bin3`` as default with bin=3, the
+    prompt shows ``cellpose_bin3``, not ``cellpose_bin3_bin3``."""
+    fake, calls = _make_input_dialog_stub([("cellpose_bin3", True)])
+    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+
+    prompt_for_resource_name(
+        None,
+        title="t",
+        label="l",
+        default="cellpose_bin3",
+        existing_names=[],
+        bin=3,
+    )
+    assert calls[0]["text"] == "cellpose_bin3"
+
+
+def test_bin_empty_input_reprompts_with_suffixed_default(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty submission re-prompts with the bin-suffixed default."""
+    fake, calls = _make_input_dialog_stub(
+        [("", True), ("cellpose_bin3", True)]
+    )
+    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+
+    prompt_for_resource_name(
+        None,
+        title="t",
+        label="l",
+        default="cellpose",
+        existing_names=[],
+        bin=3,
+    )
+    assert calls[0]["text"] == "cellpose_bin3"
+    assert calls[1]["text"] == "cellpose_bin3"

@@ -258,6 +258,7 @@ class CompressConfig:
     datasets: list[DatasetSpec] = field(default_factory=list)
     gui_states: dict[str, DatasetGuiState] = field(default_factory=dict)
     flim_params: dict | None = None  # passed through to import_dataset for .bin FLIM data
+    creation_bin: int = 1  # sum-binned k×k at compress; defines /metadata.native_shape
 
 
 @dataclass(frozen=True)

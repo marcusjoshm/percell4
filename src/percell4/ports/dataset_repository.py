@@ -30,18 +30,45 @@ class DatasetRepository(Protocol):
 
     # ── Channel images ───────────────────────────────────────
 
-    def read_channel_images(self, handle: DatasetHandle) -> dict[str, NDArray[np.float32]]:
-        """Read all channel images from the dataset."""
+    def read_channel_images(
+        self,
+        handle: DatasetHandle,
+        view_bin: int = 1,
+    ) -> dict[str, NDArray[np.float32]]:
+        """Read all channel images from the dataset.
+
+        ``view_bin`` (>= 1) downsamples each channel via ``sum_bin_2d``
+        on the trailing two axes. At k=1 the arrays are byte-identical
+        to what was written. See ``src/percell4/domain/io/view_bin.py``.
+        """
         ...
 
     # ── Segmentation labels ──────────────────────────────────
 
-    def read_labels(self, handle: DatasetHandle, name: str) -> NDArray[np.int32]:
-        """Read a segmentation label array by name."""
+    def read_labels(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        view_bin: int = 1,
+    ) -> NDArray[np.int32]:
+        """Read a segmentation label array by name.
+
+        ``view_bin`` downsamples via block mode (ties resolve to 0).
+        """
         ...
 
-    def write_labels(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
-        """Write a segmentation label array."""
+    def write_labels(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        data: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> None:
+        """Write a segmentation label array.
+
+        ``attrs`` (optional) are stamped onto the stored dataset.
+        Phase-6 Creators use this to record ``created_at_bin``.
+        """
         ...
 
     def list_labels(self, handle: DatasetHandle) -> list[str]:
@@ -50,12 +77,30 @@ class DatasetRepository(Protocol):
 
     # ── Masks ────────────────────────────────────────────────
 
-    def read_mask(self, handle: DatasetHandle, name: str) -> NDArray[np.uint8]:
-        """Read a mask array by name."""
+    def read_mask(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        view_bin: int = 1,
+    ) -> NDArray[np.uint8]:
+        """Read a mask array by name.
+
+        ``view_bin`` downsamples via majority vote.
+        """
         ...
 
-    def write_mask(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
-        """Write a mask array."""
+    def write_mask(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        data: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> None:
+        """Write a mask array.
+
+        ``attrs`` (optional) are stamped onto the stored dataset.
+        Phase-6 Creators use this to record ``created_at_bin``.
+        """
         ...
 
     def list_masks(self, handle: DatasetHandle) -> list[str]:
@@ -84,8 +129,18 @@ class DatasetRepository(Protocol):
         """Write a numpy array at an arbitrary HDF5 path."""
         ...
 
-    def read_array(self, handle: DatasetHandle, path: str) -> NDArray:
-        """Read a numpy array from an arbitrary HDF5 path. Raises KeyError if missing."""
+    def read_array(
+        self,
+        handle: DatasetHandle,
+        path: str,
+        view_bin: int = 1,
+    ) -> NDArray:
+        """Read a numpy array from an arbitrary HDF5 path. Raises KeyError if missing.
+
+        ``view_bin`` dispatches by path prefix (``/intensity``, ``/decay/*``,
+        ``/labels/*``, ``/masks/*``, ``/phasor/*``). Unknown prefixes pass
+        through unchanged. See :meth:`DatasetStore.read_array`.
+        """
         ...
 
     def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:

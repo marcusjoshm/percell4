@@ -39,7 +39,7 @@ from percell4.domain.io.models import (
     TileConfig,
     TokenConfig,
 )
-from percell4.store import DatasetStore
+from percell4.store import DatasetStore, LayerSizeMismatchError
 
 
 @dataclass(frozen=True)
@@ -71,7 +71,6 @@ def add_decay_to_dataset(
     *,
     rotate_k: int = 0,
     flip_axis: int | None = None,
-    spatial_bin: int = 1,
     force: bool = False,
     progress_callback: Callable[[str], None] | None = None,
     intensity_channels: list[IntensityChannel] | None = None,
@@ -94,11 +93,12 @@ def add_decay_to_dataset(
     (horizontal flip / fliplr). T-axis untouched. Both rotation and flip
     only touch /decay/<ch> — /intensity is never modified.
 
-    ``spatial_bin`` sums non-overlapping k×k pixel blocks per tile before
-    stitching, so a TCSPC source at higher spatial resolution can be
-    reduced to match a downsampled /intensity. ``k=1`` is no binning.
-    Truncates residual pixels (e.g., 512 with k=3 → 170, dropping 2 px).
-    Applied at read-time, so the stored /decay is at the binned dims.
+    Source-shape validation: the stitched .bin output shape (rows*tile_h,
+    cols*tile_w) must equal ``/metadata.native_shape`` -- the dataset-wide
+    binning model locks native at compress and refuses to silently
+    accept a mismatched ancillary import. Mismatches produce a per-channel
+    error in the returned report. The user resolves them by re-importing
+    via the Compress dialog with the right creation_bin.
 
     ``intensity_channels`` lets the caller supply the IntensityChannel
     records directly, bypassing token derivation from the channel-name
@@ -110,9 +110,6 @@ def add_decay_to_dataset(
     h5_path = Path(h5_path)
     source_dir = Path(source_dir)
     progress = progress_callback or (lambda _: None)
-
-    if spatial_bin < 1:
-        raise ValueError(f"spatial_bin must be >= 1, got {spatial_bin}")
 
     progress("Scanning source directory")
     bin_files = sorted(p for p in source_dir.rglob("*.bin") if p.is_file())
@@ -212,19 +209,8 @@ def add_decay_to_dataset(
             # Read first tile to determine dimensions (compress does the same)
             first_path = next(iter(tile_to_path.values()))
             first_result = read_flim_bin(first_path, **bin_dims)
-            raw_tile_h, raw_tile_w, n_bins = first_result["array"].shape
+            tile_h, tile_w, n_bins = first_result["array"].shape
             del first_result
-
-            # Bin-aware tile dims — write_decay_streaming truncates each
-            # tile's residual pixels (H % k, W % k) before summing, so the
-            # post-bin dims here must match that floor division.
-            tile_h = raw_tile_h // spatial_bin
-            tile_w = raw_tile_w // spatial_bin
-            if tile_h == 0 or tile_w == 0:
-                raise ValueError(
-                    f"spatial_bin={spatial_bin} larger than tile dims "
-                    f"({raw_tile_h}×{raw_tile_w}); no pixels would remain"
-                )
 
             use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
             if use_tiling:
@@ -240,8 +226,37 @@ def add_decay_to_dataset(
                 out_h, out_w = tile_h, tile_w
                 positions = {0: (0, 0)}
 
-            # Delegate the actual decay write to the shared helper —
+            # Source-shape validation: the FINAL stored (H, W) must equal
+            # /metadata.native_shape. Phase 2 below rotates each stitched
+            # /decay in place; odd ``rotate_k`` values transpose (H, W).
+            # The validation must therefore check the POST-rotation shape
+            # so the canonical "stitch + rotate to fit native" workflow
+            # (e.g. .bin tiles stitched at (2048, 2560) with rotate_k=1
+            # to land at native (2560, 2048)) isn't rejected pre-rotation.
+            # flip_axis is shape-invariant -- only rotate_k matters here.
+            native_shape = metadata.get("native_shape")
+            if native_shape is not None:
+                if (int(rotate_k) % 2) == 0:
+                    final_h, final_w = out_h, out_w
+                else:
+                    final_h, final_w = out_w, out_h
+                if tuple(native_shape) != (final_h, final_w):
+                    raise LayerSizeMismatchError(
+                        f"Source TCSPC stitched shape is ({out_h}, {out_w})"
+                        + (
+                            f" -> ({final_h}, {final_w}) after rotate_k={rotate_k}"
+                            if rotate_k
+                            else ""
+                        )
+                        + f"; dataset native_shape is {tuple(native_shape)}. "
+                        "Re-import via Compress dialog with the matching "
+                        "creation_bin, or pre-bin the .bin files externally."
+                    )
+
+            # Delegate the actual decay write to the shared helper --
             # compress and add-layer go through the SAME streaming write.
+            # spatial_bin defaults to 1; only the importer's compress
+            # path passes a larger value (see U7).
             write_decay_streaming(
                 h5_path=h5_path,
                 channel_name=ch_name,
@@ -254,7 +269,6 @@ def add_decay_to_dataset(
                 out_w=out_w,
                 positions=positions,
                 use_tiling=use_tiling,
-                spatial_bin=spatial_bin,
             )
 
         except Exception as e:  # noqa: BLE001

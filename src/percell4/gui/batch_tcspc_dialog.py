@@ -864,7 +864,6 @@ class BatchTCSPCDialog(QDialog):
         cross_format_rule: CrossFormatRule = build_rule_from_preset()
         rotate_k = self._stitching_form.rotation_k()
         flip_axis = self._stitching_form.flip_axis()
-        spatial_bin = self._stitching_form.spatial_bin()
         force = bool(self._conflict_overwrite_radio and self._conflict_overwrite_radio.isChecked())
 
         progress = QProgressDialog(
@@ -897,7 +896,6 @@ class BatchTCSPCDialog(QDialog):
             cross_format_rule=cross_format_rule,
             rotate_k=rotate_k,
             flip_axis=flip_axis,
-            spatial_bin=spatial_bin,
             force=force,
             progress_callback=progress_cb,
             cancel_check=lambda: progress.wasCanceled(),
