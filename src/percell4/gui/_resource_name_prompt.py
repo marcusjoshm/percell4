@@ -22,6 +22,8 @@ from collections.abc import Iterable
 
 from qtpy.QtWidgets import QInputDialog, QMessageBox, QWidget
 
+from percell4.gui._bin_suffix import bin_suffix
+
 
 def prompt_for_resource_name(
     parent: QWidget | None,
@@ -30,6 +32,7 @@ def prompt_for_resource_name(
     label: str,
     default: str,
     existing_names: Iterable[str],
+    bin: int = 1,
 ) -> str | None:
     """Modal text prompt for a new-resource name.
 
@@ -39,9 +42,15 @@ def prompt_for_resource_name(
     The prompt re-fires on empty submission and on name collisions; the
     user can only escape the loop by typing a valid name or pressing
     Cancel. Whitespace-only inputs are treated as empty (per ``str.strip``).
+
+    ``bin`` is the session view bin at the time the prompt is opened. At
+    ``bin > 1``, the ``default`` is run through
+    :func:`percell4.gui._bin_suffix.bin_suffix` so the user sees a
+    pre-suffixed default like ``cellpose_bin3``. The user can still type
+    any name they like -- the suffix is a default, not a constraint.
     """
     existing_set = set(existing_names)
-    current_default = default
+    current_default = bin_suffix(default, bin)
     while True:
         name, ok = QInputDialog.getText(parent, title, label, text=current_default)
         if not ok:
@@ -49,7 +58,7 @@ def prompt_for_resource_name(
         if name.strip() == "":
             # Re-prompt with the original default, not the blank value
             # the user just submitted.
-            current_default = default
+            current_default = bin_suffix(default, bin)
             continue
         if name in existing_set:
             QMessageBox.warning(
