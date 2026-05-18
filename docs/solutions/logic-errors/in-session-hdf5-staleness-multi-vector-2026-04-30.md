@@ -1,7 +1,7 @@
 ---
 title: "Multi-vector in-session staleness after HDF5 writes (Qt + h5py)"
 date: 2026-04-30
-last_updated: 2026-05-04
+last_updated: 2026-05-18
 category: logic-errors
 module: percell4.application, percell4.gui, percell4.interfaces.gui.peer_views
 problem_type: logic_error
@@ -220,6 +220,8 @@ The reason this took five rounds: each fix made the symptom *mutate* rather than
 
 9. **When a "fix" only reduces symptom frequency rather than eliminating it, suspect a second vector underneath.** "Had to run it multiple times" is not a flaky test — it is the canonical signature of a stacked-cache bug.
 
+10. **When a feature adds a new shape-selecting kwarg to a worker, audit every caller — not just the worker's signature.** A receiver-side parameter with no sender wiring is dead code that lies about being live. Cache invalidation alone is not enough: if the read path that immediately follows the invalidation still passes the old default, the cache is cleared then refilled with the same content and the user sees no change. The grep checklist is symmetric to Prevention rule 4: for every funnel that writes a primary input AND for every caller of a worker that consumes a shape-selecting kwarg, verify the kwarg is forwarded. See [`../integration-issues/phasor-view-bin-not-forwarded-from-gui-callers-2026-05-18.md`](../integration-issues/phasor-view-bin-not-forwarded-from-gui-callers-2026-05-18.md) for the canonical case — `view_bin` accepted by `ComputePhasor` / `ApplyWavelet` / `ComputeLifetime` / `RunPhasorGMM` but missing from `LoadCachedPhasor` and from 8 GUI callers. The receiving caches (Vector 4 above) cleared correctly on `ACTIVE_BIN_CHANGED` and then refilled with native-shape arrays because every read defaulted to k=1.
+
 ## Related Issues
 
 - [`flim-phasor-cross-layer-alignment-2026-04-29.md`](flim-phasor-cross-layer-alignment-2026-04-29.md) — sibling axis on the same pipeline. That doc covers per-pixel alignment between `/intensity[ch_idx]` and `/decay/<ch>` (consumer-side derivation). Its Prevention rule #2 (invalidate stale `/phasor` when `/decay` is rewritten) is now **one of the five vectors** documented here. The two docs are complementary: cross-layer alignment is "where reads should source from"; this doc is "what to invalidate after writes."
@@ -228,3 +230,4 @@ The reason this took five rounds: each fix made the symptom *mutate* rather than
 - [`napari-mask-layer-misclassified-as-segmentation.md`](../ui-bugs/napari-mask-layer-misclassified-as-segmentation.md) — Item 6 ("Stale HDF5 data") is a micro-precedent for vector 5 from a different module.
 - [`docs/brainstorms/2026-04-30-phasor-mask-filter-requirements.md`](../../brainstorms/2026-04-30-phasor-mask-filter-requirements.md) — feature requirements for the mask-filter checkbox that exposed this bug class. The feature itself is straightforward; the staleness chain it surfaced is the durable learning.
 - [`docs/plans/2026-05-04-001-feat-phasor-clear-within-roi-plan.md`](../../plans/2026-05-04-001-feat-phasor-clear-within-roi-plan.md) and PR #5 (commit 46b1c7c) — second occurrence of Vector 4. The Clear-within-ROI feature added a new pixel-bound bitmap whose initial lifecycle reset assumed `set_phasor_data` was the single funnel. Code review surfaced the two sibling funnels (`_on_dataset_changed`, `_clear_phasor_display`) that bypass it. See the Vector 4 follow-up section above for the corrected pattern.
+- [`../integration-issues/phasor-view-bin-not-forwarded-from-gui-callers-2026-05-18.md`](../integration-issues/phasor-view-bin-not-forwarded-from-gui-callers-2026-05-18.md) — sibling pattern on the CALLER side. The 5 vectors here all answer "when you WRITE, what caches must be invalidated?" The new doc answers a related but distinct question: "when you ADD A NEW DIMENSION to a worker, how do callers thread it through?" Both share the deep pattern that fixing one layer is necessary but not sufficient when other layers exist. The new doc's specific case: U14 added `view_bin` to FLIM use cases and added `_invalidate_for_bin_change` on `Event.ACTIVE_BIN_CHANGED` — necessary but not sufficient because every GUI caller still defaulted to k=1 and `LoadCachedPhasor` lacked the parameter entirely. See Prevention rule 10 above for the synthesis.
