@@ -1,0 +1,364 @@
+# Bin-Write Sites Audit (U0 of the dataset-wide spatial binning plan)
+#
+# Every site in src/percell4 that calls write_array / write_labels /
+# write_mask / write_measurements / write_dataframe, classified for the
+# upcoming view-bin work.
+#
+# Categories
+# ----------
+#   creator_at_active_bin : Site that, post-Phase 6, must (a) read at
+#                           session.active_bin, (b) NN-upsample the result
+#                           to native_shape before write, (c) annotate the
+#                           target with `created_at_bin=k`, and (d) name
+#                           with bin_suffix() when k > 1. Hard requirement
+#                           for the storage-at-native invariant.
+#   creator_at_native     : Site that always writes at native by construction
+#                           (importer, port pass-through, copy/delete paths).
+#                           No view-bin work required. Listed for completeness.
+#   batch_workflow_k1     : Site that runs inside a batch workflow runner.
+#                           No Session is available, so it always operates
+#                           at k=1. Document this in the unit that touches it.
+#   side_effect_only      : Metadata/attr writes; no array shape concern.
+#   internal_chokepoint   : Inside store.py itself (write_labels and
+#                           write_mask delegate to write_array). Not a
+#                           caller, just the implementation.
+#
+# Generated: 2026-05-18
+# Source: docs/plans/2026-05-18-001-feat-dataset-wide-spatial-binning-plan.md (U0)
+# Reviewer: ce-adversarial-document-reviewer surfaced sites the plan's
+#           original U5 enumeration missed.
+
+sites:
+
+  # -- Internal store chokepoints (not callers) ----------------------------
+  - path: src/percell4/store.py:250
+    category: internal_chokepoint
+    note: write_labels delegates to write_array(path="labels/<name>", ...).
+  - path: src/percell4/store.py:275
+    category: internal_chokepoint
+    note: write_mask delegates to write_array(path="masks/<name>", ...).
+
+  # -- Importer (always native by construction) ----------------------------
+  - path: src/percell4/adapters/importer.py:421
+    category: creator_at_native
+    note: |
+      First /intensity write (single-channel 2D path). After U7, the
+      stitched-then-binned-by-creation_bin array is what reaches this
+      call. Output is native by definition.
+  - path: src/percell4/adapters/importer.py:425
+    category: creator_at_native
+    note: |
+      Multi-channel /intensity write (3D). Same rule as :421 — already
+      binned to native by U7's creation_bin path.
+  - path: src/percell4/adapters/importer.py:429
+    category: creator_at_native
+    note: |
+      Per-import labels write from layer assignments. The labels source
+      is a TIFF on disk; U7 validates source shape matches native.
+  - path: src/percell4/adapters/importer.py:434
+    category: creator_at_native
+    note: |
+      Per-import mask write. Same source-shape validation as labels.
+  - path: src/percell4/adapters/importer.py:507
+    category: creator_at_native
+    note: |
+      Phasor /phasor/<ch>/g, /s, /lifetime writes from npz import.
+      Source is pre-computed at the dataset's native; validated against
+      native_shape in U7.
+
+  # -- Port pass-through (Hdf5DatasetRepository) ---------------------------
+  - path: src/percell4/adapters/hdf5_store.py:124
+    category: internal_chokepoint
+    note: Pass-through write_labels(handle, name, data) to store.
+  - path: src/percell4/adapters/hdf5_store.py:135
+    category: internal_chokepoint
+    note: Pass-through write_mask(handle, name, data) to store.
+  - path: src/percell4/adapters/hdf5_store.py:143
+    category: internal_chokepoint
+    note: Pass-through write_dataframe(handle, "measurements", df).
+  - path: src/percell4/adapters/hdf5_store.py:160
+    category: internal_chokepoint
+    note: Pass-through write_array(handle, path, data, attrs).
+
+  # -- Phase-6 Creator sites (must respect active_bin) ---------------------
+  - path: src/percell4/application/use_cases/segment_cells.py:104
+    category: creator_at_active_bin
+    bin_role: NN-upsample labels; attr created_at_bin; name bin_suffix
+    addressed_by: U12
+    note: |
+      SegmentCells.finalize. Plan U12 owns this site directly: capture
+      session.active_bin at worker start, NN-upsample to native_shape,
+      pass attrs={"created_at_bin": k}, name via bin_suffix.
+
+  - path: src/percell4/application/use_cases/measure_cells.py:97
+    category: creator_at_active_bin
+    bin_role: tag DataFrame rows with bin_at_measure; physical-unit conversion
+    addressed_by: U13
+    note: |
+      MeasureCells.execute. Plan U13 owns this site: read images and
+      labels via repo with view_bin=session.active_bin; multiply area
+      counts by k² before writing; add bin_at_measure=k column.
+
+  - path: src/percell4/application/use_cases/analyze_particles.py:79
+    category: creator_at_active_bin
+    bin_role: tag DataFrame rows with bin_at_measure
+    addressed_by: U13
+    note: |
+      analyze_particles writes merged measurements without any bin
+      awareness today. Same DataFrame schema as measure_cells, so the
+      bin_at_measure column convention applies. Add to U13 scope.
+
+  - path: src/percell4/application/use_cases/accept_threshold.py:67
+    category: creator_at_active_bin
+    bin_role: NN-upsample mask; attr created_at_bin; name bin_suffix
+    addressed_by: U12 (broaden to all mask Creators)
+    note: |
+      AcceptThreshold writes a binary mask from the threshold-tab preview.
+      Preview array is at active_bin (the viewer feeds it). Output mask
+      must NN-upsample to native and carry created_at_bin attr.
+
+  - path: src/percell4/application/use_cases/apply_wavelet.py:106
+    category: creator_at_active_bin
+    bin_role: NN-upsample g_filtered to native; attr created_at_bin
+    addressed_by: U14
+    note: |
+      ApplyWavelet writes /phasor/<ch>/g_filtered. Input g_map is at the
+      bin where compute_phasor produced it. Either ApplyWavelet learns the
+      view_bin via kwarg (Principle 5: plans in, use-cases consume) and
+      upsamples before write, OR the on-disk g_filtered is stored at
+      bin and the read path mean_bins on read. Plan U14 chooses the
+      former (consistent with all other Creators).
+  - path: src/percell4/application/use_cases/apply_wavelet.py:110
+    category: creator_at_active_bin
+    bin_role: NN-upsample s_filtered to native
+    addressed_by: U14
+    note: Same as :106 but for s_filtered.
+  - path: src/percell4/application/use_cases/apply_wavelet.py:117
+    category: creator_at_active_bin
+    bin_role: NN-upsample lifetime_filtered to native
+    addressed_by: U14
+    note: Same as :106 but for lifetime_filtered.
+
+  - path: src/percell4/application/use_cases/compute_phasor.py:112
+    category: creator_at_active_bin
+    bin_role: NN-upsample g to native
+    addressed_by: U14
+    note: |
+      ComputePhasor writes /phasor/<ch>/g. Decay is read via U3 at
+      view_bin; g is therefore at the binned shape. NN-upsample before
+      write; carry created_at_bin attr.
+  - path: src/percell4/application/use_cases/compute_phasor.py:116
+    category: creator_at_active_bin
+    bin_role: NN-upsample s to native
+    addressed_by: U14
+    note: Same as :112 but for s.
+
+  - path: src/percell4/application/use_cases/compute_lifetime.py:73
+    category: creator_at_active_bin
+    bin_role: NN-upsample lifetime to native
+    addressed_by: U14
+    note: |
+      ComputeLifetime writes /phasor/<ch>/lifetime from g, s read via U3
+      at view_bin. NN-upsample to native; carry created_at_bin attr.
+
+  - path: src/percell4/gui/segmentation_panel.py:275
+    category: creator_at_active_bin
+    bin_role: NN-upsample labels; attr created_at_bin; name bin_suffix
+    addressed_by: U12
+    note: |
+      Manual labels write from the Segmentation panel. Active layer data
+      comes from the viewer at active_bin. Owned by U12.
+
+  - path: src/percell4/gui/segmentation_panel.py:740
+    category: creator_at_active_bin
+    bin_role: NN-upsample empty-labels stub; attr created_at_bin; name bin_suffix
+    addressed_by: U12
+    note: |
+      Create Empty Labels writes an int32 zero array sized to the active
+      layer's shape — which is the binned shape at active_bin > 1.
+      Upsample to native shape so the empty stub is correctly sized.
+
+  - path: src/percell4/gui/threshold_qc.py:734
+    category: creator_at_active_bin
+    bin_role: NN-upsample mask; attr created_at_bin; name bin_suffix
+    addressed_by: U12 (broaden)
+    note: |
+      Threshold-QC mask save. self._seg_labels comes from the caller at
+      whatever bin the viewer pulled. Must NN-upsample. Name via
+      bin_suffix.
+  - path: src/percell4/gui/threshold_qc.py:741
+    category: creator_at_active_bin
+    bin_role: tag DataFrame rows with bin_at_measure
+    addressed_by: U13
+    note: |
+      Threshold-QC writes /groups/<mask_name> — a per-group measurement
+      DataFrame keyed by the mask. Treat like measure_cells output: add
+      bin_at_measure column.
+  - path: src/percell4/gui/threshold_qc.py:757
+    category: creator_at_active_bin
+    bin_role: tag DataFrame rows with bin_at_measure
+    addressed_by: U13
+    note: |
+      Threshold-QC writes /measurements when write_measurements_to_store=True.
+      Same as measure_cells output: bin_at_measure column.
+
+  - path: src/percell4/interfaces/gui/main_window.py:1108
+    category: creator_at_active_bin
+    bin_role: NN-upsample mask; attr created_at_bin; name bin_suffix
+    addressed_by: U12 (broaden) + U14 (phasor mask naming)
+    note: |
+      "Apply Current Phasor as Mask" writes a binary_mask received from
+      phasor_plot._compute_visible_valid_2d at active_bin. Must
+      NN-upsample, carry attr, name via bin_suffix.
+  - path: src/percell4/interfaces/gui/main_window.py:1160
+    category: creator_at_active_bin
+    bin_role: NN-upsample mask; attr created_at_bin; name bin_suffix
+    addressed_by: U12 (broaden)
+    note: |
+      Phasor-mask-applied callback writes the binary from the phasor
+      compute. Same rule as :1108.
+
+  # -- Add-Layer dialog: post-creation imports of external files -----------
+  # These accept user-supplied TIFFs and validate against native_shape per
+  # U6. Source is at native (validated), so no upsample is needed — but
+  # they still write user-named layers. The user-supplied name is the
+  # canonical name (no auto _bin suffix), because the file is at native
+  # regardless of session.active_bin.
+  - path: src/percell4/gui/add_layer_dialog.py:635
+    category: creator_at_native
+    bin_role: name as supplied by user; assert source shape matches native
+    addressed_by: U6 (size-match validation)
+    note: |
+      Manual labels import from TIFF. The TIFF is at whatever resolution
+      it's at; U6 already validates against native_shape. Once
+      validated, write at native with no transform and no _bin suffix —
+      this is "external native data," not a session-bin derivative.
+  - path: src/percell4/gui/add_layer_dialog.py:701
+    category: creator_at_native
+    bin_role: name as supplied; assert source matches native
+    addressed_by: U6
+    note: ROI labels import. Same rule as :635.
+  - path: src/percell4/gui/add_layer_dialog.py:730
+    category: creator_at_native
+    bin_role: assert source matches native
+    addressed_by: U6
+    note: 2D /intensity write for an imported single-channel TIFF.
+  - path: src/percell4/gui/add_layer_dialog.py:741
+    category: creator_at_native
+    bin_role: assert source matches native
+    addressed_by: U6
+    note: 3D /intensity write for an imported multi-channel TIFF.
+  - path: src/percell4/gui/add_layer_dialog.py:751
+    category: creator_at_native
+    bin_role: name as supplied; assert source matches native
+    addressed_by: U6
+    note: Labels write from a different Add-Layer code path.
+  - path: src/percell4/gui/add_layer_dialog.py:757
+    category: creator_at_native
+    bin_role: name as supplied; assert source matches native
+    addressed_by: U6
+    note: Mask write from Add-Layer.
+  - path: src/percell4/gui/add_layer_dialog.py:1620
+    category: creator_at_native
+    bin_role: assert source matches native
+    addressed_by: U6
+    note: Generic /intensity rewrite path (channel additions).
+
+  # -- Batch workflows (no Session, always k=1) ----------------------------
+  - path: src/percell4/workflows/phases.py:203
+    category: batch_workflow_k1
+    bin_role: always native; name "cellpose_qc" stays
+    addressed_by: U12 (note in plan, no code change)
+    note: |
+      seg-QC inside single-cell batch runner writes hardcoded
+      "cellpose_qc". No Session in scope; always at k=1. Document the
+      exception explicitly in the U12 verification.
+  - path: src/percell4/workflows/phases.py:365
+    category: batch_workflow_k1
+    bin_role: always native
+    addressed_by: U13 (note in plan)
+    note: Round threshold mask write in batch workflow.
+  - path: src/percell4/workflows/phases.py:378
+    category: batch_workflow_k1
+    bin_role: always native; DataFrame has no bin_at_measure
+    addressed_by: U13 (note in plan)
+    note: Per-round /groups/<round> DataFrame in batch workflow.
+
+  - path: src/percell4/gui/workflows/single_cell/seg_qc.py:548
+    category: batch_workflow_k1
+    bin_role: always native; name "cellpose_qc" stays
+    addressed_by: U12 (note in plan, no code change)
+    note: |
+      Single-cell seg-QC final write. Same as workflows/phases.py:203:
+      runs in batch context, no Session, always k=1.
+
+  # -- import_phasor_npz: external import, validated against native --------
+  - path: src/percell4/application/use_cases/import_phasor_npz.py:132
+    category: creator_at_native
+    addressed_by: U6 (size-match validation pattern)
+    note: |
+      External phasor npz import — /phasor/<ch>/g write. Validates
+      shape against native_shape on the way in; once validated, writes
+      at native with no transform.
+  - path: src/percell4/application/use_cases/import_phasor_npz.py:137
+    category: creator_at_native
+    addressed_by: U6
+    note: /phasor/<ch>/s write.
+  - path: src/percell4/application/use_cases/import_phasor_npz.py:145
+    category: creator_at_native
+    addressed_by: U6
+    note: /phasor/<ch>/g_filtered write.
+  - path: src/percell4/application/use_cases/import_phasor_npz.py:150
+    category: creator_at_native
+    addressed_by: U6
+    note: /phasor/<ch>/s_filtered write.
+  - path: src/percell4/application/use_cases/import_phasor_npz.py:156
+    category: creator_at_native
+    addressed_by: U6
+    note: /phasor/<ch>/lifetime_filtered write.
+
+  # -- Other writers (data_panel split-on-delete) --------------------------
+  - path: src/percell4/interfaces/gui/task_panels/data_panel.py:430
+    category: creator_at_native
+    note: |
+      Channel-deletion path rewrites /intensity after dropping a slice.
+      Input is the existing /intensity read at native (no view_bin
+      passed). Output stays at native. No bin-suffix or attr required.
+
+  # -- run_phasor_gmm: GMM mask save in main_window/phasor_plot path -------
+  # The GMM masks ultimately flow through the same write_mask paths above
+  # (main_window:1108/1160). The use case itself does not call write_mask
+  # directly — it returns masks; the caller writes them. No separate audit
+  # entry needed.
+
+# ============================================================================
+# Phase 6 coverage map
+# ============================================================================
+# U12 (Segmentation + general mask Creators) addresses:
+#   - segment_cells.py:104                 (Cellpose finalize)
+#   - segmentation_panel.py:275, :740      (manual labels, empty labels)
+#   - accept_threshold.py:67               (threshold-tab mask)
+#   - threshold_qc.py:734                  (threshold-QC mask)
+#   - main_window.py:1108, :1160           (phasor-derived mask saves)
+#
+# U13 (Measurement + DataFrame Creators) addresses:
+#   - measure_cells.py:97                  (cell measurements)
+#   - analyze_particles.py:79              (particle measurements)
+#   - threshold_qc.py:741, :757            (group + measurement DataFrames)
+#
+# U14 (Phasor / FLIM derived-array Creators) addresses:
+#   - compute_phasor.py:112, :116          (g, s)
+#   - apply_wavelet.py:106, :110, :117     (g/s/lifetime_filtered)
+#   - compute_lifetime.py:73               (lifetime)
+#
+# Batch-workflow exceptions (always k=1, documented in plan):
+#   - workflows/phases.py:203, :365, :378
+#   - gui/workflows/single_cell/seg_qc.py:548
+#
+# Import-time creators (size-matched at validation, no transform):
+#   - importer.py:421, :425, :429, :434, :507  (compress)
+#   - add_layer_dialog.py:635, :701, :730, :741, :751, :757, :1620  (Add-Layer)
+#   - import_phasor_npz.py:132, :137, :145, :150, :156  (npz)
+#
+# Data-panel rewrite paths (always native):
+#   - data_panel.py:430                    (intensity channel drop)
