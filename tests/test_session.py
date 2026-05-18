@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from percell4.application.session import Event, Session
 from percell4.domain.dataset import DatasetHandle
@@ -569,3 +570,98 @@ class TestSessionRefreshResourceLists:
         session.refresh_resource_lists(channel_names=["c1"])
         # mask_names unchanged
         assert session.dataset.metadata["mask_names"] == ["original"]
+
+
+class TestSessionActiveBin:
+    """View-bin (k) as a Session field (U4)."""
+
+    def test_initial_active_bin_is_one(self):
+        session = Session()
+        assert session.active_bin == 1
+
+    def test_set_active_bin_emits_event(self):
+        session = Session()
+        events = []
+        session.subscribe(Event.ACTIVE_BIN_CHANGED, lambda: events.append(1))
+        session.set_active_bin(3)
+        assert events == [1]
+        assert session.active_bin == 3
+
+    def test_same_bin_no_event(self):
+        session = Session()
+        session.set_active_bin(3)
+        events = []
+        session.subscribe(Event.ACTIVE_BIN_CHANGED, lambda: events.append(1))
+        session.set_active_bin(3)
+        assert events == []
+
+    def test_set_active_bin_min_value(self):
+        session = Session()
+        session.set_active_bin(1)
+        assert session.active_bin == 1
+
+    def test_set_active_bin_max_value(self):
+        session = Session()
+        session.set_active_bin(16)
+        assert session.active_bin == 16
+
+    def test_set_active_bin_rejects_zero(self):
+        session = Session()
+        with pytest.raises(ValueError):
+            session.set_active_bin(0)
+
+    def test_set_active_bin_rejects_negative(self):
+        session = Session()
+        with pytest.raises(ValueError):
+            session.set_active_bin(-1)
+
+    def test_set_active_bin_rejects_above_sixteen(self):
+        session = Session()
+        with pytest.raises(ValueError):
+            session.set_active_bin(17)
+
+    def test_set_dataset_resets_bin_to_one(self):
+        session = Session()
+        session.set_active_bin(3)
+        events = []
+        session.subscribe(Event.ACTIVE_BIN_CHANGED, lambda: events.append(1))
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5"))
+        assert session.active_bin == 1
+        assert events == [1]  # transition from 3 to 1 fires the event
+
+    def test_set_dataset_does_not_emit_bin_when_already_one(self):
+        session = Session()
+        # active_bin is 1 by default
+        events = []
+        session.subscribe(Event.ACTIVE_BIN_CHANGED, lambda: events.append(1))
+        session.set_dataset(DatasetHandle(path="/tmp/x.h5"))
+        assert events == []  # 1 -> 1 is no-op
+
+    def test_clear_resets_bin_to_one(self):
+        session = Session()
+        session.set_active_bin(3)
+        session.clear()
+        assert session.active_bin == 1
+
+
+class TestStateChangeBridge:
+    """CellDataModel re-emits ACTIVE_BIN_CHANGED as StateChange(bin=True)."""
+
+    def test_cell_data_model_emits_state_change_bin(self):
+        from percell4.model import CellDataModel, StateChange
+
+        session = Session()
+        model = CellDataModel(session=session)
+        received: list[StateChange] = []
+        model.state_changed.connect(received.append)
+
+        session.set_active_bin(3)
+
+        # At least one StateChange with bin=True was emitted.
+        bin_changes = [c for c in received if c.bin]
+        assert len(bin_changes) == 1
+        # Other flags off on this particular change.
+        assert not bin_changes[0].data
+        assert not bin_changes[0].selection
+        assert not bin_changes[0].segmentation
+
