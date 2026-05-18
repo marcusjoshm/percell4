@@ -2139,8 +2139,11 @@ class PhasorPlotWindow(QMainWindow):
             return
 
         try:
+            # Session view bin propagates through the cache load so the
+            # hydrated g/s arrive at the binned shape the phasor plot
+            # should display after a bin toggle (U14 caller-wiring fix).
             cached = LoadCachedPhasor(self._get_repo(), self._session).execute(
-                active_channel,
+                active_channel, view_bin=self._session.active_bin,
             )
         except (NoCachedPhasorError, NoDatasetError):
             # Clear prior channel's display so the user sees the new

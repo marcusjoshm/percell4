@@ -286,8 +286,12 @@ class FlimPanel(QWidget):
                 )
 
                 repo = self._get_repo()
+                # Session view bin propagates through the cache load so
+                # cached g/s and decay-derived intensity arrive at the
+                # binned shape the phasor plot expects to display.
+                active_bin = self.data_model.session.active_bin
                 cached = LoadCachedPhasor(repo, self.data_model.session).execute(
-                    active_channel,
+                    active_channel, view_bin=active_bin,
                 )
             except NoCachedPhasorError:
                 pass  # Fall through to compute
@@ -323,7 +327,10 @@ class FlimPanel(QWidget):
 
             repo = self._get_repo()
             uc = ComputePhasor(repo, self.data_model.session)
-            result = uc.execute(channel=active_channel, harmonic=harmonic)
+            active_bin = self.data_model.session.active_bin
+            result = uc.execute(
+                channel=active_channel, harmonic=harmonic, view_bin=active_bin,
+            )
         except ValueError as e:
             self._show_status(str(e))
             return
@@ -346,7 +353,9 @@ class FlimPanel(QWidget):
             # values are correct.
             try:
                 repo = self._get_repo()
-                decay = repo.read_array(handle, f"decay/{active_channel}")
+                decay = repo.read_array(
+                    handle, f"decay/{active_channel}", view_bin=active_bin,
+                )
                 phasor_intensity = decay.sum(axis=-1).astype(np.float32)
             except KeyError:
                 phasor_intensity = None
@@ -393,8 +402,9 @@ class FlimPanel(QWidget):
                 )
 
                 repo = self._get_repo()
+                active_bin = self.data_model.session.active_bin
                 cached = LoadCachedPhasor(repo, self.data_model.session).execute(
-                    active_channel,
+                    active_channel, view_bin=active_bin,
                 )
             except NoCachedPhasorError:
                 pass  # No raw phasor either — fall through to compute (will fail in apply_wavelet with a clear ValueError)
@@ -433,7 +443,12 @@ class FlimPanel(QWidget):
 
             repo = self._get_repo()
             uc = ApplyWavelet(repo, self.data_model.session)
-            result = uc.execute(channel=active_channel, filter_level=filter_level)
+            active_bin = self.data_model.session.active_bin
+            result = uc.execute(
+                channel=active_channel,
+                filter_level=filter_level,
+                view_bin=active_bin,
+            )
         except ImportError:
             QApplication.restoreOverrideCursor()
             self._show_status(
@@ -503,7 +518,8 @@ class FlimPanel(QWidget):
 
             repo = self._get_repo()
             uc = ComputeLifetime(repo, self.data_model.session)
-            result = uc.execute(channel=active_channel)
+            active_bin = self.data_model.session.active_bin
+            result = uc.execute(channel=active_channel, view_bin=active_bin)
         except ValueError as e:
             self._show_status(str(e))
             return
@@ -667,6 +683,10 @@ class FlimPanel(QWidget):
             mask_filter_active=phasor_win._mask_filter_check.isChecked(),
             use_filtered_gs=phasor_win._filtered_check.isChecked(),
             harmonic=int(phasor_win._harmonic_combo.currentText()),
+            # Capture session.active_bin at worker-construction (race-safe
+            # per the U12 capture pattern) so a mid-flight bin toggle
+            # cannot alter the resolution of an in-flight GMM result.
+            view_bin=self.data_model.session.active_bin,
         )
 
         # Lazy import — keeps the use case's transitive sklearn import out

@@ -190,3 +190,57 @@ def test_no_h5py_imports_in_use_case():
     src = Path(mod.__file__).read_text()
     assert "import h5py" not in src
     assert "from h5py" not in src
+
+
+# ── view_bin forwarding (post-U14 caller-wiring fix) ─────────
+
+
+class _RecordingRepo:
+    """Repo that records every (path, view_bin) read so a test can
+    assert the use case forwards view_bin to every store read."""
+
+    def __init__(self):
+        self.arrays: dict[str, np.ndarray] = {}
+        self.reads: list[tuple[str, int]] = []
+
+    def read_array(self, handle, path, view_bin=1):
+        self.reads.append((path, view_bin))
+        if path not in self.arrays:
+            raise KeyError(path)
+        return self.arrays[path]
+
+
+def test_load_cached_phasor_forwards_view_bin_to_every_read(session):
+    """Each of the 5 reads (g, s, g_filtered, s_filtered, decay/<ch>)
+    receives the caller's view_bin so the store dispatch downsamples
+    them at the active bin. Pre-fix this missed every read."""
+    repo = _RecordingRepo()
+    repo.arrays["phasor/ch0/g"] = np.zeros((8, 8), dtype=np.float32)
+    repo.arrays["phasor/ch0/s"] = np.zeros((8, 8), dtype=np.float32)
+    repo.arrays["phasor/ch0/g_filtered"] = np.zeros((8, 8), dtype=np.float32)
+    repo.arrays["phasor/ch0/s_filtered"] = np.zeros((8, 8), dtype=np.float32)
+    repo.arrays["decay/ch0"] = np.zeros((8, 8, 4), dtype=np.float32)
+
+    LoadCachedPhasor(repo, session).execute("ch0", view_bin=3)
+
+    # Every read must have view_bin == 3.
+    assert repo.reads, "no reads recorded"
+    for path, vb in repo.reads:
+        assert vb == 3, f"read of {path} used view_bin={vb}, expected 3"
+    # Every expected path was read.
+    paths = {p for p, _ in repo.reads}
+    assert "phasor/ch0/g" in paths
+    assert "phasor/ch0/s" in paths
+    assert "phasor/ch0/g_filtered" in paths
+    assert "phasor/ch0/s_filtered" in paths
+    assert "decay/ch0" in paths
+
+
+def test_load_cached_phasor_default_view_bin_is_one(session):
+    """Backward-compat: omitting view_bin reads at k=1."""
+    repo = _RecordingRepo()
+    repo.arrays["phasor/ch0/g"] = np.zeros((8, 8), dtype=np.float32)
+    repo.arrays["phasor/ch0/s"] = np.zeros((8, 8), dtype=np.float32)
+
+    LoadCachedPhasor(repo, session).execute("ch0")
+    assert all(vb == 1 for _, vb in repo.reads)
