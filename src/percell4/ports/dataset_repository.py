@@ -57,8 +57,18 @@ class DatasetRepository(Protocol):
         """
         ...
 
-    def write_labels(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
-        """Write a segmentation label array."""
+    def write_labels(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        data: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> None:
+        """Write a segmentation label array.
+
+        ``attrs`` (optional) are stamped onto the stored dataset.
+        Phase-6 Creators use this to record ``created_at_bin``.
+        """
         ...
 
     def list_labels(self, handle: DatasetHandle) -> list[str]:
@@ -79,8 +89,18 @@ class DatasetRepository(Protocol):
         """
         ...
 
-    def write_mask(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
-        """Write a mask array."""
+    def write_mask(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        data: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> None:
+        """Write a mask array.
+
+        ``attrs`` (optional) are stamped onto the stored dataset.
+        Phase-6 Creators use this to record ``created_at_bin``.
+        """
         ...
 
     def list_masks(self, handle: DatasetHandle) -> list[str]:

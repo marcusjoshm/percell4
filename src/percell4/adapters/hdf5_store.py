@@ -126,8 +126,14 @@ class Hdf5DatasetRepository:
     ) -> NDArray[np.int32]:
         return self._store(handle).read_labels(name, view_bin=view_bin)
 
-    def write_labels(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
-        self._store(handle).write_labels(name, data)
+    def write_labels(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        data: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> None:
+        self._store(handle).write_labels(name, data, attrs=attrs)
 
     def list_labels(self, handle: DatasetHandle) -> list[str]:
         return self._store(handle).list_labels()
@@ -139,8 +145,14 @@ class Hdf5DatasetRepository:
     ) -> NDArray[np.uint8]:
         return self._store(handle).read_mask(name, view_bin=view_bin)
 
-    def write_mask(self, handle: DatasetHandle, name: str, data: NDArray) -> None:
-        self._store(handle).write_mask(name, data)
+    def write_mask(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        data: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> None:
+        self._store(handle).write_mask(name, data, attrs=attrs)
 
     def list_masks(self, handle: DatasetHandle) -> list[str]:
         return self._store(handle).list_masks()

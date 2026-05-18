@@ -388,17 +388,27 @@ class DatasetStore:
 
     # ── Convenience: labels ───────────────────────────────────
 
-    def write_labels(self, name: str, array: NDArray) -> int:
+    def write_labels(
+        self,
+        name: str,
+        array: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> int:
         """Write a segmentation label array at /labels/<name>.
 
         Enforces int32 dtype. Returns element count.
+
+        ``attrs`` (optional) are merged onto the canonical ``{"dims":
+        ["H", "W"]}`` so Phase-6 Creators can stamp ``created_at_bin``
+        without bypassing the chokepoint.
         """
         if array.ndim != 2:
             raise ValueError(f"Labels must be 2D, got {array.ndim}D")
         array = array.astype(np.int32, copy=False)
-        return self.write_array(
-            f"labels/{name}", array, attrs={"dims": ["H", "W"]}
-        )
+        merged_attrs: dict[str, Any] = {"dims": ["H", "W"]}
+        if attrs:
+            merged_attrs.update(attrs)
+        return self.write_array(f"labels/{name}", array, attrs=merged_attrs)
 
     def read_labels(self, name: str, view_bin: int = 1) -> NDArray[np.int32]:
         """Read a segmentation label array from /labels/<name>.
@@ -414,20 +424,30 @@ class DatasetStore:
 
     # ── Convenience: masks ────────────────────────────────────
 
-    def write_mask(self, name: str, array: NDArray) -> int:
+    def write_mask(
+        self,
+        name: str,
+        array: NDArray,
+        attrs: dict[str, Any] | None = None,
+    ) -> int:
         """Write a mask (binary or multi-label) at /masks/<name>.
 
         Enforces uint8 dtype. Values 0-255 supported:
         - Binary: 0=outside, 1=inside
         - Multi-label: 0=outside, 1..N=ROI labels
         Returns element count.
+
+        ``attrs`` (optional) are merged onto the canonical ``{"dims":
+        ["H", "W"]}`` so Phase-6 Creators can stamp ``created_at_bin``
+        and any provenance keys without bypassing the chokepoint.
         """
         if array.ndim != 2:
             raise ValueError(f"Mask must be 2D, got {array.ndim}D")
         array = array.astype(np.uint8, copy=False)
-        return self.write_array(
-            f"masks/{name}", array, attrs={"dims": ["H", "W"]}
-        )
+        merged_attrs: dict[str, Any] = {"dims": ["H", "W"]}
+        if attrs:
+            merged_attrs.update(attrs)
+        return self.write_array(f"masks/{name}", array, attrs=merged_attrs)
 
     def read_mask(self, name: str, view_bin: int = 1) -> NDArray[np.uint8]:
         """Read a mask from /masks/<name>.

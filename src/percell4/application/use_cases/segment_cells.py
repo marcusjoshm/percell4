@@ -76,6 +76,7 @@ class SegmentCells:
         min_area: int = 15,
         remove_edge_cells: bool = True,
         name: str | None = None,
+        view_bin: int = 1,
     ) -> SegmentationResult:
         """Post-process masks, write to store, update session.
 
@@ -84,7 +85,18 @@ class SegmentCells:
         otherwise the historical auto-derived ``f"cellpose_{n_cells}"``
         name is used so non-GUI callers (workflow runners, tests) keep
         working unchanged.
+
+        ``view_bin`` is the bin captured at worker start (Phase 6
+        capture-by-value-on-worker-construction pattern). When > 1, the
+        labels coming in are at the binned shape; we nearest-neighbor
+        upsample to native_shape before write so every stored array
+        stays canonical (dataset-wide-binning storage invariant) and we
+        stamp ``created_at_bin = view_bin`` on the dataset so the
+        DataPanel layer-list annotation knows.
         """
+        from percell4.domain.io.view_bin import nn_upsample_2d
+        from percell4.gui._bin_suffix import bin_suffix
+
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
@@ -98,10 +110,34 @@ class SegmentCells:
         labels = relabel_sequential(labels)
         n_cells = int(labels.max())
 
-        seg_name = name if name is not None else f"cellpose_{n_cells}"
+        # Default name picks up bin_suffix(); explicit ``name`` from the
+        # GUI is assumed to already be the user's final choice (the
+        # prompt seeded it through bin_suffix at U5).
+        if name is None:
+            seg_name = bin_suffix(f"cellpose_{n_cells}", view_bin)
+        else:
+            seg_name = name
+
+        # Upsample to native before write so on-disk shape matches every
+        # other layer in this .h5.
+        attrs: dict | None = None
+        if view_bin > 1:
+            metadata = self._repo.read_metadata(handle)
+            native = metadata.get("native_shape")
+            if native is None:
+                raise NoDatasetError(
+                    "Cannot write a binned segmentation: "
+                    "/metadata.native_shape is missing. Re-compress the "
+                    "dataset to populate it."
+                )
+            target = (int(native[0]), int(native[1]))
+            labels = nn_upsample_2d(labels, view_bin, target_hw=target).astype(
+                np.int32, copy=False
+            )
+            attrs = {"created_at_bin": int(view_bin)}
 
         # Store-before-viewer: write to HDF5 first
-        self._repo.write_labels(handle, seg_name, labels)
+        self._repo.write_labels(handle, seg_name, labels, attrs=attrs)
         # Refresh inventory before auto-selecting so subscribers re-list
         # the combos before they look up the just-written name.
         mask_set = set(self._repo.list_masks(handle))
