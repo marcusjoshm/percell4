@@ -69,6 +69,9 @@ class LauncherWindow(QMainWindow):
         # Holds the currently-running workflow runner to prevent GC of
         # the QObject. Cleared in _on_workflow_event when the run finishes.
         self._active_workflow_runner = None
+        # Holds the active dilute phase mask workflow panel (interactive
+        # single-dataset workflow). Cleared in _on_dilute_workflow_finished.
+        self._active_dilute_workflow_panel = None
 
         # Unified model state change handler
         self.data_model.state_changed.connect(self._on_state_changed)
@@ -344,6 +347,19 @@ class LauncherWindow(QMainWindow):
         )
         layout.addWidget(self._btn_single_cell_workflow)
 
+        self._btn_dilute_phase_workflow = QPushButton(
+            "Dilute phase mask generation"
+        )
+        self._btn_dilute_phase_workflow.setToolTip(
+            "Interactive single-dataset workflow: iterate Grouped "
+            "Threshold + dilation + NaN-subtract on the active channel; "
+            "save one final mask of the in-cell dilute phase."
+        )
+        self._btn_dilute_phase_workflow.clicked.connect(
+            self._on_open_dilute_phase_workflow
+        )
+        layout.addWidget(self._btn_dilute_phase_workflow)
+
         layout.addStretch()
         return panel
 
@@ -455,6 +471,85 @@ class LauncherWindow(QMainWindow):
                 f"The workflow runner raised an exception:\n\n{e}",
             )
             self._active_workflow_runner = None
+
+    def _on_open_dilute_phase_workflow(self) -> None:
+        """Open the dilute phase mask generation panel.
+
+        Interactive single-dataset workflow (not generator-driven like
+        the multi-dataset single_cell runner). The panel owns the
+        :class:`DilutePhaseMaskController` state machine; we just gate
+        re-entry via ``is_workflow_locked``, hold a strong reference so
+        the panel + controller don't GC mid-flight, and unlock on
+        Done / Cancel / error.
+        """
+        if self.is_workflow_locked:
+            self.statusBar().showMessage(
+                "A workflow is already running — finish or cancel it first."
+            )
+            return
+
+        session = self.get_session()
+        handle = session.dataset if session is not None else None
+        if handle is None:
+            self.statusBar().showMessage(
+                "Open a dataset before launching the dilute phase workflow."
+            )
+            return
+
+        viewer_win = self.get_viewer_window()
+        store = getattr(self, "_current_store", None)
+        if store is None or viewer_win is None:
+            self.statusBar().showMessage(
+                "Dilute phase workflow requires an open dataset and viewer."
+            )
+            return
+
+        from percell4.gui.workflows.dilute_phase.panel import (
+            DilutePhaseMaskPanel,
+        )
+
+        try:
+            panel = DilutePhaseMaskPanel(
+                parent=self,
+                store=store,
+                data_model=self.get_data_model(),
+                session=session,
+                viewer_win=viewer_win,
+                get_active_seg_labels=self._get_active_seg_labels,
+                handle=handle,
+            )
+        except Exception as e:
+            logger.exception("failed to construct DilutePhaseMaskPanel")
+            QMessageBox.warning(
+                self,
+                "Dilute phase workflow error",
+                f"Could not open the dilute phase panel:\n\n{e}",
+            )
+            return
+
+        self._active_dilute_workflow_panel = panel
+        panel.workflow_done.connect(self._on_dilute_workflow_finished)
+        panel.workflow_cancelled.connect(self._on_dilute_workflow_finished)
+        panel.workflow_error.connect(self._on_dilute_workflow_error)
+
+        self.set_workflow_locked(True)
+        panel.show()
+
+    def _on_dilute_workflow_finished(self) -> None:
+        """Common teardown for Done / Cancel / clean-error completion."""
+        self.set_workflow_locked(False)
+        panel = self._active_dilute_workflow_panel
+        self._active_dilute_workflow_panel = None
+        if panel is not None:
+            try:
+                panel.close()
+            except Exception:
+                logger.exception("dilute phase panel close raised")
+
+    def _on_dilute_workflow_error(self, msg: str) -> None:
+        """Surface a controller error in the status bar; release the
+        lock if the panel reports a hard failure."""
+        self.statusBar().showMessage(f"Dilute phase workflow: {msg}")
 
     def _on_workflow_event(self, event) -> None:
         """Slot for ``BaseWorkflowRunner.workflow_event`` signal.

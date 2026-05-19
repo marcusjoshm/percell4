@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -72,6 +72,12 @@ _DILATION_TOOLTIP = (
 
 class DilutePhaseMaskPanel(QWidget):
     """Setup + iteration UI for the dilute-phase mask generation workflow."""
+
+    # Re-emitted from the inner controller so the launcher can wire
+    # workflow_locked release without reaching into _controller.
+    workflow_done = Signal()
+    workflow_cancelled = Signal()
+    workflow_error = Signal(str)
 
     def __init__(
         self,
@@ -480,12 +486,15 @@ class DilutePhaseMaskPanel(QWidget):
         self._round_label.setText(
             f"Saved '{self._name_edit.text().strip()}' — workflow complete."
         )
+        self.workflow_done.emit()
 
     def _on_workflow_cancelled(self) -> None:
         self._round_label.setText("Cancelled.")
+        self.workflow_cancelled.emit()
 
     def _on_error(self, msg: str) -> None:
         self._status_label.setText(msg)
+        self.workflow_error.emit(msg)
 
     # ── Helpers ─────────────────────────────────────────────────
 
