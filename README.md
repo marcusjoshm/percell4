@@ -10,7 +10,7 @@ Single-cell microscopy analysis with FLIM support: segmentation (Cellpose), per-
 - **Per-cell measurements** across multiple channels and ROIs, configurable metrics
 - **Multi-window UI** — napari viewer, pyqtgraph scatter, cell table, and phasor plot, all synchronized through a single `CellDataModel`
 - **Batch TIFF compression** for moving microscope datasets into the `.h5` format
-- **Image and measurement export** (TIFF, CSV/XLSX) for downstream analysis
+- **Image and measurement export** (TIFF, CSV/XLSX) for downstream analysis, including a batch TIFF exporter on the command line
 
 **Requires Python 3.12 or newer.**
 
@@ -119,6 +119,33 @@ From a checkout without installing the package, you can also run:
 
 ```bash
 python main.py
+```
+
+## Batch TIFF export (CLI)
+
+Export dataset layers as TIFFs across one or more `.h5` files without opening the GUI. From the activated environment:
+
+```bash
+python -m percell4.interfaces.cli.batch_export INPUTS --output-dir DIR [options]
+```
+
+`INPUTS` is one or more `.h5` files, or directories containing `.h5` files (directories are globbed non-recursively for `*.h5`). For each dataset it writes one TIFF per intensity channel, per `/labels/<name>`, and per `/masks/<name>` into `--output-dir` using a flat `<h5_stem>_<layer>.tif` layout. Existing files with matching names are overwritten — point `--output-dir` at a fresh directory to preserve prior runs. Phasor, lifetime, and decay arrays are not exported.
+
+| Option | Purpose |
+|---|---|
+| `--output-dir DIR`, `-o DIR` | Target directory for the `.tif` outputs. Created if missing. **Required.** |
+| `--view-bin N` | Bin factor applied to every layer at read time. Default `1` (native resolution). `N > 1` produces downsampled TIFFs using the same lens the GUI applies for `view_bin=N` (`sum_bin_2d` for intensity, `mode_labels` for `/labels`, `majority_vote_mask` for `/masks`). `N` must be an integer `>= 1`. Output filenames are unchanged regardless of bin — track the value yourself (e.g. `--output-dir out_bin4/`) if you mix runs. |
+| `--quiet` | Suppress per-dataset error detail lines. Status headers and final totals still print. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+# Native-resolution export of two datasets
+python -m percell4.interfaces.cli.batch_export dish_1.h5 dish_2.h5 --output-dir /tmp/exports
+
+# Every .h5 in a directory, downsampled to match the GUI's view-bin 4 lens
+python -m percell4.interfaces.cli.batch_export /scratch/dishes/ --output-dir ~/exports/ --view-bin 4
 ```
 
 ## Install from a wheel
