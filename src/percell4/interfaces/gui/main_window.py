@@ -1406,7 +1406,7 @@ class LauncherWindow(QMainWindow):
 
         from percell4.gui.export_images_dialog import ExportImagesDialog
 
-        dlg = ExportImagesDialog(self, store)
+        dlg = ExportImagesDialog(self, store, session=self.data_model.session)
         if dlg.exec_() != ExportImagesDialog.Accepted:
             return
 
@@ -1414,6 +1414,7 @@ class LauncherWindow(QMainWindow):
         channels = dlg.selected_channels
         labels = dlg.selected_labels
         masks = dlg.selected_masks
+        view_bin = dlg.selected_view_bin()
         dlg.deleteLater()
 
         if output_folder is None:
@@ -1442,10 +1443,13 @@ class LauncherWindow(QMainWindow):
                     channels=channels,
                     labels=labels,
                     masks=masks,
+                    view_bin=view_bin,
                 ),
             )
+            bin_suffix = f" at k={view_bin}" if view_bin > 1 else ""
             self.statusBar().showMessage(
-                f"Exported {result.exported_count} image(s) to {result.output_folder}"
+                f"Exported {result.exported_count} image(s){bin_suffix} "
+                f"to {result.output_folder}"
             )
         except Exception as e:
             self.statusBar().showMessage(f"Export error: {e}")
