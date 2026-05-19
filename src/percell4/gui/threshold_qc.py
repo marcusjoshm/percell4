@@ -47,6 +47,15 @@ _LAYER_GROUP_IMAGE = "_group_image"
 _LAYER_THRESHOLD_PREVIEW = "_group_threshold_preview"
 _LAYER_ROI = "_group_roi"
 
+# Geometry persistence for the per-group QC window. Without this, every
+# call to _build_qc_dock creates a fresh QMainWindow that Qt re-centers,
+# forcing the user to re-position once per group. Same QSettings org /
+# app namespace as every other persisted-geometry window in the
+# codebase (SessionWindow, PhasorPlot, DataPlot, CellTable, ...).
+_QSETTINGS_ORG = "LeeLabPerCell4"
+_QSETTINGS_APP = "PerCell4"
+_QC_GEOMETRY_KEY = "threshold_qc/geometry"
+
 # File-local convenience alias — not exported. Source of truth lives in
 # percell4.config.viewer_presets.THRESHOLD_QC_GROUP_COLORS.
 _GROUP_COLORS = vp.THRESHOLD_QC_GROUP_COLORS
@@ -492,6 +501,7 @@ class ThresholdQCController(QObject):
 
     def _build_qc_dock(self, initial_value: float) -> None:
         """Build or rebuild the per-group QC as a separate window."""
+        from qtpy.QtCore import QSettings
         from qtpy.QtWidgets import QMainWindow
 
         self._remove_qc_dock()
@@ -502,6 +512,16 @@ class ThresholdQCController(QObject):
         win.setWindowTitle(f"Threshold QC — Group {gs.group_id} of {len(self._groups)}")
         win.setMinimumSize(350, 300)
         win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
+
+        # Restore the window's last-known position so group-to-group
+        # advance and workflow-to-workflow restart both honor the user's
+        # placement. Falls through to Qt's default centering when no
+        # geometry has been saved yet (first ever run).
+        geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(
+            _QC_GEOMETRY_KEY,
+        )
+        if geom:
+            win.restoreGeometry(geom)
 
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -876,6 +896,19 @@ class ThresholdQCController(QObject):
 
     def _remove_qc_dock(self) -> None:
         if hasattr(self, "_qc_window") and self._qc_window is not None:
+            # Persist geometry BEFORE close — saveGeometry on a closed
+            # QMainWindow returns whatever Qt last knew, which on some
+            # platforms is stale or empty.
+            try:
+                from qtpy.QtCore import QSettings
+
+                QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+                    _QC_GEOMETRY_KEY, self._qc_window.saveGeometry(),
+                )
+            except Exception:
+                logger.exception(
+                    "threshold_qc: failed to save QC window geometry"
+                )
             try:
                 self._qc_window.close()
             except Exception:
