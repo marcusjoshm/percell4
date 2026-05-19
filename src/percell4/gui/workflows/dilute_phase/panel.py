@@ -496,6 +496,28 @@ class DilutePhaseMaskPanel(QWidget):
         self._status_label.setText(msg)
         self.workflow_error.emit(msg)
 
+    def closeEvent(self, event) -> None:
+        """Treat OS-level window close (the X button) as Cancel.
+
+        Without this, the user could dismiss the panel window while a
+        controller is still alive, leaving the launcher
+        ``is_workflow_locked`` and the working buffer dangling. Routing
+        through ``controller.cancel()`` runs ``_teardown`` (removes
+        transient layers, drops state) and emits ``workflow_cancelled``,
+        which the launcher uses to release the lock.
+        """
+        if self._controller is not None:
+            try:
+                self._controller.cancel()
+            except Exception:
+                logger.exception("dilute panel cancel-on-close raised")
+        else:
+            # Pre-Start close — nothing to clean up, but still emit so
+            # the launcher releases the lock if it was acquired before
+            # Start ran.
+            self.workflow_cancelled.emit()
+        super().closeEvent(event)
+
     # ── Helpers ─────────────────────────────────────────────────
 
     def _update_round_label(self, round_n: int) -> None:

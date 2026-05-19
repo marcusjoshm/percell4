@@ -26,8 +26,11 @@ from qtpy.QtCore import QObject, Signal
 
 class _FakePanel(QObject):
     """Minimal stand-in for DilutePhaseMaskPanel exposing only the
-    three signals the launcher cares about + a `show()` and `close()`
-    no-op so the lifecycle wiring round-trips cleanly."""
+    three signals the launcher cares about + the window-setup and
+    lifecycle methods the launcher calls. Each is a no-op recorder so
+    the test can audit what the launcher invoked without dragging in
+    a real QWidget (which would need a qtbot fixture and a parent).
+    """
 
     workflow_done = Signal()
     workflow_cancelled = Signal()
@@ -37,12 +40,34 @@ class _FakePanel(QObject):
         super().__init__()
         self.show_called = False
         self.close_called = False
+        self.window_flag_set = False
+        self.title_set = None
+        self.resize_called_with = None
+        self.raise_called = False
+        self.activate_called = False
 
     def show(self) -> None:
         self.show_called = True
 
     def close(self) -> None:
         self.close_called = True
+
+    def setWindowFlag(self, flag, on=True) -> None:  # noqa: N802 - Qt API
+        # Record only — the real panel forwards to QWidget.setWindowFlag
+        # which makes the panel a top-level window.
+        self.window_flag_set = bool(on)
+
+    def setWindowTitle(self, title: str) -> None:  # noqa: N802 - Qt API
+        self.title_set = title
+
+    def resize(self, w: int, h: int) -> None:
+        self.resize_called_with = (w, h)
+
+    def raise_(self) -> None:
+        self.raise_called = True
+
+    def activateWindow(self) -> None:  # noqa: N802 - Qt API
+        self.activate_called = True
 
 
 @pytest.fixture
@@ -102,6 +127,36 @@ def test_click_opens_panel_and_locks(launcher):
     assert isinstance(launcher._active_dilute_workflow_panel, _FakePanel)
     assert launcher._active_dilute_workflow_panel.show_called
     assert launcher.is_workflow_locked
+
+
+def test_click_promotes_panel_to_top_level_window(launcher):
+    """Regression for the May-18 bug where panel.show() was called on a
+    parented QWidget without Qt.Window flag, so the panel rendered
+    invisibly inside the launcher's coordinate space (status bar said
+    'Workflow running...' but no window appeared).
+
+    The launcher must explicitly promote the panel to a top-level
+    window before show(): set Qt.Window flag, set a window title,
+    resize to a sensible default, then raise + activate so it surfaces
+    above any napari sub-windows."""
+    with patch(
+        "percell4.gui.workflows.dilute_phase.panel.DilutePhaseMaskPanel",
+        new=_FakePanel,
+    ):
+        launcher._on_open_dilute_phase_workflow()
+
+    panel = launcher._active_dilute_workflow_panel
+    assert panel.window_flag_set, (
+        "Launcher must call panel.setWindowFlag(Qt.Window, True) so "
+        "the parented QWidget renders as its own top-level window"
+    )
+    assert panel.title_set, "Launcher must set a window title"
+    assert panel.resize_called_with is not None, (
+        "Launcher must resize the panel to a sensible default; a "
+        "0x0 QWidget would still render invisibly"
+    )
+    assert panel.raise_called, "Launcher must raise() the panel"
+    assert panel.activate_called, "Launcher must activateWindow()"
 
 
 def test_workflow_done_unlocks_and_clears_panel(launcher):

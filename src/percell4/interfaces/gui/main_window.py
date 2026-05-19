@@ -532,8 +532,22 @@ class LauncherWindow(QMainWindow):
         panel.workflow_cancelled.connect(self._on_dilute_workflow_finished)
         panel.workflow_error.connect(self._on_dilute_workflow_error)
 
+        # The panel was constructed with parent=self for Qt-lifecycle
+        # ownership (closing the launcher closes the panel), but it
+        # must render as its own top-level window — without the
+        # Qt.Window flag, panel.show() would try to display the widget
+        # inside the launcher's central-widget area where nothing adds
+        # it to a layout, so the user sees the lock spinner but no
+        # window. Window title + reasonable starting size make it
+        # feel like a first-class workflow surface.
+        panel.setWindowFlag(Qt.Window, True)
+        panel.setWindowTitle("Dilute Phase Mask Generation")
+        panel.resize(520, 700)
+
         self.set_workflow_locked(True)
         panel.show()
+        panel.raise_()
+        panel.activateWindow()
 
     def _on_dilute_workflow_finished(self) -> None:
         """Common teardown for Done / Cancel / clean-error completion."""
