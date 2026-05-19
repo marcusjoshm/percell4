@@ -49,9 +49,14 @@ Thumbs.db
 .Rdata
 .Rproj.user/
 
-# Claude — ignore everything except the project-scoped settings.json
-.claude/*
-!.claude/settings.json
+# Local agent context — kept on disk but never pushed to the remote
+# repo. Agent-generated DOCUMENTATION (docs/solutions/, docs/audits/,
+# etc.) is still tracked; only the per-developer context-engineering
+# files are excluded here.
+.claude/
+.cursor/
+CLAUDE.md
+compound-engineering.local.md
 .worktrees
 
 # Agent / tool context caches
