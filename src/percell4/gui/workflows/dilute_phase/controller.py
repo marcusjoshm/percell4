@@ -245,6 +245,24 @@ class DilutePhaseMaskController(QObject):
             # Don't tear down — the panel may want to retry or cancel.
             return
 
+        # AcceptDiluteMask is the Qt-free Creator triplet — it persists
+        # the mask and updates the session, but adding the layer to
+        # napari is the caller's responsibility (mirrors how
+        # analysis_panel.py:506 calls viewer_win.add_mask after
+        # AcceptThreshold.execute). Without this call the mask shows up
+        # in the SessionWindow combo but the napari viewer stays empty
+        # until the user reloads the dataset.
+        try:
+            self._viewer_win.add_mask(
+                dilute_mask.astype(np.uint8),
+                name=self._final_mask_name,
+            )
+        except Exception:
+            logger.exception(
+                "dilute finish: viewer_win.add_mask raised — mask is "
+                "persisted but won't appear until dataset reload"
+            )
+
         self._teardown()
         self.workflow_done.emit()
 

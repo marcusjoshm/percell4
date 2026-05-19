@@ -583,3 +583,57 @@ def test_real_threshold_qc_in_no_persist_mode_feeds_callback(
     # ≥3 pixels apart).
     assert not controller._cumulative_condensed[seg_labels == 2].any()
     assert not controller._cumulative_condensed[seg_labels == 3].any()
+
+
+# ── Regression: viewer.add_mask called on Done ──────────────
+
+
+def test_finish_calls_viewer_add_mask_so_layer_appears_in_napari(
+    fake_viewer, fake_data_model, fake_session,
+    channel_image, seg_labels, locked_config, handle,
+    monkeypatch,
+):
+    """Bug 2026-05-18: after Done, the dilute mask landed in /masks/
+    and the SessionWindow combo refreshed, but the napari viewer never
+    got an add_mask() call — so the user saw the mask in the combo
+    but no labels layer until they reloaded the dataset.
+
+    The Creator triplet in AcceptDiluteMask (store.write_mask →
+    refresh_resource_lists → set_active_mask) is intentionally Qt-free
+    — viewer wiring is the caller's responsibility. The controller
+    must call ``viewer_win.add_mask(final_mask, name=name)`` after
+    the use case returns so the layer materializes immediately.
+    """
+    controller = _make_controller(
+        fake_viewer, fake_data_model, fake_session,
+        channel_image, seg_labels, locked_config, handle,
+    )
+
+    # Stub the use case's repo so finish() can run without disk I/O.
+    class _FakeRepo:
+        def write_mask(self, h, name, data, attrs=None):
+            pass
+
+        def list_masks(self, h):
+            return ["dilute_v1"]
+
+    monkeypatch.setattr(
+        "percell4.gui.workflows.dilute_phase.controller.Hdf5DatasetRepository",
+        _FakeRepo,
+    )
+
+    controller.finish()
+
+    assert fake_viewer.add_mask.call_count == 1, (
+        "Controller.finish() must call viewer_win.add_mask(mask, "
+        "name=final_mask_name) so the dilute mask appears in napari "
+        "without forcing the user to reload the dataset"
+    )
+    args, kwargs = fake_viewer.add_mask.call_args
+    # Mask name should be the final_mask_name from _make_controller.
+    name_arg = kwargs.get("name", args[1] if len(args) > 1 else None)
+    assert name_arg == "dilute_v1"
+    mask_arg = args[0] if args else kwargs.get("data")
+    # Mask should be 2D, dtype uint8 (per the add_mask wrapper contract).
+    assert mask_arg.ndim == 2
+    assert mask_arg.dtype == np.uint8
