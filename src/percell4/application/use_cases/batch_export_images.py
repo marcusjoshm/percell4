@@ -133,6 +133,7 @@ def batch_export_images(
     *,
     output_dir: Path,
     overwrite: bool = True,
+    view_bin: int = 1,
     progress_callback: Callable[[BatchExportItemResult], None] | None = None,
 ) -> BatchExportReport:
     """Export every channel, label, and mask from each ``.h5`` to TIFFs.
@@ -152,6 +153,12 @@ def batch_export_images(
             unused -- ``tifffile.imwrite`` always overwrites. Kept as
             a kwarg so a future ``--no-overwrite`` flag can be wired
             without changing the call shape.
+        view_bin: Bin factor applied to every layer at read time.
+            ``1`` (default) writes at native resolution -- the
+            established export contract. ``>1`` routes each layer
+            through the repository's view-bin lens (sum_bin_2d for
+            intensity, mode_labels for /labels, majority_vote_mask
+            for /masks), producing downsampled TIFFs.
         progress_callback: Invoked once per dataset after its
             :class:`BatchExportItemResult` is classified.
 
@@ -172,6 +179,7 @@ def batch_export_images(
             repo=repo,
             export_uc=export_uc,
             output_dir=output_dir,
+            view_bin=view_bin,
         )
         results.append(result)
         if progress_callback is not None:
@@ -186,6 +194,7 @@ def _process_one_dataset(
     repo: Hdf5DatasetRepository,
     export_uc: ExportImages,
     output_dir: Path,
+    view_bin: int = 1,
 ) -> BatchExportItemResult:
     """Export every layer of one dataset. Catches per-dataset failures."""
     try:
@@ -200,8 +209,10 @@ def _process_one_dataset(
     store = DatasetStore(h5_path)
 
     try:
-        # Read intensity shape via the store (read-only, no view_bin
-        # needed for the batch -- export always at native).
+        # Read intensity shape via h5py directly (bin-independent --
+        # we only need the channel-axis dimension to enumerate
+        # channel names; the actual export reads inside ExportImages
+        # honor the requested view_bin).
         import h5py
 
         with h5py.File(h5_path, "r") as f:
@@ -232,6 +243,7 @@ def _process_one_dataset(
         channels=channels,
         labels=labels,
         masks=masks,
+        view_bin=view_bin,
     )
 
     try:

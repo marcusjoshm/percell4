@@ -327,3 +327,81 @@ def test_report_aggregate_properties_sum_correctly(tmp_path: Path):
     # ok.h5 has 2 intensity channels (the _make_h5 default 3D shape),
     # so 2 TIFFs land. The other two datasets write none.
     assert report.total_files_written == 2
+
+
+# ── view_bin parameter ──────────────────────────────────────────────
+
+
+def test_default_view_bin_one_writes_native_shape(tmp_path: Path):
+    """R7: omitting view_bin keeps the native-resolution behavior.
+    A (2, 32, 32) intensity → two 32x32 TIFFs."""
+    out = tmp_path / "out"
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        intensity_shape=(2, 32, 32),
+        channel_names=["A", "B"],
+    )
+
+    batch_export_images([h5], output_dir=out)
+
+    a = tifffile.imread(out / "ds_A.tif")
+    b = tifffile.imread(out / "ds_B.tif")
+    assert a.shape == (32, 32)
+    assert b.shape == (32, 32)
+
+
+def test_view_bin_two_produces_half_shape_tiffs(tmp_path: Path):
+    """view_bin=2 on a (2, 32, 32) intensity → two 16x16 TIFFs."""
+    out = tmp_path / "out"
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        intensity_shape=(2, 32, 32),
+        channel_names=["A", "B"],
+    )
+
+    batch_export_images([h5], output_dir=out, view_bin=2)
+
+    a = tifffile.imread(out / "ds_A.tif")
+    b = tifffile.imread(out / "ds_B.tif")
+    assert a.shape == (16, 16)
+    assert b.shape == (16, 16)
+
+
+def test_view_bin_threads_to_labels_and_masks(tmp_path: Path):
+    """view_bin applies to /labels and /masks too, not just intensity."""
+    out = tmp_path / "out"
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        intensity_shape=(2, 32, 32),
+        channel_names=["A", "B"],
+        labels={"seg": np.zeros((32, 32), dtype=np.int32)},
+        masks={"threshold": np.zeros((32, 32), dtype=np.uint8)},
+    )
+
+    batch_export_images([h5], output_dir=out, view_bin=2)
+
+    seg = tifffile.imread(out / "ds_seg.tif")
+    mask = tifffile.imread(out / "ds_threshold.tif")
+    assert seg.shape == (16, 16)
+    assert mask.shape == (16, 16)
+
+
+def test_view_bin_per_dataset_isolation(tmp_path: Path):
+    """Per-dataset error isolation still works under view_bin > 1."""
+    out = tmp_path / "out"
+    h5_ok = _make_h5(
+        tmp_path / "ok.h5",
+        intensity_shape=(2, 32, 32),
+        channel_names=["ch0", "ch1"],
+    )
+    h5_missing = tmp_path / "missing.h5"
+
+    report = batch_export_images(
+        [h5_missing, h5_ok], output_dir=out, view_bin=2,
+    )
+
+    assert report.items[0].status == "failed"
+    assert report.items[1].status == "succeeded"
+    # Two TIFFs (ch0, ch1) at 16x16 from ok.h5.
+    assert report.total_files_written == 2
+    assert tifffile.imread(out / "ok_ch0.tif").shape == (16, 16)
