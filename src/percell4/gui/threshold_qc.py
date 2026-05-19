@@ -85,8 +85,13 @@ class ThresholdQCController(QObject):
         metric: str,
         sigma: float,
         mask_name: str,
-        on_complete: Callable[[bool, str], None] | None = None,
+        on_complete: (
+            Callable[[bool, str], None]
+            | Callable[[bool, str, NDArray | None], None]
+            | None
+        ) = None,
         write_measurements_to_store: bool = True,
+        persist_round_outputs: bool = True,
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -100,10 +105,31 @@ class ThresholdQCController(QObject):
         self._sigma = sigma
         self._mask_name = mask_name
         self._on_complete = on_complete
-        # When False, /masks/<name> and /groups/<name> are still written,
-        # but /measurements is left alone. Used by the batch workflow runner,
-        # which owns measurement persistence separately.
+
+        # Two independent persistence switches:
+        #   - persist_round_outputs=False suppresses the full /masks/<name>,
+        #     /groups/<name>, viewer.add_mask, refresh_resource_lists, and
+        #     set_active_mask chain. Used by the dilute-phase workflow, which
+        #     captures each round's accepted mask in memory and decides
+        #     whether to persist anything only at workflow-Done.
+        #   - write_measurements_to_store=False suppresses only the
+        #     /measurements write while still writing the per-round /masks/
+        #     and /groups/ artifacts. Used by the multi-dataset batch
+        #     runner, which owns /measurements in its own run folder. See
+        #     docs/solutions/tech-debt/threshold-qc-measurements-write-owned-by-controller.md
         self._write_measurements_to_store = write_measurements_to_store
+        self._persist_round_outputs = persist_round_outputs
+
+        if on_complete is not None:
+            import inspect
+            try:
+                self._on_complete_arity = len(
+                    inspect.signature(on_complete).parameters
+                )
+            except (TypeError, ValueError):
+                self._on_complete_arity = 2
+        else:
+            self._on_complete_arity = 0
 
         # Build group states
         self._groups: list[GroupState] = []
@@ -405,9 +431,13 @@ class ThresholdQCController(QObject):
             ),
         )
 
-        # Compute initial threshold
+        # Compute initial threshold. Filter NaN before passing to skimage
+        # threshold methods — they raise on non-finite input. NaN pixels are
+        # not part of the cell's measurable area for the round (they were
+        # subtracted by a prior dilute-phase round).
         from percell4.domain.measure.thresholding import THRESHOLD_METHODS
         pixels = self._group_image_buffer[group_cell_mask]
+        pixels = pixels[np.isfinite(pixels)]
         if len(pixels) > 0 and pixels.max() > 0:
             _, value = THRESHOLD_METHODS["otsu"](pixels)
         else:
@@ -605,6 +635,7 @@ class ThresholdQCController(QObject):
                 break
 
         source_pixels = self._group_image_buffer[pixels_mask]
+        source_pixels = source_pixels[np.isfinite(source_pixels)]
         if len(source_pixels) == 0 or source_pixels.max() == 0:
             return
 
@@ -621,15 +652,27 @@ class ThresholdQCController(QObject):
             y_min, y_max = rows.min(), rows.max() + 1
             x_min, x_max = cols.min(), cols.max() + 1
             crop = self._group_image_buffer[y_min:y_max, x_min:x_max]
-            mask_crop, value = THRESHOLD_METHODS["adaptive"](crop)
+            # Adaptive thresholding (skimage) requires finite input; replace
+            # NaN with 0 only for the adaptive computation. The post-compose
+            # `(image > value) & np.isfinite(image)` (below) keeps NaN pixels
+            # out of the final mask regardless.
+            crop_finite = np.where(np.isfinite(crop), crop, 0)
+            mask_crop, value = THRESHOLD_METHODS["adaptive"](crop_finite)
             # Build full preview from crop
             preview = np.zeros_like(group_cell_mask, dtype=np.uint8)
             preview[y_min:y_max, x_min:x_max] = mask_crop
             preview[~group_cell_mask] = 0
+            # Exclude NaN-region pixels from the adaptive preview.
+            finite_full = np.isfinite(self._group_image_buffer)
+            preview[~finite_full] = 0
         else:
             _, value = THRESHOLD_METHODS[method](source_pixels)
             preview = np.where(
-                group_cell_mask & (self._group_image_buffer > value), 1, 0
+                group_cell_mask
+                & (self._group_image_buffer > value)
+                & np.isfinite(self._group_image_buffer),
+                1,
+                0,
             ).astype(np.uint8)
 
         self._current_threshold = value
@@ -649,7 +692,9 @@ class ThresholdQCController(QObject):
             return
         group_cell_mask = self._current_group_mask
         preview = (
-            group_cell_mask & (self._group_image_buffer > value)
+            group_cell_mask
+            & (self._group_image_buffer > value)
+            & np.isfinite(self._group_image_buffer)
         )
         n_pos = int(preview.sum())
         n_total = int(group_cell_mask.sum())
@@ -674,15 +719,22 @@ class ThresholdQCController(QObject):
                 y_min, y_max = rows.min(), rows.max() + 1
                 x_min, x_max = cols.min(), cols.max() + 1
                 crop = self._group_image_buffer[y_min:y_max, x_min:x_max]
-                mask_crop, _ = THRESHOLD_METHODS["adaptive"](crop)
+                crop_finite = np.where(np.isfinite(crop), crop, 0)
+                mask_crop, _ = THRESHOLD_METHODS["adaptive"](crop_finite)
                 mask = np.zeros_like(group_cell_mask, dtype=np.uint8)
                 mask[y_min:y_max, x_min:x_max] = mask_crop
                 mask[~group_cell_mask] = 0
+                # Exclude NaN-region pixels from the accepted mask.
+                mask[~np.isfinite(self._group_image_buffer)] = 0
             else:
                 mask = np.zeros_like(group_cell_mask, dtype=np.uint8)
         else:
             mask = np.where(
-                group_cell_mask & (self._group_image_buffer > value), 1, 0
+                group_cell_mask
+                & (self._group_image_buffer > value)
+                & np.isfinite(self._group_image_buffer),
+                1,
+                0,
             ).astype(np.uint8)
 
         gs.mask = mask
@@ -720,7 +772,7 @@ class ThresholdQCController(QObject):
     # ── Finalization ──
 
     def _finalize(self) -> None:
-        """Combine masks and store results."""
+        """Combine masks and (optionally) store results."""
         self._cleanup_all()
 
         # Combine masks (in-place union)
@@ -729,50 +781,61 @@ class ThresholdQCController(QObject):
             if gs.mask is not None:
                 np.maximum(combined, gs.mask, out=combined)
 
-        # Save mask to HDF5
-        if self._store is not None:
-            self._store.write_mask(self._mask_name, combined)
-
-            # Save group mapping for persistence across re-measurement
-            import pandas as pd
-            col_name = f"group_{self._channel}_{self._metric}"
-            group_df = self._result.group_assignments.reset_index()
-            group_df.columns = ["label", col_name]
-            self._store.write_dataframe(f"/groups/{self._mask_name}", group_df)
-
-        # Add group column to DataFrame (only if the model has data with
-        # a 'label' column — in the batch workflow, the model may have been
-        # cleared at run start, so this is a no-op and that's fine).
-        col_name = f"group_{self._channel}_{self._metric}"
-        df = self._data_model.df
-        if df is not None and not df.empty and "label" in df.columns:
-            df = df.assign(
-                **{col_name: df["label"].map(self._result.group_assignments)}
-            )
-            self._data_model.set_measurements(df)
-
-            # Persist updated DataFrame (skipped by the batch workflow runner,
-            # which owns measurement persistence in its own run folder).
-            if self._store is not None and self._write_measurements_to_store:
-                self._store.write_dataframe("/measurements", df)
-
-        # Show final mask in viewer
-        viewer = self._viewer_win.viewer
-        if viewer is not None:
-            self._viewer_win.add_mask(combined, name=self._mask_name)
+        if self._persist_round_outputs:
+            # Save mask to HDF5
             if self._store is not None:
-                self._data_model.session.refresh_resource_lists(
-                    mask_names=self._store.list_masks(),
+                self._store.write_mask(self._mask_name, combined)
+
+                # Save group mapping for persistence across re-measurement
+                col_name = f"group_{self._channel}_{self._metric}"
+                group_df = self._result.group_assignments.reset_index()
+                group_df.columns = ["label", col_name]
+                self._store.write_dataframe(
+                    f"/groups/{self._mask_name}", group_df,
                 )
-            self._data_model.set_active_mask(self._mask_name)
+
+            # Add group column to DataFrame (only if the model has data with
+            # a 'label' column — in the batch workflow, the model may have been
+            # cleared at run start, so this is a no-op and that's fine).
+            col_name = f"group_{self._channel}_{self._metric}"
+            df = self._data_model.df
+            if df is not None and not df.empty and "label" in df.columns:
+                df = df.assign(
+                    **{col_name: df["label"].map(self._result.group_assignments)}
+                )
+                self._data_model.set_measurements(df)
+
+                # Persist updated DataFrame unless the caller owns
+                # /measurements (the multi-dataset workflow runner does).
+                if (
+                    self._store is not None
+                    and self._write_measurements_to_store
+                ):
+                    self._store.write_dataframe("/measurements", df)
+
+            # Show final mask in viewer
+            viewer = self._viewer_win.viewer
+            if viewer is not None:
+                self._viewer_win.add_mask(combined, name=self._mask_name)
+                if self._store is not None:
+                    self._data_model.session.refresh_resource_lists(
+                        mask_names=self._store.list_masks(),
+                    )
+                self._data_model.set_active_mask(self._mask_name)
 
         n_accepted = sum(1 for gs in self._groups if gs.status == GroupStatus.ACCEPTED)
         n_skipped = sum(1 for gs in self._groups if gs.status == GroupStatus.SKIPPED)
-        msg = (
-            f"Grouped thresholding complete: {n_accepted} accepted, "
-            f"{n_skipped} skipped. Mask saved as '{self._mask_name}'."
-        )
-        self._finish(True, msg)
+        if self._persist_round_outputs:
+            msg = (
+                f"Grouped thresholding complete: {n_accepted} accepted, "
+                f"{n_skipped} skipped. Mask saved as '{self._mask_name}'."
+            )
+        else:
+            msg = (
+                f"Round complete: {n_accepted} accepted, {n_skipped} skipped. "
+                f"Mask returned to caller; not persisted to /masks/."
+            )
+        self._finish(True, msg, combined)
 
     # ── Cleanup ──
 
@@ -819,7 +882,20 @@ class ThresholdQCController(QObject):
                 pass
             self._qc_window = None
 
-    def _finish(self, success: bool, msg: str) -> None:
+    def _finish(
+        self,
+        success: bool,
+        msg: str,
+        mask: NDArray | None = None,
+    ) -> None:
         logger.info(msg)
-        if self._on_complete is not None:
+        if self._on_complete is None:
+            return
+        # Backward compat: legacy callbacks are 2-arg (success, msg).
+        # New callbacks (e.g. the dilute-phase workflow) take a third
+        # mask argument so the no-persist round can hand back the
+        # accepted union without going through the store.
+        if self._on_complete_arity >= 3:
+            self._on_complete(success, msg, mask)
+        else:
             self._on_complete(success, msg)
