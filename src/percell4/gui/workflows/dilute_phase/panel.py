@@ -69,6 +69,14 @@ _DILATION_TOOLTIP = (
     " from the working buffer"
 )
 
+# Geometry persistence — same QSettings org / app namespace as every
+# other persisted-geometry window in the codebase (SessionWindow,
+# PhasorPlot, ThresholdQC, ...). Distinct key so moving the dilute
+# panel doesn't reposition the QC windows or vice versa.
+_QSETTINGS_ORG = "LeeLabPerCell4"
+_QSETTINGS_APP = "PerCell4"
+_GEOMETRY_KEY = "dilute_phase_panel/geometry"
+
 
 class DilutePhaseMaskPanel(QWidget):
     """Setup + iteration UI for the dilute-phase mask generation workflow."""
@@ -99,6 +107,12 @@ class DilutePhaseMaskPanel(QWidget):
 
         # Becomes the live U6 controller once Start fires.
         self._controller: DilutePhaseMaskController | None = None
+
+        # Flag for one-shot geometry restore in showEvent. The launcher
+        # calls panel.resize(520, 700) BEFORE show(), so restoring in
+        # __init__ would be overwritten by that resize. Restoring on
+        # first show overrides it when a saved geometry exists.
+        self._geometry_restored = False
 
         self._build_ui()
         self._wire_signals()
@@ -496,6 +510,27 @@ class DilutePhaseMaskPanel(QWidget):
         self._status_label.setText(msg)
         self.workflow_error.emit(msg)
 
+    def showEvent(self, event) -> None:
+        """Restore saved geometry on first show (after the launcher's
+        baseline ``resize(520, 700)`` has run). Subsequent shows do
+        nothing — Qt keeps the current geometry."""
+        super().showEvent(event)
+        if self._geometry_restored:
+            return
+        self._geometry_restored = True
+        try:
+            from qtpy.QtCore import QSettings
+
+            geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(
+                _GEOMETRY_KEY,
+            )
+            if geom:
+                self.restoreGeometry(geom)
+        except Exception:
+            logger.exception(
+                "dilute panel: failed to restore geometry"
+            )
+
     def closeEvent(self, event) -> None:
         """Treat OS-level window close (the X button) as Cancel.
 
@@ -505,7 +540,25 @@ class DilutePhaseMaskPanel(QWidget):
         through ``controller.cancel()`` runs ``_teardown`` (removes
         transient layers, drops state) and emits ``workflow_cancelled``,
         which the launcher uses to release the lock.
+
+        Also persists window geometry so the next open lands at the
+        user's last position.
         """
+        # Save geometry BEFORE running the cancel chain — same
+        # save-before-close discipline as the threshold_qc windows
+        # (saveGeometry on an already-closing widget can return stale
+        # data on some platforms).
+        try:
+            from qtpy.QtCore import QSettings
+
+            QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+                _GEOMETRY_KEY, self.saveGeometry(),
+            )
+        except Exception:
+            logger.exception(
+                "dilute panel: failed to save geometry"
+            )
+
         if self._controller is not None:
             try:
                 self._controller.cancel()
