@@ -14,14 +14,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from percell4.application.phasor_render import RenderOutcome
 from percell4.application.use_cases import batch_export_phasor as mod
 from percell4.application.use_cases.batch_export_phasor import (
     BatchPhasorExportReport,
     batch_export_phasor,
 )
-from percell4.application.phasor_render import RenderOutcome
 from percell4.store import DatasetStore
-
 
 # ── Fixture builders ────────────────────────────────────────────────────
 
@@ -116,7 +115,7 @@ def test_no_phasor_group_skipped_no_changes(tmp_path: Path) -> None:
     (item,) = report.items
     assert item.status == "skipped_no_changes"
     assert item.files_written == 0
-    assert "<dataset>" in item.skipped
+    assert "_dataset" in item.skipped
 
 
 def test_asymmetric_filtered_cache_records_structured_skip(
@@ -136,6 +135,84 @@ def test_asymmetric_filtered_cache_records_structured_skip(
     assert "ch0_filtered" in item.skipped
     assert "asymmetric" in item.skipped["ch0_filtered"]
     assert not (out / "ds_ch0_phasor_filtered.png").exists()
+
+
+def test_asymmetric_raw_cache_g_without_s_is_skipped(
+    tmp_path: Path,
+) -> None:
+    """phasor/ch0/g present, phasor/ch0/s absent -> channel skipped
+    (asymmetric raw cache), no PNG, no error."""
+    out = tmp_path / "out"
+    h5 = tmp_path / "ds.h5"
+    store = DatasetStore(h5)
+    store.create(metadata={})
+    g, _ = _gs()
+    store.write_array("phasor/ch0/g", g)  # no /s
+
+    report = batch_export_phasor([h5], output_dir=out)
+
+    (item,) = report.items
+    assert "ch0" in item.skipped
+    assert "asymmetric" in item.skipped["ch0"]
+    assert item.errors == {}
+    assert item.files_written == 0
+    assert not (out.exists() and any(out.iterdir()))
+
+
+def test_all_channels_error_is_failed_not_skipped(tmp_path: Path) -> None:
+    """Every channel hits a genuine error (stale decay) and zero files
+    written -> status 'failed' and total_failed counts it (not
+    'skipped_no_changes', which would undercount real failures)."""
+    out = tmp_path / "out"
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        channels={
+            "ch0": {"decay_shape": (4, 4, 16)},  # mismatch -> error
+            "ch1": {"decay_shape": (2, 2, 16)},  # mismatch -> error
+        },
+    )
+
+    report = batch_export_phasor([h5], output_dir=out)
+
+    (item,) = report.items
+    assert item.status == "failed"
+    assert set(item.errors) == {"ch0", "ch1"}
+    assert item.files_written == 0
+    assert report.total_failed == 1
+    assert report.total_skipped == 0
+
+
+def test_raw_render_failure_does_not_skip_filtered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1: a channel with filtered maps whose RAW render raises still
+    gets its filtered PNG written; the raw failure is recorded per
+    output, not as a whole-channel error."""
+    out = tmp_path / "out"
+    h5 = _make_h5(
+        tmp_path / "ds.h5", channels={"ch0": {"filtered": True}}
+    )
+
+    real = mod.render_phasor_png
+
+    def flaky(g, s, *, out_path, intensity=None, title=None):
+        if str(out_path).endswith("_ch0_phasor.png"):  # raw only
+            raise RuntimeError("raw boom")
+        return real(
+            g, s, out_path=out_path, intensity=intensity, title=title
+        )
+
+    monkeypatch.setattr(mod, "render_phasor_png", flaky)
+
+    report = batch_export_phasor([h5], output_dir=out)
+
+    (item,) = report.items
+    assert "ds_ch0_phasor.png" in item.errors
+    assert "raw boom" in item.errors["ds_ch0_phasor.png"]
+    # Filtered PNG still produced despite the raw failure.
+    assert (out / "ds_ch0_phasor_filtered.png").exists()
+    assert item.channels_exported == ("ds_ch0_phasor_filtered.png",)
+    assert item.status == "succeeded"
 
 
 def test_channel_without_decay_renders_unweighted(tmp_path: Path) -> None:
@@ -245,8 +322,10 @@ def test_renderer_exception_routed_to_errors(
     report = batch_export_phasor([h5], output_dir=out)
 
     (item,) = report.items
-    assert "ch0" in item.errors
-    assert "boom" in item.errors["ch0"]
+    # Render failures are keyed by the per-output filename (T1), not the
+    # bare channel — so raw vs filtered failures stay distinguishable.
+    assert "ds_ch0_phasor.png" in item.errors
+    assert "boom" in item.errors["ds_ch0_phasor.png"]
     # ch1 still exported despite ch0 raising.
     assert (out / "ds_ch1_phasor.png").exists()
     assert item.status == "succeeded"
@@ -269,7 +348,7 @@ def test_progress_callback_invoked_once_per_path(
 
     assert len(seen) == 2
     assert all(
-        type(x).__name__ == "BatchPhasorExportItemResult" for x in seen
+        isinstance(x, mod.BatchPhasorExportItemResult) for x in seen
     )
 
 

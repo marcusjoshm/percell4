@@ -172,6 +172,24 @@ def test_all_zero_g_returns_empty(tmp_path: Path) -> None:
     assert out.exists()
 
 
+def test_valid_pixels_but_all_zero_intensity_returns_empty(
+    tmp_path: Path,
+) -> None:
+    """A2/A1 regression: valid (finite, non-zero) g/s but all-zero
+    weights -> blank histogram -> must report RENDERED_EMPTY, not
+    RENDERED_WITH_DATA (the outcome is decided post-weighting)."""
+    g, s, _ = _cluster(0.5, 0.35)
+    zero_intensity = np.zeros(g.size, dtype=np.float32)
+    out = tmp_path / "p.png"
+
+    outcome = render_phasor_png(
+        g, s, out_path=out, intensity=zero_intensity
+    )
+
+    assert outcome is RenderOutcome.RENDERED_EMPTY
+    assert out.exists() and out.stat().st_size > 0
+
+
 def test_intensity_shape_mismatch_falls_back_unweighted(
     tmp_path: Path,
 ) -> None:

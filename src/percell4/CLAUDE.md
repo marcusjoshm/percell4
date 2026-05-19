@@ -44,7 +44,9 @@ push driven by `ViewerWindow._on_state_changed`.
   for batch workflows).
 - `application/` — use cases and `Session`. The session emits its own
   signals; `CellDataModel` bridges them onto the legacy `state_changed`
-  surface.
+  surface. `phasor_render.py` is a Qt-free headless phasor-plot PNG
+  renderer (matplotlib `Figure` + `FigureCanvasAgg`, no `pyplot`/no
+  global backend mutation) used by the `batch_export_phasor` use case.
 - `domain/` — Qt-free domain types and I/O ports.
 - `adapters/` — driven adapters (HDF5 store, napari viewer adapter).
 - `ports/` — port protocols consumed by use cases.

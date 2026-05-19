@@ -22,9 +22,13 @@ GUI-parity is *specified*, not merely "looks similar":
   independently; matplotlib ``imshow`` defaults to ``aspect="equal"``,
   which would squash the semicircle into an ellipse.
 
-No Qt, no napari: the matplotlib Agg backend is forced before any
-``pyplot`` import so importing this module never pulls a GUI toolkit
-(load-bearing for the batch CLI's no-Qt seam).
+No Qt, no napari, **no global backend mutation**: this module renders
+through :class:`matplotlib.figure.Figure` +
+:class:`~matplotlib.backends.backend_agg.FigureCanvasAgg` directly and
+never imports ``pyplot`` or calls ``matplotlib.use()``. That keeps it
+safe to import from any process — including a live GUI one — since it
+cannot switch a host's backend or tear down its figure stack as a
+side effect of import.
 """
 
 from __future__ import annotations
@@ -32,17 +36,12 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 
-import matplotlib
+import numpy as np
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from numpy.typing import NDArray
 
-matplotlib.use("Agg")  # before any pyplot import — no Qt backend
-
-import matplotlib.pyplot as plt  # noqa: E402 — must follow use("Agg")
-import numpy as np  # noqa: E402
-from numpy.typing import NDArray  # noqa: E402
-
-from percell4.domain.flim.phasor_display import (  # noqa: E402
-    compute_valid_phasor_pixels,
-)
+from percell4.domain.flim.phasor_display import compute_valid_phasor_pixels
 
 # GUI parity constants — keep in lockstep with phasor_plot._refresh_histogram.
 _G_RANGE: tuple[float, float] = (-0.005, 1.005)
@@ -54,8 +53,9 @@ _CMAP: str = "nipy_spectral"
 class RenderOutcome(Enum):
     """Outcome of a single :func:`render_phasor_png` call.
 
-    ``RENDERED_EMPTY`` means the PNG was written but contained no valid
-    phasor pixels (all NaN/zero after the validity filter). The caller
+    ``RENDERED_EMPTY`` means the PNG was written but the histogram
+    carried no signal — either no valid (finite, non-zero) pixels, or
+    all weights were zero (e.g. an all-zero decay channel). The caller
     is expected to consume this — it is not an advisory the caller may
     ignore (see ``batch_export_phasor``).
     """
@@ -91,9 +91,10 @@ def render_phasor_png(
         title: Optional plot title.
 
     Returns:
-        :class:`RenderOutcome` — ``RENDERED_WITH_DATA`` when at least
-        one valid pixel was binned, ``RENDERED_EMPTY`` otherwise (the
-        PNG is still written in both cases).
+        :class:`RenderOutcome` — ``RENDERED_WITH_DATA`` when the
+        weighted histogram carries any signal, ``RENDERED_EMPTY`` when
+        it does not (no valid pixels, or all weights zero). The PNG is
+        written in both cases.
 
     Raises:
         ValueError: if ``g`` and ``s`` have mismatched shapes.
@@ -120,12 +121,6 @@ def render_phasor_png(
     else:
         weights = np.ones(g_valid.size)
 
-    outcome = (
-        RenderOutcome.RENDERED_WITH_DATA
-        if g_valid.size > 0
-        else RenderOutcome.RENDERED_EMPTY
-    )
-
     hist, _g_edges, _s_edges = np.histogram2d(
         g_valid,
         s_valid,
@@ -133,42 +128,53 @@ def render_phasor_png(
         range=[_G_RANGE, _S_RANGE],
         weights=weights,
     )
+
+    # Outcome is decided from the *post-weight* histogram, not the valid
+    # pixel count: an all-zero-weight render (e.g. a zeroed decay
+    # channel) has valid pixels but no signal and must report empty so
+    # the caller is not silently handed a blank plot.
+    outcome = (
+        RenderOutcome.RENDERED_WITH_DATA
+        if hist.sum() > 0
+        else RenderOutcome.RENDERED_EMPTY
+    )
+
     hist_display = np.log1p(hist)
 
-    fig, ax = plt.subplots()
-    try:
-        # hist is (n_g, n_s); transpose so axis0 -> y (S), axis1 -> x
-        # (G), matching the GUI's col-major ImageItem result.
-        ax.imshow(
-            hist_display.T,
-            origin="lower",
-            extent=[_G_RANGE[0], _G_RANGE[1], _S_RANGE[0], _S_RANGE[1]],
-            cmap=_CMAP,
-            aspect="auto",  # GUI scales G/S independently — not "equal"
-        )
+    fig = Figure()
+    FigureCanvasAgg(fig)
+    ax = fig.subplots()
 
-        # Universal semicircle (parametrization mirrors the GUI).
-        theta = np.linspace(0, np.pi, 200)
-        ax.plot(
-            0.5 + 0.5 * np.cos(theta),
-            0.5 * np.sin(theta),
-            color="white",
-            linewidth=1.5,
-        )
+    # hist is (n_g, n_s); transpose so axis0 -> y (S), axis1 -> x (G),
+    # matching the GUI's col-major ImageItem result.
+    ax.imshow(
+        hist_display.T,
+        origin="lower",
+        extent=[_G_RANGE[0], _G_RANGE[1], _S_RANGE[0], _S_RANGE[1]],
+        cmap=_CMAP,
+        aspect="auto",  # GUI scales G/S independently — not "equal"
+    )
 
-        ax.set_xlim(*_G_RANGE)
-        ax.set_ylim(*_S_RANGE)
-        ax.set_xlabel("G")
-        ax.set_ylabel("S")
-        if title is not None:
-            ax.set_title(title)
+    # Universal semicircle (parametrization mirrors the GUI).
+    theta = np.linspace(0, np.pi, 200)
+    ax.plot(
+        0.5 + 0.5 * np.cos(theta),
+        0.5 * np.sin(theta),
+        color="white",
+        linewidth=1.5,
+    )
 
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out_path)
-    finally:
-        # Close unconditionally — Agg figures accumulate across a large
-        # batch otherwise.
-        plt.close(fig)
+    ax.set_xlim(*_G_RANGE)
+    ax.set_ylim(*_S_RANGE)
+    ax.set_xlabel("G")
+    ax.set_ylabel("S")
+    if title is not None:
+        ax.set_title(title)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    # No pyplot global state to release: the Figure and its Agg canvas
+    # are local and garbage-collected with this frame.
 
     return outcome

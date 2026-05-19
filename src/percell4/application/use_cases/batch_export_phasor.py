@@ -176,8 +176,42 @@ def _process_one_dataset(
 ) -> BatchPhasorExportItemResult:
     """Export every cached phasor of one dataset. Isolates failures."""
     store = DatasetStore(h5_path)
+    stem = h5_path.stem
+    exported: list[str] = []
+    skipped: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    rendered_empty: list[str] = []
+
     try:
-        channels = store.list_groups("phasor")
+        # One shared h5py handle (+ chunk cache) for the whole dataset
+        # instead of an open/close per array read across every channel.
+        with store.open_read():
+            channels = store.list_groups("phasor")
+
+            if not channels:
+                return BatchPhasorExportItemResult(
+                    h5_path=h5_path,
+                    status="skipped_no_changes",
+                    skipped={
+                        "_dataset": "no /phasor groups (run batch_phasor)"
+                    },
+                )
+
+            for ch in sorted(channels):
+                try:
+                    _export_channel(
+                        store=store,
+                        ch=ch,
+                        stem=stem,
+                        output_dir=output_dir,
+                        exported=exported,
+                        skipped=skipped,
+                        errors=errors,
+                        rendered_empty=rendered_empty,
+                    )
+                except Exception as exc:  # noqa: BLE001 — per-channel isolation
+                    errors[ch] = f"unexpected: {exc}"
+                    continue
     except Exception as exc:  # noqa: BLE001 — orchestrator never raises per-item
         return BatchPhasorExportItemResult(
             h5_path=h5_path,
@@ -185,41 +219,15 @@ def _process_one_dataset(
             error=f"open/enumerate failed: {exc}",
         )
 
-    if not channels:
-        return BatchPhasorExportItemResult(
-            h5_path=h5_path,
-            status="skipped_no_changes",
-            skipped={"<dataset>": "no /phasor groups (run batch_phasor)"},
-        )
-
-    stem = h5_path.stem
-    files_written = 0
-    exported: list[str] = []
-    skipped: dict[str, str] = {}
-    errors: dict[str, str] = {}
-    rendered_empty: list[str] = []
-
-    for ch in sorted(channels):
-        try:
-            _export_channel(
-                store=store,
-                ch=ch,
-                stem=stem,
-                output_dir=output_dir,
-                exported=exported,
-                skipped=skipped,
-                errors=errors,
-                rendered_empty=rendered_empty,
-            )
-        except Exception as exc:  # noqa: BLE001 — per-channel isolation
-            errors[ch] = f"unexpected: {exc}"
-            continue
-
     files_written = len(exported)
     if files_written > 0:
         status = "succeeded"
+    elif errors:
+        # Channels existed and at least one produced a genuine error
+        # with no output anywhere — that is a failure, not a no-op.
+        status = "failed"
     else:
-        # Channels existed but produced nothing (all skipped/errored).
+        # Channels existed but were all skipped (no usable phasor).
         status = "skipped_no_changes"
 
     return BatchPhasorExportItemResult(
@@ -292,22 +300,39 @@ def _export_channel(
             )
             return
 
-    raw_name = f"{stem}_{ch}_phasor.png"
-    outcome = render_phasor_png(
-        g, s, out_path=output_dir / raw_name, intensity=intensity
+    # Render raw and filtered as independent outputs: a failure of one
+    # must not skip the other (the channel's two PNGs are unrelated
+    # render calls). Per-output errors are keyed by the output name so
+    # they are distinguishable from a whole-channel error.
+    _render_output(
+        f"{stem}_{ch}_phasor.png", g, s, intensity,
+        output_dir, exported, errors, rendered_empty,
     )
-    exported.append(raw_name)
-    if outcome is RenderOutcome.RENDERED_EMPTY:
-        rendered_empty.append(raw_name)
-
     if g_filt is not None and s_filt is not None:
-        filt_name = f"{stem}_{ch}_phasor_filtered.png"
-        outcome = render_phasor_png(
-            g_filt,
-            s_filt,
-            out_path=output_dir / filt_name,
-            intensity=intensity,
+        _render_output(
+            f"{stem}_{ch}_phasor_filtered.png", g_filt, s_filt, intensity,
+            output_dir, exported, errors, rendered_empty,
         )
-        exported.append(filt_name)
-        if outcome is RenderOutcome.RENDERED_EMPTY:
-            rendered_empty.append(filt_name)
+
+
+def _render_output(
+    name: str,
+    g: np.ndarray,
+    s: np.ndarray,
+    intensity: np.ndarray | None,
+    output_dir: Path,
+    exported: list[str],
+    errors: dict[str, str],
+    rendered_empty: list[str],
+) -> None:
+    """Render one PNG, isolating its failure from the channel's others."""
+    try:
+        outcome = render_phasor_png(
+            g, s, out_path=output_dir / name, intensity=intensity
+        )
+    except Exception as exc:  # noqa: BLE001 — per-output isolation
+        errors[name] = f"render failed: {exc}"
+        return
+    exported.append(name)
+    if outcome is RenderOutcome.RENDERED_EMPTY:
+        rendered_empty.append(name)
