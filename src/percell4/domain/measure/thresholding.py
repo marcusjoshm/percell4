@@ -83,10 +83,18 @@ def apply_gaussian_smoothing(
     """Apply Gaussian smoothing if sigma is set.
 
     Returns smoothed float32 copy, or original image unchanged if
-    sigma is None or <= 0.
+    sigma is None or <= 0. Internally dispatches to a NaN-safe
+    normalized-convolution variant when the input contains any NaN
+    (e.g. the dilute-phase workflow's working buffer); otherwise
+    falls through to scipy's gaussian_filter for bit-identical
+    legacy behavior.
     """
     if sigma is None or sigma <= 0:
         return image
+    if np.isnan(image).any():
+        from percell4.domain.image.gaussian import nan_safe_gaussian_filter
+
+        return nan_safe_gaussian_filter(image, sigma=sigma)
     from scipy.ndimage import gaussian_filter
 
     return gaussian_filter(image.astype(np.float32), sigma=sigma)
