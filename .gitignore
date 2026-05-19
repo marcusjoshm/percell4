@@ -52,11 +52,12 @@ Thumbs.db
 # Local agent context — kept on disk but never pushed to the remote
 # repo. Agent-generated DOCUMENTATION (docs/solutions/, docs/audits/,
 # etc.) is still tracked; only the per-developer context-engineering
-# files are excluded here.
+# files and tool hooks are excluded here.
 .claude/
 .cursor/
 CLAUDE.md
 compound-engineering.local.md
+scripts/claude_code_hooks/
 .worktrees
 
 # Agent / tool context caches
