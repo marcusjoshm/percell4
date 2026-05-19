@@ -55,6 +55,7 @@ _LAYER_ROI = "_group_roi"
 _QSETTINGS_ORG = "LeeLabPerCell4"
 _QSETTINGS_APP = "PerCell4"
 _QC_GEOMETRY_KEY = "threshold_qc/geometry"
+_PREVIEW_GEOMETRY_KEY = "threshold_qc_preview/geometry"
 
 # File-local convenience alias — not exported. Source of truth lives in
 # percell4.config.viewer_presets.THRESHOLD_QC_GROUP_COLORS.
@@ -224,12 +225,24 @@ class ThresholdQCController(QObject):
 
     def _build_preview_dock(self) -> None:
         """Build the group preview as a separate window with histogram and buttons."""
+        from qtpy.QtCore import QSettings
         from qtpy.QtWidgets import QMainWindow
 
         win = QMainWindow()
         win.setWindowTitle(f"Group Preview — {self._mask_name}")
         win.setMinimumSize(500, 450)
         win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
+
+        # Same geometry-persistence pattern as the per-group QC window.
+        # The preview opens once per workflow run, so the relevant
+        # scenario is run-to-run rather than group-to-group, but the
+        # mechanism is identical. Distinct settings key keeps the two
+        # windows independent.
+        geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(
+            _PREVIEW_GEOMETRY_KEY,
+        )
+        if geom:
+            win.restoreGeometry(geom)
 
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -888,6 +901,19 @@ class ThresholdQCController(QObject):
 
     def _close_preview_window(self) -> None:
         if hasattr(self, "_preview_window") and self._preview_window is not None:
+            # Persist geometry BEFORE close — see _remove_qc_dock for
+            # the platform-flakiness rationale.
+            try:
+                from qtpy.QtCore import QSettings
+
+                QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+                    _PREVIEW_GEOMETRY_KEY,
+                    self._preview_window.saveGeometry(),
+                )
+            except Exception:
+                logger.exception(
+                    "threshold_qc: failed to save preview window geometry"
+                )
             try:
                 self._preview_window.close()
             except Exception:

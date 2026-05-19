@@ -205,3 +205,103 @@ def test_first_build_uses_default_when_no_saved_geometry(
     g = win.geometry()
     assert g.width() >= 350, "Falls back to the declared minimum width"
     assert g.height() >= 300, "Falls back to the declared minimum height"
+
+
+# ── Group Preview window geometry persistence ───────────────────────
+
+
+def test_preview_window_geometry_persists_across_workflow_runs(
+    qtbot, isolated_settings, fake_viewer,
+):
+    """Same QSettings persistence for the Group Preview window. The
+    preview opens once per workflow run (before per-group QC begins),
+    so the relevant scenario is run-to-run, not group-to-group."""
+    # First run: open the preview, move it, close it.
+    controller_a = _make_controller(fake_viewer)
+    controller_a._build_preview_dock()
+    win_a = controller_a._preview_window
+    qtbot.addWidget(win_a)
+    qtbot.waitExposed(win_a)
+
+    win_a.setGeometry(180, 70, 540, 470)
+    qtbot.wait(50)
+    controller_a._close_preview_window()
+    qtbot.wait(50)
+
+    # Second run: brand-new controller — the preview opens at the
+    # remembered position.
+    controller_b = _make_controller(fake_viewer)
+    controller_b._build_preview_dock()
+    win_b = controller_b._preview_window
+    qtbot.addWidget(win_b)
+    qtbot.waitExposed(win_b)
+
+    g = win_b.geometry()
+    assert abs(g.x() - 180) <= 10, (
+        f"Preview window should re-open at the remembered x=180, "
+        f"got x={g.x()}"
+    )
+    assert abs(g.y() - 70) <= 10
+    assert abs(g.width() - 540) <= 10
+    assert abs(g.height() - 470) <= 10
+
+
+def test_preview_first_build_uses_default_when_no_saved_geometry(
+    qtbot, isolated_settings, fake_viewer,
+):
+    """First-ever preview build with no saved geometry → falls back
+    to the declared minimum size (500x450)."""
+    controller = _make_controller(fake_viewer)
+    controller._build_preview_dock()
+    win = controller._preview_window
+    qtbot.addWidget(win)
+    qtbot.waitExposed(win)
+
+    g = win.geometry()
+    assert g.width() >= 500
+    assert g.height() >= 450
+
+
+def test_qc_and_preview_use_distinct_settings_keys(
+    qtbot, isolated_settings, fake_viewer,
+):
+    """The two windows must persist under different keys so moving
+    one doesn't reposition the other on the next open. Verifies the
+    contract via QSettings.allKeys() rather than guessing internals."""
+    from qtpy.QtCore import QSettings
+
+    controller = _make_controller(fake_viewer)
+
+    # Open + move + close the preview window first.
+    controller._build_preview_dock()
+    pw = controller._preview_window
+    qtbot.addWidget(pw)
+    qtbot.waitExposed(pw)
+    pw.setGeometry(100, 50, 510, 460)
+    qtbot.wait(50)
+    controller._close_preview_window()
+
+    # Open + move + close the QC window with a clearly different
+    # geometry.
+    controller._current_index = 0
+    controller._current_group_mask = controller._seg_labels == 1
+    controller._group_image_buffer = controller._channel_image.copy()
+    controller._build_qc_dock(initial_value=0.0)
+    qw = controller._qc_window
+    qtbot.addWidget(qw)
+    qtbot.waitExposed(qw)
+    qw.setGeometry(400, 200, 360, 320)
+    qtbot.wait(50)
+    controller._remove_qc_dock()
+
+    # Both keys should exist; they must be distinct.
+    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    keys = set(qs.allKeys())
+    assert "threshold_qc/geometry" in keys
+    assert "threshold_qc_preview/geometry" in keys
+
+    # Sanity: the QSettings values for the two keys are NOT equal
+    # (different geometries went in).
+    qc_geom = qs.value("threshold_qc/geometry")
+    preview_geom = qs.value("threshold_qc_preview/geometry")
+    assert qc_geom != preview_geom
