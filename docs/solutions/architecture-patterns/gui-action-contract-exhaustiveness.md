@@ -79,6 +79,7 @@ Every hit must trace to a Selector or Creator, never an Action. The audit produc
 
 ## Related
 
+- `docs/solutions/architecture-patterns/creator-contract-four-step-sequence-2026-05-18.md` — companion: the **Creator** class's four-step contract (store, viewer, refresh, set_active) and the Qt-free-use-case / Qt-aware-caller split. Read after this doc for the per-class detail.
 - `docs/audits/gui-element-classification.yaml` — full inventory.
 - `docs/audits/session-mutation-graph.md` — every writer of the five session fields.
 - `docs/audits/subscriber-rebind-matrix.md` — every consumer of session-derived state.
