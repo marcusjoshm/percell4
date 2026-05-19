@@ -17,6 +17,13 @@ class ExportRequest:
     channels: list[tuple[str, int]]  # (channel_name, channel_index)
     labels: list[str]  # segmentation label names
     masks: list[str]  # mask names
+    # Bin factor applied at read time. ``view_bin=1`` (default) writes
+    # TIFFs at native resolution — the established export contract. A
+    # value > 1 routes each layer through the repository's view-bin
+    # lens (sum_bin_2d for intensity, mode_labels for /labels,
+    # majority_vote_mask for /masks), producing downsampled TIFFs at
+    # the GUI's current viewing resolution.
+    view_bin: int = 1
 
 
 @dataclass
@@ -46,7 +53,9 @@ class ExportImages:
 
         # Export intensity channels
         if request.channels:
-            intensity = self._repo.read_array(handle, "intensity")
+            intensity = self._repo.read_array(
+                handle, "intensity", view_bin=request.view_bin,
+            )
             for name, idx in request.channels:
                 if intensity.ndim == 3:
                     data = intensity[idx]
@@ -58,14 +67,18 @@ class ExportImages:
 
         # Export segmentation labels
         for name in request.labels:
-            data = self._repo.read_labels(handle, name)
+            data = self._repo.read_labels(
+                handle, name, view_bin=request.view_bin,
+            )
             out_path = request.output_folder / f"{request.dataset_name}_{name}.tif"
             tifffile.imwrite(str(out_path), data)
             exported += 1
 
         # Export masks
         for name in request.masks:
-            data = self._repo.read_mask(handle, name)
+            data = self._repo.read_mask(
+                handle, name, view_bin=request.view_bin,
+            )
             out_path = request.output_folder / f"{request.dataset_name}_{name}.tif"
             tifffile.imwrite(str(out_path), data)
             exported += 1
