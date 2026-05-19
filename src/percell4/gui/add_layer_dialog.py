@@ -752,12 +752,24 @@ class AddLayerDialog(QDialog):
             mask_set = set(self._store.list_masks())
             seg_names = [n for n in self._store.list_labels() if n not in mask_set]
             self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
+            # Auto-select the new segmentation. Without this, downstream
+            # panels (e.g., Grouped Thresholding) read
+            # data_model.active_segmentation, get the empty-string
+            # coercion of None, and fail with "Segmentation '' not found
+            # in viewer". Matches the convention used by the ROI import
+            # tab (line 641), the Cellpose .npy import tab (line 707),
+            # and segment_cells.finalize.
+            self._data_model.set_active_segmentation(name)
         elif layer_type == "Mask":
             binary = (array > 0).astype(np.uint8)
             self._store.write_mask(name, binary)
             self._data_model.session.refresh_resource_lists(
                 mask_names=self._store.list_masks(),
             )
+            # Auto-select the new mask. Latent twin of the segmentation
+            # bug above -- a downstream panel reading session.active_mask
+            # would hit the same empty-string trap.
+            self._data_model.set_active_mask(name)
 
     def _refresh_viewer(self) -> None:
         """Refresh the viewer and data tab from the store."""
