@@ -103,6 +103,7 @@ class DilutePhaseMaskController(QObject):
         final_mask_name: str,
         handle: "DatasetHandle",
         channel: str = "",
+        session_free: bool = False,
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -120,6 +121,12 @@ class DilutePhaseMaskController(QObject):
         # /groups/ write doesn't happen, so a missing/empty value is
         # tolerable — but pass the real name when available.
         self._channel = channel
+        # When True, finish() skips session.refresh_resource_lists +
+        # session.set_active_mask. Used by the end-to-end workflow's
+        # Phase 5 queue where the launcher session must NOT be mutated
+        # per-dataset. The store write + viewer_win.add_mask still
+        # fire so the operator gets per-dataset visual confirmation.
+        self._session_free = bool(session_free)
 
         # Round-scoped state.
         self._working_buffer: NDArray[np.float32] = (
@@ -238,6 +245,7 @@ class DilutePhaseMaskController(QObject):
                 handle=self._handle,
                 mask_name=self._final_mask_name,
                 mask=dilute_mask,
+                batch_mode=self._session_free,
             )
         except Exception as exc:
             logger.exception("dilute finish: AcceptDiluteMask raised")

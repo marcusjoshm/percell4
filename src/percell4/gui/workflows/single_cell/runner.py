@@ -250,6 +250,24 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                         ),
                     )
 
+        # ── Phase 5: Dilute-phase mask (optional, INTERACTIVE) ──
+        # Runs only when the user enabled dilute generation in the
+        # config dialog AND we're in interactive mode. In headless
+        # tests we skip Phase 5 entirely — the dilute UI is inherently
+        # user-driven (adaptive per-dataset round count) and has no
+        # meaningful auto-mode equivalent.
+        if cfg.dilute_settings is not None and self._interactive_qc:
+            active = datasets_without_failures(self._working_entries, meta)
+            for idx, entry in enumerate(active):
+                yield PhaseRequest(
+                    kind=PhaseKind.INTERACTIVE,
+                    phase_name="dilute",
+                    dataset_index=idx,
+                    dataset_total=len(active),
+                    dataset_name=entry.name,
+                    handler=self._make_dilute_handler(entry, idx, len(active)),
+                )
+
         # ── Phase 7: measurement ──────────────────────────
         active = datasets_without_failures(self._working_entries, meta)
         for idx, entry in enumerate(active):
@@ -531,6 +549,105 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             self._active_qc_controller = controller
             self._log(phase="seg_qc", dataset=entry.name, event="opened")
             controller.start()
+
+        return handler
+
+    def _make_dilute_handler(self, entry, queue_index: int, queue_total: int):
+        """Factory for the Phase 5 INTERACTIVE dilute-phase handler.
+
+        Per the U5 plan, the handler instantiates a
+        :class:`DilutePhaseQueueEntry` that wraps the existing
+        :class:`DilutePhaseMaskController` in session-free mode.
+        Per-dataset round counts are persisted into
+        ``RunMetadata.per_dataset_dilute_round_counts`` so the
+        ``summary_datasets.csv`` builder can populate ``n_rounds_dilute``.
+        """
+        def handler(on_complete):
+            from percell4.gui.workflows.single_cell.dilute_queue import (
+                DilutePhaseQueueEntry,
+            )
+
+            if self._host is None:
+                on_complete(
+                    PhaseResult(success=False, message="no host for dilute queue")
+                )
+                return
+            if self._config.dilute_settings is None:
+                on_complete(
+                    PhaseResult(
+                        success=True,
+                        message="dilute disabled (no dilute_settings)",
+                    )
+                )
+                return
+
+            viewer_win = self._host.get_viewer_window()
+            data_model = self._host.get_data_model()
+            session = self._host.get_session()
+
+            def _wrapped_complete(result: PhaseResult) -> None:
+                # Explicit cancelled flag (new in U5) — the substring
+                # sniff stays as a backward-compat fallback for handlers
+                # that haven't migrated yet.
+                if result.cancelled or (
+                    not result.success and "cancel" in result.message.lower()
+                ):
+                    self.request_cancel()
+                if not result.success and not result.cancelled:
+                    record_failure(
+                        self._metadata,
+                        dataset_name=entry.name,
+                        phase_name="dilute",
+                        failure=DatasetFailure.MEASUREMENT_ERROR,
+                        message=result.message,
+                    )
+                self._log(
+                    phase="dilute",
+                    dataset=entry.name,
+                    event="done" if result.success else "failed",
+                    message=result.message,
+                )
+                on_complete(result)
+
+            def _record_round_count(name: str, n: int) -> None:
+                """Callback from the queue entry at workflow_done."""
+                self._metadata.per_dataset_dilute_round_counts[name] = n
+
+            try:
+                qentry = DilutePhaseQueueEntry(
+                    entry=entry,
+                    dilute_settings=self._config.dilute_settings,
+                    viewer_win=viewer_win,
+                    data_model=data_model,
+                    session=session,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    on_complete=_wrapped_complete,
+                    on_round_complete=_record_round_count,
+                )
+            except Exception as e:
+                logger.exception("dilute queue entry init failed")
+                _wrapped_complete(
+                    PhaseResult(
+                        success=False,
+                        message=f"dilute queue init failed: {e}",
+                    )
+                )
+                return
+
+            # Strong-ref slot to defeat Qt GC mid-flight.
+            self._active_qc_controller = qentry
+            self._log(phase="dilute", dataset=entry.name, event="opened")
+            try:
+                qentry.start()
+            except Exception as e:
+                logger.exception("dilute queue entry start raised")
+                _wrapped_complete(
+                    PhaseResult(
+                        success=False,
+                        message=f"dilute queue start failed: {e}",
+                    )
+                )
 
         return handler
 
