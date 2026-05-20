@@ -95,15 +95,33 @@ def compress_one(
     z_project_method = plan.get("z_project_method", "mip")
     selected_channels = set(plan.get("selected_channels", []))
 
-    # Convert the stored file path strings back into DiscoveredFile-like
-    # inputs. The existing `import_dataset` accepts a `files=` override
-    # that's a list of DiscoveredFile tuples; we need to reconstruct
-    # those from the captured plan.
+    # Deserialize layer_assignments — preserves user-renamed channel
+    # display names (e.g. token "00" -> "mNG") so the h5 written by
+    # import_dataset reflects the names the researcher chose in the
+    # CompressDialog, not the raw token IDs.
+    layer_assignments: dict[str, Any] | None = None
+    la_payload = plan.get("layer_assignments")
+    if la_payload:
+        from percell4.domain.io.models import LayerAssignment, LayerType
+
+        layer_assignments = {}
+        for ch_id, entry_dict in la_payload.items():
+            try:
+                lt = LayerType(entry_dict.get("layer_type", "channel"))
+            except (KeyError, ValueError):
+                lt = LayerType.CHANNEL
+            layer_assignments[ch_id] = LayerAssignment(
+                layer_type=lt,
+                name=entry_dict.get("name", ""),
+            )
+
+    # import_dataset accepts ``files=`` as either DiscoveredFile-like
+    # objects or plain path strings — its scanner re-derives tokens
+    # from filenames. Pass path strings directly so we don't need to
+    # serialize / reconstruct tokens through the compress_plan dict.
     try:
         from percell4.adapters.importer import import_dataset
-        from percell4.domain.io.models import DiscoveredFile
 
-        discovered = [DiscoveredFile(path=Path(p)) for p in files_paths]
         # Single-cell workflow inherits creation_bin from the captured
         # CompressDialog plan if present; otherwise defaults to 1 (no
         # binning), keeping existing single-cell runs byte-identical
@@ -114,7 +132,8 @@ def compress_one(
             output_h5=output_path,
             z_project_method=z_project_method,
             selected_channels=selected_channels or None,
-            files=discovered or None,
+            layer_assignments=layer_assignments,
+            files=files_paths or None,
             creation_bin=creation_bin,
         )
     except Exception as e:

@@ -605,27 +605,79 @@ class LauncherWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # Build a concise summary dialog.
-            if event.success:
+            # Build a concise summary dialog. Distinguish three cases:
+            # (a) no failures — fully successful run
+            # (b) some failures — partial success (worth surfacing prominently)
+            # (c) all datasets failed — run "completed" technically but produced
+            #     no data; this MUST NOT be presented as success.
+            run_folder = None
+            n_failures = 0
+            n_datasets = 0
+            failed_phases: list[str] = []
+            dataset_failures: set[str] = set()
+            if runner is not None and runner._metadata is not None:
+                run_folder = runner._metadata.run_folder
+                n_failures = len(runner._metadata.failures)
+                # Per-dataset failure count (excluding "<export>" sentinel
+                # failures which represent aggregation issues, not dataset
+                # failures).
+                dataset_failures = {
+                    f.dataset_name
+                    for f in runner._metadata.failures
+                    if f.dataset_name != "<export>"
+                }
+                failed_phases = sorted(
+                    {f.phase_name for f in runner._metadata.failures}
+                )
+                try:
+                    n_datasets = len(runner._config.datasets)
+                except Exception:
+                    n_datasets = 0
+
+            all_failed = (
+                n_datasets > 0
+                and len(dataset_failures) >= n_datasets
+            )
+
+            if not event.success:
+                header = "Workflow ended"
+                body_prefix = f"Run did not complete: {event.message}"
+            elif all_failed:
+                header = "Workflow finished — no data produced"
+                body_prefix = (
+                    "Every dataset failed before measurement. "
+                    "Outputs were not produced. Check the failure list below "
+                    "and the run_config.json for full details."
+                )
+            elif n_failures > 0:
+                header = "Workflow finished with failures"
+                body_prefix = (
+                    f"The run completed but {len(dataset_failures)} of "
+                    f"{n_datasets} datasets failed and were excluded from "
+                    f"measurement. Surviving datasets were exported."
+                )
+            else:
                 header = "Workflow complete"
                 body_prefix = "The workflow run finished successfully."
+
+            body_parts = [body_prefix, "", f"Run folder: {run_folder}"]
+            if n_failures > 0:
+                body_parts.append(
+                    f"Failures recorded: {n_failures} "
+                    f"(phases: {', '.join(failed_phases) or 'unknown'})"
+                )
             else:
-                header = "Workflow ended"
-                body_prefix = f"Run did not complete successfully: {event.message}"
+                body_parts.append("Failures recorded: 0")
+            body = "\n".join(body_parts)
 
-            run_folder = getattr(runner, "_metadata", None)
-            if run_folder is not None:
-                run_folder = run_folder.run_folder
-            n_failures = 0
-            if runner is not None and runner._metadata is not None:
-                n_failures = len(runner._metadata.failures)
-
-            body = (
-                f"{body_prefix}\n\n"
-                f"Run folder: {run_folder}\n"
-                f"Failures recorded: {n_failures}"
-            )
-            QMessageBox.warning(self, header, body)
+            # Use warning() for failure-tinged outcomes so the icon
+            # matches; information() for the all-clean case.
+            if all_failed or not event.success:
+                QMessageBox.critical(self, header, body)
+            elif n_failures > 0:
+                QMessageBox.warning(self, header, body)
+            else:
+                QMessageBox.information(self, header, body)
             self.statusBar().showMessage(
                 f"Workflow {'complete' if event.success else 'ended'}: "
                 f"{event.message}"

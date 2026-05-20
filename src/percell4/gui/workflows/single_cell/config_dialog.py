@@ -272,13 +272,15 @@ class WorkflowConfigDialog(QDialog):
         btn_add_h5_folder.clicked.connect(self._on_add_h5_folder)
         btn_row.addWidget(btn_add_h5_folder)
 
-        btn_add_tiff = QPushButton("Add .tiff source...")
-        btn_add_tiff.clicked.connect(self._on_add_tiff_source)
+        btn_add_tiff = QPushButton("Add .tiff files...")
+        btn_add_tiff.setToolTip(
+            "Open the compress dataset dialog to discover .tiff files "
+            "(single dataset or a folder of datasets) and configure "
+            "compression. Channels you rename or deselect there are "
+            "carried into this run's config."
+        )
+        btn_add_tiff.clicked.connect(self._on_add_tiff_files)
         btn_row.addWidget(btn_add_tiff)
-
-        btn_add_tiff_folder = QPushButton("Add .tiff folder...")
-        btn_add_tiff_folder.clicked.connect(self._on_add_tiff_folder)
-        btn_row.addWidget(btn_add_tiff_folder)
 
         btn_remove = QPushButton("Remove")
         btn_remove.clicked.connect(self._on_remove_dataset)
@@ -586,10 +588,12 @@ class WorkflowConfigDialog(QDialog):
         added, skipped = self._add_h5_paths(h5_files)
         self._toast_add_result(added, skipped)
 
-    def _on_add_tiff_source(self) -> None:
-        self._add_tiff_via_compress_dialog()
+    def _on_add_tiff_files(self) -> None:
+        """Open the compress dataset dialog for tiff discovery + config.
 
-    def _on_add_tiff_folder(self) -> None:
+        The CompressDialog itself handles both single-source and
+        folder-of-datasets cases — this single entry point covers both.
+        """
         self._add_tiff_via_compress_dialog()
 
     def _on_remove_dataset(self) -> None:
@@ -687,12 +691,37 @@ class WorkflowConfigDialog(QDialog):
         finally:
             dialog.deleteLater()
 
-        channel_names = sorted(cfg.selected_channels)
+        # Resolve channel display names from the dialog's layer assignments.
+        # The user may have renamed token channels (e.g. "00" -> "mNG") in
+        # the manual-mode mapping. cfg.selected_channels carries the
+        # token-side IDs ("00"); cfg.layer_assignments maps each to its
+        # LayerAssignment, whose .name field is the user-facing name.
+        # Fall back to the token when no override was set.
+        selected_token_ids = sorted(cfg.selected_channels)
+        layer_assignments = cfg.layer_assignments or {}
+        channel_names = [
+            (layer_assignments[ch_id].name
+             if ch_id in layer_assignments and layer_assignments[ch_id].name
+             else ch_id)
+            for ch_id in selected_token_ids
+        ]
         if not channel_names:
             self._dataset_status.setText(
                 "No channels selected in the compress dialog — nothing to add."
             )
             return
+
+        # Serialize layer_assignments so Phase 0 (compress_one) can pass
+        # them through to import_dataset. Each entry is JSON-safe.
+        layer_assignments_payload = {
+            ch_id: {
+                "layer_type": assignment.layer_type.value
+                if hasattr(assignment.layer_type, "value")
+                else str(assignment.layer_type),
+                "name": assignment.name,
+            }
+            for ch_id, assignment in layer_assignments.items()
+        }
 
         added = 0
         skipped: list[str] = []
@@ -711,7 +740,8 @@ class WorkflowConfigDialog(QDialog):
                     "files": [str(f.path) for f in ds.files],
                     "output_path": str(ds.output_path),
                     "z_project_method": cfg.z_project_method,
-                    "selected_channels": sorted(cfg.selected_channels),
+                    "selected_channels": selected_token_ids,
+                    "layer_assignments": layer_assignments_payload,
                 },
             )
             if self._add_pending(pd):
