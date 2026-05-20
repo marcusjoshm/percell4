@@ -62,6 +62,8 @@ from percell4.workflows.channels import ChannelSource, intersect_channels
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    DiluteSettings,
+    EdgeMode,
     GmmCriterion,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -219,6 +221,7 @@ class WorkflowConfigDialog(QDialog):
         layout.addWidget(self._build_datasets_group(), stretch=3)
         layout.addWidget(self._build_cellpose_group())
         layout.addWidget(self._build_rounds_group(), stretch=2)
+        layout.addWidget(self._build_dilute_group())
         layout.addWidget(self._build_columns_group())
         layout.addWidget(self._build_output_group())
         layout.addStretch()
@@ -335,11 +338,40 @@ class WorkflowConfigDialog(QDialog):
         self._cp_min_size.setValue(15)
         form.addRow("Min cell size (px):", self._cp_min_size)
 
-        note = QLabel(
-            "Edge-touching cells are always removed (workflow invariant)."
+        # Edge-mode selector. Replaces the pre-evolution "edge cells
+        # always removed" invariant with a per-run choice. Labels and
+        # tooltips are researcher-facing, not implementation-facing.
+        self._edge_mode = QComboBox()
+        self._edge_mode.addItem(
+            "Exclude (default)", EdgeMode.EXCLUDE
         )
-        note.setStyleSheet("color: #888; font-style: italic;")
-        form.addRow("", note)
+        self._edge_mode.addItem(
+            "Include — count as whole cells",
+            EdgeMode.INCLUDE_AS_NORMAL,
+        )
+        self._edge_mode.addItem(
+            "Include — synthesize edge-cohort row",
+            EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+        )
+        self._edge_mode.setToolTip(
+            "How the workflow handles cells touching the image border.\n\n"
+            "Exclude — Remove edge cells in Phase 1. They are not measured. "
+            "Recommended default: edge cells are partial and would bias "
+            "sum/area metrics.\n\n"
+            "Include — count as whole cells — Keep edge cells in labels. "
+            "They participate in clustering, thresholding, and per-cell "
+            "measurement as if they were whole cells. They appear in the "
+            "parquet flagged with is_edge=True; their metric values are "
+            "biased low for sum/area-style metrics.\n\n"
+            "Include — synthesize edge-cohort row — Keep edge cells like "
+            "above AND emit one extra synthetic row per dataset "
+            "(cell_id=-1, is_edge_synthetic=True) whose metric values are "
+            "sum(M across edge cells) / N_theoretical, where "
+            "N_theoretical = sum(edge_area) / mean(whole_area). The "
+            "synthetic row represents the edge ring as a count-normalized "
+            "whole-cell equivalent."
+        )
+        form.addRow("Edge cells:", self._edge_mode)
 
         return box
 
@@ -383,6 +415,94 @@ class WorkflowConfigDialog(QDialog):
 
         btn_row.addStretch()
         outer.addLayout(btn_row)
+
+        return box
+
+    def _build_dilute_group(self) -> QGroupBox:
+        """Optional Phase 5 (dilute-phase mask) configuration.
+
+        Wraps `mask_name`, `dilation_radius_px`, `channel`, and a
+        ThresholdingRound-shaped settings block in a checkable group box.
+        Settings here are locked at workflow Start — the runner picks
+        them up once and never re-reads. Per origin R11.
+        """
+        box = QGroupBox("Generate dilute-phase mask")
+        box.setCheckable(True)
+        box.setChecked(False)
+        box.setToolTip(
+            "Optional: insert a per-dataset interactive dilute-phase mask "
+            "generation phase between thresholding rounds and measurement. "
+            "Reuses the existing single-dataset dilute UI as the inner loop; "
+            "each dataset runs as many rounds as the researcher decides."
+        )
+        form = QFormLayout(box)
+
+        self._dilute_mask_name = QLineEdit()
+        self._dilute_mask_name.setPlaceholderText("e.g. dilute")
+        self._dilute_mask_name.setToolTip(
+            "Name of the final dilute mask. Written to /masks/<name> in "
+            "each dataset's h5. Must be unique against every thresholding "
+            "round name in this run."
+        )
+        form.addRow("Mask name:", self._dilute_mask_name)
+
+        self._dilute_channel = QComboBox()
+        self._dilute_channel.setToolTip(
+            "Which channel from /intensity to feed to the per-round metric "
+            "computation. Populated from the channel intersection across "
+            "selected datasets."
+        )
+        form.addRow("Channel:", self._dilute_channel)
+
+        self._dilute_dilation_px = QSpinBox()
+        self._dilute_dilation_px.setRange(1, 200)
+        self._dilute_dilation_px.setValue(3)
+        self._dilute_dilation_px.setToolTip(
+            "Pixel radius used to dilate each round's accepted condensed "
+            "mask before subtracting it from the working buffer."
+        )
+        form.addRow("Dilation radius (px):", self._dilute_dilation_px)
+
+        self._dilute_metric = QComboBox()
+        self._dilute_metric.addItems(sorted(BUILTIN_METRICS.keys()))
+        self._dilute_metric.setCurrentText("mean_intensity")
+        form.addRow("Metric:", self._dilute_metric)
+
+        self._dilute_algorithm = QComboBox()
+        self._dilute_algorithm.addItem("GMM", ThresholdAlgorithm.GMM)
+        self._dilute_algorithm.addItem("K-means", ThresholdAlgorithm.KMEANS)
+        form.addRow("Algorithm:", self._dilute_algorithm)
+
+        self._dilute_gmm_criterion = QComboBox()
+        self._dilute_gmm_criterion.addItem("BIC", GmmCriterion.BIC)
+        self._dilute_gmm_criterion.addItem("Silhouette", GmmCriterion.SILHOUETTE)
+        form.addRow("GMM criterion:", self._dilute_gmm_criterion)
+
+        self._dilute_gmm_max = QSpinBox()
+        self._dilute_gmm_max.setRange(2, 20)
+        self._dilute_gmm_max.setValue(4)
+        form.addRow("GMM max components:", self._dilute_gmm_max)
+
+        self._dilute_kmeans_n = QSpinBox()
+        self._dilute_kmeans_n.setRange(2, 20)
+        self._dilute_kmeans_n.setValue(3)
+        form.addRow("K-means n_clusters:", self._dilute_kmeans_n)
+
+        self._dilute_sigma = QDoubleSpinBox()
+        self._dilute_sigma.setRange(0.0, 50.0)
+        self._dilute_sigma.setSingleStep(0.1)
+        self._dilute_sigma.setValue(1.0)
+        form.addRow("Gaussian σ:", self._dilute_sigma)
+
+        # Settings-lock note (Tier 2 doc-review finding).
+        lock_note = QLabel(
+            "These settings are locked at workflow Start and apply to "
+            "every dataset in this run. Each dataset runs as many rounds "
+            "as you choose interactively."
+        )
+        lock_note.setWordWrap(True)
+        lock_note.setStyleSheet("color: #888; font-style: italic;")
+        form.addRow("", lock_note)
 
         return box
 
@@ -871,6 +991,21 @@ class WorkflowConfigDialog(QDialog):
             self._cp_seg_channel.setEnabled(False)
         self._cp_seg_channel.blockSignals(False)
 
+        # Mirror the same channel-list population for the dilute combo.
+        prev_dilute = self._dilute_channel.currentText()
+        self._dilute_channel.blockSignals(True)
+        self._dilute_channel.clear()
+        if intersected:
+            self._dilute_channel.addItems(intersected)
+            self._dilute_channel.setEnabled(True)
+            idx = self._dilute_channel.findText(prev_dilute)
+            if idx >= 0:
+                self._dilute_channel.setCurrentIndex(idx)
+        else:
+            self._dilute_channel.addItem("(add datasets first)")
+            self._dilute_channel.setEnabled(False)
+        self._dilute_channel.blockSignals(False)
+
         # Prune selected channels/metrics to those still valid.
         valid_channels = set(intersected)
         self._selected_csv_channels &= valid_channels
@@ -1112,6 +1247,17 @@ class WorkflowConfigDialog(QDialog):
             self._warn("Choose a segmentation channel in the Cellpose settings.")
             return None
 
+        # Edge-mode selector value.
+        edge_mode = self._edge_mode.currentData()
+        if edge_mode is None:
+            edge_mode = EdgeMode.EXCLUDE
+
+        # Optional dilute settings.
+        dilute_settings = self._try_build_dilute_settings(intersected)
+        if dilute_settings is False:
+            # Validation error already surfaced.
+            return None
+
         entries = [pd.to_entry() for pd in kept_datasets]
         try:
             return WorkflowConfig(
@@ -1121,10 +1267,62 @@ class WorkflowConfigDialog(QDialog):
                 selected_csv_columns=selected_cols,
                 output_parent=output_parent,
                 seg_channel_name=seg_channel,
+                edge_mode=edge_mode,
+                dilute_settings=dilute_settings,
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")
             return None
+
+    def _try_build_dilute_settings(
+        self, intersected_channels: list[str]
+    ) -> DiluteSettings | None | bool:
+        """Construct DiluteSettings from the dilute group when checked.
+
+        Returns ``None`` when the group is unchecked (dilute disabled).
+        Returns a ``DiluteSettings`` instance on success. Returns
+        ``False`` (sentinel for "validation failed; dialog stays open")
+        when the user enabled dilute but the inputs are invalid.
+        """
+        dilute_group = self._dilute_mask_name.parent()
+        if not isinstance(dilute_group, QGroupBox) or not dilute_group.isChecked():
+            return None
+
+        mask_name = self._dilute_mask_name.text().strip()
+        if not mask_name:
+            self._warn(
+                "Dilute mask name is required when dilute generation is enabled."
+            )
+            return False
+
+        channel = self._dilute_channel.currentText()
+        if not channel or channel.startswith("("):
+            self._warn(
+                "Pick a dilute channel from the intersection of dataset channels."
+            )
+            return False
+        if intersected_channels and channel not in intersected_channels:
+            self._warn(
+                f"Dilute channel {channel!r} is not in the channel intersection "
+                f"{intersected_channels}."
+            )
+            return False
+
+        try:
+            return DiluteSettings(
+                mask_name=mask_name,
+                dilation_radius_px=int(self._dilute_dilation_px.value()),
+                channel=channel,
+                metric=self._dilute_metric.currentText(),
+                algorithm=self._dilute_algorithm.currentData() or ThresholdAlgorithm.GMM,
+                gmm_criterion=self._dilute_gmm_criterion.currentData() or GmmCriterion.BIC,
+                gmm_max_components=int(self._dilute_gmm_max.value()),
+                kmeans_n_clusters=int(self._dilute_kmeans_n.value()),
+                gaussian_sigma=float(self._dilute_sigma.value()),
+            )
+        except ValueError as e:
+            self._warn(f"Dilute settings invalid: {e}")
+            return False
 
     def _resolve_channel_intersection(
         self,

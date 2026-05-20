@@ -22,6 +22,7 @@ from percell4.gui.workflows.single_cell.config_dialog import (
 from percell4.store import DatasetStore
 from percell4.workflows.models import (
     DatasetSource,
+    EdgeMode,
     ThresholdAlgorithm,
 )
 
@@ -426,3 +427,149 @@ def test_pending_dataset_to_entry_round_trips_channels(tmp_path):
     assert entry.name == "x"
     assert entry.channel_names == ["GFP", "RFP"]
     assert entry.source is DatasetSource.H5_EXISTING
+
+
+# ── U3: Edge-mode selector ─────────────────────────────────────────────
+
+
+def test_edge_mode_combo_defaults_to_exclude(dialog):
+    """U3: dialog opens with edge_mode combo defaulting to EXCLUDE."""
+    assert dialog._edge_mode.currentData() is EdgeMode.EXCLUDE
+
+
+def test_edge_mode_combo_has_three_options(dialog):
+    """U3: all three EdgeMode values are exposed in the combo."""
+    values = [
+        dialog._edge_mode.itemData(i)
+        for i in range(dialog._edge_mode.count())
+    ]
+    assert set(values) == {
+        EdgeMode.EXCLUDE,
+        EdgeMode.INCLUDE_AS_NORMAL,
+        EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    }
+
+
+def test_edge_mode_carried_into_built_config(dialog, h5_ds1, tmp_path):
+    """U3: chosen edge_mode propagates through _try_build_config to WorkflowConfig."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    # Set combo to size-normalized cohort
+    target = EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
+    idx = next(
+        i
+        for i in range(dialog._edge_mode.count())
+        if dialog._edge_mode.itemData(i) is target
+    )
+    dialog._edge_mode.setCurrentIndex(idx)
+
+    dialog._on_start_clicked()
+
+    cfg = dialog.workflow_config
+    assert cfg is not None
+    assert cfg.edge_mode is EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
+
+
+# ── U3: Dilute sub-panel ───────────────────────────────────────────────
+
+
+def _dilute_group(dialog):
+    """The dilute group is the QGroupBox that holds _dilute_mask_name."""
+    return dialog._dilute_mask_name.parent()
+
+
+def test_dilute_group_unchecked_by_default(dialog):
+    """U3: dilute generation is opt-in — group starts unchecked."""
+    group = _dilute_group(dialog)
+    assert group.isCheckable() is True
+    assert group.isChecked() is False
+
+
+def test_dilute_disabled_produces_none_dilute_settings(dialog, h5_ds1, tmp_path):
+    """U3: dilute group unchecked → cfg.dilute_settings is None."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    dialog._on_start_clicked()
+    cfg = dialog.workflow_config
+    assert cfg is not None
+    assert cfg.dilute_settings is None
+
+
+def test_dilute_enabled_builds_full_settings(dialog, h5_ds1, h5_ds2, tmp_path):
+    """U3: dilute group checked + filled → cfg.dilute_settings is populated."""
+    dialog._add_h5_paths([h5_ds1, h5_ds2])
+    dialog._on_add_round()
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    # Enable + fill dilute group
+    _dilute_group(dialog).setChecked(True)
+    dialog._dilute_mask_name.setText("dilute")
+    dialog._dilute_dilation_px.setValue(5)
+    # The channel combo is populated by the dataset add → seg/dilute refresh
+    # Pick whatever is at index 0 (should be GFP from the intersection).
+    dialog._dilute_channel.setCurrentIndex(0)
+
+    dialog._on_start_clicked()
+    cfg = dialog.workflow_config
+    assert cfg is not None, "dialog should have accepted"
+    ds = cfg.dilute_settings
+    assert ds is not None
+    assert ds.mask_name == "dilute"
+    assert ds.dilation_radius_px == 5
+    assert ds.channel in ("GFP", "RFP")
+    assert ds.metric == "mean_intensity"
+    assert ds.algorithm is ThresholdAlgorithm.GMM
+
+
+def test_dilute_enabled_empty_name_warns(dialog, h5_ds1, tmp_path):
+    """U3: dilute group checked + empty mask name → validation warning."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    _dilute_group(dialog).setChecked(True)
+    dialog._dilute_mask_name.setText("")  # empty
+
+    with patch.object(QMessageBox, "warning") as warn_mock:
+        dialog._on_start_clicked()
+
+    warn_mock.assert_called()
+    msg = " ".join(str(a) for a in warn_mock.call_args[0]).lower()
+    assert "dilute" in msg and ("name" in msg or "required" in msg)
+    assert dialog.workflow_config is None
+
+
+def test_dilute_name_collision_with_round_name_warns(
+    dialog, h5_ds1, tmp_path
+):
+    """U3 / AE4: dilute mask_name matching a thresholding round name → warning."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    # Set the round's name to something specific.
+    round_name_item = dialog._rounds_table.item(0, 0)
+    round_name_item.setText("puncta_bright")
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+
+    _dilute_group(dialog).setChecked(True)
+    dialog._dilute_mask_name.setText("puncta_bright")  # collision
+    dialog._dilute_channel.setCurrentIndex(0)
+
+    with patch.object(QMessageBox, "warning") as warn_mock:
+        dialog._on_start_clicked()
+
+    warn_mock.assert_called()
+    msg = " ".join(str(a) for a in warn_mock.call_args[0]).lower()
+    assert "conflict" in msg or "puncta_bright" in msg
+    assert dialog.workflow_config is None
+
+
+def test_dialog_remains_scroll_wrap_compliant(dialog):
+    """U3: dialog still uses wrap_in_scroll — adding sections did not regress
+    the dialog-scroll compliance pattern (per docs/solutions/ui-bugs/
+    dialog-scroll-when-tall.md)."""
+    from qtpy.QtWidgets import QScrollArea
+
+    # The outer layout's first widget (above btn_bar) should be a
+    # QScrollArea per wrap_in_scroll.
+    scroll_areas = dialog.findChildren(QScrollArea)
+    assert len(scroll_areas) >= 1
