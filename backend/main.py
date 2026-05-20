@@ -296,9 +296,142 @@ async def _simulate_task(task_id: str, label: str, duration_ms: int) -> None:
 
 @app.post("/cellpose")
 async def cellpose(payload: dict[str, Any]) -> dict[str, str]:
-    model = payload.get("model", "cyto3")
-    asyncio.create_task(_simulate_task("cellpose", f"Cellpose [{model}]", 3200))
-    return {"task_id": "cellpose"}
+    """Run Cellpose against a real .h5 channel and save the result.
+
+    Fires an async task that broadcasts progress over /events and
+    returns the task_id immediately. The actual inference runs in a
+    thread pool via asyncio.to_thread so the event loop can keep
+    serving WS broadcasts.
+
+    Request body:
+        path:               absolute .h5 path
+        channel:            channel name to segment (required)
+        model:              cellpose model name (default "cyto3")
+        diameter:           pixels, None for auto-detect
+        gpu:                bool
+        remove_edge_cells:  bool, default True
+        name:               optional explicit segmentation name; if
+                            omitted SegmentCells synthesizes one from
+                            the cell count.
+
+    Errors are reported via the task_finished event with success=False,
+    not by HTTP status — the HTTP call only validates inputs.
+    """
+    path = payload.get("path")
+    channel = payload.get("channel")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not channel:
+        raise HTTPException(status_code=400, detail="channel is required")
+
+    task_id = "cellpose"
+    asyncio.create_task(_run_cellpose_task(task_id, payload))
+    return {"task_id": task_id}
+
+
+async def _run_cellpose_task(task_id: str, payload: dict[str, Any]) -> None:
+    """Drive the full read → infer → finalize sequence with progress events."""
+    from pathlib import Path as _Path
+
+    path = payload["path"]
+    channel = payload["channel"]
+    model_type = payload.get("model", "cyto3")
+    diameter = payload.get("diameter") or None
+    gpu = bool(payload.get("gpu", False))
+    remove_edge_cells = bool(payload.get("remove_edge_cells", True))
+    name = payload.get("name")
+
+    label = f"Cellpose [{model_type}, d={diameter or 'auto'}]"
+    await bus.emit({"type": "task_started", "task_id": task_id, "label": label})
+
+    try:
+        from percell4.adapters.cellpose import run_cellpose
+        from percell4.adapters.hdf5_store import (
+            Hdf5DatasetRepository,
+            _build_handle_metadata,
+        )
+        from percell4.application.session import Session
+        from percell4.application.use_cases.segment_cells import SegmentCells
+        from percell4.domain.dataset import DatasetHandle
+        from percell4.store import DatasetStore
+
+        # ── Phase 1: open dataset, pick the channel ────────────────
+        await bus.emit({"type": "task_progress", "task_id": task_id, "progress": 0.05})
+
+        store = DatasetStore(path)
+        if not store.exists():
+            raise FileNotFoundError(f"file not found: {path}")
+        handle = DatasetHandle(
+            path=_Path(path), metadata=_build_handle_metadata(store),
+        )
+        channel_names = list(handle.metadata.get("channel_names", []))
+        if channel not in channel_names:
+            raise ValueError(
+                f"channel '{channel}' not in dataset; valid: {channel_names}",
+            )
+        idx = channel_names.index(channel)
+
+        # Load the channel image. Multi-channel files are (C, H, W);
+        # single-channel files may be (H, W) directly.
+        with store.open_read() as s:
+            intensity = s.read_array("intensity")
+        if intensity.ndim == 3:
+            image_2d = intensity[idx]
+        elif intensity.ndim == 2:
+            image_2d = intensity
+        else:
+            raise ValueError(
+                f"unsupported /intensity shape {intensity.shape}; "
+                "expected (C,H,W) or (H,W)",
+            )
+
+        # ── Phase 2: cellpose inference (slow; can take seconds) ──
+        await bus.emit({"type": "task_progress", "task_id": task_id, "progress": 0.2})
+        raw_masks = await asyncio.to_thread(
+            run_cellpose,
+            image_2d,
+            model_type=model_type,
+            diameter=diameter,
+            gpu=gpu,
+        )
+
+        # ── Phase 3: finalize via SegmentCells ────────────────────
+        await bus.emit({"type": "task_progress", "task_id": task_id, "progress": 0.92})
+        session = Session()
+        session.set_dataset(handle)
+        result = SegmentCells(Hdf5DatasetRepository(), session).finalize(
+            raw_masks,
+            remove_edge_cells=remove_edge_cells,
+            name=name,
+        )
+
+        await bus.emit({"type": "task_progress", "task_id": task_id, "progress": 1.0})
+        if result.n_cells == 0:
+            message = (
+                f"Cellpose: 0 cells in channel '{channel}' (saved as "
+                f"'{result.seg_name}'). Try a different channel, adjust "
+                f"diameter, or check the image."
+            )
+        else:
+            message = (
+                f"Cellpose: {result.n_cells} cells saved as "
+                f"'{result.seg_name}' ({result.edge_removed} edge, "
+                f"{result.small_removed} small removed)"
+            )
+        await bus.emit({
+            "type": "task_finished",
+            "task_id": task_id,
+            "success": True,
+            "message": message,
+            "extra": {"new_segmentation": result.seg_name},
+        })
+    except Exception as e:  # noqa: BLE001
+        await bus.emit({
+            "type": "task_finished",
+            "task_id": task_id,
+            "success": False,
+            "message": f"Cellpose failed: {e}",
+        })
 
 
 @app.post("/phasor/compute")

@@ -77,16 +77,23 @@ export async function getPhasorHistogram(channel: string, harmonic = 1) {
 // subscribeEvents() to drive the status bar.
 
 export async function startCellpose(params: {
+  path: string;
+  channel: string;
   model: string;
   diameter?: number;
   gpu?: boolean;
   remove_edge_cells?: boolean;
+  name?: string;
 }): Promise<{ task_id: string }> {
   const r = await fetch(`${BASE}/cellpose`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
   });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `cellpose start failed: HTTP ${r.status}`);
+  }
   return r.json();
 }
 
@@ -132,7 +139,15 @@ export type BackendEvent =
   | { type: "ready" }
   | { type: "task_started"; task_id: string; label: string }
   | { type: "task_progress"; task_id: string; progress: number }
-  | { type: "task_finished"; task_id: string; success: boolean; message: string };
+  | {
+      type: "task_finished";
+      task_id: string;
+      success: boolean;
+      message: string;
+      // Optional task-specific structured payload. Cellpose includes
+      // { new_segmentation: <name> }.
+      extra?: Record<string, unknown>;
+    };
 
 export function subscribeEvents(onEvent: (e: BackendEvent) => void): () => void {
   let closed = false;

@@ -28,6 +28,8 @@ export interface CellposeParams {
   remove_edge_cells: boolean;
 }
 
+const CELLPOSE_TASK_ID = "cellpose";
+
 interface State {
   dataset: string;
   // Absolute path of the loaded dataset on disk. `dataset` above is the
@@ -104,7 +106,16 @@ interface State {
   // Underscore prefix marks "framework plumbing, not for UI".
   _onTaskStarted: (label: string) => void;
   _onTaskProgress: (progress: number) => void;
-  _onTaskFinished: (message: string) => void;
+  _onTaskFinished: (
+    taskId: string,
+    message: string,
+    extra?: Record<string, unknown>,
+  ) => void;
+
+  // Refresh segmentation/mask/channel lists from /load_image WITHOUT
+  // touching status, selection, filter, or active selectors. Use this
+  // after a backend op writes new layers to disk (e.g. Cellpose).
+  refreshDatasetMetadata: () => Promise<void>;
 
   detach: (c: CompanionId) => void;
   reattach: (c: CompanionId) => void;
@@ -301,15 +312,32 @@ export const usePerCell = create<State>((set, get) => ({
   },
 
   runCellpose: async (params) => {
+    const s = get();
+    if (!s.datasetPath) {
+      set({ status: "Load a dataset first (I/O → Load Dataset…)" });
+      return;
+    }
+    if (!s.channel) {
+      set({ status: "Select a channel in the Session bar first" });
+      return;
+    }
     const label = `Cellpose [${params.model}, d=${params.diameter}]`;
     set({
       runningTask: { label, progress: 0, cancellable: true },
       status: label,
     });
     try {
-      await startCellpose(params);
+      await startCellpose({
+        path: s.datasetPath,
+        channel: s.channel,
+        model: params.model,
+        diameter: params.diameter,
+        gpu: params.gpu,
+        remove_edge_cells: params.remove_edge_cells,
+      });
     } catch (e) {
-      set({ runningTask: null, status: `Cellpose request failed: ${e}` });
+      const msg = e instanceof Error ? e.message : String(e);
+      set({ runningTask: null, status: `Cellpose request failed: ${msg}` });
     }
   },
 
@@ -326,8 +354,43 @@ export const usePerCell = create<State>((set, get) => ({
         ? { runningTask: { ...s.runningTask, progress } }
         : {},
     ),
-  _onTaskFinished: (message) =>
-    set({ runningTask: null, status: message }),
+  _onTaskFinished: (taskId, message, extra) => {
+    set({ runningTask: null, status: message });
+    // Cellpose wrote a new segmentation to the .h5: refresh the seg
+    // list and snap the active selector to the new name. Skip on
+    // failure — nothing changed on disk.
+    if (taskId === CELLPOSE_TASK_ID && !message.startsWith("Cellpose failed")) {
+      const newSeg =
+        typeof extra?.new_segmentation === "string"
+          ? (extra.new_segmentation as string)
+          : null;
+      // Quiet refresh — does NOT touch status, so the cellpose result
+      // message stays visible.
+      get()
+        .refreshDatasetMetadata()
+        .then(() => {
+          if (newSeg) set({ segmentation: newSeg });
+        });
+    }
+  },
+
+  refreshDatasetMetadata: async () => {
+    const s = get();
+    if (!s.datasetPath) return;
+    try {
+      const meta = await loadImage(s.datasetPath);
+      set({
+        channelNames: meta.channel_names,
+        maskNames: meta.mask_names,
+        segmentationNames: meta.segmentation_names,
+        flimFrequencyMhz: meta.flim_frequency_mhz,
+      });
+    } catch {
+      // Quiet refresh — leave stale lists if the load fails. The user
+      // is still reading the cellpose status; we don't want to
+      // overwrite it with a generic error message.
+    }
+  },
 
   detach: (c) =>
     set((s) => {

@@ -15,7 +15,8 @@ subscribeEvents((event) => {
   const s = usePerCell.getState();
   if (event.type === "task_started") s._onTaskStarted(event.label);
   else if (event.type === "task_progress") s._onTaskProgress(event.progress);
-  else if (event.type === "task_finished") s._onTaskFinished(event.message);
+  else if (event.type === "task_finished")
+    s._onTaskFinished(event.task_id, event.message, event.extra);
 });
 
 declare module "@tanstack/react-router" {
