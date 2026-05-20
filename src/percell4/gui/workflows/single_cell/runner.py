@@ -713,7 +713,14 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             df, failure, msg = measure_one(
                 store,
                 round_specs=list(self._config.thresholding_rounds),
+                edge_mode=self._config.edge_mode,
             )
+            # Soft failures from _append_synthetic_row (e.g. AE2: zero
+            # whole cells in edge-cohort mode) leave df populated so
+            # the dataset's per-cell rows still reach staging — only
+            # the synthetic row is missing. Hard failures (read error,
+            # empty labels, measure crash) return an empty df and we
+            # skip staging entirely.
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -724,7 +731,10 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 self._log(phase="measure", dataset=entry.name, event="failed",
                           failure=failure.value, message=msg)
-                return PhaseResult(success=False, message=msg)
+                if df.empty:
+                    return PhaseResult(success=False, message=msg)
+                # Fall through: stage the soft-failure df so its
+                # per-cell rows reach the parquet.
 
             try:
                 write_staging_parquet(

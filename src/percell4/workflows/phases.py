@@ -48,6 +48,7 @@ from percell4.adapters.cellpose import run_cellpose
 from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
+    get_edge_labels,
     relabel_sequential,
 )
 from percell4.store import DatasetStore
@@ -424,10 +425,114 @@ def _channel_index(store: DatasetStore, channel_name: str) -> int:
 # ── Phase 7: Measure ────────────────────────────────────────────────────
 
 
+# Columns that are identity / cohort flags, NOT metrics — excluded from the
+# synthetic-row aggregation. ``label`` is the post-relabel sequential ID;
+# ``cell_id`` is the same value (carried forward for parquet identity).
+_NON_METRIC_COLUMNS = frozenset({"label", "cell_id", "is_edge", "is_edge_synthetic"})
+
+
+def _append_synthetic_row(
+    df: pd.DataFrame,
+    edge_label_set: set[int],
+    edge_mode: EdgeMode,
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Append the size-normalized edge-cohort synthetic row when applicable.
+
+    Origin R7: ``N_theoretical = sum(edge_areas) / mean(whole_areas)``;
+    for each metric column M, ``synthetic_M = nansum(M across edge cells)
+    / N_theoretical``. ``sum(M)/N_theoretical`` is intentional — density-
+    based extrapolation, not a sample mean. See plan U4.
+
+    Returns ``(df, None, "")`` unchanged in these cases:
+    - ``edge_mode`` is not ``INCLUDE_AS_SIZE_NORMALIZED_COHORT`` (most runs).
+    - The dataset has zero edge cells (R10a). No synthetic row needed.
+
+    Returns ``(df, DatasetFailure.MEASUREMENT_ERROR, msg)`` and skips the
+    append when the dataset has zero whole cells (R10b). The per-cell df
+    is returned unchanged so the runner can still stage the dataset's
+    rows; the failure record marks the dataset for the summary CSV's
+    ``failure_reason`` column. AE2.
+
+    NaN policy: ``nansum`` so a single NaN in any edge cell's metric
+    column does not blank the entire synthetic value (Tier 2 doc-review
+    finding). Mask-overlap columns (``<channel>_<metric>_in_<round>``,
+    ``..._out_<round>``) are treated as numeric metrics — the same
+    ``sum/N_theoretical`` formula applies uniformly per origin R7.
+    """
+    if edge_mode != EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT:
+        return df, None, ""
+
+    if "is_edge" not in df.columns or "label" not in df.columns:
+        # measure_one's caller must populate these before invoking this
+        # helper — a programming error rather than a runtime failure.
+        return df, None, ""
+
+    if not edge_label_set:
+        # R10a: no edge cells in this dataset, no synthetic row.
+        return df, None, ""
+
+    edge_rows = df[df["is_edge"]]
+    whole_rows = df[~df["is_edge"]]
+
+    if whole_rows.empty:
+        # R10b / AE2: cannot compute A_mean for normalization.
+        return (
+            df,
+            DatasetFailure.MEASUREMENT_ERROR,
+            "no whole cells to compute A_mean for edge-cohort normalization",
+        )
+
+    if "area" not in df.columns:
+        # Defensive: every per-cell row should carry area (core column).
+        return df, None, ""
+
+    a_mean = float(np.nanmean(whole_rows["area"]))
+    if not np.isfinite(a_mean) or a_mean <= 0:
+        return (
+            df,
+            DatasetFailure.MEASUREMENT_ERROR,
+            "whole-cell mean area is non-positive or non-finite — cannot normalize",
+        )
+
+    edge_area_sum = float(np.nansum(edge_rows["area"]))
+    n_theoretical = edge_area_sum / a_mean
+    if n_theoretical <= 0:
+        return df, None, ""  # nothing to spread across
+
+    # Build the synthetic row. Numeric metric columns get
+    # nansum / N_theoretical; identity / cohort flags get explicit
+    # values; non-numeric columns get the column's null.
+    synthetic: dict[str, Any] = {}
+    for col in df.columns:
+        if col in _NON_METRIC_COLUMNS:
+            continue
+        # Only aggregate numeric columns. Object / categorical / group
+        # columns are left out of the synthetic row (group_<round>
+        # columns will be NaN after the existing left-merge — natural
+        # behavior with the synthetic label of -1).
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        synthetic[col] = float(np.nansum(edge_rows[col])) / n_theoretical
+
+    synthetic["label"] = -1
+    synthetic["cell_id"] = -1
+    synthetic["is_edge"] = False
+    synthetic["is_edge_synthetic"] = True
+
+    df_out = pd.concat([df, pd.DataFrame([synthetic])], ignore_index=True)
+    return (
+        df_out,
+        None,
+        f"appended edge-cohort synthetic row (n_edge={len(edge_rows)}, "
+        f"n_theoretical={n_theoretical:.2f})",
+    )
+
+
 def measure_one(
     store: DatasetStore,
     round_specs: list[ThresholdingRound],
     metric_names: list[str] | None = None,
+    edge_mode: EdgeMode = EdgeMode.EXCLUDE,
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Measure one dataset: all channels × all metrics × all round masks.
 
@@ -436,9 +541,17 @@ def measure_one(
     :func:`measure_multichannel_with_masks`, then merges the
     ``group_<round>`` columns from each round's stored DataFrame.
 
-    Returns an empty DataFrame on failure (alongside a failure code);
-    the caller appends it to ``staging/`` regardless and lets
-    :func:`export_run` skip empty datasets in the concat.
+    Adds the per-cell identity / cohort columns ``cell_id``, ``is_edge``,
+    and ``is_edge_synthetic`` to every row. When ``edge_mode`` is
+    ``INCLUDE_AS_SIZE_NORMALIZED_COHORT``, additionally appends one
+    synthetic edge-cohort row per origin R7 via
+    :func:`_append_synthetic_row`.
+
+    Returns an empty DataFrame on a hard failure (e.g., read error,
+    empty labels). For the "soft" zero-whole-cells case (R10b), returns
+    the per-cell df with a recorded ``DatasetFailure`` — the runner
+    stages the df anyway so the dataset's per-cell rows reach the
+    parquet, and ``summary_datasets.csv`` notes the failure reason.
     """
     metric_names = metric_names or sorted(BUILTIN_METRICS.keys())
 
@@ -521,6 +634,40 @@ def measure_one(
             DatasetFailure.MEASUREMENT_ERROR,
             f"measure failed: {e}",
         )
+
+    # Per-cell identity + cohort columns. ``cell_id`` mirrors the
+    # post-relabel sequential ``label`` for real cells (synthetic row
+    # below carries ``cell_id=-1``). ``(dataset, cell_id)`` is the
+    # composite key — ``cell_id`` is NOT globally unique across
+    # datasets (see plan's From 2026-05-20 ce-doc-review section on
+    # adversarial finding #1).
+    df["cell_id"] = df["label"]
+
+    # Recompute the edge label set from the post-QC labels (cheap
+    # border-row/column scan; no new HDF5 contract).
+    edge_label_set = get_edge_labels(labels.astype(np.int32))
+    df["is_edge"] = df["label"].isin(edge_label_set)
+    df["is_edge_synthetic"] = False
+
+    # Append the size-normalized synthetic row when the mode requires
+    # it. The helper handles all the R10 edge cases and returns a
+    # DatasetFailure for the zero-whole-cells case (df is preserved
+    # so the runner can still stage per-cell rows).
+    df, edge_failure, edge_msg = _append_synthetic_row(
+        df, edge_label_set, edge_mode
+    )
+    if edge_failure is not None:
+        # Surface as the function's failure; the runner stages the
+        # df anyway when it is non-empty (see _make_measure_handler).
+        # Merge group_<round> columns first so the staging parquet
+        # has the same column shape as a successful run.
+        for round_name, g_df in group_dfs.items():
+            cols = list(g_df.columns)
+            if len(cols) != 2 or cols[0] != "label":
+                continue
+            g_df = g_df.rename(columns={cols[1]: f"group_{round_name}"})
+            df = df.merge(g_df, on="label", how="left")
+        return df, edge_failure, edge_msg
 
     # Merge group_<round> columns from the per-round stored DataFrames.
     # Each group_df has columns ["label", "group_<channel>_<metric>"]; we

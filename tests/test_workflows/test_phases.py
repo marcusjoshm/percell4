@@ -462,6 +462,255 @@ def test_measure_one_missing_mask_still_succeeds(fixture_store_with_labels):
     assert "GFP_mean_intensity_in_nonexistent" not in df.columns
 
 
+# ── measure_one × identity / cohort columns (U4) ────────────────────────
+
+
+def test_measure_one_populates_cell_id_column(fixture_store_with_labels):
+    """U4: every real row carries cell_id = label."""
+    df, failure, _ = measure_one(fixture_store_with_labels, round_specs=[])
+    assert failure is None
+    assert "cell_id" in df.columns
+    # cell_id mirrors label for real cells.
+    pd.testing.assert_series_equal(
+        df["cell_id"].rename("label"), df["label"], check_dtype=False
+    )
+
+
+def test_measure_one_populates_is_edge_columns_default_exclude(
+    fixture_store_with_labels,
+):
+    """U4: is_edge / is_edge_synthetic are always present, uniformly False
+    in EXCLUDE mode (the default) on a fixture with no edge-touching cells."""
+    df, failure, _ = measure_one(fixture_store_with_labels, round_specs=[])
+    assert failure is None
+    assert "is_edge" in df.columns
+    assert "is_edge_synthetic" in df.columns
+    assert not df["is_edge"].any()
+    assert not df["is_edge_synthetic"].any()
+
+
+def _write_labels_with_edge_cells(store: DatasetStore) -> np.ndarray:
+    """Write a labels array with 4 edge-touching cells + 8 whole cells.
+
+    Built on top of the standard 12-cell fixture (rows at 5, 27, 49, 71;
+    cols at 5, 27, 49). The cells in row index 0 (rows 5-10) get extended
+    to touch the top edge (rows 0-10). Same on row index 3 (rows 71-76)
+    extended to touch the bottom edge (rows 71-99). Middle rows (27, 49)
+    stay interior.
+
+    Result: cells 1,2,3 touch top edge; cells 10,11,12 touch bottom edge;
+    cells 4-9 are interior. 6 edge cells, 6 interior cells.
+    """
+    size = 100
+    labels = np.zeros((size, size), dtype=np.int32)
+    for i in range(12):
+        grid_row = i // 3  # 0..3
+        grid_col = i % 3  # 0..2
+        if grid_row == 0:
+            # Stretch to touch the top edge.
+            row_lo, row_hi = 0, 11
+        elif grid_row == 3:
+            # Stretch to touch the bottom edge.
+            row_lo, row_hi = 71, 100
+        else:
+            row_lo = 5 + grid_row * 22
+            row_hi = row_lo + 6
+        col_lo = 5 + grid_col * 22
+        col_hi = col_lo + 6
+        labels[row_lo:row_hi, col_lo:col_hi] = i + 1
+    store.write_labels("cellpose_qc", labels)
+    return labels
+
+
+@pytest.fixture
+def fixture_store_with_edge_cells(tmp_path: Path) -> DatasetStore:
+    """Fixture: 100×100 image with 6 edge-touching + 6 interior labels."""
+    store = _make_fixture_h5(tmp_path / "edge_DS.h5")
+    _write_labels_with_edge_cells(store)
+    return store
+
+
+def test_measure_one_flags_edge_cells_in_include_normal_mode(
+    fixture_store_with_edge_cells,
+):
+    """U4: INCLUDE_AS_NORMAL keeps edge cells with is_edge=True."""
+    from percell4.workflows.models import EdgeMode
+
+    df, failure, _ = measure_one(
+        fixture_store_with_edge_cells,
+        round_specs=[],
+        edge_mode=EdgeMode.INCLUDE_AS_NORMAL,
+    )
+    assert failure is None
+    # 6 edge + 6 whole = 12 real cells, no synthetic row
+    assert len(df) == 12
+    assert df["is_edge"].sum() == 6
+    assert (~df["is_edge"]).sum() == 6
+    # No synthetic row in this mode
+    assert not df["is_edge_synthetic"].any()
+
+
+def test_measure_one_appends_synthetic_row_in_size_normalized_mode(
+    fixture_store_with_edge_cells,
+):
+    """U4 / AE1: INCLUDE_AS_SIZE_NORMALIZED_COHORT appends one synthetic row."""
+    from percell4.workflows.models import EdgeMode
+
+    df, failure, _ = measure_one(
+        fixture_store_with_edge_cells,
+        round_specs=[],
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+    assert failure is None
+    # 12 real + 1 synthetic = 13 rows
+    assert len(df) == 13
+
+    synthetic = df[df["is_edge_synthetic"]]
+    assert len(synthetic) == 1
+    s = synthetic.iloc[0]
+    assert s["cell_id"] == -1
+    assert s["label"] == -1
+    assert bool(s["is_edge"]) is False
+    # 6 real edge cells + 6 real whole cells (no synthetic counted)
+    assert df["is_edge"].sum() == 6
+    assert (~df["is_edge"] & ~df["is_edge_synthetic"]).sum() == 6
+
+
+def test_measure_one_synthetic_row_area_equals_whole_mean_area(
+    fixture_store_with_edge_cells,
+):
+    """U4: synthetic row's area = sum(edge_area) / N_theoretical
+              = sum(edge_area) / (sum(edge_area) / mean(whole_area))
+              = mean(whole_area).
+    """
+    from percell4.workflows.models import EdgeMode
+
+    df, _, _ = measure_one(
+        fixture_store_with_edge_cells,
+        round_specs=[],
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+    real = df[~df["is_edge_synthetic"]]
+    synthetic = df[df["is_edge_synthetic"]].iloc[0]
+
+    whole_mean_area = real.loc[~real["is_edge"], "area"].mean()
+    assert synthetic["area"] == pytest.approx(whole_mean_area, rel=1e-6)
+
+
+def test_measure_one_no_edge_cells_emits_no_synthetic_row(
+    fixture_store_with_labels,
+):
+    """U4 / R10a: zero edge cells → no synthetic row, no failure."""
+    from percell4.workflows.models import EdgeMode
+
+    df, failure, _ = measure_one(
+        fixture_store_with_labels,
+        round_specs=[],
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+    assert failure is None
+    # 12 real cells, all interior, no synthetic row
+    assert len(df) == 12
+    assert not df["is_edge"].any()
+    assert not df["is_edge_synthetic"].any()
+
+
+def test_measure_one_zero_whole_cells_records_failure_preserves_df(tmp_path):
+    """U4 / AE2 / R10b: all cells touch the border → DatasetFailure recorded,
+    no synthetic row, but per-cell rows still returned for staging."""
+    from percell4.workflows.models import EdgeMode
+
+    # Build a fixture where every cell touches the border.
+    store = _make_fixture_h5(tmp_path / "all_edge.h5", n_cells=4, size=50)
+    labels = np.zeros((50, 50), dtype=np.int32)
+    labels[0:8, 0:8] = 1  # top-left corner
+    labels[0:8, 42:50] = 2  # top-right corner
+    labels[42:50, 0:8] = 3  # bottom-left corner
+    labels[42:50, 42:50] = 4  # bottom-right corner
+    store.write_labels("cellpose_qc", labels)
+
+    df, failure, msg = measure_one(
+        store,
+        round_specs=[],
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+    # Soft failure: DatasetFailure recorded for the synthetic-row math,
+    # but per-cell rows preserved so the runner can stage them.
+    assert failure is DatasetFailure.MEASUREMENT_ERROR
+    assert "no whole cells" in msg.lower()
+    assert len(df) == 4  # all 4 edge cells preserved
+    assert df["is_edge"].all()
+    assert not df["is_edge_synthetic"].any()
+
+
+def test_measure_one_synthetic_row_has_nan_group_columns(
+    fixture_store_with_edge_cells,
+):
+    """U4: synthetic row's group_<round> columns are NaN after the left-merge.
+
+    The synthetic row has label=-1 which is absent from /groups/<round>;
+    the existing df.merge(on='label', how='left') leaves the group
+    column NaN naturally — no special-casing in the merge code.
+    """
+    from percell4.workflows.models import EdgeMode
+
+    round_spec = ThresholdingRound(
+        name="GFP_split",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(
+        fixture_store_with_edge_cells, round_spec
+    )
+    apply_threshold_headless(
+        fixture_store_with_edge_cells, round_spec, grouping
+    )
+
+    df, failure, _ = measure_one(
+        fixture_store_with_edge_cells,
+        round_specs=[round_spec],
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+    assert failure is None
+    synthetic = df[df["is_edge_synthetic"]]
+    assert len(synthetic) == 1
+    assert pd.isna(synthetic.iloc[0]["group_GFP_split"])
+
+
+def test_measure_one_default_edge_mode_exclude_emits_no_synthetic_row(
+    fixture_store_with_edge_cells,
+):
+    """U4: calling measure_one without edge_mode uses EXCLUDE default —
+    edge cells appear with is_edge=True (Phase 1 didn't filter here since
+    we wrote labels directly) but no synthetic row is emitted."""
+    df, failure, _ = measure_one(
+        fixture_store_with_edge_cells, round_specs=[]
+    )
+    assert failure is None
+    # Edge cells are tagged (measure-time recompute), but no synthetic row
+    # because edge_mode defaults to EXCLUDE.
+    assert df["is_edge"].any()
+    assert not df["is_edge_synthetic"].any()
+
+
+def test_measure_one_zero_edge_cells_in_size_normalized_mode_no_failure(
+    fixture_store_with_labels,
+):
+    """U4 / R10a: in size-normalized mode, zero edge cells → no failure, no synthetic."""
+    from percell4.workflows.models import EdgeMode
+
+    df, failure, _ = measure_one(
+        fixture_store_with_labels,
+        round_specs=[],
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+    assert failure is None
+    assert not df["is_edge_synthetic"].any()
+
+
 # ── export_run ──────────────────────────────────────────────────────────
 
 
