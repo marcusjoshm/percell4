@@ -9,6 +9,9 @@ src/routeTree.gen.ts
 # Tauri
 src-tauri/target
 src-tauri/Cargo.lock
+src-tauri/gen
+# Sidecar binaries are platform-specific and built per-machine
+src-tauri/binaries
 
 # OS
 .DS_Store

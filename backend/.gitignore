@@ -1,0 +1,4 @@
+# PyInstaller artifacts
+build/
+dist/
+*.spec
