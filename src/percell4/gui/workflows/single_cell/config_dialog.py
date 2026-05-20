@@ -65,6 +65,7 @@ from percell4.workflows.models import (
     DiluteSettings,
     EdgeMode,
     GmmCriterion,
+    ParticleSettings,
     ThresholdAlgorithm,
     ThresholdingRound,
     WorkflowConfig,
@@ -221,6 +222,7 @@ class WorkflowConfigDialog(QDialog):
         layout.addWidget(self._build_datasets_group(), stretch=3)
         layout.addWidget(self._build_cellpose_group())
         layout.addWidget(self._build_rounds_group(), stretch=2)
+        layout.addWidget(self._build_particles_group())
         layout.addWidget(self._build_dilute_group())
         layout.addWidget(self._build_columns_group())
         layout.addWidget(self._build_output_group())
@@ -448,6 +450,52 @@ class WorkflowConfigDialog(QDialog):
 
         btn_row.addStretch()
         outer.addLayout(btn_row)
+
+        return box
+
+    def _build_particles_group(self) -> QGroupBox:
+        """Optional particle analysis (U7).
+
+        When the group is checked, the measure phase additionally:
+        - Merges per-cell particle summary columns (counts, total/mean/max
+          area, coverage_fraction, per-channel intensity aggregates) into
+          measurements.parquet, prefixed by the round name.
+        - Writes a per-particle detail file (particles.parquet +
+          particles.csv) to the run folder, with one row per detected
+          particle (cell_id, round_name, particle_id, area, centroid,
+          per-channel intensities).
+        """
+        box = QGroupBox("Include particle analysis")
+        box.setCheckable(True)
+        box.setChecked(False)
+        box.setToolTip(
+            "Optional: count and measure connected-component particles "
+            "within each cell, using each grouped-threshold round's mask "
+            "as the particle-vs-background classifier. Adds per-cell "
+            "summary columns to measurements.parquet (prefixed with the "
+            "round name) and writes per-particle detail rows to "
+            "particles.parquet/csv in the run folder."
+        )
+        form = QFormLayout(box)
+
+        self._particle_min_area = QSpinBox()
+        self._particle_min_area.setRange(0, 1_000_000)
+        self._particle_min_area.setValue(0)
+        self._particle_min_area.setToolTip(
+            "Minimum particle area in pixels. Connected components "
+            "smaller than this are dropped. 0 = keep every component "
+            "(including single-pixel hits)."
+        )
+        form.addRow("Min particle area (px):", self._particle_min_area)
+
+        note = QLabel(
+            "Particle analysis runs against every thresholding round's "
+            "mask. To analyze only a subset of rounds, configure fewer "
+            "rounds — there is no per-round toggle in this version."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888; font-style: italic;")
+        form.addRow("", note)
 
         return box
 
@@ -1319,6 +1367,19 @@ class WorkflowConfigDialog(QDialog):
             # Validation error already surfaced.
             return None
 
+        # Optional particle analysis. The group is checkable so we can
+        # detect enabled vs disabled directly from the group's state.
+        particle_settings: ParticleSettings | None = None
+        particle_group = self._particle_min_area.parent()
+        if isinstance(particle_group, QGroupBox) and particle_group.isChecked():
+            try:
+                particle_settings = ParticleSettings(
+                    min_area=int(self._particle_min_area.value()),
+                )
+            except ValueError as e:
+                self._warn(f"Particle settings invalid: {e}")
+                return None
+
         entries = [pd.to_entry() for pd in kept_datasets]
         try:
             return WorkflowConfig(
@@ -1333,6 +1394,7 @@ class WorkflowConfigDialog(QDialog):
                 dilute_settings=dilute_settings,
                 cellpose_segmentation_name=self._cp_seg_name.text().strip()
                 or "cellpose_qc",
+                particle_settings=particle_settings,
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")

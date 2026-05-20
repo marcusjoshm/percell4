@@ -851,6 +851,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 edge_mode=self._config.edge_mode,
                 edge_margin_px=self._config.edge_margin_px,
                 seg_name=self._config.cellpose_segmentation_name,
+                particle_settings=self._config.particle_settings,
             )
             # Soft failures from _append_synthetic_row (e.g. AE2: zero
             # whole cells in edge-cohort mode) leave df populated so
@@ -887,6 +888,45 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     message=f"staging write failed: {e}",
                 )
                 return PhaseResult(success=False, message=str(e))
+
+            # Particle analysis: per-particle detail. Per-cell columns
+            # were already merged into df inside measure_one. Errors
+            # here are recorded but non-fatal — per-cell measurements
+            # have already landed.
+            if self._config.particle_settings is not None:
+                try:
+                    from percell4.workflows.phases import (
+                        measure_particles_one,
+                        write_staging_particles_parquet,
+                    )
+
+                    particles_df, pfail, pmsg = measure_particles_one(
+                        store,
+                        round_specs=list(self._config.thresholding_rounds),
+                        particle_settings=self._config.particle_settings,
+                        seg_name=self._config.cellpose_segmentation_name,
+                    )
+                    if pfail is not None:
+                        record_failure(
+                            self._metadata,
+                            dataset_name=entry.name,
+                            phase_name="particles",
+                            failure=pfail,
+                            message=pmsg,
+                        )
+                    elif not particles_df.empty:
+                        write_staging_particles_parquet(
+                            self._metadata.run_folder, entry.name, particles_df
+                        )
+                except Exception as e:
+                    logger.exception("particle staging failed for %s", entry.name)
+                    record_failure(
+                        self._metadata,
+                        dataset_name=entry.name,
+                        phase_name="particles",
+                        failure=DatasetFailure.MEASUREMENT_ERROR,
+                        message=f"particle staging failed: {e}",
+                    )
 
             self._log(phase="measure", dataset=entry.name, event="done",
                       message=msg)

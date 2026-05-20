@@ -133,6 +133,33 @@ class ThresholdingRound:
 
 
 @dataclass(frozen=True)
+class ParticleSettings:
+    """Optional particle analysis configuration.
+
+    When present on ``WorkflowConfig``, the measure phase additionally
+    runs :func:`percell4.domain.measure.particle.analyze_particles` for
+    every thresholding round's mask. The per-cell summary columns
+    (counts, total/mean/max area, coverage_fraction, per-channel
+    intensity aggregates) are merged into the existing measurements
+    DataFrame with a ``<round_name>_`` prefix. The per-particle detail
+    rows (one row per detected particle, with parent ``cell_id``) are
+    written to a separate ``particles.parquet`` / ``particles.csv``
+    in the run folder.
+
+    ``min_area`` filters out connected components below that pixel area
+    before counting / measuring. 0 = keep every component.
+    """
+
+    min_area: int = 0
+
+    def __post_init__(self) -> None:
+        if self.min_area < 0:
+            raise ValueError(
+                f"min_area must be >= 0, got {self.min_area}"
+            )
+
+
+@dataclass(frozen=True)
 class DiluteSettings:
     """Optional Phase 5 (dilute-phase mask) configuration.
 
@@ -247,6 +274,10 @@ class WorkflowConfig:
     # run multiple Cellpose parameterizations on the same h5 and keep
     # each segmentation's downstream measurements separate.
     cellpose_segmentation_name: str = "cellpose_qc"
+    # Optional particle analysis. When set, measure_one adds per-cell
+    # particle summary columns to the measurements parquet and writes
+    # a separate particles.parquet/csv with per-particle detail.
+    particle_settings: ParticleSettings | None = None
 
     def __post_init__(self) -> None:
         if not self.datasets:

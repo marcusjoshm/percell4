@@ -30,10 +30,12 @@ from percell4.workflows.phases import (
     datasets_without_failures,
     export_run,
     measure_one,
+    measure_particles_one,
     record_failure,
     segment_one,
     threshold_compute_one,
     write_staging_parquet,
+    write_staging_particles_parquet,
 )
 
 # ── Synthetic fixtures ──────────────────────────────────────────────────
@@ -1012,6 +1014,168 @@ def test_summary_groups_excludes_synthetic_rows(
     # n_cells count.
     total = summary[summary["round_name"] == "R"]["n_cells"].sum()
     assert total == 12  # not 13 — synthetic excluded
+
+
+def test_measure_one_merges_particle_columns_when_particle_settings_set(
+    fixture_store_with_labels,
+):
+    """U7: per-cell particle summary columns are prefixed with the round name
+    and merged into the per-cell df."""
+    from percell4.workflows.models import ParticleSettings
+
+    round_spec = ThresholdingRound(
+        name="GFP_split",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(
+        fixture_store_with_labels, round_spec
+    )
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+
+    df, failure, _ = measure_one(
+        fixture_store_with_labels,
+        round_specs=[round_spec],
+        particle_settings=ParticleSettings(min_area=0),
+    )
+    assert failure is None
+    # Per-cell particle columns prefixed with the round name.
+    assert "GFP_split_particle_count" in df.columns
+    assert "GFP_split_total_particle_area" in df.columns
+    # Per-channel intensity aggregates from the particle helper.
+    assert any(c.startswith("GFP_split_GFP_") for c in df.columns)
+
+
+def test_measure_one_no_particle_columns_when_particle_settings_none(
+    fixture_store_with_labels,
+):
+    """U7: with particle_settings=None, no particle columns are added."""
+    round_spec = ThresholdingRound(
+        name="GFP_split",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(
+        fixture_store_with_labels, round_spec
+    )
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+
+    df, failure, _ = measure_one(
+        fixture_store_with_labels,
+        round_specs=[round_spec],
+        particle_settings=None,
+    )
+    assert failure is None
+    assert "GFP_split_particle_count" not in df.columns
+
+
+def test_measure_particles_one_returns_per_particle_rows(
+    fixture_store_with_labels,
+):
+    """U7: measure_particles_one returns a combined per-particle df with
+    a round_name column."""
+    from percell4.workflows.models import ParticleSettings
+
+    round_spec = ThresholdingRound(
+        name="GFP_split",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(
+        fixture_store_with_labels, round_spec
+    )
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+
+    particles, failure, msg = measure_particles_one(
+        fixture_store_with_labels,
+        round_specs=[round_spec],
+        particle_settings=ParticleSettings(min_area=0),
+    )
+    assert failure is None, msg
+    if not particles.empty:
+        assert "round_name" in particles.columns
+        assert "cell_id" in particles.columns
+        assert "particle_id" in particles.columns
+        assert (particles["round_name"] == "GFP_split").all()
+
+
+def test_measure_particles_one_no_rounds_returns_empty_df(
+    fixture_store_with_labels,
+):
+    """U7: when no round masks are present (round_specs=[]), the helper
+    returns an empty df with no failure."""
+    from percell4.workflows.models import ParticleSettings
+
+    particles, failure, _ = measure_particles_one(
+        fixture_store_with_labels,
+        round_specs=[],
+        particle_settings=ParticleSettings(min_area=0),
+    )
+    assert failure is None
+    assert particles.empty
+
+
+def test_export_run_writes_particles_parquet_and_csv(
+    tmp_path, fixture_store_with_labels
+):
+    """U7: when staging_particles/ has parquet files, export_run produces
+    particles.parquet and particles.csv in the run folder."""
+    from percell4.workflows.models import ParticleSettings
+
+    run_folder = tmp_path / "run_particles"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    round_spec = ThresholdingRound(
+        name="GFP_split",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(
+        fixture_store_with_labels, round_spec
+    )
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+
+    df, _, _ = measure_one(
+        fixture_store_with_labels,
+        round_specs=[round_spec],
+        particle_settings=ParticleSettings(min_area=0),
+    )
+    write_staging_parquet(run_folder, "DS1", df)
+
+    particles_df, _, _ = measure_particles_one(
+        fixture_store_with_labels,
+        round_specs=[round_spec],
+        particle_settings=ParticleSettings(min_area=0),
+    )
+    if not particles_df.empty:
+        write_staging_particles_parquet(run_folder, "DS1", particles_df)
+
+    cfg = _sample_workflow_config(selected_cols=[])
+    meta = _sample_run_metadata(run_folder)
+    failure, _ = export_run(run_folder, cfg, meta)
+    assert failure is None
+
+    # Per-cell measurements still produced
+    assert (run_folder / "measurements.parquet").is_file()
+    # When particles were detected, particles.parquet + csv produced
+    if not particles_df.empty:
+        assert (run_folder / "particles.parquet").is_file()
+        assert (run_folder / "particles.csv").is_file()
+        # Staging cleaned up on success
+        assert not (run_folder / "staging_particles").exists()
 
 
 def test_summary_csvs_written_atomically_no_tmp_residue(

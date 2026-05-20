@@ -58,6 +58,7 @@ from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
     EdgeMode,
+    ParticleSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -736,6 +737,7 @@ def measure_one(
     edge_mode: EdgeMode = EdgeMode.EXCLUDE,
     edge_margin_px: int = 0,
     seg_name: str = "cellpose_qc",
+    particle_settings: ParticleSettings | None = None,
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Measure one dataset: all channels × all metrics × all round masks.
 
@@ -854,6 +856,39 @@ def measure_one(
     df["is_edge"] = df["label"].isin(edge_label_set)
     df["is_edge_synthetic"] = False
 
+    # Particle analysis (per-cell summary). For each round mask, count
+    # connected components within each cell and merge the summary
+    # columns into df with a "<round_name>_" prefix. The detailed
+    # per-particle rows are produced separately by
+    # :func:`measure_particles_one` (called by the runner).
+    if particle_settings is not None:
+        from percell4.domain.measure.particle import analyze_particles
+
+        for round_name, round_mask in round_masks.items():
+            try:
+                particle_summary = analyze_particles(
+                    images=images,
+                    labels=labels,
+                    mask=round_mask,
+                    min_area=particle_settings.min_area,
+                )
+            except Exception as e:
+                logger.exception(
+                    "analyze_particles failed for round %s — skipping",
+                    round_name,
+                )
+                continue
+            if particle_summary.empty:
+                continue
+            # Rename non-label columns with a per-round prefix.
+            rename_map = {
+                c: f"{round_name}_{c}"
+                for c in particle_summary.columns
+                if c != "label"
+            }
+            particle_summary = particle_summary.rename(columns=rename_map)
+            df = df.merge(particle_summary, on="label", how="left")
+
     # Append the size-normalized synthetic row when the mode requires
     # it. The helper handles all the R10 edge cases and returns a
     # DatasetFailure for the zero-whole-cells case (df is preserved
@@ -903,6 +938,122 @@ def write_staging_parquet(
     staging_dir = run_folder / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
     # Prefix with dataset name so rows can be attributed during concat.
+    df_out = df.copy()
+    df_out.insert(0, "dataset", dataset_name)
+    path = staging_dir / f"{dataset_name}.parquet"
+    df_out.to_parquet(path, engine="pyarrow", index=False, compression="snappy")
+    return path
+
+
+# ── U7 particle analysis ────────────────────────────────────────────────
+
+
+def measure_particles_one(
+    store: DatasetStore,
+    round_specs: list[ThresholdingRound],
+    particle_settings: ParticleSettings,
+    seg_name: str = "cellpose_qc",
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Per-particle detail rows for one dataset across every round.
+
+    Re-reads the dataset's intensity cube, labels, and each round's mask,
+    then calls :func:`analyze_particles_detail` per round. Returns one
+    combined DataFrame whose columns are:
+
+    - ``round_name`` (added here)
+    - ``cell_id``, ``particle_id``, ``area``, ``centroid_y``, ``centroid_x``
+    - ``{channel}_mean_intensity``, ``{channel}_integrated_intensity``
+      for every channel
+
+    Rounds whose mask is missing are skipped silently (consistent with
+    ``measure_one``). On read error returns an empty DataFrame + failure.
+    """
+    try:
+        with store.open_read() as s:
+            intensity = s.read_array("intensity")
+            labels = s.read_labels(seg_name)
+            meta = s.metadata
+            channel_names_raw = meta.get("channel_names", [])
+            channel_names = [
+                n.decode() if isinstance(n, bytes) else str(n)
+                for n in channel_names_raw
+            ]
+
+            images: dict[str, NDArray] = {}
+            if intensity.ndim == 2:
+                name = channel_names[0] if channel_names else "ch0"
+                images[name] = intensity
+            elif intensity.ndim == 3:
+                for i, name in enumerate(channel_names):
+                    if i < intensity.shape[0]:
+                        images[name] = intensity[i]
+            else:
+                return (
+                    pd.DataFrame(),
+                    DatasetFailure.MEASUREMENT_ERROR,
+                    f"unexpected intensity ndim: {intensity.ndim}",
+                )
+
+            round_masks: dict[str, NDArray[np.uint8]] = {}
+            for round_spec in round_specs:
+                try:
+                    round_masks[round_spec.name] = s.read_mask(round_spec.name)
+                except KeyError:
+                    continue
+    except Exception as e:
+        logger.exception("measure_particles_one read session failed")
+        return (
+            pd.DataFrame(),
+            DatasetFailure.MEASUREMENT_ERROR,
+            f"read session failed: {e}",
+        )
+
+    if not round_masks:
+        return pd.DataFrame(), None, "no round masks present — nothing to detail"
+    if int(labels.max()) == 0:
+        return pd.DataFrame(), None, "empty labels — no particles to detail"
+
+    from percell4.domain.measure.particle import analyze_particles_detail
+
+    frames: list[pd.DataFrame] = []
+    for round_name, round_mask in round_masks.items():
+        try:
+            detail = analyze_particles_detail(
+                images=images,
+                labels=labels,
+                mask=round_mask,
+                min_area=particle_settings.min_area,
+            )
+        except Exception:
+            logger.exception(
+                "analyze_particles_detail failed for round %s — skipping",
+                round_name,
+            )
+            continue
+        if detail.empty:
+            continue
+        detail = detail.copy()
+        detail.insert(0, "round_name", round_name)
+        frames.append(detail)
+
+    if not frames:
+        return pd.DataFrame(), None, "no particles detected in any round"
+
+    combined = pd.concat(frames, ignore_index=True)
+    return combined, None, f"{len(combined)} particles across {len(frames)} rounds"
+
+
+def write_staging_particles_parquet(
+    run_folder: Path, dataset_name: str, df: pd.DataFrame
+) -> Path:
+    """Write a dataset's per-particle DataFrame to ``run_folder/staging_particles/``.
+
+    Sibling of :func:`write_staging_parquet`. :func:`export_run`
+    concatenates these into ``particles.parquet`` / ``particles.csv``
+    when present, alongside the existing per-cell artifacts.
+    """
+    staging_dir = run_folder / "staging_particles"
+    staging_dir.mkdir(parents=True, exist_ok=True)
     df_out = df.copy()
     df_out.insert(0, "dataset", dataset_name)
     path = staging_dir / f"{dataset_name}.parquet"
@@ -1088,6 +1239,55 @@ def export_run(
             failure=DatasetFailure.MEASUREMENT_ERROR,
             message=str(e),
         )
+
+    # Particles export (U7) — concat the per-dataset particle staging
+    # files into particles.parquet + particles.csv when present. Errors
+    # are recorded but non-fatal (measurements.parquet has landed).
+    particles_dir = run_folder / "staging_particles"
+    particles_files = sorted(particles_dir.glob("*.parquet")) if particles_dir.is_dir() else []
+    if particles_files:
+        try:
+            import pyarrow.dataset as pa_ds
+
+            pds = pa_ds.dataset(
+                [str(p) for p in particles_files], format="parquet"
+            )
+            particles_df = pds.to_table().to_pandas()
+            if "dataset" in particles_df.columns:
+                particles_df["dataset"] = pd.Categorical(particles_df["dataset"])
+            particles_path = run_folder / "particles.parquet"
+            particles_df.to_parquet(
+                particles_path,
+                engine="pyarrow",
+                compression="snappy",
+                index=False,
+                use_dictionary=True,
+            )
+            particles_csv = run_folder / "particles.csv"
+            particles_df.to_csv(
+                particles_csv,
+                index=False,
+                float_format="%.6g",
+                na_rep="",
+                encoding="utf-8",
+                lineterminator="\n",
+            )
+            # Clean up per-particle staging on success.
+            try:
+                for p in particles_files:
+                    p.unlink()
+                particles_dir.rmdir()
+            except OSError:
+                logger.exception("failed to clean up staging_particles/")
+        except Exception as e:
+            logger.exception("particles export failed")
+            record_failure(
+                metadata,
+                dataset_name="<export>",
+                phase_name="particles",
+                failure=DatasetFailure.MEASUREMENT_ERROR,
+                message=f"particles export failed: {e}",
+            )
 
     # Clean up staging on success.
     try:

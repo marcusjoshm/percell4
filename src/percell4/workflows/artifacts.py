@@ -29,6 +29,7 @@ from percell4.workflows.models import (
     DiluteSettings,
     EdgeMode,
     GmmCriterion,
+    ParticleSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -180,6 +181,14 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
     )
 
 
+def _particle_to_dict(p: ParticleSettings) -> dict[str, Any]:
+    return {"min_area": p.min_area}
+
+
+def _particle_from_dict(d: dict[str, Any]) -> ParticleSettings:
+    return ParticleSettings(min_area=int(d.get("min_area", 0)))
+
+
 def _dilute_to_dict(d: DiluteSettings) -> dict[str, Any]:
     return {
         "mask_name": d.mask_name,
@@ -245,6 +254,11 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
             else None
         ),
         "cellpose_segmentation_name": cfg.cellpose_segmentation_name,
+        "particle_settings": (
+            _particle_to_dict(cfg.particle_settings)
+            if cfg.particle_settings is not None
+            else None
+        ),
     }
 
 
@@ -256,6 +270,7 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
     respectively, preserving the historical workflow invariant on Resume.
     """
     dilute_blob = data.get("dilute_settings")
+    particle_blob = data.get("particle_settings")
     return WorkflowConfig(
         datasets=[_entry_from_dict(d) for d in data["datasets"]],
         cellpose=_cellpose_from_dict(data["cellpose"]),
@@ -272,6 +287,11 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
         ),
         cellpose_segmentation_name=data.get(
             "cellpose_segmentation_name", "cellpose_qc"
+        ),
+        particle_settings=(
+            _particle_from_dict(particle_blob)
+            if particle_blob is not None
+            else None
         ),
     )
 
