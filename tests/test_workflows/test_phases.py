@@ -839,6 +839,200 @@ def test_export_run_fails_if_no_staging_parquets(tmp_path):
     assert failure is DatasetFailure.MEASUREMENT_ERROR
 
 
+# ── export_run summary CSVs (U6) ────────────────────────────────────────
+
+
+def test_export_run_writes_summary_groups_csv(
+    tmp_path, fixture_store_with_labels
+):
+    """U6: summary_groups.csv has one row per (dataset, round_name, group_label)."""
+    run_folder = tmp_path / "run_summary"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    round_spec = ThresholdingRound(
+        name="R",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(
+        fixture_store_with_labels, round_spec
+    )
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+    df, _, _ = measure_one(
+        fixture_store_with_labels, round_specs=[round_spec]
+    )
+    write_staging_parquet(run_folder, "DS1", df)
+
+    cfg = _sample_workflow_config(selected_cols=[])
+    meta = _sample_run_metadata(run_folder)
+    failure, _ = export_run(run_folder, cfg, meta)
+    assert failure is None
+
+    summary_path = run_folder / "summary_groups.csv"
+    assert summary_path.exists()
+    summary = pd.read_csv(summary_path)
+
+    # Columns we promised in origin R18.
+    for col in ("dataset", "round_name", "group_label", "n_cells",
+                "fraction_of_dataset_cells"):
+        assert col in summary.columns
+
+    # Per-metric stats for the GFP_mean_intensity column at minimum.
+    assert any(c.endswith("_mean") for c in summary.columns)
+    assert any(c.endswith("_median") for c in summary.columns)
+    assert any(c.endswith("_std") for c in summary.columns)
+
+    # fraction_of_dataset_cells sums to ~1.0 within each (dataset, round).
+    grouped = summary.groupby(["dataset", "round_name"], observed=True)[
+        "fraction_of_dataset_cells"
+    ].sum()
+    for val in grouped:
+        assert val == pytest.approx(1.0, abs=1e-6)
+
+    # n_cells across groups in the round equals total real cells.
+    total_in_round = summary[summary["round_name"] == "R"]["n_cells"].sum()
+    assert total_in_round == 12
+
+
+def test_export_run_writes_summary_datasets_csv(
+    tmp_path, fixture_store_with_labels
+):
+    """U6: summary_datasets.csv has one row per dataset with origin R19 columns."""
+    run_folder = tmp_path / "run_summary_ds"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    df, _, _ = measure_one(fixture_store_with_labels, round_specs=[])
+    write_staging_parquet(run_folder, "DS1", df)
+
+    cfg = _sample_workflow_config(selected_cols=[])
+    meta = _sample_run_metadata(run_folder)
+    failure, _ = export_run(run_folder, cfg, meta)
+    assert failure is None
+
+    summary_path = run_folder / "summary_datasets.csv"
+    assert summary_path.exists()
+    summary = pd.read_csv(summary_path)
+
+    # Origin R19 columns
+    for col in ("dataset", "source", "n_cells_total", "n_cells_whole",
+                "n_cells_edge", "n_rounds_thresholding", "n_rounds_dilute",
+                "dilute_enabled", "edge_mode", "failure_reason"):
+        assert col in summary.columns
+
+    assert len(summary) == 1
+    row = summary.iloc[0]
+    assert row["dataset"] == "DS1"
+    assert row["source"] in ("h5_existing", "compressed_from_tiff")
+    assert row["n_cells_total"] == 12
+    assert row["n_cells_whole"] == 12  # No edge cells in this fixture
+    assert row["n_cells_edge"] == 0
+    assert int(row["n_rounds_thresholding"]) == len(cfg.thresholding_rounds)
+    # Dilute is disabled in _sample_workflow_config — n_rounds_dilute NaN
+    assert pd.isna(row["n_rounds_dilute"])
+    assert bool(row["dilute_enabled"]) is False
+    assert row["edge_mode"] == "exclude"  # default
+
+
+def test_summary_datasets_csv_records_failure_reason(
+    tmp_path, fixture_store_with_labels
+):
+    """U6: failure_reason column populated when a dataset has metadata failures."""
+    run_folder = tmp_path / "run_summary_fail"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    df, _, _ = measure_one(fixture_store_with_labels, round_specs=[])
+    write_staging_parquet(run_folder, "DS1", df)
+
+    cfg = _sample_workflow_config(selected_cols=[])
+    meta = _sample_run_metadata(run_folder)
+    # Simulate a recorded failure on DS1.
+    record_failure(
+        meta,
+        dataset_name="DS1",
+        phase_name="threshold",
+        failure=DatasetFailure.THRESHOLD_ERROR,
+        message="all cells in one group",
+    )
+
+    failure, _ = export_run(run_folder, cfg, meta)
+    assert failure is None
+
+    summary = pd.read_csv(run_folder / "summary_datasets.csv")
+    row = summary[summary["dataset"] == "DS1"].iloc[0]
+    assert "threshold: all cells in one group" in str(row["failure_reason"])
+
+
+def test_summary_groups_excludes_synthetic_rows(
+    tmp_path, fixture_store_with_edge_cells
+):
+    """U6: synthetic rows (is_edge_synthetic=True) excluded from group stats."""
+    from percell4.workflows.models import EdgeMode
+
+    run_folder = tmp_path / "run_summary_synth"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    round_spec = ThresholdingRound(
+        name="R",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(
+        fixture_store_with_edge_cells, round_spec
+    )
+    apply_threshold_headless(
+        fixture_store_with_edge_cells, round_spec, grouping
+    )
+    df, _, _ = measure_one(
+        fixture_store_with_edge_cells,
+        round_specs=[round_spec],
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+    # The df includes 12 real + 1 synthetic = 13 rows
+    assert df["is_edge_synthetic"].sum() == 1
+
+    write_staging_parquet(run_folder, "DS1", df)
+    cfg = _sample_workflow_config(selected_cols=[])
+    meta = _sample_run_metadata(run_folder)
+    failure, _ = export_run(run_folder, cfg, meta)
+    assert failure is None
+
+    summary = pd.read_csv(run_folder / "summary_groups.csv")
+    # The synthetic row has NaN group, so it's already filtered, but
+    # additionally we explicitly exclude is_edge_synthetic from the
+    # n_cells count.
+    total = summary[summary["round_name"] == "R"]["n_cells"].sum()
+    assert total == 12  # not 13 — synthetic excluded
+
+
+def test_summary_csvs_written_atomically_no_tmp_residue(
+    tmp_path, fixture_store_with_labels
+):
+    """U6: write_atomic is used for both summary CSVs — no .tmp leftovers."""
+    run_folder = tmp_path / "run_atomic"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    df, _, _ = measure_one(fixture_store_with_labels, round_specs=[])
+    write_staging_parquet(run_folder, "DS1", df)
+
+    cfg = _sample_workflow_config(selected_cols=[])
+    meta = _sample_run_metadata(run_folder)
+    export_run(run_folder, cfg, meta)
+
+    assert not (run_folder / "summary_groups.csv.tmp").exists()
+    assert not (run_folder / "summary_datasets.csv.tmp").exists()
+
+
 # ── Failure tracking helpers ────────────────────────────────────────────
 
 

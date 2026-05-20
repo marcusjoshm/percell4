@@ -52,6 +52,7 @@ from percell4.domain.segmentation.postprocess import (
     relabel_sequential,
 )
 from percell4.store import DatasetStore
+from percell4.workflows.artifacts import write_atomic
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
     CellposeSettings,
@@ -420,6 +421,183 @@ def _channel_index(store: DatasetStore, channel_name: str) -> int:
             f"channel {channel_name!r} not in dataset; available: {names_list}"
         )
     return names_list.index(channel_name)
+
+
+# ── Phase 8: Summary CSV builders (U6) ──────────────────────────────────
+
+
+def _is_metric_column(col: str) -> bool:
+    """True if ``col`` is a numeric metric column the summary should aggregate.
+
+    Excludes identity / cohort flag columns. Anything else numeric is
+    treated as a metric — including per-round mask-overlap columns
+    (``{channel}_{metric}_in_{round}`` etc.) which are legitimate
+    per-cell quantities. The actual numeric-dtype check happens at the
+    caller so this helper stays pure-string.
+    """
+    return col not in _NON_METRIC_COLUMNS and col != "dataset"
+
+
+def _build_summary_groups(
+    df: pd.DataFrame,
+    thresholding_round_names: list[str],
+) -> pd.DataFrame:
+    """Per (dataset × round × group) aggregation: n_cells + metric stats.
+
+    Synthetic rows (``is_edge_synthetic=True``) are excluded — their
+    ``group_<round>`` is NaN and they must not contaminate group
+    statistics. Per origin R18.
+
+    For each thresholding round, produces one row per (dataset,
+    group_label) with:
+      - ``dataset``, ``round_name``, ``group_label``
+      - ``n_cells`` (count of per-cell rows in that group)
+      - ``fraction_of_dataset_cells`` (n_cells / total per-cell rows in
+        that dataset, within this round)
+      - ``<metric>_mean``, ``<metric>_median``, ``<metric>_std`` for
+        every numeric metric column in ``df``
+    """
+    if "is_edge_synthetic" in df.columns:
+        real = df[~df["is_edge_synthetic"]].copy()
+    else:
+        real = df.copy()
+
+    if real.empty:
+        return pd.DataFrame(
+            columns=["dataset", "round_name", "group_label", "n_cells",
+                     "fraction_of_dataset_cells"]
+        )
+
+    metric_cols = [
+        c for c in real.columns
+        if _is_metric_column(c) and pd.api.types.is_numeric_dtype(real[c])
+        # Group columns are categorical-ish; skip even if numeric.
+        and not c.startswith("group_")
+    ]
+
+    frames: list[pd.DataFrame] = []
+    for round_name in thresholding_round_names:
+        col = f"group_{round_name}"
+        if col not in real.columns:
+            continue
+        # Cells without a group assignment (NaN) are dropped.
+        grouped = real.dropna(subset=[col]).groupby(
+            ["dataset", col], observed=True
+        )
+        if grouped.ngroups == 0:
+            continue
+        counts = grouped.size().rename("n_cells").reset_index()
+        counts = counts.rename(columns={col: "group_label"})
+
+        # Fraction within (dataset) — total real cells per dataset
+        # across all groups in this round (not the dataset's grand
+        # total) so per-round fractions sum to 1.0.
+        per_dataset_total = counts.groupby("dataset", observed=True)[
+            "n_cells"
+        ].transform("sum")
+        counts["fraction_of_dataset_cells"] = counts["n_cells"] / per_dataset_total
+
+        if metric_cols:
+            stats = grouped[metric_cols].agg(["mean", "median", "std"])
+            # Flatten MultiIndex columns: (metric, stat) → metric_stat
+            stats.columns = [f"{m}_{s}" for m, s in stats.columns]
+            stats = stats.reset_index().rename(columns={col: "group_label"})
+            counts = counts.merge(
+                stats, on=["dataset", "group_label"], how="left"
+            )
+
+        counts.insert(1, "round_name", round_name)
+        frames.append(counts)
+
+    if not frames:
+        return pd.DataFrame(
+            columns=["dataset", "round_name", "group_label", "n_cells",
+                     "fraction_of_dataset_cells"]
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def _build_summary_datasets(
+    df: pd.DataFrame,
+    config: WorkflowConfig,
+    metadata: RunMetadata,
+) -> pd.DataFrame:
+    """Per-dataset run audit: counts, edge_mode, dilute round counts, failures.
+
+    One row per dataset in ``config.datasets``. Columns:
+      - ``dataset``, ``source`` (original — TIFF_PENDING is rewritten
+        as ``compressed_from_tiff`` to match the brainstorm's user-facing
+        encoding)
+      - ``n_cells_total``, ``n_cells_whole``, ``n_cells_edge`` (real
+        cells only — synthetic rows excluded from the totals)
+      - ``n_rounds_thresholding`` (len of ``config.thresholding_rounds``)
+      - ``n_rounds_dilute`` (per-dataset count from metadata; NaN if
+        dilute is disabled)
+      - ``dilute_enabled`` (bool — True iff ``config.dilute_settings`` is set)
+      - ``edge_mode`` (the run-wide value, broadcast per row for
+        readability)
+      - ``failure_reason`` (semicolon-joined messages for any failures
+        recorded against this dataset; NaN if none)
+
+    Per origin R19.
+    """
+    rows: list[dict[str, Any]] = []
+    failures_by_ds: dict[str, list[str]] = {}
+    for f in metadata.failures:
+        failures_by_ds.setdefault(f.dataset_name, []).append(
+            f"{f.phase_name}: {f.message}"
+        )
+
+    dilute_enabled = config.dilute_settings is not None
+    n_rounds_thresholding = len(config.thresholding_rounds)
+    edge_mode_value = config.edge_mode.value
+
+    if "is_edge_synthetic" in df.columns:
+        real = df[~df["is_edge_synthetic"]]
+    else:
+        real = df
+
+    # Group real cells by dataset once.
+    if not real.empty and "dataset" in real.columns:
+        counts_by_ds = real.groupby("dataset", observed=True).agg(
+            n_cells_total=("label", "size"),
+            n_cells_whole=("is_edge", lambda s: int((~s).sum())),
+            n_cells_edge=("is_edge", lambda s: int(s.sum())),
+        ).to_dict("index")
+    else:
+        counts_by_ds = {}
+
+    for ds_entry in config.datasets:
+        name = ds_entry.name
+        counts = counts_by_ds.get(name, {})
+        source_str = (
+            "compressed_from_tiff"
+            if ds_entry.source == DatasetSource.TIFF_PENDING
+            else ds_entry.source.value
+        )
+        row: dict[str, Any] = {
+            "dataset": name,
+            "source": source_str,
+            "n_cells_total": int(counts.get("n_cells_total", 0)),
+            "n_cells_whole": int(counts.get("n_cells_whole", 0)),
+            "n_cells_edge": int(counts.get("n_cells_edge", 0)),
+            "n_rounds_thresholding": n_rounds_thresholding,
+            "n_rounds_dilute": (
+                metadata.per_dataset_dilute_round_counts.get(name, 0)
+                if dilute_enabled
+                else None
+            ),
+            "dilute_enabled": dilute_enabled,
+            "edge_mode": edge_mode_value,
+            "failure_reason": (
+                "; ".join(failures_by_ds[name])
+                if name in failures_by_ds
+                else None
+            ),
+        }
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 # ── Phase 7: Measure ────────────────────────────────────────────────────
@@ -833,6 +1011,56 @@ def export_run(
                 DatasetFailure.MEASUREMENT_ERROR,
                 f"per_dataset/{ds_name}.csv failed: {e}",
             )
+
+    # Summary CSVs (U6) — derived from the same in-memory df.
+    # Failures here are recorded but do NOT abort the run: the
+    # measurements.parquet and CSVs have already landed.
+    round_names = [r.name for r in config.thresholding_rounds]
+    try:
+        summary_groups = _build_summary_groups(df, round_names)
+        write_atomic(
+            run_folder / "summary_groups.csv",
+            lambda tmp: summary_groups.to_csv(
+                tmp,
+                index=False,
+                float_format="%.6g",
+                na_rep="",
+                encoding="utf-8",
+                lineterminator="\n",
+            ),
+        )
+    except Exception as e:
+        logger.exception("summary_groups.csv write failed")
+        record_failure(
+            metadata,
+            dataset_name="<export>",
+            phase_name="summary_groups",
+            failure=DatasetFailure.MEASUREMENT_ERROR,
+            message=str(e),
+        )
+
+    try:
+        summary_datasets = _build_summary_datasets(df, config, metadata)
+        write_atomic(
+            run_folder / "summary_datasets.csv",
+            lambda tmp: summary_datasets.to_csv(
+                tmp,
+                index=False,
+                float_format="%.6g",
+                na_rep="",
+                encoding="utf-8",
+                lineterminator="\n",
+            ),
+        )
+    except Exception as e:
+        logger.exception("summary_datasets.csv write failed")
+        record_failure(
+            metadata,
+            dataset_name="<export>",
+            phase_name="summary_datasets",
+            failure=DatasetFailure.MEASUREMENT_ERROR,
+            message=str(e),
+        )
 
     # Clean up staging on success.
     try:
