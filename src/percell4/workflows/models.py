@@ -232,9 +232,21 @@ class WorkflowConfig:
     # to EXCLUDE to preserve the pre-evolution workflow invariant on
     # pre-existing run folders loaded via read_run_config.
     edge_mode: EdgeMode = EdgeMode.EXCLUDE
+    # Pixel margin used by both Phase 1 edge filtering (when
+    # edge_mode == EXCLUDE) and Phase 7's get_edge_labels recompute
+    # (for INCLUDE_AS_SIZE_NORMALIZED_COHORT). 0 = strict border only.
+    # Higher values pull cells closer to the edge into the "edge cell"
+    # set.
+    edge_margin_px: int = 0
     # Optional Phase 5 (dilute-phase mask) configuration. ``None`` means
     # the workflow skips Phase 5 entirely.
     dilute_settings: DiluteSettings | None = None
+    # HDF5 path component for the Cellpose-produced segmentation that
+    # downstream phases read. Defaults to "cellpose_qc" (the
+    # pre-evolution hardcoded name); configurable so a researcher can
+    # run multiple Cellpose parameterizations on the same h5 and keep
+    # each segmentation's downstream measurements separate.
+    cellpose_segmentation_name: str = "cellpose_qc"
 
     def __post_init__(self) -> None:
         if not self.datasets:
@@ -247,6 +259,16 @@ class WorkflowConfig:
         ds_names = [d.name for d in self.datasets]
         if len(set(ds_names)) != len(ds_names):
             raise ValueError(f"dataset names must be unique: {ds_names}")
+        if self.edge_margin_px < 0:
+            raise ValueError(
+                f"edge_margin_px must be >= 0, got {self.edge_margin_px}"
+            )
+        if not _ROUND_NAME_RE.match(self.cellpose_segmentation_name):
+            raise ValueError(
+                "cellpose_segmentation_name must match "
+                f"{_ROUND_NAME_RE.pattern}, got "
+                f"{self.cellpose_segmentation_name!r}"
+            )
         # Cross-field: dilute mask name must not collide with any
         # thresholding round name (both compete for /masks/<name> in
         # each dataset's h5). Origin R14 / AE4.

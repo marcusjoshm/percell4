@@ -174,6 +174,8 @@ def segment_one(
     cellpose_model: Any = None,
     channel_idx: int = 0,
     edge_mode: EdgeMode = EdgeMode.EXCLUDE,
+    edge_margin_px: int = 0,
+    seg_name: str = "cellpose_qc",
 ) -> tuple[NDArray[np.int32], DatasetFailure | None, str]:
     """Run Cellpose + postprocess on one dataset and write `/labels/cellpose_qc`.
 
@@ -230,7 +232,7 @@ def segment_one(
     # persistence here.
     labels = labels.astype(np.int32)
     if edge_mode == EdgeMode.EXCLUDE:
-        labels, _n_edge = filter_edge_cells(labels, edge_margin=0)
+        labels, _n_edge = filter_edge_cells(labels, edge_margin=edge_margin_px)
     labels, _n_small = filter_small_cells(labels, min_area=cfg.min_size)
     labels = relabel_sequential(labels)
 
@@ -242,13 +244,13 @@ def segment_one(
         )
 
     try:
-        store.write_labels("cellpose_qc", labels)
+        store.write_labels(seg_name, labels)
     except Exception as e:
-        logger.exception("failed to write /labels/cellpose_qc")
+        logger.exception("failed to write /labels/%s", seg_name)
         return (
             labels,
             DatasetFailure.SEGMENTATION_ERROR,
-            f"write /labels/cellpose_qc failed: {e}",
+            f"write /labels/{seg_name} failed: {e}",
         )
 
     return labels, None, f"{int(labels.max())} cells after postprocess"
@@ -260,6 +262,7 @@ def segment_one(
 def threshold_compute_one(
     store: DatasetStore,
     round_spec: ThresholdingRound,
+    seg_name: str = "cellpose_qc",
 ) -> tuple[GroupingResult | None, DatasetFailure | None, str]:
     """Compute the per-cell grouping for one round on one dataset.
 
@@ -274,12 +277,12 @@ def threshold_compute_one(
 
     try:
         image = store.read_channel("intensity", channel_idx)
-        labels = store.read_labels("cellpose_qc")
+        labels = store.read_labels(seg_name)
     except KeyError as e:
         return None, DatasetFailure.THRESHOLD_ERROR, f"missing h5 key: {e}"
 
     if int(labels.max()) == 0:
-        return None, DatasetFailure.THRESHOLD_EMPTY, "no cells in /labels/cellpose_qc"
+        return None, DatasetFailure.THRESHOLD_EMPTY, f"no cells in /labels/{seg_name}"
 
     try:
         measure_df = measure_cells(image, labels, metrics=[round_spec.metric])
@@ -321,6 +324,7 @@ def apply_threshold_headless(
     store: DatasetStore,
     round_spec: ThresholdingRound,
     grouping: GroupingResult,
+    seg_name: str = "cellpose_qc",
 ) -> tuple[DatasetFailure | None, str]:
     """Headless per-group Otsu thresholding — the Phase 4 QC stand-in.
 
@@ -345,7 +349,7 @@ def apply_threshold_headless(
     try:
         channel_idx = _channel_index(store, round_spec.channel)
         image = store.read_channel("intensity", channel_idx)
-        labels = store.read_labels("cellpose_qc")
+        labels = store.read_labels(seg_name)
     except (KeyError, ValueError) as e:
         return DatasetFailure.THRESHOLD_ERROR, str(e)
 
@@ -730,6 +734,8 @@ def measure_one(
     round_specs: list[ThresholdingRound],
     metric_names: list[str] | None = None,
     edge_mode: EdgeMode = EdgeMode.EXCLUDE,
+    edge_margin_px: int = 0,
+    seg_name: str = "cellpose_qc",
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Measure one dataset: all channels × all metrics × all round masks.
 
@@ -755,7 +761,7 @@ def measure_one(
     try:
         with store.open_read() as s:
             intensity = s.read_array("intensity")
-            labels = s.read_labels("cellpose_qc")
+            labels = s.read_labels(seg_name)
             meta = s.metadata
             channel_names_raw = meta.get("channel_names", [])
             channel_names = [
@@ -842,7 +848,9 @@ def measure_one(
 
     # Recompute the edge label set from the post-QC labels (cheap
     # border-row/column scan; no new HDF5 contract).
-    edge_label_set = get_edge_labels(labels.astype(np.int32))
+    edge_label_set = get_edge_labels(
+        labels.astype(np.int32), edge_margin=edge_margin_px
+    )
     df["is_edge"] = df["label"].isin(edge_label_set)
     df["is_edge_synthetic"] = False
 

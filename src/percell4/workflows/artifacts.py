@@ -238,11 +238,13 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
         "output_parent": str(cfg.output_parent),
         "seg_channel_name": cfg.seg_channel_name,
         "edge_mode": cfg.edge_mode.value,
+        "edge_margin_px": cfg.edge_margin_px,
         "dilute_settings": (
             _dilute_to_dict(cfg.dilute_settings)
             if cfg.dilute_settings is not None
             else None
         ),
+        "cellpose_segmentation_name": cfg.cellpose_segmentation_name,
     }
 
 
@@ -264,8 +266,12 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
         output_parent=Path(data["output_parent"]),
         seg_channel_name=data.get("seg_channel_name", ""),
         edge_mode=EdgeMode(data.get("edge_mode", EdgeMode.EXCLUDE.value)),
+        edge_margin_px=int(data.get("edge_margin_px", 0)),
         dilute_settings=(
             _dilute_from_dict(dilute_blob) if dilute_blob is not None else None
+        ),
+        cellpose_segmentation_name=data.get(
+            "cellpose_segmentation_name", "cellpose_qc"
         ),
     )
 

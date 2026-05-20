@@ -133,6 +133,7 @@ class DilutePhaseQueueEntry(QObject):
         queue_total: int,
         on_complete: Callable[[PhaseResult], None],
         on_round_complete: Callable[[str, int], None] | None = None,
+        seg_name: str = "cellpose_qc",
     ) -> None:
         super().__init__()
         self._entry = entry
@@ -143,6 +144,7 @@ class DilutePhaseQueueEntry(QObject):
         self._queue_index = queue_index
         self._queue_total = queue_total
         self._on_complete = on_complete
+        self._seg_name = seg_name
         # Optional per-dataset round-count callback — the runner uses
         # this to persist completed counts into
         # RunMetadata.per_dataset_dilute_round_counts at workflow_done.
@@ -187,7 +189,7 @@ class DilutePhaseQueueEntry(QObject):
             self._store = DatasetStore(self._entry.h5_path)
             channel_idx = _channel_index(self._store, self._dilute_settings.channel)
             channel_image = self._store.read_channel("intensity", channel_idx)
-            seg_labels = self._store.read_labels("cellpose_qc")
+            seg_labels = self._store.read_labels(self._seg_name)
         except Exception as e:
             logger.exception(
                 "dilute queue: failed to load %s for dilute phase",

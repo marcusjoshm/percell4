@@ -56,6 +56,7 @@ class ThresholdQCQueueEntry:
         queue_index: int,
         queue_total: int,
         on_complete: Callable[[PhaseResult], None],
+        seg_name: str = "cellpose_qc",
     ) -> None:
         self._viewer_win = viewer_win
         self._data_model = data_model
@@ -65,6 +66,7 @@ class ThresholdQCQueueEntry:
         self._queue_index = queue_index
         self._queue_total = queue_total
         self._on_complete = on_complete
+        self._seg_name = seg_name
 
         self._store: DatasetStore | None = None
         self._controller: ThresholdQCController | None = None
@@ -100,7 +102,7 @@ class ThresholdQCQueueEntry:
             self._store = DatasetStore(self._entry.h5_path)
             channel_idx = _channel_index(self._store, self._round_spec.channel)
             channel_image = self._store.read_channel("intensity", channel_idx)
-            seg_labels = self._store.read_labels("cellpose_qc")
+            seg_labels = self._store.read_labels(self._seg_name)
         except Exception as e:
             logger.exception(
                 "threshold QC: failed to load %s for round %s",

@@ -340,6 +340,19 @@ class WorkflowConfigDialog(QDialog):
         self._cp_min_size.setValue(15)
         form.addRow("Min cell size (px):", self._cp_min_size)
 
+        # Segmentation-layer name (was hardcoded as "cellpose_qc" before
+        # this evolution; now configurable so a researcher can keep
+        # multiple Cellpose parameterizations on the same .h5).
+        self._cp_seg_name = QLineEdit("cellpose_qc")
+        self._cp_seg_name.setToolTip(
+            "HDF5 path component for the Cellpose-produced segmentation "
+            "(/labels/<name>). Downstream phases (seg-QC, thresholding, "
+            "dilute, measure) all read and write under this name. Pick a "
+            "different name to keep multiple Cellpose parameterizations "
+            "on the same .h5 without overwriting each other."
+        )
+        form.addRow("Segmentation layer name:", self._cp_seg_name)
+
         # Edge-mode selector. Replaces the pre-evolution "edge cells
         # always removed" invariant with a per-run choice. Labels and
         # tooltips are researcher-facing, not implementation-facing.
@@ -374,6 +387,24 @@ class WorkflowConfigDialog(QDialog):
             "whole-cell equivalent."
         )
         form.addRow("Edge cells:", self._edge_mode)
+
+        # Edge margin (px) — applies to both Phase 1's edge filter
+        # (when edge_mode == EXCLUDE) and Phase 7's edge-cohort identification
+        # (when edge_mode == INCLUDE_AS_SIZE_NORMALIZED_COHORT). 0 = strict
+        # border-touching only.
+        self._edge_margin = QSpinBox()
+        self._edge_margin.setRange(0, 500)
+        self._edge_margin.setValue(0)
+        self._edge_margin.setToolTip(
+            "Pixel margin from the image border that counts as 'edge'.\n\n"
+            "0 (default): strict border-touching cells only.\n"
+            "N > 0: cells within N pixels of any border are treated as edge.\n\n"
+            "Used by Phase 1 filtering in 'Exclude' mode, and by the "
+            "edge-cohort identification at measurement time in "
+            "'synthesize edge-cohort row' mode. Has no effect in "
+            "'count as whole cells' mode (every cell is treated equally)."
+        )
+        form.addRow("Edge margin (px):", self._edge_margin)
 
         return box
 
@@ -1298,7 +1329,10 @@ class WorkflowConfigDialog(QDialog):
                 output_parent=output_parent,
                 seg_channel_name=seg_channel,
                 edge_mode=edge_mode,
+                edge_margin_px=int(self._edge_margin.value()),
                 dilute_settings=dilute_settings,
+                cellpose_segmentation_name=self._cp_seg_name.text().strip()
+                or "cellpose_qc",
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")

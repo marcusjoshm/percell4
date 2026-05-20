@@ -366,6 +366,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 cellpose_model=self._cellpose_model,
                 channel_idx=self._seg_channel_idx(store),
                 edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
+                seg_name=self._config.cellpose_segmentation_name,
             )
             if failure is not None:
                 record_failure(
@@ -437,6 +439,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             seg_ch_idx = self._seg_channel_idx(store)
 
             edge_mode = self._config.edge_mode
+            edge_margin_px = self._config.edge_margin_px
+            seg_name = self._config.cellpose_segmentation_name
 
             def _do_segment() -> tuple:
                 """Runs in the Worker thread. Pure numpy + h5py, no Qt."""
@@ -446,6 +450,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     cellpose_model=self._cellpose_model,
                     channel_idx=seg_ch_idx,
                     edge_mode=edge_mode,
+                    edge_margin_px=edge_margin_px,
+                    seg_name=seg_name,
                 )
 
             worker = Worker(_do_segment)
@@ -545,6 +551,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
                 channel_idx=seg_ch,
+                seg_name=self._config.cellpose_segmentation_name,
             )
             self._active_qc_controller = controller
             self._log(phase="seg_qc", dataset=entry.name, event="opened")
@@ -624,6 +631,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     queue_total=queue_total,
                     on_complete=_wrapped_complete,
                     on_round_complete=_record_round_count,
+                    seg_name=self._config.cellpose_segmentation_name,
                 )
             except Exception as e:
                 logger.exception("dilute queue entry init failed")
@@ -670,7 +678,11 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
-            grouping, failure, msg = threshold_compute_one(store, round_spec)
+            grouping, failure, msg = threshold_compute_one(
+                store,
+                round_spec,
+                seg_name=self._config.cellpose_segmentation_name,
+            )
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -721,7 +733,12 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
-            failure, msg = apply_threshold_headless(store, round_spec, grouping)
+            failure, msg = apply_threshold_headless(
+                store,
+                round_spec,
+                grouping,
+                seg_name=self._config.cellpose_segmentation_name,
+            )
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -800,6 +817,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 queue_index=queue_index,
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
+                seg_name=self._config.cellpose_segmentation_name,
             )
             # Hold a reference to prevent GC.
             self._active_qc_controller = queue_entry
@@ -831,6 +849,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 store,
                 round_specs=list(self._config.thresholding_rounds),
                 edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
+                seg_name=self._config.cellpose_segmentation_name,
             )
             # Soft failures from _append_synthetic_row (e.g. AE2: zero
             # whole cells in edge-cohort mode) leave df populated so
