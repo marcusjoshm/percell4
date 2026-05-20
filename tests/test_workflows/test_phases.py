@@ -141,6 +141,152 @@ def test_segment_one_handles_read_error(tmp_path):
     assert "read /intensity failed" in msg
 
 
+# ── segment_one × edge_mode ─────────────────────────────────────────────
+
+
+def _fake_cellpose_labels_with_edges() -> np.ndarray:
+    """A 50×50 label array with 4 cells, 2 touching borders.
+
+    Cells:
+      - label 1: top-left corner (0:8, 0:8) — touches top + left edges
+      - label 2: interior (20:30, 20:30) — area=100
+      - label 3: interior (15:18, 15:18) — area=9
+      - label 4: bottom-right corner (42:50, 42:50) — touches bottom + right
+    """
+    labels = np.zeros((50, 50), dtype=np.int32)
+    labels[0:8, 0:8] = 1
+    labels[20:30, 20:30] = 2
+    labels[15:18, 15:18] = 3
+    labels[42:50, 42:50] = 4
+    return labels
+
+
+@pytest.fixture
+def fixture_store_50px(tmp_path: Path) -> DatasetStore:
+    """A 50×50 h5 store sized for the edge-mode fixture labels."""
+    return _make_fixture_h5(tmp_path / "edge_ds.h5", n_cells=4, size=50)
+
+
+def test_segment_one_exclude_mode_removes_edge_cells(
+    fixture_store_50px, monkeypatch
+):
+    """Default EXCLUDE mode preserves today's filter-edge invariant."""
+    from percell4.workflows import phases
+    from percell4.workflows.models import EdgeMode
+
+    monkeypatch.setattr(
+        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
+    )
+    cfg = CellposeSettings(min_size=5)
+
+    labels, failure, _msg = segment_one(
+        fixture_store_50px, cfg, edge_mode=EdgeMode.EXCLUDE
+    )
+
+    assert failure is None
+    # Cells 1 and 4 (edge-touching) were removed; cells 2 and 3 survive
+    # and get sequential relabeling (1, 2).
+    unique = set(np.unique(labels).tolist()) - {0}
+    assert len(unique) == 2  # exactly 2 cells remain
+
+
+def test_segment_one_include_normal_keeps_edge_cells(
+    fixture_store_50px, monkeypatch
+):
+    """INCLUDE_AS_NORMAL mode keeps edge cells in labels."""
+    from percell4.workflows import phases
+    from percell4.workflows.models import EdgeMode
+
+    monkeypatch.setattr(
+        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
+    )
+    cfg = CellposeSettings(min_size=5)
+
+    labels, failure, _msg = segment_one(
+        fixture_store_50px, cfg, edge_mode=EdgeMode.INCLUDE_AS_NORMAL
+    )
+
+    assert failure is None
+    # All 4 cells survive (cell 3 area=9 > min_size=5; no edge filter).
+    unique = set(np.unique(labels).tolist()) - {0}
+    assert len(unique) == 4
+
+
+def test_segment_one_size_normalized_cohort_keeps_edge_cells(
+    fixture_store_50px, monkeypatch
+):
+    """INCLUDE_AS_SIZE_NORMALIZED_COHORT mode also keeps edge cells in Phase 1.
+
+    The cohort treatment is a measure-time concern (U4), not a Phase 1
+    concern — Phase 1 just preserves the edge cells in labels.
+    """
+    from percell4.workflows import phases
+    from percell4.workflows.models import EdgeMode
+
+    monkeypatch.setattr(
+        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
+    )
+    cfg = CellposeSettings(min_size=5)
+
+    labels, failure, _msg = segment_one(
+        fixture_store_50px,
+        cfg,
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+    )
+
+    assert failure is None
+    unique = set(np.unique(labels).tolist()) - {0}
+    assert len(unique) == 4
+
+
+def test_segment_one_default_edge_mode_is_exclude(
+    fixture_store_50px, monkeypatch
+):
+    """Calling segment_one without edge_mode preserves the today's-behavior default."""
+    from percell4.workflows import phases
+
+    monkeypatch.setattr(
+        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
+    )
+    cfg = CellposeSettings(min_size=5)
+
+    # No edge_mode kwarg — default EXCLUDE
+    labels, failure, _msg = segment_one(fixture_store_50px, cfg)
+
+    assert failure is None
+    unique = set(np.unique(labels).tolist()) - {0}
+    assert len(unique) == 2  # edge cells removed
+
+
+def test_segment_one_include_normal_with_no_edge_cells_matches_exclude(
+    fixture_store_50px, monkeypatch
+):
+    """When labels have no edge-touching cells, all three modes produce the same output."""
+    from percell4.workflows import phases
+    from percell4.workflows.models import EdgeMode
+
+    # All cells are well inside the image
+    interior_labels = np.zeros((50, 50), dtype=np.int32)
+    interior_labels[10:20, 10:20] = 1
+    interior_labels[30:40, 30:40] = 2
+
+    monkeypatch.setattr(
+        phases, "run_cellpose", lambda *a, **kw: interior_labels.copy()
+    )
+    cfg = CellposeSettings(min_size=5)
+
+    out_exclude, _, _ = segment_one(
+        fixture_store_50px, cfg, edge_mode=EdgeMode.EXCLUDE
+    )
+    out_normal, _, _ = segment_one(
+        fixture_store_50px, cfg, edge_mode=EdgeMode.INCLUDE_AS_NORMAL
+    )
+
+    # Both produce the same sequential labels [1, 2]
+    np.testing.assert_array_equal(out_exclude, out_normal)
+    assert set(np.unique(out_exclude).tolist()) - {0} == {1, 2}
+
+
 # ── threshold_compute_one ───────────────────────────────────────────────
 
 

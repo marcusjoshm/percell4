@@ -347,6 +347,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 self._config.cellpose,
                 cellpose_model=self._cellpose_model,
                 channel_idx=self._seg_channel_idx(store),
+                edge_mode=self._config.edge_mode,
             )
             if failure is not None:
                 record_failure(
@@ -417,6 +418,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             seg_ch_idx = self._seg_channel_idx(store)
 
+            edge_mode = self._config.edge_mode
+
             def _do_segment() -> tuple:
                 """Runs in the Worker thread. Pure numpy + h5py, no Qt."""
                 return segment_one(
@@ -424,6 +427,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     self._config.cellpose,
                     cellpose_model=self._cellpose_model,
                     channel_idx=seg_ch_idx,
+                    edge_mode=edge_mode,
                 )
 
             worker = Worker(_do_segment)

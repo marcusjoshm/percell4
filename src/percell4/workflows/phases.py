@@ -55,6 +55,7 @@ from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    EdgeMode,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -151,6 +152,7 @@ def segment_one(
     cfg: CellposeSettings,
     cellpose_model: Any = None,
     channel_idx: int = 0,
+    edge_mode: EdgeMode = EdgeMode.EXCLUDE,
 ) -> tuple[NDArray[np.int32], DatasetFailure | None, str]:
     """Run Cellpose + postprocess on one dataset and write `/labels/cellpose_qc`.
 
@@ -163,6 +165,13 @@ def segment_one(
     ``CellposeModel`` instance out of the per-dataset loop and passes it
     here, model construction (seconds-to-minutes on CPU) happens once
     per phase, not once per dataset.
+
+    ``edge_mode`` controls whether border-touching cells are removed in
+    postprocess. Default ``EXCLUDE`` matches the pre-evolution workflow
+    invariant. ``INCLUDE_AS_NORMAL`` and ``INCLUDE_AS_SIZE_NORMALIZED_COHORT``
+    keep edge cells in labels; they are flagged via the ``is_edge`` column
+    at measure time (recomputed from labels by ``get_edge_labels`` — no
+    persistence here).
     """
     try:
         image = _read_segmentation_channel(store, channel_idx=channel_idx)
@@ -193,8 +202,14 @@ def segment_one(
             f"Cellpose failed: {type(e).__name__}: {e}",
         )
 
-    # Postprocess: edge removal is always on per workflow invariant.
-    labels, _n_edge = filter_edge_cells(labels.astype(np.int32), edge_margin=0)
+    # Postprocess: edge removal is conditional on the workflow's edge_mode.
+    # Modes other than EXCLUDE keep edge cells in labels; they will be
+    # flagged with ``is_edge=True`` at measure time (recomputed from the
+    # post-QC labels via ``get_edge_labels`` in U4) — no extra HDF5
+    # persistence here.
+    labels = labels.astype(np.int32)
+    if edge_mode == EdgeMode.EXCLUDE:
+        labels, _n_edge = filter_edge_cells(labels, edge_margin=0)
     labels, _n_small = filter_small_cells(labels, min_area=cfg.min_size)
     labels = relabel_sequential(labels)
 
