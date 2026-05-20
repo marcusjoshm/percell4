@@ -13,12 +13,26 @@ export async function health(): Promise<{ status: string }> {
   return r.json();
 }
 
-export async function loadImage(path: string) {
+export interface DatasetMeta {
+  path: string;
+  shape: [number, number, number] | null;
+  channel_names: string[];
+  segmentation_names: string[];
+  mask_names: string[];
+  flim_frequency_mhz: number | null;
+  creation_bin: number;
+}
+
+export async function loadImage(path: string): Promise<DatasetMeta> {
   const r = await fetch(`${BASE}/load_image`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
   });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `load_image failed: HTTP ${r.status}`);
+  }
   return r.json();
 }
 

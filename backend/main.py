@@ -22,11 +22,21 @@ import asyncio
 import json
 import os
 import random
+import sys
+from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+
+# When running from source (`python -m backend.main`), the `percell4`
+# package lives at `<repo>/src/percell4/`. Inject it into sys.path so
+# the imports below resolve. The PyInstaller bundle gets the same
+# resolution via `--paths src` at build time, so this is a no-op there.
+_REPO_SRC = Path(__file__).resolve().parent.parent / "src"
+if _REPO_SRC.is_dir() and str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
 
 PORT = int(os.environ.get("PERCELL4_PORT", "8765"))
 
@@ -52,14 +62,58 @@ def health() -> dict[str, str]:
 
 @app.post("/load_image")
 def load_image(payload: dict[str, Any]) -> dict[str, Any]:
-    """Stub: return fake dataset metadata for any path."""
+    """Read real dataset metadata from an HDF5 file via percell4 core.
+
+    Delegates to ``percell4.store.DatasetStore`` + the
+    ``_build_handle_metadata`` adapter to return the same dict shape the
+    PyQt5 app uses. Output is normalized to JSON-safe primitives
+    (channel/seg/mask names → str, shape → list[int], frequency →
+    float | None).
+    """
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    # Imports are local so a missing percell4 package only breaks this
+    # endpoint, not the whole sidecar.
+    from percell4.adapters.hdf5_store import _build_handle_metadata
+    from percell4.store import DatasetStore
+
+    store = DatasetStore(path)
+    if not store.exists():
+        raise HTTPException(status_code=404, detail=f"file not found: {path}")
+
+    try:
+        md = _build_handle_metadata(store)
+    except Exception as e:  # noqa: BLE001 — surface as 400 with message
+        raise HTTPException(
+            status_code=400, detail=f"failed to read {path}: {e}",
+        ) from e
+
+    channel_names = [str(n) for n in md.get("channel_names", [])]
+    seg_names = [str(n) for n in md.get("segmentation_names", [])]
+    mask_names = [str(n) for n in md.get("mask_names", [])]
+
+    # Synthesize (C, H, W) — the React `DatasetMeta.shape` consumer wants
+    # a triple. Native shape comes from metadata as (H, W); prepend C.
+    native_shape = md.get("native_shape")
+    if native_shape is not None:
+        h, w = int(native_shape[0]), int(native_shape[1])
+        shape: list[int] | None = [len(channel_names) or 1, h, w]
+    else:
+        shape = None
+
+    freq_raw = md.get("flim_frequency_mhz")
+    freq: float | None = float(freq_raw) if freq_raw is not None else None
+
     return {
-        "path": payload.get("path", "experiment_0824_HeLa.h5"),
-        "shape": [4, 1024, 1024],
-        "channel_names": ["DAPI", "GFP", "Cy5", "NADH"],
-        "segmentation_names": ["dapi_seg", "nuclei_v2"],
-        "mask_names": ["thresh_488", "particles"],
-        "flim_frequency_mhz": 80.0,
+        "path": str(Path(path).resolve()),
+        "shape": shape,
+        "channel_names": channel_names,
+        "segmentation_names": seg_names,
+        "mask_names": mask_names,
+        "flim_frequency_mhz": freq,
+        "creation_bin": int(md.get("creation_bin", 1)),
     }
 
 

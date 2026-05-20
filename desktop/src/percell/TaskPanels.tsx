@@ -1,7 +1,7 @@
 import { useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { PanelHeader, GroupBox, Row, MiniButton, MiniSelect, MiniInput, MiniCheckbox } from "./ui";
 import { usePerCell } from "./store";
-import { CHANNELS, MASKS, SEGMENTATIONS } from "./mock";
 
 export function TaskPanel() {
   const hub = usePerCell((s) => s.hub);
@@ -36,13 +36,24 @@ export function TaskPanel() {
 
 function IOPanel() {
   const setStatus = usePerCell((s) => s.setStatus);
+  const loadDataset = usePerCell((s) => s.loadDataset);
   return (
     <>
       <GroupBox title="Import">
         <MiniButton onClick={() => setStatus("Compress TIFF wizard opened")}>
           Compress TIFF Dataset…
         </MiniButton>
-        <MiniButton onClick={() => setStatus("Load dataset…")}>Load Dataset…</MiniButton>
+        <MiniButton
+          onClick={async () => {
+            const picked = await openDialog({
+              multiple: false,
+              filters: [{ name: "HDF5", extensions: ["h5", "hdf5"] }],
+            });
+            if (typeof picked === "string") loadDataset(picked);
+          }}
+        >
+          Load Dataset…
+        </MiniButton>
         <MiniButton onClick={() => setStatus("Add layer…")}>Add Layer to Dataset…</MiniButton>
         <MiniButton onClick={() => setStatus("Batch TCSPC append…")}>
           Batch TCSPC Append…
@@ -485,25 +496,41 @@ function WorkflowDialog({
 }
 
 function DataPanel() {
+  const {
+    dataset,
+    channelNames,
+    maskNames,
+    segmentationNames,
+    flimFrequencyMhz,
+    viewBin,
+  } = usePerCell();
   return (
     <>
       <GroupBox title="Layer Management">
         <Row label="Segmentations">
-          <MiniSelect value="dapi_seg" options={[...SEGMENTATIONS]} onChange={() => {}} />
+          <MiniSelect
+            value={segmentationNames[0] ?? ""}
+            options={segmentationNames}
+            onChange={() => {}}
+          />
         </Row>
         <div className="grid grid-cols-2 gap-1.5">
           <MiniButton>Rename</MiniButton>
           <MiniButton>Delete</MiniButton>
         </div>
         <Row label="Masks">
-          <MiniSelect value="thresh_488" options={[...MASKS]} onChange={() => {}} />
+          <MiniSelect value={maskNames[0] ?? ""} options={maskNames} onChange={() => {}} />
         </Row>
         <div className="grid grid-cols-2 gap-1.5">
           <MiniButton>Rename</MiniButton>
           <MiniButton>Delete</MiniButton>
         </div>
         <Row label="Channels">
-          <MiniSelect value="DAPI" options={[...CHANNELS]} onChange={() => {}} />
+          <MiniSelect
+            value={channelNames[0] ?? ""}
+            options={channelNames}
+            onChange={() => {}}
+          />
         </Row>
         <div className="grid grid-cols-2 gap-1.5">
           <MiniButton>Rename</MiniButton>
@@ -512,11 +539,11 @@ function DataPanel() {
       </GroupBox>
       <GroupBox title="Dataset Info">
         <div className="mono text-[10px] text-foreground/80 leading-relaxed">
-          <div>File: experiment_0824_HeLa.h5</div>
-          <div>Shape: (4, 1024, 1024)</div>
-          <div>Native: (1024, 1024)</div>
-          <div>Creation bin: 1 │ View bin: {usePerCell.getState().viewBin}</div>
-          <div>Labels: 3 │ Masks: 2</div>
+          <div>File: {dataset}</div>
+          <div>Channels: {channelNames.length}</div>
+          <div>Labels: {segmentationNames.length} │ Masks: {maskNames.length}</div>
+          <div>View bin: {viewBin}</div>
+          {flimFrequencyMhz !== null && <div>FLIM frequency: {flimFrequencyMhz} MHz</div>}
         </div>
       </GroupBox>
     </>

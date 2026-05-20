@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import { CELLS, type CellId } from "./mock";
-import { startCellpose } from "@/lib/api";
+import { CELLS, CHANNELS, MASKS, SEGMENTATIONS, type CellId } from "./mock";
+import { loadImage, startCellpose } from "@/lib/api";
 
 export type HubCategory =
   | "io"
@@ -35,6 +35,15 @@ interface State {
   segmentation: string;
   viewBin: number;
   alwaysOnTop: boolean;
+
+  // Available items in each selector. Populated from the FastAPI
+  // sidecar's /load_image response (real .h5 metadata) once a dataset
+  // loads; defaulted to the mock constants pre-load so the UI is
+  // demoable without a backend.
+  channelNames: string[];
+  maskNames: string[];
+  segmentationNames: string[];
+  flimFrequencyMhz: number | null;
 
   selection: Set<CellId>;
   filter: Set<CellId> | null;
@@ -79,6 +88,7 @@ interface State {
   // let the WebSocket event bus drive progress + completion via the
   // _on* handlers below.
   runCellpose: (params: CellposeParams) => Promise<void>;
+  loadDataset: (path: string) => Promise<void>;
 
   // Backend event handlers — called by the WS bridge in main.tsx.
   // Underscore prefix marks "framework plumbing, not for UI".
@@ -100,6 +110,11 @@ export const usePerCell = create<State>((set, get) => ({
   segmentation: "dapi_seg",
   viewBin: 1,
   alwaysOnTop: false,
+
+  channelNames: [...CHANNELS],
+  maskNames: [...MASKS],
+  segmentationNames: [...SEGMENTATIONS],
+  flimFrequencyMhz: 80.0,
 
   selection: new Set(),
   filter: null,
@@ -192,6 +207,41 @@ export const usePerCell = create<State>((set, get) => ({
   // routed through _onTask* below. The local label set here is shown
   // until the backend's task_started event overrides it (usually a
   // sub-second later).
+  // POST /load_image, then commit the returned metadata to state.
+  // Resets selection/filter and forces the active channel/mask/seg to
+  // the first entry of the new dataset (or empty if there is none) so
+  // the SessionBar dropdowns are never stuck pointing at a stale name.
+  loadDataset: async (path) => {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    set({ status: `Loading ${trimmed}…` });
+    let meta;
+    try {
+      meta = await loadImage(trimmed);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      set({ status: `Load failed: ${msg}` });
+      return;
+    }
+    const stem = meta.path.split("/").pop() || meta.path;
+    set({
+      dataset: stem,
+      channelNames: meta.channel_names,
+      maskNames: meta.mask_names,
+      segmentationNames: meta.segmentation_names,
+      flimFrequencyMhz: meta.flim_frequency_mhz,
+      channel: meta.channel_names[0] ?? "",
+      mask: meta.mask_names[0] ?? "",
+      segmentation: meta.segmentation_names[0] ?? "",
+      selection: new Set(),
+      filter: null,
+      status:
+        `Loaded ${stem} — ${meta.channel_names.length} channel(s), ` +
+        `${meta.segmentation_names.length} segmentation(s), ` +
+        `${meta.mask_names.length} mask(s)`,
+    });
+  },
+
   runCellpose: async (params) => {
     const label = `Cellpose [${params.model}, d=${params.diameter}]`;
     set({

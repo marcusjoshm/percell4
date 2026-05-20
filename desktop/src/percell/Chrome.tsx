@@ -14,7 +14,7 @@ import {
   CircleDot,
 } from "lucide-react";
 import { usePerCell, type HubCategory, type LayoutPreset } from "./store";
-import { CHANNELS, MASKS, SEGMENTATIONS, CELLS } from "./mock";
+import { CELLS } from "./mock";
 import { cn } from "@/lib/utils";
 
 const HUB: { id: HubCategory; label: string; Icon: typeof FileInput }[] = [
@@ -107,6 +107,9 @@ export function SessionBar() {
     segmentation,
     viewBin,
     alwaysOnTop,
+    channelNames,
+    maskNames,
+    segmentationNames,
     setChannel,
     setMask,
     setSegmentation,
@@ -121,12 +124,12 @@ export function SessionBar() {
         <span className="text-[11px] mono text-foreground/90 truncate">{dataset}</span>
       </div>
       <div className="h-4 w-px bg-border" />
-      <Selector label="Channel" value={channel} options={[...CHANNELS]} onChange={setChannel} />
-      <Selector label="Mask" value={mask} options={[...MASKS]} onChange={setMask} />
+      <Selector label="Channel" value={channel} options={channelNames} onChange={setChannel} />
+      <Selector label="Mask" value={mask} options={maskNames} onChange={setMask} />
       <Selector
         label="Segmentation"
         value={segmentation}
-        options={[...SEGMENTATIONS]}
+        options={segmentationNames}
         onChange={setSegmentation}
       />
       <div className="flex items-center gap-1.5">
