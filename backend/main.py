@@ -117,26 +117,103 @@ def load_image(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@app.get("/measurements")
-def measurements() -> dict[str, Any]:
-    """Stub: 312 fake cells with 8 numeric metrics."""
-    random.seed(7)
-    rows = []
-    for i in range(312):
-        area = 200 + random.random() * 900
-        mean_ch1 = 400 + random.random() * 1400
-        rows.append({
-            "label": i + 1,
-            "area_px": round(area, 1),
-            "mean_DAPI": round(mean_ch1, 1),
-            "mean_GFP": round(200 + random.random() * 1000, 1),
-            "mean_NADH": round(410 + random.random() * 240, 1),
-            "phasor_g_NADH": round(0.45 + random.random() * 0.08, 3),
-            "phasor_s_NADH": round(0.32 + random.random() * 0.05, 3),
-            "eccentricity": round(0.2 + random.random() * 0.7, 3),
-            "integrated": round(area * mean_ch1, 0),
-        })
-    return {"rows": rows, "n_cells": len(rows)}
+@app.post("/measurements")
+def measurements(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run per-cell measurement against the active dataset/seg/mask.
+
+    Stateless: each request supplies the path + active selectors so the
+    sidecar can be killed and restarted without the frontend losing
+    context. Delegates to `percell4.application.use_cases.MeasureCells`,
+    which writes the resulting DataFrame back to the .h5 file (matches
+    the existing PyQt5 app behavior).
+
+    Request body:
+        path:         absolute .h5 path
+        segmentation: active segmentation name (required)
+        mask:         active mask name (optional)
+        view_bin:     downsample factor 1..16 (default 1)
+        metrics:      list of metric names; default = all BUILTIN_METRICS
+
+    Returns:
+        n_cells, columns, rows (DataFrame.to_dict(orient="records"))
+    """
+    path = payload.get("path")
+    seg_name = payload.get("segmentation")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not seg_name:
+        raise HTTPException(status_code=400, detail="segmentation is required")
+
+    from pathlib import Path as _Path
+
+    from percell4.adapters.hdf5_store import (
+        Hdf5DatasetRepository,
+        _build_handle_metadata,
+    )
+    from percell4.application.session import Session
+    from percell4.application.use_cases.measure_cells import MeasureCells
+    from percell4.domain.dataset import DatasetHandle
+    from percell4.domain.errors import (
+        NoDatasetError,
+        NoMaskError,
+        NoSegmentationError,
+    )
+    from percell4.domain.measure.metrics import BUILTIN_METRICS
+    from percell4.store import DatasetStore
+
+    store = DatasetStore(path)
+    if not store.exists():
+        raise HTTPException(status_code=404, detail=f"file not found: {path}")
+
+    try:
+        handle = DatasetHandle(
+            path=_Path(path), metadata=_build_handle_metadata(store),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail=f"failed to open {path}: {e}",
+        ) from e
+
+    session = Session()
+    session.set_dataset(handle)
+    session.set_active_segmentation(seg_name)
+    mask_name = payload.get("mask")
+    if mask_name:
+        session.set_active_mask(mask_name)
+    view_bin = int(payload.get("view_bin", 1))
+    session.set_active_bin(view_bin)
+
+    metrics = payload.get("metrics") or list(BUILTIN_METRICS.keys())
+    # Reject unknown metric names early — MeasureCells would raise
+    # later, but the message is friendlier here.
+    unknown = [m for m in metrics if m not in BUILTIN_METRICS]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown metric(s): {unknown}; "
+            f"valid: {sorted(BUILTIN_METRICS.keys())}",
+        )
+
+    try:
+        df = MeasureCells(Hdf5DatasetRepository(), session).execute(
+            metrics=metrics,
+        )
+    except (NoDatasetError, NoSegmentationError, NoMaskError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500, detail=f"measurement failed: {e}",
+        ) from e
+
+    # JSON-safe DataFrame: rows as plain dicts, numpy ints/floats coerced
+    # to native types via `df.to_dict(orient="records")` after astype.
+    return {
+        "n_cells": int(len(df)),
+        "columns": list(df.columns),
+        "rows": df.to_dict(orient="records"),
+    }
 
 
 @app.post("/phasor/histogram")

@@ -170,6 +170,8 @@ function AnalysisPanel() {
     runTask,
     setStatus,
     setCompanion,
+    measurementRows,
+    measurementColumns,
   } = usePerCell();
   const [method, setMethod] = useState("Otsu");
   const [thresh, setThresh] = useState("1247");
@@ -246,7 +248,11 @@ function AnalysisPanel() {
         <MiniButton variant="primary" onClick={() => setMetricsOpen(true)}>
           Measure Cells
         </MiniButton>
-        <div className="text-[10px] mono text-muted-foreground">Measured 312 cells, 24 columns</div>
+        <div className="text-[10px] mono text-muted-foreground">
+          {measurementRows.length > 0
+            ? `Measured ${measurementRows.length} cells, ${measurementColumns.length} columns`
+            : "No measurements yet"}
+        </div>
         <div className="grid grid-cols-2 gap-1.5">
           <MiniButton onClick={() => setCompanion("plot")}>Open Data Plot</MiniButton>
           <MiniButton onClick={() => setCompanion("table")}>Open Cell Table</MiniButton>
@@ -275,20 +281,23 @@ function AnalysisPanel() {
 }
 
 function MetricDialog({ onClose }: { onClose: () => void }) {
-  const runTask = usePerCell((s) => s.runTask);
+  const measureCells = usePerCell((s) => s.measureCells);
+  // Names here must match the keys in `percell4.domain.measure.metrics`
+  // BUILTIN_METRICS — see backend rejection on unknown names.
   const all = [
-    "label",
-    "area_px",
+    "area",
     "mean_intensity",
+    "max_intensity",
+    "min_intensity",
+    "median_intensity",
     "integrated_intensity",
-    "eccentricity",
-    "perimeter",
-    "solidity",
-    "phasor_g",
-    "phasor_s",
-    "lifetime_mean",
+    "std_intensity",
+    "mode_intensity",
+    "sg_ratio",
   ];
-  const [picked, setPicked] = useState(new Set(all.slice(0, 5)));
+  const [picked, setPicked] = useState(
+    new Set(["area", "mean_intensity", "integrated_intensity"]),
+  );
   return (
     <div
       className="fixed inset-0 z-50 bg-black/60 grid place-items-center"
@@ -318,7 +327,7 @@ function MetricDialog({ onClose }: { onClose: () => void }) {
           <MiniButton
             variant="primary"
             onClick={() => {
-              runTask(`Measuring (${picked.size} metrics)`, 2200);
+              measureCells([...picked]);
               onClose();
             }}
           >

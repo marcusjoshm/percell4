@@ -36,8 +36,30 @@ export async function loadImage(path: string): Promise<DatasetMeta> {
   return r.json();
 }
 
-export async function getMeasurements() {
-  const r = await fetch(`${BASE}/measurements`);
+export interface MeasureRequest {
+  path: string;
+  segmentation: string;
+  mask?: string;
+  view_bin?: number;
+  metrics?: string[];
+}
+
+export interface MeasurementsResponse {
+  n_cells: number;
+  columns: string[];
+  rows: Record<string, number | string | null>[];
+}
+
+export async function getMeasurements(req: MeasureRequest): Promise<MeasurementsResponse> {
+  const r = await fetch(`${BASE}/measurements`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `measurements failed: HTTP ${r.status}`);
+  }
   return r.json();
 }
 

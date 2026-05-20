@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { CELLS, CHANNELS, MASKS, SEGMENTATIONS, type CellId } from "./mock";
-import { loadImage, startCellpose } from "@/lib/api";
+import { getMeasurements, loadImage, startCellpose } from "@/lib/api";
 
 export type HubCategory =
   | "io"
@@ -30,6 +30,9 @@ export interface CellposeParams {
 
 interface State {
   dataset: string;
+  // Absolute path of the loaded dataset on disk. `dataset` above is the
+  // basename for display; the backend needs the full path on every call.
+  datasetPath: string;
   channel: string;
   mask: string;
   segmentation: string;
@@ -44,6 +47,12 @@ interface State {
   maskNames: string[];
   segmentationNames: string[];
   flimFrequencyMhz: number | null;
+
+  // Per-cell measurements as returned by /measurements. Empty until
+  // the user runs Measure Cells. Schema is dynamic (column set depends
+  // on the dataset's channels and active mask).
+  measurementRows: Record<string, number | string | null>[];
+  measurementColumns: string[];
 
   selection: Set<CellId>;
   filter: Set<CellId> | null;
@@ -89,6 +98,7 @@ interface State {
   // _on* handlers below.
   runCellpose: (params: CellposeParams) => Promise<void>;
   loadDataset: (path: string) => Promise<void>;
+  measureCells: (metrics?: string[]) => Promise<void>;
 
   // Backend event handlers — called by the WS bridge in main.tsx.
   // Underscore prefix marks "framework plumbing, not for UI".
@@ -105,6 +115,7 @@ export const visibleCells = (filter: Set<CellId> | null) =>
 
 export const usePerCell = create<State>((set, get) => ({
   dataset: "experiment_0824_HeLa.h5",
+  datasetPath: "",
   channel: "DAPI",
   mask: "thresh_488",
   segmentation: "dapi_seg",
@@ -115,6 +126,9 @@ export const usePerCell = create<State>((set, get) => ({
   maskNames: [...MASKS],
   segmentationNames: [...SEGMENTATIONS],
   flimFrequencyMhz: 80.0,
+
+  measurementRows: [],
+  measurementColumns: [],
 
   selection: new Set(),
   filter: null,
@@ -226,6 +240,7 @@ export const usePerCell = create<State>((set, get) => ({
     const stem = meta.path.split("/").pop() || meta.path;
     set({
       dataset: stem,
+      datasetPath: meta.path,
       channelNames: meta.channel_names,
       maskNames: meta.mask_names,
       segmentationNames: meta.segmentation_names,
@@ -235,11 +250,54 @@ export const usePerCell = create<State>((set, get) => ({
       segmentation: meta.segmentation_names[0] ?? "",
       selection: new Set(),
       filter: null,
+      // Dataset switch invalidates any prior measurements.
+      measurementRows: [],
+      measurementColumns: [],
       status:
         `Loaded ${stem} — ${meta.channel_names.length} channel(s), ` +
         `${meta.segmentation_names.length} segmentation(s), ` +
         `${meta.mask_names.length} mask(s)`,
     });
+  },
+
+  // POST /measurements against the currently loaded dataset using the
+  // active segmentation + mask + view bin. The result DataFrame goes
+  // into measurementRows/measurementColumns; the status bar reports
+  // the count. Companion views can read these fields once they're
+  // refactored to consume real measurement data.
+  measureCells: async (metrics) => {
+    const s = get();
+    if (!s.datasetPath) {
+      set({ status: "Load a dataset first (I/O → Load Dataset…)" });
+      return;
+    }
+    if (!s.segmentation) {
+      set({ status: "Select a segmentation in the Session bar first" });
+      return;
+    }
+    const label = `Measuring cells (${metrics?.length ?? "all"} metrics)`;
+    set({
+      runningTask: { label, progress: 0, cancellable: false },
+      status: label,
+    });
+    try {
+      const resp = await getMeasurements({
+        path: s.datasetPath,
+        segmentation: s.segmentation,
+        mask: s.mask || undefined,
+        view_bin: s.viewBin,
+        metrics,
+      });
+      set({
+        runningTask: null,
+        measurementRows: resp.rows,
+        measurementColumns: resp.columns,
+        status: `Measured ${resp.n_cells} cells, ${resp.columns.length} columns`,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      set({ runningTask: null, status: `Measure failed: ${msg}` });
+    }
   },
 
   runCellpose: async (params) => {
