@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { CELLS, type CellId } from "./mock";
+import { startCellpose } from "@/lib/api";
 
 export type HubCategory =
   | "io"
@@ -18,6 +19,13 @@ export interface RunningTask {
   label: string;
   progress: number; // 0..1
   cancellable: boolean;
+}
+
+export interface CellposeParams {
+  model: string;
+  diameter: number;
+  gpu: boolean;
+  remove_edge_cells: boolean;
 }
 
 interface State {
@@ -66,6 +74,17 @@ interface State {
   setStatus: (s: string) => void;
   runTask: (label: string, durationMs?: number) => void;
   cancelTask: () => void;
+
+  // Real backend-driven actions. These post to the FastAPI sidecar and
+  // let the WebSocket event bus drive progress + completion via the
+  // _on* handlers below.
+  runCellpose: (params: CellposeParams) => Promise<void>;
+
+  // Backend event handlers — called by the WS bridge in main.tsx.
+  // Underscore prefix marks "framework plumbing, not for UI".
+  _onTaskStarted: (label: string) => void;
+  _onTaskProgress: (progress: number) => void;
+  _onTaskFinished: (message: string) => void;
 
   detach: (c: CompanionId) => void;
   reattach: (c: CompanionId) => void;
@@ -166,6 +185,41 @@ export const usePerCell = create<State>((set, get) => ({
       runningTask: null,
       status: s.runningTask ? `${s.runningTask.label} — cancelled` : s.status,
     })),
+
+  // ── Real backend-driven actions ──────────────────────────────────
+  // The HTTP POST kicks off the task and returns immediately with a
+  // task_id. Progress + completion arrive on the /events WebSocket,
+  // routed through _onTask* below. The local label set here is shown
+  // until the backend's task_started event overrides it (usually a
+  // sub-second later).
+  runCellpose: async (params) => {
+    const label = `Cellpose [${params.model}, d=${params.diameter}]`;
+    set({
+      runningTask: { label, progress: 0, cancellable: true },
+      status: label,
+    });
+    try {
+      await startCellpose(params);
+    } catch (e) {
+      set({ runningTask: null, status: `Cellpose request failed: ${e}` });
+    }
+  },
+
+  // ── Backend WebSocket event handlers ─────────────────────────────
+  // Called by the bridge in main.tsx as `task_started` / `task_progress`
+  // / `task_finished` events arrive over /events. They are deliberately
+  // last-write-wins: there is only one running task at a time, so we
+  // don't bother keying by task_id.
+  _onTaskStarted: (label) =>
+    set({ runningTask: { label, progress: 0, cancellable: true }, status: label }),
+  _onTaskProgress: (progress) =>
+    set((s) =>
+      s.runningTask
+        ? { runningTask: { ...s.runningTask, progress } }
+        : {},
+    ),
+  _onTaskFinished: (message) =>
+    set({ runningTask: null, status: message }),
 
   detach: (c) =>
     set((s) => {

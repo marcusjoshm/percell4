@@ -81,7 +81,7 @@ function ViewerPanel() {
 }
 
 function SegmentPanel() {
-  const runTask = usePerCell((s) => s.runTask);
+  const runCellpose = usePerCell((s) => s.runCellpose);
   const [model, setModel] = useState("cyto3");
   const [diameter, setDiameter] = useState("30");
   const [gpu, setGpu] = useState(true);
@@ -110,7 +110,14 @@ function SegmentPanel() {
         </Row>
         <MiniButton
           variant="primary"
-          onClick={() => runTask(`Cellpose [${model}, d=${diameter}]`, 3200)}
+          onClick={() =>
+            runCellpose({
+              model,
+              diameter: Number(diameter) || 0,
+              gpu,
+              remove_edge_cells: edge,
+            })
+          }
         >
           ▶ Run Cellpose
         </MiniButton>

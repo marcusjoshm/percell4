@@ -32,7 +32,7 @@ export function ImageViewer() {
     staged,
     channel,
     viewBin,
-    runTask,
+    runCellpose,
   } = usePerCell();
   const [hover, setHover] = useState<{ x: number; y: number; intensity: number } | null>(
     null,
@@ -132,7 +132,14 @@ export function ImageViewer() {
           </div>
 
           <button
-            onClick={() => runTask("Running Cellpose [cyto3]", 3000)}
+            onClick={() =>
+              runCellpose({
+                model: "cyto3",
+                diameter: 30,
+                gpu: true,
+                remove_edge_cells: true,
+              })
+            }
             className="mt-2 h-7 text-[11px] bg-accent/15 border border-accent/40 text-accent rounded hover:bg-accent/25"
           >
             ▶ Run Cellpose
