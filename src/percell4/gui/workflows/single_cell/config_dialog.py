@@ -546,15 +546,51 @@ class WorkflowConfigDialog(QDialog):
         )
         form = QFormLayout(box)
 
-        self._particle_min_area = QSpinBox()
-        self._particle_min_area.setRange(0, 1_000_000)
-        self._particle_min_area.setValue(0)
+        # Min particle area: paired value + unit. QDoubleSpinBox covers
+        # both modes — integer step for px, fractional for µm². Switching
+        # units does not auto-convert the entered number (the µm² mode is
+        # resolved per-dataset inside the workflow phase using each
+        # dataset's pixel_size_um, so a px↔µm² convert here would imply a
+        # single canonical pixel size that doesn't exist at config time).
+        min_area_row = QWidget()
+        min_area_layout = QHBoxLayout(min_area_row)
+        min_area_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._particle_min_area = QDoubleSpinBox()
+        self._particle_min_area.setRange(0.0, 1_000_000.0)
+        self._particle_min_area.setDecimals(0)
+        self._particle_min_area.setSingleStep(1.0)
+        self._particle_min_area.setValue(0.0)
         self._particle_min_area.setToolTip(
-            "Minimum particle area in pixels. Connected components "
-            "smaller than this are dropped. 0 = keep every component "
-            "(including single-pixel hits)."
+            "Minimum particle area. Connected components smaller than "
+            "this are dropped. 0 = keep every component (including "
+            "single-pixel hits). The unit follows the selector to the "
+            "right — µm² mode is converted to pixels per dataset using "
+            "that dataset's pixel size."
         )
-        form.addRow("Min particle area (px):", self._particle_min_area)
+
+        self._particle_min_area_unit = QComboBox()
+        self._particle_min_area_unit.addItem("px", userData="px")
+        self._particle_min_area_unit.addItem("µm²", userData="um2")
+        self._particle_min_area_unit.setCurrentIndex(0)
+        self._particle_min_area_unit.setToolTip(
+            "Unit for Min particle area. px applies a uniform pixel "
+            "threshold to every dataset. µm² resolves to a per-dataset "
+            "pixel threshold using each dataset's TIFF pixel size — "
+            "datasets without a known pixel size will fail their "
+            "particle phase explicitly rather than silently default."
+        )
+        # Wire the signal at construction so tests using
+        # `combo.setCurrentIndex(i)` (which fires currentIndexChanged)
+        # exercise the runtime decimals/step swap. Matches the
+        # qt-wire-user-edit-signals convention.
+        self._particle_min_area_unit.currentIndexChanged.connect(
+            self._on_min_area_unit_changed,
+        )
+
+        min_area_layout.addWidget(self._particle_min_area, stretch=1)
+        min_area_layout.addWidget(self._particle_min_area_unit)
+        form.addRow("Min particle area:", min_area_row)
 
         note = QLabel(
             "Particle analysis runs against every thresholding round's "
@@ -566,6 +602,21 @@ class WorkflowConfigDialog(QDialog):
         form.addRow("", note)
 
         return box
+
+    def _on_min_area_unit_changed(self) -> None:
+        """Re-tune the spinbox decimals/step when the unit combo flips.
+
+        Switching units does NOT auto-convert the entered numeric value
+        — the user re-states intent. px gets integer step; µm² gets
+        fractional precision so sub-pixel² thresholds are expressible.
+        """
+        unit = self._particle_min_area_unit.currentData()
+        if unit == "um2":
+            self._particle_min_area.setDecimals(4)
+            self._particle_min_area.setSingleStep(0.01)
+        else:
+            self._particle_min_area.setDecimals(0)
+            self._particle_min_area.setSingleStep(1.0)
 
     def _build_dilute_group(self) -> QGroupBox:
         """Optional Phase 5 (dilute-phase mask) configuration.
@@ -1555,11 +1606,22 @@ class WorkflowConfigDialog(QDialog):
         # Optional particle analysis. The group is checkable so we can
         # detect enabled vs disabled directly from the group's state.
         particle_settings: ParticleSettings | None = None
-        particle_group = self._particle_min_area.parent()
-        if isinstance(particle_group, QGroupBox) and particle_group.isChecked():
+        # The QHBoxLayout row wraps both widgets in a QWidget, so the
+        # spinbox's parent is that row container, not the QGroupBox.
+        # Walk up to the group.
+        particle_group: QGroupBox | None = None
+        node = self._particle_min_area.parent()
+        while node is not None:
+            if isinstance(node, QGroupBox):
+                particle_group = node
+                break
+            node = node.parent()
+        if particle_group is not None and particle_group.isChecked():
+            unit = self._particle_min_area_unit.currentData() or "px"
             try:
                 particle_settings = ParticleSettings(
-                    min_area=int(self._particle_min_area.value()),
+                    min_area=float(self._particle_min_area.value()),
+                    min_area_unit=str(unit),
                 )
             except ValueError as e:
                 self._warn(f"Particle settings invalid: {e}")

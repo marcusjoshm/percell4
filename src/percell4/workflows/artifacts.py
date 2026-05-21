@@ -185,11 +185,22 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
 
 
 def _particle_to_dict(p: ParticleSettings) -> dict[str, Any]:
-    return {"min_area": p.min_area}
+    return {"min_area": p.min_area, "min_area_unit": p.min_area_unit}
 
 
 def _particle_from_dict(d: dict[str, Any]) -> ParticleSettings:
-    return ParticleSettings(min_area=int(d.get("min_area", 0)))
+    """Load ParticleSettings, accepting both the new and legacy schema.
+
+    Legacy ``run_config.json`` files predate the µm² unit selector and
+    carry ``{"min_area": <int>}`` only. Treat that shape as the px
+    default; tolerate either int or float in the value so a hand-edited
+    config doesn't trip the loader.
+    """
+    raw_value = d.get("min_area", 0)
+    return ParticleSettings(
+        min_area=float(raw_value),
+        min_area_unit=str(d.get("min_area_unit", "px")),
+    )
 
 
 def _dilute_to_dict(d: DiluteSettings) -> dict[str, Any]:
