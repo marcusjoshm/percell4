@@ -155,9 +155,10 @@ def test_remove_selected_dataset(dialog, h5_ds1, h5_ds2):
 
 def test_cellpose_defaults(dialog):
     assert dialog._cp_model.currentText() == "cpsam"
-    assert dialog._cp_diameter.value() == 30.0
+    assert dialog._cp_diameter.value() == 300.0
     assert dialog._cp_gpu.isChecked() is True
     assert dialog._cp_min_size.value() == 15
+    assert dialog._cp_seg_name.text() == "cp_mask"
 
 
 # ── Rounds table ────────────────────────────────────────────────────────
@@ -170,8 +171,10 @@ def test_add_round_populates_row(dialog, h5_ds1, h5_ds2):
     data = dialog._read_round_row(0)
     assert data["name"] == "round_1"
     assert data["channel"] in ("GFP", "RFP")  # from intersection
-    assert data["metric"] == "mean_intensity"
+    assert data["metric"] == "median_intensity"
     assert data["algorithm"] == "gmm"
+    assert data["gmm_max"] == 10
+    assert data["sigma"] == 0.0
 
 
 def test_add_round_with_no_datasets_shows_placeholder(dialog):
@@ -434,9 +437,13 @@ def test_pending_dataset_to_entry_round_trips_channels(tmp_path):
 # ── U3: Edge-mode selector ─────────────────────────────────────────────
 
 
-def test_edge_mode_combo_defaults_to_exclude(dialog):
-    """U3: dialog opens with edge_mode combo defaulting to EXCLUDE."""
-    assert dialog._edge_mode.currentData() is EdgeMode.EXCLUDE
+def test_edge_mode_combo_defaults_to_size_normalized_cohort(dialog):
+    """Default edge mode is the size-normalized cohort (workflow's
+    primary phase-separation use case)."""
+    assert (
+        dialog._edge_mode.currentData()
+        is EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
+    )
 
 
 def test_edge_mode_combo_has_three_options(dialog):
@@ -481,18 +488,26 @@ def _dilute_group(dialog):
     return dialog._dilute_mask_name.parent()
 
 
-def test_dilute_group_unchecked_by_default(dialog):
-    """U3: dilute generation is opt-in — group starts unchecked."""
+def test_dilute_group_checked_by_default(dialog):
+    """Dilute generation is ON by default (workflow's phase-separation
+    use case). The default mask name is pre-filled so Start isn't blocked."""
     group = _dilute_group(dialog)
     assert group.isCheckable() is True
-    assert group.isChecked() is False
+    assert group.isChecked() is True
+    assert dialog._dilute_mask_name.text() == "dilute"
+    # Default field values per the requested config.
+    assert dialog._dilute_dilation_px.value() == 5
+    assert dialog._dilute_metric.currentText() == "median_intensity"
+    assert dialog._dilute_gmm_max.value() == 10
+    assert dialog._dilute_sigma.value() == 0.0
 
 
 def test_dilute_disabled_produces_none_dilute_settings(dialog, h5_ds1, tmp_path):
-    """U3: dilute group unchecked → cfg.dilute_settings is None."""
+    """Unchecking the dilute group → cfg.dilute_settings is None."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._output_edit.setText(str(tmp_path / "runs"))
+    _dilute_group(dialog).setChecked(False)  # explicitly disable
     dialog._on_start_clicked()
     cfg = dialog.workflow_config
     assert cfg is not None
@@ -504,7 +519,7 @@ def test_dilute_enabled_builds_full_settings(dialog, h5_ds1, h5_ds2, tmp_path):
     dialog._add_h5_paths([h5_ds1, h5_ds2])
     dialog._on_add_round()
     dialog._output_edit.setText(str(tmp_path / "runs"))
-    # Enable + fill dilute group
+    # Group is checked by default; just confirm the fields.
     _dilute_group(dialog).setChecked(True)
     dialog._dilute_mask_name.setText("dilute")
     dialog._dilute_dilation_px.setValue(5)
@@ -520,7 +535,8 @@ def test_dilute_enabled_builds_full_settings(dialog, h5_ds1, h5_ds2, tmp_path):
     assert ds.mask_name == "dilute"
     assert ds.dilation_radius_px == 5
     assert ds.channel in ("GFP", "RFP")
-    assert ds.metric == "mean_intensity"
+    # Metric default is median_intensity now.
+    assert ds.metric == "median_intensity"
     assert ds.algorithm is ThresholdAlgorithm.GMM
 
 
@@ -630,14 +646,35 @@ def test_particle_metrics_not_added_when_unselected(dialog, h5_ds1, tmp_path):
     dialog._output_edit.setText(str(tmp_path / "runs"))
     dialog._selected_csv_channels = {"GFP"}
     dialog._selected_csv_metrics = {"mean_intensity"}
-    # Default — both particle sets empty
-    assert dialog._selected_csv_particle_per_cell == set()
-    assert dialog._selected_csv_particle_per_channel == set()
+    # Explicitly clear the particle defaults for this test.
+    dialog._selected_csv_particle_per_cell = set()
+    dialog._selected_csv_particle_per_channel = set()
 
     intersected = ["GFP", "RFP", "DAPI"]
     rounds = dialog._rounds_from_table(intersected)
     cols = dialog._build_selected_csv_columns(intersected, rounds)
     assert not any("particle" in c for c in cols)
+
+
+def test_csv_picker_default_selections(dialog, h5_ds1):
+    """The CSV picker pre-seeds the requested default metric + particle set,
+    and channels auto-select to the full intersection."""
+    # Default metric / particle selections (before any picker interaction).
+    assert dialog._selected_csv_metrics == {
+        "area",
+        "integrated_intensity",
+        "mean_intensity",
+    }
+    assert dialog._selected_csv_particle_per_cell == {
+        "particle_count",
+        "total_particle_area",
+    }
+    assert dialog._selected_csv_particle_per_channel == {
+        "particle_mean_intensity",
+    }
+    # Channels auto-select to the intersection once datasets are added.
+    dialog._add_h5_paths([h5_ds1])
+    assert dialog._selected_csv_channels == {"GFP", "RFP", "DAPI"}
 
 
 def test_picker_emits_area_um2_siblings(dialog, h5_ds1, tmp_path):
