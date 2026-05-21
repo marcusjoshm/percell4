@@ -563,6 +563,58 @@ def test_dilute_name_collision_with_round_name_warns(
     assert dialog.workflow_config is None
 
 
+def test_particle_metrics_round_trip_into_csv_columns(dialog, h5_ds1, tmp_path):
+    """U7 / Configure CSV Export: selected particle metrics produce
+    <round>_<metric> and <round>_<channel>_<metric> columns."""
+    from percell4.gui.workflows.single_cell.config_dialog import (
+        _PARTICLE_PER_CELL_METRICS,
+        _PARTICLE_PER_CHANNEL_METRICS,
+    )
+
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    # Set a meaningful round name we can spot in the output.
+    dialog._rounds_table.item(0, 0).setText("puncta")
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+
+    # Pre-select one channel + one whole-cell metric so the picker has
+    # at least one channel for the per-channel particle columns.
+    dialog._selected_csv_channels = {"GFP"}
+    dialog._selected_csv_metrics = {"mean_intensity"}
+    # Pick one per-cell and one per-channel particle metric.
+    dialog._selected_csv_particle_per_cell = {"particle_count"}
+    dialog._selected_csv_particle_per_channel = {"particle_mean"}
+
+    intersected = ["GFP", "RFP", "DAPI"]
+    rounds = dialog._rounds_from_table(intersected)
+    cols = dialog._build_selected_csv_columns(intersected, rounds)
+
+    # Per-cell particle column: <round>_<metric>
+    assert "puncta_particle_count" in cols
+    # Per-channel particle column: <round>_<channel>_<metric>
+    assert "puncta_GFP_particle_mean" in cols
+    # Not selected → not in the list
+    assert "puncta_total_particle_area" not in cols
+    assert "puncta_GFP_particle_integrated_total" not in cols
+
+
+def test_particle_metrics_not_added_when_unselected(dialog, h5_ds1, tmp_path):
+    """U7: with no particle metrics selected, no particle columns are emitted."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    dialog._selected_csv_channels = {"GFP"}
+    dialog._selected_csv_metrics = {"mean_intensity"}
+    # Default — both particle sets empty
+    assert dialog._selected_csv_particle_per_cell == set()
+    assert dialog._selected_csv_particle_per_channel == set()
+
+    intersected = ["GFP", "RFP", "DAPI"]
+    rounds = dialog._rounds_from_table(intersected)
+    cols = dialog._build_selected_csv_columns(intersected, rounds)
+    assert not any("particle" in c for c in cols)
+
+
 def test_dialog_remains_scroll_wrap_compliant(dialog):
     """U3: dialog still uses wrap_in_scroll — adding sections did not regress
     the dialog-scroll compliance pattern (per docs/solutions/ui-bugs/

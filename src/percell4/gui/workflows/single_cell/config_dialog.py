@@ -97,6 +97,25 @@ _CORE_OPTIONAL_COLUMNS = (
     "area",
 )
 
+# Particle-analysis per-cell summary metrics (U7). Single value per cell;
+# the CSV column shape is "<round_name>_<metric>" — one column per
+# (round × metric) when particle analysis is enabled.
+_PARTICLE_PER_CELL_METRICS = (
+    "particle_count",
+    "total_particle_area",
+    "mean_particle_area",
+    "max_particle_area",
+    "particle_coverage_fraction",
+)
+
+# Particle-analysis per-channel summary metrics (U7). One value per
+# (cell, channel). The CSV column shape is "<round_name>_<channel>_<metric>"
+# — one column per (round × channel × metric).
+_PARTICLE_PER_CHANNEL_METRICS = (
+    "particle_mean",
+    "particle_integrated_total",
+)
+
 # Matches the `_ROUND_NAME_RE` in `workflows/models.py`. Duplicated here so
 # we can live-validate the cell while the user types — reconstructing the
 # ThresholdingRound dataclass on every keystroke just to catch a typo
@@ -200,6 +219,10 @@ class WorkflowConfigDialog(QDialog):
         self._pending_datasets: list[_PendingDataset] = []
         self._selected_csv_channels: set[str] = set()
         self._selected_csv_metrics: set[str] = set()
+        # U7 particle metrics — independent picker state (only applied
+        # to CSV columns when particle analysis is enabled at run time).
+        self._selected_csv_particle_per_cell: set[str] = set()
+        self._selected_csv_particle_per_channel: set[str] = set()
         self._workflow_config: WorkflowConfig | None = None
 
         self._build_ui()
@@ -1125,8 +1148,10 @@ class WorkflowConfigDialog(QDialog):
         """Update the summary label under the Configure CSV Export button."""
         n_ch = len(self._selected_csv_channels)
         n_met = len(self._selected_csv_metrics)
+        n_ppc = len(self._selected_csv_particle_per_cell)
+        n_ppch = len(self._selected_csv_particle_per_channel)
         round_names = self._round_names_from_table()
-        if n_ch == 0 and n_met == 0:
+        if n_ch == 0 and n_met == 0 and n_ppc == 0 and n_ppch == 0:
             self._csv_summary_label.setText(
                 "No channels or metrics selected yet. "
                 "Click 'Configure CSV Export...' to choose."
@@ -1135,6 +1160,8 @@ class WorkflowConfigDialog(QDialog):
             parts = [f"{n_ch} channel(s)", f"{n_met} metric(s)"]
             if round_names:
                 parts.append(f"{len(round_names)} round(s)")
+            if n_ppc or n_ppch:
+                parts.append(f"{n_ppc + n_ppch} particle metric(s)")
             col_count = self._estimate_csv_column_count()
             self._csv_summary_label.setText(
                 f"CSV export: {', '.join(parts)} → ~{col_count} columns. "
@@ -1145,15 +1172,20 @@ class WorkflowConfigDialog(QDialog):
         """Rough count of the CSV columns that will be produced."""
         n_ch = len(self._selected_csv_channels)
         n_met = len(self._selected_csv_metrics)
+        n_ppc = len(self._selected_csv_particle_per_cell)
+        n_ppch = len(self._selected_csv_particle_per_channel)
         round_names = self._round_names_from_table()
         n_rounds = len(round_names)
         # identity (3) + core (7) + ch×met + group_per_round + ch×met×round×2 (in/out)
+        # + per-cell particle cols (round × ppc) + per-channel particle cols (round × ch × ppch)
         return (
             len(_ALWAYS_ON_COLUMNS)
             + len(_CORE_OPTIONAL_COLUMNS)
             + n_ch * n_met
             + n_rounds
             + n_ch * n_met * n_rounds * 2
+            + n_rounds * n_ppc
+            + n_rounds * n_ch * n_ppch
         )
 
     def _on_configure_csv_export(self) -> None:
@@ -1223,12 +1255,78 @@ class WorkflowConfigDialog(QDialog):
         met_layout.addLayout(met_btn_row)
         layout.addWidget(met_box)
 
+        # ── Particle metrics (per cell) ──
+        # Always shown so the picker is stateful regardless of whether
+        # particle analysis is currently enabled. When it's off, the
+        # CSV writer in export_run filters out columns that don't
+        # exist in the df, so pre-selected particle metrics are safe.
+        ppc_box = QGroupBox(
+            "Particle metrics — per cell "
+            "(used only when particle analysis is enabled)"
+        )
+        ppc_layout = QVBoxLayout(ppc_box)
+        ppc_cbs: dict[str, QCheckBox] = {}
+        for name in _PARTICLE_PER_CELL_METRICS:
+            cb = QCheckBox(name.replace("_", " ").title())
+            cb.setObjectName(name)
+            cb.setChecked(name in self._selected_csv_particle_per_cell)
+            ppc_cbs[name] = cb
+            ppc_layout.addWidget(cb)
+
+        ppc_btn_row = QHBoxLayout()
+        ppc_all = QPushButton("All")
+        ppc_all.clicked.connect(
+            lambda: [cb.setChecked(True) for cb in ppc_cbs.values()]
+        )
+        ppc_btn_row.addWidget(ppc_all)
+        ppc_none = QPushButton("None")
+        ppc_none.clicked.connect(
+            lambda: [cb.setChecked(False) for cb in ppc_cbs.values()]
+        )
+        ppc_btn_row.addWidget(ppc_none)
+        ppc_btn_row.addStretch()
+        ppc_layout.addLayout(ppc_btn_row)
+        layout.addWidget(ppc_box)
+
+        # ── Particle metrics (per channel) ──
+        ppch_box = QGroupBox(
+            "Particle metrics — per channel "
+            "(used only when particle analysis is enabled)"
+        )
+        ppch_layout = QVBoxLayout(ppch_box)
+        ppch_cbs: dict[str, QCheckBox] = {}
+        for name in _PARTICLE_PER_CHANNEL_METRICS:
+            cb = QCheckBox(name.replace("_", " ").title())
+            cb.setObjectName(name)
+            cb.setChecked(name in self._selected_csv_particle_per_channel)
+            ppch_cbs[name] = cb
+            ppch_layout.addWidget(cb)
+
+        ppch_btn_row = QHBoxLayout()
+        ppch_all = QPushButton("All")
+        ppch_all.clicked.connect(
+            lambda: [cb.setChecked(True) for cb in ppch_cbs.values()]
+        )
+        ppch_btn_row.addWidget(ppch_all)
+        ppch_none = QPushButton("None")
+        ppch_none.clicked.connect(
+            lambda: [cb.setChecked(False) for cb in ppch_cbs.values()]
+        )
+        ppch_btn_row.addWidget(ppch_none)
+        ppch_btn_row.addStretch()
+        ppch_layout.addLayout(ppch_btn_row)
+        layout.addWidget(ppch_box)
+
         # ── Note ──
         note = QLabel(
             "The exported CSVs will contain every combination of the "
             "selected channels × metrics, plus core columns (label, "
             "centroid, area), group assignments per round, and per-round "
-            "inside/outside columns. The full measurements.parquet "
+            "inside/outside columns. When particle analysis is enabled, "
+            "the selected per-cell particle metrics produce one column "
+            "per round (<round>_<metric>) and the per-channel particle "
+            "metrics produce one column per round × channel "
+            "(<round>_<channel>_<metric>). The full measurements.parquet "
             "always contains everything regardless of this selection."
         )
         note.setWordWrap(True)
@@ -1249,6 +1347,12 @@ class WorkflowConfigDialog(QDialog):
         }
         self._selected_csv_metrics = {
             name for name, cb in met_cbs.items() if cb.isChecked()
+        }
+        self._selected_csv_particle_per_cell = {
+            name for name, cb in ppc_cbs.items() if cb.isChecked()
+        }
+        self._selected_csv_particle_per_channel = {
+            name for name, cb in ppch_cbs.items() if cb.isChecked()
         }
         self._update_csv_summary()
 
@@ -1561,6 +1665,19 @@ class WorkflowConfigDialog(QDialog):
                 for rn in round_names:
                     cols.append(f"{ch}_{m}_in_{rn}")
                     cols.append(f"{ch}_{m}_out_{rn}")
+
+        # U7 particle columns. Per-cell metrics: <round>_<metric>;
+        # per-channel metrics: <round>_<channel>_<metric>.
+        # When particle analysis is disabled at run time, these columns
+        # won't exist in the df and the CSV writer filters them out
+        # (see export_run's `[c for c in config.selected_csv_columns
+        # if c in df.columns]` guard).
+        for rn in round_names:
+            for m in sorted(self._selected_csv_particle_per_cell):
+                cols.append(f"{rn}_{m}")
+            for ch in channels:
+                for m in sorted(self._selected_csv_particle_per_channel):
+                    cols.append(f"{rn}_{ch}_{m}")
 
         return cols
 
