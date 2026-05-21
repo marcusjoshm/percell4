@@ -512,6 +512,7 @@ function DataPanel() {
     segmentationNames,
     flimFrequencyMhz,
     viewBin,
+    pixelSizeUm,
   } = usePerCell();
   return (
     <>
@@ -553,6 +554,11 @@ function DataPanel() {
           <div>Labels: {segmentationNames.length} │ Masks: {maskNames.length}</div>
           <div>View bin: {viewBin}</div>
           {flimFrequencyMhz !== null && <div>FLIM frequency: {flimFrequencyMhz} MHz</div>}
+          <div>
+            Pixel size: {pixelSizeUm !== null
+              ? `${pixelSizeUm.toPrecision(4)} µm/px`
+              : "(not in TIFF metadata)"}
+          </div>
         </div>
       </GroupBox>
     </>

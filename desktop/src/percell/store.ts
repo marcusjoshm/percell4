@@ -57,6 +57,13 @@ interface State {
   segmentationNames: string[];
   flimFrequencyMhz: number | null;
 
+  // Pixel size in micrometers (square pixels). Sourced from the
+  // dataset's /metadata.pixel_size_um when present; otherwise the user
+  // sets it manually from the DataPanel. When non-null, measureCells
+  // forwards it to /measurements and the backend appends an `area_um2`
+  // column to the result.
+  pixelSizeUm: number | null;
+
   // Per-cell measurements as returned by /measurements. Empty until
   // the user runs Measure Cells. Schema is dynamic (column set depends
   // on the dataset's channels and active mask).
@@ -178,6 +185,7 @@ export const usePerCell = create<State>((set, get) => ({
   maskNames: [...MASKS],
   segmentationNames: [...SEGMENTATIONS],
   flimFrequencyMhz: 80.0,
+  pixelSizeUm: null,
 
   measurementRows: [],
   measurementColumns: [],
@@ -322,6 +330,7 @@ export const usePerCell = create<State>((set, get) => ({
       maskNames: meta.mask_names,
       segmentationNames: meta.segmentation_names,
       flimFrequencyMhz: meta.flim_frequency_mhz,
+      pixelSizeUm: meta.pixel_size_um,
       channel: meta.channel_names[0] ?? "",
       mask: meta.mask_names[0] ?? "",
       segmentation: meta.segmentation_names[0] ?? "",
@@ -374,6 +383,7 @@ export const usePerCell = create<State>((set, get) => ({
         mask: s.mask || undefined,
         view_bin: s.viewBin,
         metrics,
+        pixel_size_um: s.pixelSizeUm ?? undefined,
       });
       set({
         runningTask: null,
@@ -570,11 +580,16 @@ export const usePerCell = create<State>((set, get) => ({
   setMaskOpacity: (v) =>
     set({ maskOpacity: Math.max(0, Math.min(1, v)) }),
 
+
   refreshDatasetMetadata: async () => {
     const s = get();
     if (!s.datasetPath) return;
     try {
       const meta = await loadImage(s.datasetPath);
+      // Note: do NOT clobber pixelSizeUm here. If the user entered one
+      // manually for a legacy dataset, a quiet refresh (e.g. after
+      // Cellpose) shouldn't wipe it. Only the explicit loadDataset
+      // path replaces the user's pixel-size override.
       set({
         channelNames: meta.channel_names,
         maskNames: meta.mask_names,

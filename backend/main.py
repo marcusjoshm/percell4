@@ -55,6 +55,93 @@ app.add_middleware(
 # ── Dataset metadata ────────────────────────────────────────────────
 
 
+def _read_tiff_pixel_size_um(tif_path: Path) -> float | None:
+    """Extract µm/pixel from a TIFF, unit-aware.
+
+    Reads XResolution + ResolutionUnit from the first page. The TIFF
+    spec defines XResolution as `pixels per ResolutionUnit`:
+
+        unit_per_pixel = 1 / (XResolution.num / XResolution.den)
+                       = XResolution.den / XResolution.num
+
+    ResolutionUnit (Tag 296):
+        1 = none / unspecified — treat as µm/pixel (ImageJ convention)
+        2 = inch                — convert × 25400
+        3 = centimeter          — convert × 10000
+
+    The percell4 importer (readers.py) does NOT do this conversion; it
+    returns `denominator/numerator` and labels the result as µm,
+    silently miscoding centimeter-tagged TIFFs by a factor of 10000.
+    This helper supersedes that path for the sidecar's auto-detect.
+    """
+    try:
+        import tifffile
+    except Exception:
+        return None
+    try:
+        with tifffile.TiffFile(str(tif_path)) as tif:
+            if not tif.pages:
+                return None
+            page = tif.pages[0]
+            xres_tag = page.tags.get("XResolution")
+            if xres_tag is None:
+                return None
+            xres = xres_tag.value
+            # tifffile may return a (num, den) tuple or a pre-evaluated
+            # float. Normalize to (num, den).
+            if isinstance(xres, tuple) and len(xres) == 2:
+                num, den = xres
+            else:
+                try:
+                    num, den = float(xres), 1.0
+                except (TypeError, ValueError):
+                    return None
+            if num <= 0:
+                return None
+            unit_per_pixel = den / num  # in whatever ResolutionUnit declares
+            unit_tag = page.tags.get("ResolutionUnit")
+            unit_code = int(unit_tag.value) if unit_tag is not None else 1
+            scale_to_um = {1: 1.0, 2: 25400.0, 3: 10000.0}.get(unit_code)
+            if scale_to_um is None:
+                return None
+            value = unit_per_pixel * scale_to_um
+            return float(value) if value > 0 else None
+    except Exception:
+        return None
+
+
+def _autodetect_pixel_size_um(
+    source_dir: str | None, h5_path: Path,
+) -> float | None:
+    """Recover pixel size in µm from any TIFF reachable on disk.
+
+    Strategy (in order, first hit wins):
+      1. /metadata.source_dir — the directory the importer read from.
+         Usually contains the original TIFFs the .h5 was built from.
+      2. The .h5's own parent directory — common case where the user
+         keeps TIFFs alongside the dataset for reference.
+
+    Returns None if nothing readable is found.
+    """
+    candidates: list[Path] = []
+    if source_dir:
+        sd = Path(source_dir)
+        if sd.is_dir():
+            candidates.append(sd)
+    parent = h5_path.parent
+    if parent.is_dir() and parent not in candidates:
+        candidates.append(parent)
+
+    for d in candidates:
+        for tif in sorted(d.iterdir()):
+            if tif.suffix.lower() not in (".tif", ".tiff"):
+                continue
+            pxs = _read_tiff_pixel_size_um(tif)
+            if pxs is not None and pxs > 0:
+                return pxs
+    return None
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "version": "0.1.0"}
@@ -106,6 +193,21 @@ def load_image(payload: dict[str, Any]) -> dict[str, Any]:
     freq_raw = md.get("flim_frequency_mhz")
     freq: float | None = float(freq_raw) if freq_raw is not None else None
 
+    # pixel_size_um lives in /metadata when the importer recorded it
+    # from the source TIFFs (readers.py). When absent — many legacy
+    # imports missed it — fall back to reading XResolution from the
+    # original TIFF source, then from any TIFF sitting alongside the
+    # .h5. No-manual-entry policy: if neither lookup yields a value,
+    # area_um2 just doesn't appear in measurements.
+    pxs_raw = md.get("pixel_size_um")
+    pixel_size_um: float | None = (
+        float(pxs_raw) if pxs_raw is not None else None
+    )
+    if pixel_size_um is None:
+        pixel_size_um = _autodetect_pixel_size_um(
+            source_dir=md.get("source_dir"), h5_path=Path(path),
+        )
+
     return {
         "path": str(Path(path).resolve()),
         "shape": shape,
@@ -114,6 +216,7 @@ def load_image(payload: dict[str, Any]) -> dict[str, Any]:
         "mask_names": mask_names,
         "flim_frequency_mhz": freq,
         "creation_bin": int(md.get("creation_bin", 1)),
+        "pixel_size_um": pixel_size_um,
     }
 
 
@@ -206,6 +309,26 @@ def measurements(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(
             status_code=500, detail=f"measurement failed: {e}",
         ) from e
+
+    # area_um2: derived column, computed post-MeasureCells. The core use
+    # case only produces pixel counts (`area`); converting to physical
+    # units needs a pixel size. We accept it via request body so the
+    # frontend can let users enter a value when /metadata doesn't have
+    # one (most legacy datasets). Both axes assumed equal (square
+    # pixels), which holds for every microscope I've seen.
+    pixel_size_um = payload.get("pixel_size_um")
+    if pixel_size_um is not None and "area" in df.columns:
+        try:
+            pxs = float(pixel_size_um)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid pixel_size_um: {pixel_size_um!r}",
+            ) from None
+        if pxs > 0:
+            # area is in pixels at view_bin=1 thanks to MeasureCells'
+            # k**2 rescaling, so this multiplication is bin-agnostic.
+            df["area_um2"] = df["area"] * (pxs * pxs)
 
     # JSON-safe DataFrame: rows as plain dicts, numpy ints/floats coerced
     # to native types via `df.to_dict(orient="records")` after astype.

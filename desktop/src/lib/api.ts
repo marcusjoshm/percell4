@@ -21,6 +21,10 @@ export interface DatasetMeta {
   mask_names: string[];
   flim_frequency_mhz: number | null;
   creation_bin: number;
+  // Pixel size in micrometers, square pixels assumed. Null when the
+  // .h5's /metadata group doesn't carry one — the user can override
+  // via the DataPanel input so area_um2 still appears in measurements.
+  pixel_size_um: number | null;
 }
 
 export async function loadImage(path: string): Promise<DatasetMeta> {
@@ -42,6 +46,9 @@ export interface MeasureRequest {
   mask?: string;
   view_bin?: number;
   metrics?: string[];
+  // When set AND `area` is in metrics, backend post-appends an
+  // `area_um2 = area * pixel_size_um²` column to every row.
+  pixel_size_um?: number;
 }
 
 export interface MeasurementsResponse {
