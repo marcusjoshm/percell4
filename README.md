@@ -30,19 +30,6 @@
 
 ---
 
-## Tech Stack
-
-- **GUI:** Qt (PyQt5 + qtpy), napari (`>=0.5,<0.8`), pyqtgraph (`>=0.13,<0.15`)
-- **Data:** HDF5 via h5py (`>=3.10,<4`), pandas (`>=2.0,<3`), pyarrow (`>=14`)
-- **Imaging:** numpy (`>=1.26`), scikit-image (`>=0.22`), scipy (`>=1.12`), tifffile, sdtfile (Becker & Hickl FLIM)
-- **Segmentation:** Cellpose (`>=3.0,<5.0`), scikit-learn
-- **CLI:** click (`>=8.1`), rich (`>=13.0`)
-- **Python:** 3.12 or newer
-
-Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `flim`, `imagej`, `all`) are documented under [Optional extras](#optional-extras).
-
----
-
 ## Workflow Protocol
 
 The following protocol is a general-purpose workflow for single-cell segmentation, mask generation, and particle analysis. Image data from this workflow are saved as "datasets" in the form of HDF5 files, which can be exported as `.tiff` files for downstream analysis using Python or R scripts. Analyses are saved as `.csv` files that can also be used for graphing and statistics in Python or R.
@@ -69,25 +56,24 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
    The PerCell4 launcher window opens.
 
 2. **Open the workflow.**
-   Click the **Workflows** tab in the launcher sidebar. Click the **Single-cell thresholding analysis workflow** button. The workflow configuration window opens.
+   Click the **Workflows** tab in the launcher sidebar. Click the **Single-cell thresholding analysis workflow** button. A setup window opens.
 
 3. **Add your datasets.**
-   Click the **.tiff file icon** in the Datasets panel of the configuration window. A new window called **Compress TIFF Dataset** will open. In the Source panel at the top, click **Browse...** next to the Directory field and select a folder containing `.tiff` files exported from LASX. Output will default to one level up from the `.tiff`-containing folder; this is where the `.h5` datasets will be saved. To change the output folder, click **Browse...** next to the Output field and create or choose a different folder.
+   Click the **.tiff file icon** in the Datasets panel of the setup window. A new window called **Compress TIFF Dataset** opens. In the Source panel at the top, click **Browse...** next to the Directory field and select a folder containing `.tiff` files exported from LASX. The Output field defaults to one level up from the folder containing the `.tiff` files; this is where the dataset will be saved. To change the output folder, click **Browse...** next to the Output field and create or choose a different folder.
 
-   Next, change the Discovery field from **Subdirectory** to **Flat Directory**. You should see a list of file names matching the LASX file names. Channels will be the channel tokens created by LASX at export. To rename them, switch the discovery mode to **Manual** and type in your desired channel name. Z-series stacks are automatically processed to a single file; the default is `MIP` (Maximum Intensity Projection). Non-overlapping tiles of a tile-scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation as needed. Click **Compress** at the bottom of the window.
+   Next, change the Discovery field from **Subdirectory** to **Flat Directory**. You should see a list of file names matching the LASX file names. Channels will be the channel tokens created by LASX at export. To rename them, switch the discovery mode to **Manual** and type your desired channel name. Z-series stacks are automatically projected to a single image; the default is `MIP` (Maximum Intensity Projection). Non-overlapping tiles of a tile scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation if needed. Click **Compress** at the bottom of the window.
 
-   The Compress TIFF Dataset window closes and the new dataset is added to the Datasets table.
+   The Compress TIFF Dataset window closes and the new dataset is added to the Datasets table. Repeat for every experiment you want to include in this run.
 
 4. **Configure Cellpose.**
    Select the channel with the strongest cytoplasmic signal as the segmentation channel. The default settings work for most datasets. The default 300 px diameter corresponds to ~30 µm at optimal resolution on a 1.4 NA objective and suits most cells. For larger- or smaller-than-average cells, adjust the diameter accordingly.
 
-5. **Choose the edge-cell mode.** Pick one of three options for cells touching the image border:
+5. **Choose the edge-cell mode.** Pick one of three options for how to handle cells touching the image border:
    - **exclude** (default) — discard edge cells
-   - **include_as_normal** — keep edge cells
-   - **include_as_size_normalized_cohort** — keep edge cells and analyze them normalized by the average size of non-edge cells in the same dataset
+   - **include_as_normal** — keep edge cells like any other cell
+   - **include_as_size_normalized_cohort** — keep edge cells and analyze them together as one group, sized relative to the average non-edge cell in the same dataset
 
-6. **Define the thresholding rounds.**
-   For each round you want to run:
+6. **Define the thresholding rounds.** Each "round" produces one mask per cell — for example, one round for P-bodies and another for stress granules. For each round you want to run:
    - Click **Add round** in the Thresholding rounds table.
    - Name the round (e.g., `P-body_mask`).
    - Pick the target channel from the dropdown list.
@@ -99,52 +85,52 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 
 7. **(Optional) Enable the dilute-phase mask.**
    Check **Generate dilute-phase mask** if you want a dilute-phase mask generated in this run. Then set:
-   - **Dilute mask name** — must not collide with any thresholding round name (the configuration window blocks Start if it does).
+   - **Dilute mask name** — must be different from every thresholding round name (the app will not let the run start until you fix it).
    - **Dilation radius** in pixels — used every dilute round.
    - Use the same grouping and filter settings you would use for grouped thresholding.
 
-8. **Pick output columns and the output directory.**
-   In the **Output** group of the configuration window, choose which metric columns to include in the parquet and CSV exports. Pick the output parent directory — the workflow creates a `run_<timestamp>/` subfolder inside it.
+8. **Pick output columns and the output folder.**
+   In the **Output** group of the setup window, choose which measurement columns to include in your results files. Pick the output folder — the app creates a new subfolder named with the date and time of the run.
 
 9. **Start the run.**
-   Click **Start**. The configuration window locks in. The workflow runs Phase 0 (compress TIFFs to `.h5`) and Phase 1 (Cellpose segmentation across every dataset) unattended. Watch progress in the launcher status bar.
+   Click **Start**. The app first compresses your TIFFs into datasets, then runs Cellpose to find every cell in every dataset. You do not need to do anything during this part — watch progress in the launcher status bar.
 
-10. **QC the Cellpose segmentation (interactive).**
-    When Cellpose finishes, the Viewer window opens with the first dataset. Cell labels overlay the segmentation channel. Refine the labels with napari tools:
-    - Select the labels layer in the napari layer list, then use the paint, erase, and fill controls on the layer toolbar.
+10. **Review the cell outlines (your input needed).**
+    When Cellpose finishes, the Viewer window opens with the first dataset. Cell outlines are shown on top of your image. Refine them if needed:
+    - Click the cell outlines layer in the layer list on the left, then use the paint, erase, and fill tools above the image.
 
-    Click **Accept** to advance to the next dataset. Repeat for every dataset in the queue.
+    Click **Accept** to move on to the next dataset. Repeat for every dataset.
 
-11. **QC the thresholding rounds (interactive).**
-    For each thresholding round, the Threshold QC modal opens for the first dataset. The candidate mask overlays the round's target channel. Either:
-    - Click **Accept** to keep the autothresholded mask, or
-    - Draw a circular ROI on the canvas to guide refinement, then click **Accept** — the workflow recomputes the threshold inside the ROI and writes the refined mask to `/masks/<round_name>`.
+11. **Review each thresholding mask (your input needed).**
+    For each thresholding round, a review window opens for the first dataset. The proposed mask is shown on top of the target channel. Either:
+    - Click **Accept** to keep the proposed mask, or
+    - Draw a circular region on the image to guide refinement, then click **Accept** — the app recalculates the mask using only that region.
 
-    Repeat for every dataset, then for every configured round.
+    Repeat for every dataset, then for every round.
 
-12. **(Optional) Build the dilute-phase mask (interactive).**
-    If you enabled dilute in step 7, the dilute panel opens for the first dataset. For each dataset:
-    - Click **Compute** to generate the candidate condensed mask.
-    - The Threshold QC modal opens — review the mask and click **Accept** to keep this round.
-    - The accepted mask is dilated and NaN-subtracted in memory.
-    - Click **Another round** to refine further on the same dataset, or **Done** to advance to the next dataset.
+12. **(Optional) Build the dilute-phase mask (your input needed).**
+    If you enabled the dilute-phase mask in step 7, the dilute window opens for the first dataset. For each dataset:
+    - Click **Compute** to generate the proposed condensed mask.
+    - A review window opens — look over the mask and click **Accept** to keep this round.
+    - The accepted mask is automatically expanded slightly and removed from the input for the next round.
+    - Click **Another round** to refine further on the same dataset, or **Done** to move on to the next dataset.
 
-    Different datasets may need different numbers of dilute rounds. The accumulated union is persisted to `/masks/<dilute_name>` when you click **Done**.
+    Different datasets may need different numbers of rounds. The final mask is saved when you click **Done**.
 
-13. **Wait for measurement and export (unattended).**
-    The workflow measures every cell across every single-cell segmentation and mask layer, then concatenates per-dataset staging parquets into the final outputs. No interaction needed.
+13. **Wait for the app to measure and save your results.**
+    The app measures every cell across every segmentation and mask, then saves the results. You do not need to do anything during this part.
 
 14. **Find your results.**
-    Open the output parent you chose in step 8. Inside, find `run_<timestamp>/`:
-    - `measurements.parquet` — every per-cell row across every dataset (the canonical output).
-    - `combined.csv` — the same data as a flat CSV.
-    - `per_dataset/<DS>.csv` — one CSV per dataset.
-    - `summary_groups.csv` — one row per `(dataset, round, group)` with means, medians, std, and cell counts.
-    - `summary_datasets.csv` — one row per dataset with edge mode, round counts, and failure reasons.
+    Open the output folder you chose in step 8. Inside, find a new folder named with the date and time of the run. It contains:
+    - `combined.csv` — every cell from every dataset in one spreadsheet (open this in Excel, Numbers, or Google Sheets).
+    - `per_dataset/<DS>.csv` — one spreadsheet per dataset.
+    - `summary_groups.csv` — one row per dataset × round × group, with means, medians, standard deviations, and cell counts.
+    - `summary_datasets.csv` — one row per dataset with edge-cell mode, round counts, and any failure reasons.
+    - `measurements.parquet` — the same data as `combined.csv`, in a compact format for Python or R users.
 
-**Pausing and resuming.** The workflow writes `run_state.json` after each phase. To pick up an interrupted run, open the launcher, click the **Workflows** tab, and click **Resume run...** instead of starting a new workflow.
+**Pausing and resuming.** The app saves its progress after each step. To pick up an interrupted run, open the launcher, click the **Workflows** tab, and click **Resume run...** instead of starting a new workflow.
 
-**Headless TIFF export.** If you only need TIFFs out of an existing `.h5` — for ImageJ, custom downstream code, or sharing with a colleague — use the CLI documented in the next section.
+**Headless TIFF export.** If you only need `.tiff` files out of an existing dataset — for ImageJ, custom downstream scripts, or sharing with a colleague — use the command-line tool documented in the next section.
 
 ---
 
@@ -176,6 +162,20 @@ python -m percell4.interfaces.cli.batch_export /scratch/dishes/ --output-dir ~/e
 ```
 
 The GUI equivalent lives at `I/O` → **Export Images**; the workflow protocol section above explains when to reach for which.
+
+---
+
+
+## Tech Stack
+
+- **GUI:** Qt (PyQt5 + qtpy), napari (`>=0.5,<0.8`), pyqtgraph (`>=0.13,<0.15`)
+- **Data:** HDF5 via h5py (`>=3.10,<4`), pandas (`>=2.0,<3`), pyarrow (`>=14`)
+- **Imaging:** numpy (`>=1.26`), scikit-image (`>=0.22`), scipy (`>=1.12`), tifffile, sdtfile (Becker & Hickl FLIM)
+- **Segmentation:** Cellpose (`>=3.0,<5.0`), scikit-learn
+- **CLI:** click (`>=8.1`), rich (`>=13.0`)
+- **Python:** 3.12 or newer
+
+Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `flim`, `imagej`, `all`) are documented under [Optional extras](#optional-extras).
 
 ---
 
