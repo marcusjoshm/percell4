@@ -395,6 +395,79 @@ def labels_image(payload: dict[str, Any]) -> Response:
     return Response(content=buf.getvalue(), media_type="image/png")
 
 
+@app.post("/mask_image")
+def mask_image(payload: dict[str, Any]) -> Response:
+    """Return the active mask as a single-color RGBA PNG overlay.
+
+    Companion to /labels_image. Reads /masks/<name> via
+    DatasetStore.read_mask, treats any non-zero pixel as foreground,
+    paints it with the requested color (default yellow per the
+    percell4 threshold-preview convention), background fully
+    transparent.
+
+    Multi-ROI masks (mask.max() > 1) are folded into a single
+    foreground color for now — per-ROI coloring is a follow-up that
+    needs ROI-name → color mapping in the request body.
+
+    Request body:
+        path:     absolute .h5 path (required)
+        mask:     mask layer name in /masks/ (required)
+        view_bin: optional downsample factor, default 1
+        color:    optional [r, g, b] 0..255, default yellow
+
+    Response: image/png (RGBA) bytes.
+    """
+    path = payload.get("path")
+    mask_name = payload.get("mask")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not mask_name:
+        raise HTTPException(status_code=400, detail="mask is required")
+
+    view_bin = int(payload.get("view_bin", 1))
+    color = payload.get("color") or [0xFD, 0xE0, 0x47]  # yellow default
+    try:
+        r, g, b = int(color[0]), int(color[1]), int(color[2])
+    except (ValueError, TypeError, IndexError) as e:
+        raise HTTPException(
+            status_code=400, detail=f"invalid color: {color!r}",
+        ) from e
+
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from percell4.store import DatasetStore
+
+    store = DatasetStore(path)
+    if not store.exists():
+        raise HTTPException(status_code=404, detail=f"file not found: {path}")
+
+    try:
+        with store.open_read() as s:
+            mask = s.read_mask(mask_name, view_bin=view_bin)
+    except KeyError as e:
+        raise HTTPException(
+            status_code=404, detail=f"mask '{mask_name}' not found",
+        ) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail=f"failed to read mask: {e}",
+        ) from e
+
+    h, w = mask.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    fg = mask > 0
+    if fg.any():
+        rgba[fg] = [r, g, b, 255]
+    # Background pixels stay (0, 0, 0, 0) — transparent.
+
+    buf = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG", optimize=False)
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
 @app.post("/phasor/histogram")
 def phasor_histogram(payload: dict[str, Any]) -> dict[str, Any]:
     """Stub: phasor density points (g, s) for a channel."""

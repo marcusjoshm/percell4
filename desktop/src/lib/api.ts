@@ -90,6 +90,26 @@ export async function getLabelsImage(req: LabelsImageRequest): Promise<Blob> {
   return r.blob();
 }
 
+export interface MaskImageRequest {
+  path: string;
+  mask: string;
+  view_bin?: number;
+  color?: [number, number, number];
+}
+
+export async function getMaskImage(req: MaskImageRequest): Promise<Blob> {
+  const r = await fetch(`${BASE}/mask_image`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `mask_image failed: HTTP ${r.status}`);
+  }
+  return r.blob();
+}
+
 export async function getMeasurements(req: MeasureRequest): Promise<MeasurementsResponse> {
   const r = await fetch(`${BASE}/measurements`, {
     method: "POST",

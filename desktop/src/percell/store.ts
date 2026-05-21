@@ -3,6 +3,7 @@ import { CELLS, CHANNELS, MASKS, SEGMENTATIONS, type CellId } from "./mock";
 import {
   getChannelImage,
   getLabelsImage,
+  getMaskImage,
   getMeasurements,
   loadImage,
   startCellpose,
@@ -82,6 +83,15 @@ interface State {
   // raster underneath.
   labelsOpacity: number;
 
+  // Object URL of the active mask as a single-color RGBA PNG from
+  // /mask_image. Stacked above labels, below the HUD, so the mask
+  // can be faded independently. Null when no mask is selected.
+  maskImageURL: string | null;
+  // 0..1 — CSS opacity of the mask overlay. Default 0.4 — lower than
+  // labels because masks are usually broader regions, easy to occlude
+  // detail underneath if too opaque.
+  maskOpacity: number;
+
   selection: Set<CellId>;
   filter: Set<CellId> | null;
 
@@ -130,6 +140,8 @@ interface State {
   loadChannelImage: () => Promise<void>;
   loadLabelsImage: () => Promise<void>;
   setLabelsOpacity: (v: number) => void;
+  loadMaskImage: () => Promise<void>;
+  setMaskOpacity: (v: number) => void;
 
   // Backend event handlers — called by the WS bridge in main.tsx.
   // Underscore prefix marks "framework plumbing, not for UI".
@@ -176,6 +188,9 @@ export const usePerCell = create<State>((set, get) => ({
   labelsImageURL: null,
   labelsOpacity: 0.5,
 
+  maskImageURL: null,
+  maskOpacity: 0.4,
+
   selection: new Set(),
   filter: null,
 
@@ -198,7 +213,10 @@ export const usePerCell = create<State>((set, get) => ({
     // loadChannelImage handles its own errors via status.
     void get().loadChannelImage();
   },
-  setMask: (m) => set({ mask: m, status: `Mask → ${m}` }),
+  setMask: (m) => {
+    set({ mask: m, status: `Mask → ${m}` });
+    void get().loadMaskImage();
+  },
   setSegmentation: (s) => {
     set({ segmentation: s, status: `Segmentation → ${s}` });
     void get().loadLabelsImage();
@@ -207,6 +225,7 @@ export const usePerCell = create<State>((set, get) => ({
     set({ viewBin: n, status: `View bin → ${n}` });
     void get().loadChannelImage();
     void get().loadLabelsImage();
+    void get().loadMaskImage();
   },
   setAlwaysOnTop: (v) => set({ alwaysOnTop: v }),
   setLayoutPreset: (p) => set({ layoutPreset: p, status: `Layout → ${p}` }),
@@ -317,13 +336,15 @@ export const usePerCell = create<State>((set, get) => ({
         `${meta.mask_names.length} mask(s)`,
     });
     // Drop the stale blob URLs from the previous dataset. Refetch the
-    // first channel + first segmentation of the new one.
+    // first channel + first segmentation + first mask of the new one.
     const prev = get();
     if (prev.imageURL) URL.revokeObjectURL(prev.imageURL);
     if (prev.labelsImageURL) URL.revokeObjectURL(prev.labelsImageURL);
-    set({ imageURL: null, labelsImageURL: null });
+    if (prev.maskImageURL) URL.revokeObjectURL(prev.maskImageURL);
+    set({ imageURL: null, labelsImageURL: null, maskImageURL: null });
     void get().loadChannelImage();
     void get().loadLabelsImage();
+    void get().loadMaskImage();
   },
 
   // POST /measurements against the currently loaded dataset using the
@@ -510,6 +531,44 @@ export const usePerCell = create<State>((set, get) => ({
 
   setLabelsOpacity: (v) =>
     set({ labelsOpacity: Math.max(0, Math.min(1, v)) }),
+
+  // Fetch the active mask as a single-color RGBA PNG. Same shape as
+  // loadLabelsImage but for /masks/<name>. Default color is yellow
+  // server-side; the request body could later forward a per-mask
+  // color picked from the layer rail.
+  loadMaskImage: async () => {
+    const s = get();
+    if (!s.datasetPath || !s.mask) {
+      if (s.maskImageURL) URL.revokeObjectURL(s.maskImageURL);
+      set({ maskImageURL: null });
+      return;
+    }
+    let blob: Blob;
+    try {
+      blob = await getMaskImage({
+        path: s.datasetPath,
+        mask: s.mask,
+        view_bin: s.viewBin,
+      });
+    } catch (e) {
+      // Same policy as loadLabelsImage — quiet failure, drop overlay.
+      const prev = get().maskImageURL;
+      if (prev) URL.revokeObjectURL(prev);
+      set({ maskImageURL: null });
+      console.warn("mask_image fetch failed:", e);
+      return;
+    }
+    const cur = get();
+    if (cur.mask !== s.mask || cur.datasetPath !== s.datasetPath) {
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    if (cur.maskImageURL) URL.revokeObjectURL(cur.maskImageURL);
+    set({ maskImageURL: url });
+  },
+
+  setMaskOpacity: (v) =>
+    set({ maskOpacity: Math.max(0, Math.min(1, v)) }),
 
   refreshDatasetMetadata: async () => {
     const s = get();

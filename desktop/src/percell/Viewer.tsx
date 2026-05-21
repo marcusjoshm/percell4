@@ -39,6 +39,10 @@ export function ImageViewer() {
     labelsOpacity,
     setLabelsOpacity,
     segmentation,
+    maskImageURL,
+    maskOpacity,
+    setMaskOpacity,
+    mask,
   } = usePerCell();
   const [hover, setHover] = useState<{ x: number; y: number; intensity: number } | null>(
     null,
@@ -105,26 +109,55 @@ export function ImageViewer() {
             Add layer
           </button>
 
-          {/* Segmentation overlay control — the one real, reactive
-              layer control. Hidden until a segmentation is active. */}
-          {segmentation && labelsImageURL && (
-            <div className="border-t border-border pt-2 mt-1 space-y-1.5">
-              <div className="flex items-center gap-1.5 text-[10px] mono">
-                <span className="size-2 rounded-sm shrink-0 bg-accent" />
-                <span className="truncate flex-1">{segmentation}</span>
-                <span className="text-muted-foreground">
-                  {Math.round(labelsOpacity * 100)}
-                </span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={Math.round(labelsOpacity * 100)}
-                onChange={(e) => setLabelsOpacity(+e.target.value / 100)}
-                className="w-full h-1 accent-[color:var(--accent)]"
-                title="Segmentation overlay opacity"
-              />
+          {/* Overlay opacity controls — the real, reactive layer
+              controls. Each section is hidden until the underlying
+              data is loaded. */}
+          {(labelsImageURL || maskImageURL) && (
+            <div className="border-t border-border pt-2 mt-1 space-y-2">
+              {segmentation && labelsImageURL && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-[10px] mono">
+                    <span className="size-2 rounded-sm shrink-0 bg-accent" />
+                    <span className="truncate flex-1">{segmentation}</span>
+                    <span className="text-muted-foreground">
+                      {Math.round(labelsOpacity * 100)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(labelsOpacity * 100)}
+                    onChange={(e) => setLabelsOpacity(+e.target.value / 100)}
+                    className="w-full h-1 accent-[color:var(--accent)]"
+                    title="Segmentation overlay opacity"
+                  />
+                </div>
+              )}
+              {mask && maskImageURL && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-[10px] mono">
+                    <span
+                      className="size-2 rounded-sm shrink-0"
+                      style={{ background: "#fde047" }}
+                    />
+                    <span className="truncate flex-1">{mask}</span>
+                    <span className="text-muted-foreground">
+                      {Math.round(maskOpacity * 100)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(maskOpacity * 100)}
+                    onChange={(e) => setMaskOpacity(+e.target.value / 100)}
+                    className="w-full h-1"
+                    style={{ accentColor: "#fde047" }}
+                    title="Mask overlay opacity"
+                  />
+                </div>
+              )}
             </div>
           )}
 
@@ -231,6 +264,21 @@ export function ImageViewer() {
               style={{
                 imageRendering: "pixelated",
                 opacity: labelsOpacity,
+              }}
+              draggable={false}
+            />
+          )}
+          {/* Mask overlay — stacked above labels so the user can fade
+              the mask independently. Same pixel-for-pixel alignment
+              guarantee as labels (both bound to view_bin). */}
+          {imageURL && maskImageURL && (
+            <img
+              src={maskImageURL}
+              alt={`mask ${mask}`}
+              className="absolute inset-0 w-full h-full object-contain select-none pointer-events-none"
+              style={{
+                imageRendering: "pixelated",
+                opacity: maskOpacity,
               }}
               draggable={false}
             />
