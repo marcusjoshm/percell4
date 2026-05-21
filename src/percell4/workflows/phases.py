@@ -34,11 +34,14 @@ import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from percell4.workflows.run_log import RunLog
 
 from percell4.domain.measure.grouper import GroupingResult, group_cells_gmm, group_cells_kmeans
 from percell4.domain.measure.measurer import measure_cells, measure_multichannel_with_masks
@@ -851,6 +854,8 @@ def measure_one(
     edge_margin_px: int = 0,
     seg_name: str = "cellpose_qc",
     particle_settings: ParticleSettings | None = None,
+    run_log: "RunLog | None" = None,
+    dataset_name: str = "",
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Measure one dataset: all channels × all metrics × all round masks.
 
@@ -1003,10 +1008,20 @@ def measure_one(
         # at this point in the function.
         try:
             resolved_min_area_px = _resolve_min_area_px(
-                particle_settings, pixel_size_um,
+                particle_settings, pixel_size_um, dataset_name=dataset_name,
             )
         except ValueError as e:
             logger.error("particle threshold resolve failed: %s", e)
+            if run_log is not None:
+                run_log.log(
+                    phase="measure",
+                    dataset=dataset_name,
+                    event="min_area_resolve_failed",
+                    min_area_value=float(particle_settings.min_area),
+                    min_area_unit=particle_settings.min_area_unit,
+                    pixel_size_um=pixel_size_um,
+                    error=str(e),
+                )
             return (
                 pd.DataFrame(),
                 DatasetFailure.MEASUREMENT_ERROR,
@@ -1019,6 +1034,16 @@ def measure_one(
             resolved_min_area_px,
             pixel_size_um,
         )
+        if run_log is not None:
+            run_log.log(
+                phase="measure",
+                dataset=dataset_name,
+                event="min_area_resolved",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                resolved_min_area_px=resolved_min_area_px,
+            )
 
         for round_name, round_mask in round_masks.items():
             try:
@@ -1114,6 +1139,8 @@ def measure_particles_one(
     round_specs: list[ThresholdingRound],
     particle_settings: ParticleSettings,
     seg_name: str = "cellpose_qc",
+    run_log: "RunLog | None" = None,
+    dataset_name: str = "",
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Per-particle detail rows for one dataset across every round.
 
@@ -1180,10 +1207,20 @@ def measure_particles_one(
     pixel_size_um = _read_pixel_size_um(store)
     try:
         resolved_min_area_px = _resolve_min_area_px(
-            particle_settings, pixel_size_um,
+            particle_settings, pixel_size_um, dataset_name=dataset_name,
         )
     except ValueError as e:
         logger.error("particle threshold resolve failed: %s", e)
+        if run_log is not None:
+            run_log.log(
+                phase="particles",
+                dataset=dataset_name,
+                event="min_area_resolve_failed",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                error=str(e),
+            )
         return (
             pd.DataFrame(),
             DatasetFailure.MEASUREMENT_ERROR,
@@ -1196,6 +1233,16 @@ def measure_particles_one(
         resolved_min_area_px,
         pixel_size_um,
     )
+    if run_log is not None:
+        run_log.log(
+            phase="particles",
+            dataset=dataset_name,
+            event="min_area_resolved",
+            min_area_value=float(particle_settings.min_area),
+            min_area_unit=particle_settings.min_area_unit,
+            pixel_size_um=pixel_size_um,
+            resolved_min_area_px=resolved_min_area_px,
+        )
 
     from percell4.domain.measure.particle import analyze_particles_detail
 

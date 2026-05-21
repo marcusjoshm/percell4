@@ -174,6 +174,114 @@ def test_measure_particles_one_um2_without_pixel_size_fails(tmp_path):
     assert "pixel size" in msg
 
 
+def test_measure_particles_one_writes_min_area_resolved_to_run_log(tmp_path):
+    """U4 verification: the resolved per-dataset px threshold lands in
+    run_log.jsonl as a structured event so a researcher can audit what
+    was actually applied without re-deriving it from the config."""
+    import json
+
+    from percell4.workflows.run_log import RunLog
+
+    store = _build_store_with_labels(
+        tmp_path / "ds.h5", pixel_size_um=0.12034,
+    )
+    settings = ParticleSettings(min_area=0.5, min_area_unit="um2")
+
+    run_log = RunLog(tmp_path / "run")
+    df, failure, _msg = measure_particles_one(
+        store,
+        [_round_spec("puncta")],
+        settings,
+        run_log=run_log,
+        dataset_name="ds.h5",
+    )
+    assert failure is None
+
+    entries = [
+        json.loads(line)
+        for line in run_log.path.read_text().splitlines()
+        if line.strip()
+    ]
+    resolved = [e for e in entries if e.get("event") == "min_area_resolved"]
+    assert len(resolved) == 1, entries
+    entry = resolved[0]
+    assert entry["phase"] == "particles"
+    assert entry["dataset"] == "ds.h5"
+    assert entry["min_area_unit"] == "um2"
+    assert entry["min_area_value"] == pytest.approx(0.5)
+    assert entry["resolved_min_area_px"] == 35
+    assert entry["pixel_size_um"] == pytest.approx(0.12034)
+
+
+def test_measure_one_writes_min_area_resolved_to_run_log(tmp_path):
+    """measure_one (per-cell summary phase) logs the resolution too,
+    under phase='measure'. Two phases, two log lines per dataset."""
+    import json
+
+    from percell4.workflows.phases import measure_one
+    from percell4.workflows.run_log import RunLog
+
+    store = _build_store_with_labels(
+        tmp_path / "ds.h5", pixel_size_um=0.12034,
+    )
+    settings = ParticleSettings(min_area=0.5, min_area_unit="um2")
+
+    run_log = RunLog(tmp_path / "run")
+    df, failure, _msg = measure_one(
+        store,
+        [_round_spec("puncta")],
+        metric_names=["median_intensity"],
+        particle_settings=settings,
+        run_log=run_log,
+        dataset_name="ds.h5",
+    )
+    assert failure is None
+    entries = [
+        json.loads(line)
+        for line in run_log.path.read_text().splitlines()
+        if line.strip()
+    ]
+    measure_log = [
+        e for e in entries
+        if e.get("event") == "min_area_resolved" and e.get("phase") == "measure"
+    ]
+    assert len(measure_log) == 1, entries
+    assert measure_log[0]["resolved_min_area_px"] == 35
+
+
+def test_measure_one_um2_failure_logs_to_run_log(tmp_path):
+    """The µm² + missing pixel_size failure path also logs a structured
+    audit event so the researcher can find why the dataset failed without
+    grepping stderr."""
+    import json
+
+    from percell4.workflows.phases import measure_one
+    from percell4.workflows.run_log import RunLog
+
+    store = _build_store_with_labels(tmp_path / "ds.h5", pixel_size_um=None)
+    settings = ParticleSettings(min_area=0.5, min_area_unit="um2")
+
+    run_log = RunLog(tmp_path / "run")
+    df, failure, _msg = measure_one(
+        store,
+        [_round_spec("puncta")],
+        metric_names=["median_intensity"],
+        particle_settings=settings,
+        run_log=run_log,
+        dataset_name="bad_ds.h5",
+    )
+    assert failure == DatasetFailure.MEASUREMENT_ERROR
+    entries = [
+        json.loads(line)
+        for line in run_log.path.read_text().splitlines()
+        if line.strip()
+    ]
+    failed = [e for e in entries if e.get("event") == "min_area_resolve_failed"]
+    assert len(failed) == 1
+    assert failed[0]["dataset"] == "bad_ds.h5"
+    assert "pixel size" in failed[0]["error"]
+
+
 def test_measure_one_um2_without_pixel_size_fails_with_empty_df(tmp_path):
     """measure_one's µm² failure path must return an empty DataFrame, not
     the partially-built one — otherwise the runner stages a parquet with
