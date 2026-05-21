@@ -45,18 +45,7 @@ Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `fli
 
 ## Workflow Protocol
 
-This is the canonical end-to-end protocol. Read it top-to-bottom before opening the app. Input is a directory of microscope `.tif` files (and optionally Becker & Hickl `.sdt` files for FLIM). Output is one `.h5` per experiment plus a `run_<timestamp>/` folder containing `measurements.parquet`, `combined.csv`, `per_dataset/<DS>.csv`, `summary_groups.csv`, and `summary_datasets.csv`.
-
-The workflow runs as eight phases. Some phases run unattended; others queue datasets one at a time and wait for you in a QC modal. The naming conventions below are load-bearing — read them before step 1.
-
-### Channel, mask, and segmentation naming
-
-PerCell4 enforces a small, strict naming contract so the workflow runner, threshold dropdowns, and downstream parquet readers can find resources by name without surprises.
-
-- **Channels** are stored under `/intensity/<channel_name>` and listed in `/metadata.channel_names`. The importer **always writes a `chNN` prefix** (`ch00`, `ch01`, `ch02`, …) — even when you rename channels in the compress dialog. Threshold-compute and the workflow config dropdown look up channels by this exact prefixed name. **Do not strip the `ch` prefix.** Worked example: a 3-channel acquisition you label DAPI / GFP / RFP becomes `ch00_dapi`, `ch01_gfp`, `ch02_rfp` on disk — never `dapi`, `gfp`, `rfp`.
-- **Segmentation layers** live at `/labels/<name>`. Cellpose writes `/labels/cellpose`; the segmentation QC pass writes `/labels/cellpose_qc`. Custom segmentations land under `/labels/<your_name>`. The Workflows dialog reads this layer list at run configuration time.
-- **Mask layers** live at `/masks/<name>`. Each grouped-thresholding round writes `/masks/<round_name>` (e.g., `/masks/puncta_bright`). The optional dilute-phase pass writes `/masks/<dilute_name>`. **The dilute mask name must not collide with any thresholding round name in the same run** — the workflow validates this at Start and refuses with an inline error.
-- **Workflow round names become parquet columns.** Every thresholding round name becomes a `group_<round>` column in `measurements.parquet`, `combined.csv`, and the per-dataset CSVs. Pick names that read well in pandas — `puncta_bright`, `puncta_dim`, `condensates` — not generic `round_1`.
+The following protocol is a general-purpose workflow for single-cell segmentation, mask generation, and particle analysis. Image data from this workflow are saved as "datasets" in the form of HDF5 files, which can be exported as `.tiff` files for downstream analysis using Python or R scripts. Analyses are saved as `.csv` files that can also be used for graphing and statistics in Python or R.
 
 ### Step-by-step protocol
 
@@ -80,47 +69,51 @@ PerCell4 enforces a small, strict naming contract so the workflow runner, thresh
    The PerCell4 launcher window opens.
 
 2. **Open the workflow.**
-   Click the **Workflows** tab in the launcher sidebar. Click the **Single-cell thresholding analysis workflow** button. The workflow configuration dialog opens.
+   Click the **Workflows** tab in the launcher sidebar. Click the **Single-cell thresholding analysis workflow** button. The workflow configuration window opens.
 
 3. **Add your datasets.**
-   Click the **.tiff file icon** in the Datasets panel of the dialog to add a new dataset from microscope TIFFs. A file dialog opens — pick the source folder. The compress dialog then opens with the detected channels listed; rename channels here if you want (the importer keeps the `chNN` prefix automatically — see naming conventions above). Click **OK** to queue the dataset. Repeat for every dataset you want in this run.
+   Click the **.tiff file icon** in the Datasets panel of the configuration window. A new window called **Compress TIFF Dataset** will open. In the Source panel at the top, click **Browse...** next to the Directory field and select a folder containing `.tiff` files exported from LASX. Output will default to one level up from the `.tiff`-containing folder; this is where the `.h5` datasets will be saved. To change the output folder, click **Browse...** next to the Output field and create or choose a different folder.
 
-   To add an already-compressed dataset, click the **.h5 icon** instead of the .tiff icon and pick the existing `.h5` file.
+   Next, change the Discovery field from **Subdirectory** to **Flat Directory**. You should see a list of file names matching the LASX file names. Channels will be the channel tokens created by LASX at export. To rename them, switch the discovery mode to **Manual** and type in your desired channel name. Z-series stacks are automatically processed to a single file; the default is `MIP` (Maximum Intensity Projection). Non-overlapping tiles of a tile-scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation as needed. Click **Compress** at the bottom of the window.
+
+   The Compress TIFF Dataset window closes and the new dataset is added to the Datasets table.
 
 4. **Configure Cellpose.**
-   In the **Cellpose** group of the dialog, pick the segmentation model (typically `cyto3` for cytoplasm or `nuclei` for nuclear segmentation), set the cell diameter in pixels, and pick the channel to segment on. These settings apply to every dataset in the queue.
+   Select the channel with the strongest cytoplasmic signal as the segmentation channel. The default settings work for most datasets. The default 300 px diameter corresponds to ~30 µm at optimal resolution on a 1.4 NA objective and suits most cells. For larger- or smaller-than-average cells, adjust the diameter accordingly.
 
 5. **Choose the edge-cell mode.** Pick one of three options for cells touching the image border:
-   - **exclude** (default) — discard edge cells from every downstream step.
-   - **include_as_normal** — keep edge cells as ordinary rows in the parquet, flagged with `is_edge=True`.
-   - **include_as_size_normalized_cohort** — keep edge cells AND emit one synthetic cohort row per dataset (`is_edge_synthetic=True`) normalized by mean whole-cell area.
+   - **exclude** (default) — discard edge cells
+   - **include_as_normal** — keep edge cells
+   - **include_as_size_normalized_cohort** — keep edge cells and analyze them normalized by the average size of non-edge cells in the same dataset
 
 6. **Define the thresholding rounds.**
    For each round you want to run:
    - Click **Add round** in the Thresholding rounds table.
-   - Name the round (e.g., `puncta_bright`). The name becomes a `group_<round>` column in the output parquet — pick something readable.
-   - Pick the target channel (using the full `chNN_*` name).
-   - Set the number of intensity groups.
+   - Name the round (e.g., `P-body_mask`).
+   - Pick the target channel from the dropdown list.
+   - **Metric** — `median_intensity` works best for most condensate proteins.
+   - **Grouping algorithm** — use `gmm` with at least 10 groups.
+   - **Sigma (σ)** — applies a Gaussian blur to the image before segmentation, useful for noisy images. Sigma sets a radius around each pixel in standard deviations (not pixels).
 
    Add as many rounds as you need. The workflow runs them in the order shown in the table.
 
 7. **(Optional) Enable the dilute-phase mask.**
    Check **Generate dilute-phase mask** if you want a dilute-phase mask generated in this run. Then set:
-   - **Dilute mask name** — must not collide with any thresholding round name (the dialog blocks Start if it does).
+   - **Dilute mask name** — must not collide with any thresholding round name (the configuration window blocks Start if it does).
    - **Dilation radius** in pixels — used every dilute round.
+   - Use the same grouping and filter settings you would use for grouped thresholding.
 
 8. **Pick output columns and the output directory.**
-   In the **Output** group of the dialog, choose which metric columns to include in the parquet and CSV exports. Pick the output parent directory — the workflow creates a `run_<timestamp>/` subfolder inside it.
+   In the **Output** group of the configuration window, choose which metric columns to include in the parquet and CSV exports. Pick the output parent directory — the workflow creates a `run_<timestamp>/` subfolder inside it.
 
 9. **Start the run.**
-   Click **Start**. The dialog locks in. The workflow runs Phase 0 (compress TIFFs to `.h5`) and Phase 1 (Cellpose segmentation across every dataset) unattended. Watch progress in the launcher status bar.
+   Click **Start**. The configuration window locks in. The workflow runs Phase 0 (compress TIFFs to `.h5`) and Phase 1 (Cellpose segmentation across every dataset) unattended. Watch progress in the launcher status bar.
 
 10. **QC the Cellpose segmentation (interactive).**
     When Cellpose finishes, the Viewer window opens with the first dataset. Cell labels overlay the segmentation channel. Refine the labels with napari tools:
     - Select the labels layer in the napari layer list, then use the paint, erase, and fill controls on the layer toolbar.
-    - Press `M` to merge selected labels.
 
-    Click **Accept** to write `/labels/cellpose_qc` for that dataset and advance to the next. Repeat for every dataset in the queue.
+    Click **Accept** to advance to the next dataset. Repeat for every dataset in the queue.
 
 11. **QC the thresholding rounds (interactive).**
     For each thresholding round, the Threshold QC modal opens for the first dataset. The candidate mask overlays the round's target channel. Either:
@@ -139,7 +132,7 @@ PerCell4 enforces a small, strict naming contract so the workflow runner, thresh
     Different datasets may need different numbers of dilute rounds. The accumulated union is persisted to `/masks/<dilute_name>` when you click **Done**.
 
 13. **Wait for measurement and export (unattended).**
-    The workflow measures every cell across every `/labels/<seg>` and `/masks/<mask>` layer, then concatenates per-dataset staging parquets into the final outputs. No interaction needed.
+    The workflow measures every cell across every single-cell segmentation and mask layer, then concatenates per-dataset staging parquets into the final outputs. No interaction needed.
 
 14. **Find your results.**
     Open the output parent you chose in step 8. Inside, find `run_<timestamp>/`:
