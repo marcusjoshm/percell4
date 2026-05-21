@@ -132,6 +132,34 @@ def test_write_atomic_cleans_tmp_on_error(tmp_path: Path) -> None:
     assert not target.with_suffix(".txt.tmp").exists()
 
 
+def test_write_atomic_fsync_reopen_is_writable(tmp_path: Path, monkeypatch) -> None:
+    """Regression: the post-write fsync must reopen the tmp file with a
+    writable handle. On Windows os.fsync maps to FlushFileBuffers, which
+    rejects a read-only ("rb") descriptor with EBADF ("Bad file descriptor").
+    """
+    import builtins
+
+    real_open = builtins.open
+    binary_modes: list[str] = []
+
+    def _spy_open(file, mode="r", *args, **kwargs):
+        if str(file).endswith(".tmp") and "b" in mode:
+            binary_modes.append(mode)
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _spy_open)
+
+    target = tmp_path / "out.txt"
+    write_atomic(target, lambda tmp: tmp.write_text("hello"))
+
+    assert binary_modes, "expected a binary reopen of the tmp file for fsync"
+    for mode in binary_modes:
+        assert "+" in mode or "w" in mode or "a" in mode, (
+            f"fsync reopen used non-writable mode {mode!r}; "
+            "os.fsync raises EBADF on a read-only handle on Windows"
+        )
+
+
 def test_write_atomic_overwrites_existing(tmp_path: Path) -> None:
     target = tmp_path / "out.txt"
     target.write_text("old")

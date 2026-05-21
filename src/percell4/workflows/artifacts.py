@@ -66,7 +66,10 @@ def write_atomic(path: Path, writer_fn: Callable[[Path], None]) -> None:
     try:
         writer_fn(tmp)
         # Ensure the temp file's bytes are on disk before the rename.
-        with open(tmp, "rb") as fd:
+        # Open "r+b" (writable): on Windows os.fsync maps to FlushFileBuffers,
+        # which requires a write-access handle — a read-only "rb" descriptor
+        # raises EBADF ("Bad file descriptor") there.
+        with open(tmp, "r+b") as fd:
             os.fsync(fd.fileno())
     except BaseException:
         if tmp.exists():
