@@ -157,6 +157,33 @@ _ROUND_COL_HEADERS = (
 # ── Internal per-dataset record ──────────────────────────────────────────
 
 
+def _derive_tiff_pending_channel_names(
+    selected_token_ids: list[str],
+    layer_assignments: dict[str, Any],
+) -> list[str]:
+    """Resolve workflow-side channel names for a tiff_pending dataset.
+
+    ``selected_token_ids`` carries the raw token IDs from the compress
+    dialog (``"00"``, ``"01"``, …). ``layer_assignments`` may map a
+    token to a ``LayerAssignment`` with a user-chosen display name.
+
+    When the user did not rename a channel, fall back to the
+    ``ch``-prefixed token (``f"ch{ch_id}"``) — this matches what
+    ``import_dataset`` actually writes to the HDF5's
+    ``/metadata.channel_names`` (see
+    ``src/percell4/adapters/importer.py`` default ``f"ch{ch_key}"``).
+    Bare-token fallback used to produce a silent mismatch (workflow
+    config: ``"02"`` vs HDF5: ``"ch02"``) that wrecked
+    ``threshold_compute`` after a long segmentation pass.
+    """
+    out: list[str] = []
+    for ch_id in selected_token_ids:
+        override = layer_assignments.get(ch_id)
+        name = getattr(override, "name", "") if override is not None else ""
+        out.append(name or f"ch{ch_id}")
+    return out
+
+
 class _PendingDataset:
     """Lightweight record of one user-added dataset inside the dialog.
 
@@ -898,20 +925,10 @@ class WorkflowConfigDialog(QDialog):
         finally:
             dialog.deleteLater()
 
-        # Resolve channel display names from the dialog's layer assignments.
-        # The user may have renamed token channels (e.g. "00" -> "mNG") in
-        # the manual-mode mapping. cfg.selected_channels carries the
-        # token-side IDs ("00"); cfg.layer_assignments maps each to its
-        # LayerAssignment, whose .name field is the user-facing name.
-        # Fall back to the token when no override was set.
         selected_token_ids = sorted(cfg.selected_channels)
-        layer_assignments = cfg.layer_assignments or {}
-        channel_names = [
-            (layer_assignments[ch_id].name
-             if ch_id in layer_assignments and layer_assignments[ch_id].name
-             else ch_id)
-            for ch_id in selected_token_ids
-        ]
+        channel_names = _derive_tiff_pending_channel_names(
+            selected_token_ids, cfg.layer_assignments or {},
+        )
         if not channel_names:
             self._dataset_status.setText(
                 "No channels selected in the compress dialog — nothing to add."
