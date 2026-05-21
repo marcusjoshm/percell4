@@ -294,10 +294,12 @@ def test_build_selected_csv_columns_cross_product(dialog, h5_ds1, h5_ds2):
     assert "RFP_mean_intensity" not in cols
     # Group column
     assert "group_R1" in cols
-    # Per-round in/out
+    # Per-round inside columns only — the "_out_<round>" variants are
+    # intentionally NOT emitted in this workflow (iteration-3 feedback).
     assert "GFP_mean_intensity_in_R1" in cols
-    assert "GFP_mean_intensity_out_R1" in cols
-    # RFP was NOT selected so its in/out should be absent
+    assert "GFP_mean_intensity_out_R1" not in cols
+    assert not any("_out_" in c for c in cols)
+    # RFP was NOT selected so its in column should be absent too
     assert "RFP_mean_intensity_in_R1" not in cols
 
 
@@ -581,9 +583,15 @@ def test_particle_metrics_round_trip_into_csv_columns(dialog, h5_ds1, tmp_path):
     # at least one channel for the per-channel particle columns.
     dialog._selected_csv_channels = {"GFP"}
     dialog._selected_csv_metrics = {"mean_intensity"}
-    # Pick one per-cell and one per-channel particle metric.
+    # Pick one per-cell and three per-channel particle metrics (the
+    # set the user specifically named in iteration-3 feedback: min,
+    # max, integrated intensity).
     dialog._selected_csv_particle_per_cell = {"particle_count"}
-    dialog._selected_csv_particle_per_channel = {"particle_mean"}
+    dialog._selected_csv_particle_per_channel = {
+        "particle_min_intensity",
+        "particle_max_intensity",
+        "particle_integrated_intensity",
+    }
 
     intersected = ["GFP", "RFP", "DAPI"]
     rounds = dialog._rounds_from_table(intersected)
@@ -591,11 +599,28 @@ def test_particle_metrics_round_trip_into_csv_columns(dialog, h5_ds1, tmp_path):
 
     # Per-cell particle column: <round>_<metric>
     assert "puncta_particle_count" in cols
-    # Per-channel particle column: <round>_<channel>_<metric>
-    assert "puncta_GFP_particle_mean" in cols
+    # Per-channel particle columns: <round>_<channel>_<metric>
+    assert "puncta_GFP_particle_min_intensity" in cols
+    assert "puncta_GFP_particle_max_intensity" in cols
+    assert "puncta_GFP_particle_integrated_intensity" in cols
     # Not selected → not in the list
     assert "puncta_total_particle_area" not in cols
-    assert "puncta_GFP_particle_integrated_total" not in cols
+    assert "puncta_GFP_particle_mean_intensity" not in cols
+
+
+def test_particle_per_channel_metric_set_matches_builtin_metrics(dialog):
+    """U7: the per-channel particle metric set covers every BUILTIN_METRICS
+    intensity metric (area is intentionally excluded — it's a per-cell
+    quantity rolled up via particle_count / mean_particle_area)."""
+    from percell4.domain.measure.metrics import BUILTIN_METRICS
+    from percell4.gui.workflows.single_cell.config_dialog import (
+        _PARTICLE_PER_CHANNEL_METRICS,
+    )
+
+    expected = {
+        f"particle_{m}" for m in BUILTIN_METRICS.keys() if m != "area"
+    }
+    assert set(_PARTICLE_PER_CHANNEL_METRICS) == expected
 
 
 def test_particle_metrics_not_added_when_unselected(dialog, h5_ds1, tmp_path):

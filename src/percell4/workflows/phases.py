@@ -840,6 +840,15 @@ def measure_one(
             f"measure failed: {e}",
         )
 
+    # Drop the per-round "_out_<round>" columns — this workflow is
+    # interested only in stats INSIDE each round's mask (where the
+    # particles / thresholded signal lives), not the cell-minus-mask
+    # complement. The "_in_<round>" columns are kept. See iteration-3
+    # user feedback.
+    out_cols = [c for c in df.columns if "_out_" in c]
+    if out_cols:
+        df = df.drop(columns=out_cols)
+
     # Per-cell identity + cohort columns. ``cell_id`` mirrors the
     # post-relabel sequential ``label`` for real cells (synthetic row
     # below carries ``cell_id=-1``). ``(dataset, cell_id)`` is the

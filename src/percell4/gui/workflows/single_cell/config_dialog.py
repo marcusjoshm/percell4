@@ -111,9 +111,21 @@ _PARTICLE_PER_CELL_METRICS = (
 # Particle-analysis per-channel summary metrics (U7). One value per
 # (cell, channel). The CSV column shape is "<round_name>_<channel>_<metric>"
 # — one column per (round × channel × metric).
+#
+# The set mirrors BUILTIN_METRICS' intensity metrics (area is excluded
+# since the particle's area is a per-cell quantity rolled up via
+# particle_count / total_particle_area / mean_particle_area).
+# Aggregation per cell uses each metric's natural reducer (see
+# _PARTICLE_AGGREGATORS in particle.py).
 _PARTICLE_PER_CHANNEL_METRICS = (
-    "particle_mean",
-    "particle_integrated_total",
+    "particle_mean_intensity",
+    "particle_max_intensity",
+    "particle_min_intensity",
+    "particle_integrated_intensity",
+    "particle_std_intensity",
+    "particle_median_intensity",
+    "particle_mode_intensity",
+    "particle_sg_ratio",
 )
 
 # Matches the `_ROUND_NAME_RE` in `workflows/models.py`. Duplicated here so
@@ -1183,7 +1195,8 @@ class WorkflowConfigDialog(QDialog):
             + len(_CORE_OPTIONAL_COLUMNS)
             + n_ch * n_met
             + n_rounds
-            + n_ch * n_met * n_rounds * 2
+            # ch × met × round (in_<round> only — no _out_)
+            + n_ch * n_met * n_rounds
             + n_rounds * n_ppc
             + n_rounds * n_ch * n_ppch
         )
@@ -1209,8 +1222,20 @@ class WorkflowConfigDialog(QDialog):
         dialog = QDialog(self)
         dialog.setWindowTitle("Configure CSV Export Columns")
         dialog.setModal(True)
-        dialog.resize(450, 640)
-        layout = QVBoxLayout(dialog)
+        dialog.resize(560, 720)
+
+        # Outer layout holds the scroll area + the OK/Cancel button row.
+        # Each section keeps its natural height inside the scroll area;
+        # the dialog itself is capped to a screen-friendly size.
+        outer_layout = QVBoxLayout(dialog)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Scrollable content widget.
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setSpacing(10)
+        layout.setContentsMargins(12, 12, 12, 12)
 
         # ── Channels section ──
         ch_box = QGroupBox("Channels to include in CSV")
@@ -1333,11 +1358,21 @@ class WorkflowConfigDialog(QDialog):
         note.setStyleSheet("color: #888;")
         layout.addWidget(note)
 
-        # ── Buttons ──
+        # Put the content in a scroll area so each section keeps its
+        # natural height while the dialog stays at a screen-friendly
+        # size. Without this the metrics list compresses to fit when
+        # all five sections are expanded (iteration-3 user feedback).
+        outer_layout.addWidget(wrap_in_scroll(content), stretch=1)
+
+        # ── Buttons (outside the scroll area, always visible) ──
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        btn_bar = QWidget()
+        btn_layout = QHBoxLayout(btn_bar)
+        btn_layout.setContentsMargins(12, 6, 12, 12)
+        btn_layout.addWidget(buttons)
+        outer_layout.addWidget(btn_bar)
 
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -1659,12 +1694,14 @@ class WorkflowConfigDialog(QDialog):
         for rn in round_names:
             cols.append(f"group_{rn}")
 
-        # {channel}_{metric}_in_{round} / _out_{round} columns
+        # {channel}_{metric}_in_{round} columns. The _out_<round>
+        # variants are intentionally NOT emitted in this workflow —
+        # measure_one drops them from the parquet too. See the
+        # iteration-3 feedback in the requirements doc.
         for ch in channels:
             for m in metrics:
                 for rn in round_names:
                     cols.append(f"{ch}_{m}_in_{rn}")
-                    cols.append(f"{ch}_{m}_out_{rn}")
 
         # U7 particle columns. Per-cell metrics: <round>_<metric>;
         # per-channel metrics: <round>_<channel>_<metric>.

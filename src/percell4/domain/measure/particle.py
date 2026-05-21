@@ -23,18 +23,69 @@ from scipy.ndimage import find_objects
 from scipy.ndimage import label as ndlabel
 from skimage.measure import regionprops
 
+from percell4.domain.measure.metrics import BUILTIN_METRICS
+
+
+# Per-particle intensity metrics — the BUILTIN_METRICS set minus
+# ``area`` (the particle's own area is already a first-class field
+# on _ParticleRecord). For each channel × metric we compute the
+# stat over the particle's pixel set, then aggregate across particles
+# per cell with the natural reducer documented in
+# ``_PARTICLE_AGGREGATORS`` below.
+_PARTICLE_INTENSITY_METRICS = tuple(
+    m for m in BUILTIN_METRICS.keys() if m != "area"
+)
+
+
+def _agg_mean(values: list[float]) -> float:
+    return float(np.nanmean(values)) if values else 0.0
+
+
+def _agg_sum(values: list[float]) -> float:
+    return float(np.nansum(values)) if values else 0.0
+
+
+def _agg_min(values: list[float]) -> float:
+    return float(np.nanmin(values)) if values else 0.0
+
+
+def _agg_max(values: list[float]) -> float:
+    return float(np.nanmax(values)) if values else 0.0
+
+
+# Per-metric aggregator when rolling per-particle values up to per-cell.
+# Chosen for biological intuition:
+#   - min/max: the dimmest/brightest pixel across any particle in this cell
+#   - integrated: total signal across all particles
+#   - mean / median / std / mode / sg_ratio: typical (mean across particles)
+_PARTICLE_AGGREGATORS = {
+    "mean_intensity": _agg_mean,
+    "max_intensity": _agg_max,
+    "min_intensity": _agg_min,
+    "integrated_intensity": _agg_sum,
+    "std_intensity": _agg_mean,
+    "median_intensity": _agg_mean,
+    "mode_intensity": _agg_mean,
+    "sg_ratio": _agg_mean,
+}
+
 
 @dataclass
 class _ParticleRecord:
-    """Single particle measurement from one cell."""
+    """Single particle measurement from one cell.
+
+    ``metric_values`` holds per-channel intensity stats for the particle.
+    Shape: ``{channel_name: {metric_name: value, ...}, ...}``.
+    The metrics computed for each channel are listed in
+    :data:`_PARTICLE_INTENSITY_METRICS`.
+    """
 
     cell_id: int
     particle_id: int
     area: float
     centroid_y: float
     centroid_x: float
-    intensities: dict[str, float] = field(default_factory=dict)
-    integrated: dict[str, float] = field(default_factory=dict)
+    metric_values: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 def _iter_particles(
@@ -45,8 +96,9 @@ def _iter_particles(
 ) -> Iterator[_ParticleRecord]:
     """Yield per-particle records across all channels.
 
-    Single find_objects call shared across channels. For each cell, runs
-    connected-component labeling once, then measures intensity per channel.
+    For each cell, runs connected-component labeling on the cell × mask
+    intersection, then computes the full :data:`_PARTICLE_INTENSITY_METRICS`
+    set on each particle's pixel set per channel.
     """
     if labels.max() == 0:
         return
@@ -73,35 +125,49 @@ def _iter_particles(
         if n_components == 0:
             continue
 
-        # Run regionprops per channel (sharing the same particle labels)
-        props_by_channel: dict[str, list] = {}
-        for ch_name in channel_names:
-            props_by_channel[ch_name] = regionprops(
-                particle_labels, intensity_image=images[ch_name][sl]
-            )
+        # regionprops once to get particle areas + centroids cheaply.
+        first_channel = channel_names[0]
+        first_props = regionprops(
+            particle_labels, intensity_image=images[first_channel][sl]
+        )
 
-        # Iterate particles using first channel for geometry
-        first_props = props_by_channel[channel_names[0]]
+        # Pre-crop each channel image to this cell's bbox so per-particle
+        # metric calls don't re-slice the full image every time.
+        channel_crops = {ch: images[ch][sl] for ch in channel_names}
+
         for pid, prop in enumerate(first_props, start=1):
             if prop.area < min_area:
                 continue
             cy, cx = prop.centroid
+
+            # Build a boolean mask of just this particle's pixels.
+            this_particle = particle_labels == pid
+
+            # Compute the full BUILTIN_METRICS set per channel.
+            metric_values: dict[str, dict[str, float]] = {}
+            for ch_name in channel_names:
+                img_crop = channel_crops[ch_name]
+                ch_metrics: dict[str, float] = {}
+                for metric_name in _PARTICLE_INTENSITY_METRICS:
+                    fn = BUILTIN_METRICS[metric_name]
+                    try:
+                        ch_metrics[metric_name] = float(
+                            fn(img_crop, this_particle)
+                        )
+                    except Exception:
+                        # Particularly mode / sg_ratio can fail on
+                        # degenerate inputs; default to 0 so the per-cell
+                        # aggregation stays well-defined.
+                        ch_metrics[metric_name] = 0.0
+                metric_values[ch_name] = ch_metrics
+
             yield _ParticleRecord(
                 cell_id=int(label_val),
                 particle_id=pid,
                 area=float(prop.area),
                 centroid_y=float(sl[0].start + cy),
                 centroid_x=float(sl[1].start + cx),
-                intensities={
-                    ch: float(props_by_channel[ch][pid - 1].intensity_mean)
-                    for ch in channel_names
-                },
-                integrated={
-                    ch: float(
-                        props_by_channel[ch][pid - 1].intensity_mean * prop.area
-                    )
-                    for ch in channel_names
-                },
+                metric_values=metric_values,
             )
 
 
@@ -169,13 +235,15 @@ def analyze_particles(
                 "max_particle_area": max(areas),
                 "particle_coverage_fraction": total_area / cell_area,
             }
-            # Per-channel intensity aggregates
+            # Per-channel intensity aggregates. For each base metric M,
+            # produce one column `<channel>_particle_<M>` using M's
+            # natural aggregator (see _PARTICLE_AGGREGATORS).
             for ch in channel_names:
-                means = [p.intensities[ch] for p in particles]
-                integ = [p.integrated[ch] for p in particles]
                 prefix = f"{ch}_" if len(channel_names) > 1 else ""
-                row[f"{prefix}particle_mean"] = sum(means) / n
-                row[f"{prefix}particle_integrated_total"] = sum(integ)
+                for metric_name in _PARTICLE_INTENSITY_METRICS:
+                    values = [p.metric_values[ch][metric_name] for p in particles]
+                    aggregator = _PARTICLE_AGGREGATORS[metric_name]
+                    row[f"{prefix}particle_{metric_name}"] = aggregator(values)
         rows.append(row)
 
     if not rows:
@@ -205,7 +273,10 @@ def analyze_particles_detail(
     -------
     DataFrame with one row per particle. Columns:
         cell_id, particle_id, area, centroid_y, centroid_x,
-        {channel}_mean_intensity, {channel}_integrated_intensity
+        plus one ``{channel}_<metric>`` column per channel × metric in
+        :data:`_PARTICLE_INTENSITY_METRICS` (mean_intensity,
+        max_intensity, min_intensity, integrated_intensity, std_intensity,
+        median_intensity, mode_intensity, sg_ratio).
     """
     channel_names = list(images.keys())
     rows: list[dict] = []
@@ -220,15 +291,16 @@ def analyze_particles_detail(
         }
         for ch in channel_names:
             prefix = f"{ch}_" if len(channel_names) > 1 else ""
-            row[f"{prefix}mean_intensity"] = rec.intensities[ch]
-            row[f"{prefix}integrated_intensity"] = rec.integrated[ch]
+            for metric_name in _PARTICLE_INTENSITY_METRICS:
+                row[f"{prefix}{metric_name}"] = rec.metric_values[ch][metric_name]
         rows.append(row)
 
     if not rows:
         cols = ["cell_id", "particle_id", "area", "centroid_y", "centroid_x"]
         for ch in channel_names:
             prefix = f"{ch}_" if len(channel_names) > 1 else ""
-            cols.extend([f"{prefix}mean_intensity", f"{prefix}integrated_intensity"])
+            for metric_name in _PARTICLE_INTENSITY_METRICS:
+                cols.append(f"{prefix}{metric_name}")
         return pd.DataFrame(columns=cols)
 
     return pd.DataFrame(rows)
@@ -248,8 +320,8 @@ def _zero_summary_row(
     }
     for ch in channel_names:
         prefix = f"{ch}_" if len(channel_names) > 1 else ""
-        row[f"{prefix}particle_mean"] = 0.0
-        row[f"{prefix}particle_integrated_total"] = 0.0
+        for metric_name in _PARTICLE_INTENSITY_METRICS:
+            row[f"{prefix}particle_{metric_name}"] = 0.0
     return row
 
 
@@ -261,5 +333,6 @@ def _empty_summary(channel_names: list[str]) -> pd.DataFrame:
     ]
     for ch in channel_names:
         prefix = f"{ch}_" if len(channel_names) > 1 else ""
-        cols.extend([f"{prefix}particle_mean", f"{prefix}particle_integrated_total"])
+        for metric_name in _PARTICLE_INTENSITY_METRICS:
+            cols.append(f"{prefix}particle_{metric_name}")
     return pd.DataFrame(columns=cols)

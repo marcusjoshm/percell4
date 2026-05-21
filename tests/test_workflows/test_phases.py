@@ -435,10 +435,13 @@ def test_measure_one_with_round_masks(fixture_store_with_labels):
     assert failure is None, msg
     assert len(df) == 12
 
-    # Per-round inside/outside columns should exist
+    # Per-round inside columns should exist. The "_out_<round>" columns
+    # are intentionally dropped by measure_one in this workflow
+    # (iteration-3 user feedback: only inside-mask stats are kept).
     assert "GFP_mean_intensity_in_GFP_split" in df.columns
-    assert "GFP_mean_intensity_out_GFP_split" in df.columns
     assert "RFP_mean_intensity_in_GFP_split" in df.columns
+    assert "GFP_mean_intensity_out_GFP_split" not in df.columns
+    assert not any("_out_" in c for c in df.columns)
 
     # The group_<round> column should be merged in
     assert "group_GFP_split" in df.columns
