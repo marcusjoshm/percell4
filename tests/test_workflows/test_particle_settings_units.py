@@ -87,3 +87,11 @@ def test_loads_legacy_with_float_min_area():
 def test_loads_empty_dict_as_defaults():
     out = _particle_from_dict({})
     assert out == ParticleSettings()
+
+
+def test_malformed_unit_raises_at_load():
+    """A hand-edited run_config with an invalid unit string fails at load
+    rather than silently coercing to px or running the workflow with
+    undefined semantics."""
+    with pytest.raises(ValueError, match="min_area_unit"):
+        _particle_from_dict({"min_area": 5, "min_area_unit": "pixels"})

@@ -996,7 +996,11 @@ def measure_one(
         # Resolve the configured min_area into a per-dataset pixel
         # threshold. µm² mode requires this dataset's pixel size — fail
         # the dataset's particle phase explicitly when missing rather
-        # than silently default.
+        # than silently default. Return an empty df (not the partially
+        # built one) so the runner doesn't stage a schema-divergent
+        # parquet — the rest of measure_one's per-cell columns
+        # (group_<round>, area_um2 siblings) have not been merged yet
+        # at this point in the function.
         try:
             resolved_min_area_px = _resolve_min_area_px(
                 particle_settings, pixel_size_um,
@@ -1004,7 +1008,7 @@ def measure_one(
         except ValueError as e:
             logger.error("particle threshold resolve failed: %s", e)
             return (
-                df,
+                pd.DataFrame(),
                 DatasetFailure.MEASUREMENT_ERROR,
                 f"particle threshold resolve failed: {e}",
             )

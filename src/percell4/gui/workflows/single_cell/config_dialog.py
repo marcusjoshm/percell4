@@ -534,6 +534,9 @@ class WorkflowConfigDialog(QDialog):
           per-channel intensities).
         """
         box = QGroupBox("Include particle analysis")
+        # Hold an explicit reference so the build path doesn't have to
+        # walk the widget tree from the spinbox to find this group.
+        self._particle_group = box
         box.setCheckable(True)
         box.setChecked(True)
         box.setToolTip(
@@ -558,7 +561,10 @@ class WorkflowConfigDialog(QDialog):
 
         self._particle_min_area = QDoubleSpinBox()
         self._particle_min_area.setRange(0.0, 1_000_000.0)
-        self._particle_min_area.setDecimals(0)
+        # Always keep 4 decimal places of precision in the underlying
+        # value so toggling px → µm² → px doesn't quantize a fractional
+        # µm² entry to zero. Only the step changes per unit (below).
+        self._particle_min_area.setDecimals(4)
         self._particle_min_area.setSingleStep(1.0)
         self._particle_min_area.setValue(0.0)
         self._particle_min_area.setToolTip(
@@ -604,18 +610,18 @@ class WorkflowConfigDialog(QDialog):
         return box
 
     def _on_min_area_unit_changed(self) -> None:
-        """Re-tune the spinbox decimals/step when the unit combo flips.
+        """Re-tune the spinbox step when the unit combo flips.
 
         Switching units does NOT auto-convert the entered numeric value
         — the user re-states intent. px gets integer step; µm² gets
-        fractional precision so sub-pixel² thresholds are expressible.
+        fractional precision. ``decimals`` is fixed at construction so
+        a fractional value entered in µm² mode is not silently
+        quantized to zero on a transient px detour.
         """
         unit = self._particle_min_area_unit.currentData()
         if unit == "um2":
-            self._particle_min_area.setDecimals(4)
             self._particle_min_area.setSingleStep(0.01)
         else:
-            self._particle_min_area.setDecimals(0)
             self._particle_min_area.setSingleStep(1.0)
 
     def _build_dilute_group(self) -> QGroupBox:
@@ -1606,17 +1612,7 @@ class WorkflowConfigDialog(QDialog):
         # Optional particle analysis. The group is checkable so we can
         # detect enabled vs disabled directly from the group's state.
         particle_settings: ParticleSettings | None = None
-        # The QHBoxLayout row wraps both widgets in a QWidget, so the
-        # spinbox's parent is that row container, not the QGroupBox.
-        # Walk up to the group.
-        particle_group: QGroupBox | None = None
-        node = self._particle_min_area.parent()
-        while node is not None:
-            if isinstance(node, QGroupBox):
-                particle_group = node
-                break
-            node = node.parent()
-        if particle_group is not None and particle_group.isChecked():
+        if self._particle_group.isChecked():
             unit = self._particle_min_area_unit.currentData() or "px"
             try:
                 particle_settings = ParticleSettings(

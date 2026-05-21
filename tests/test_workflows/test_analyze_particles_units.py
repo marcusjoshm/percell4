@@ -174,6 +174,28 @@ def test_measure_particles_one_um2_without_pixel_size_fails(tmp_path):
     assert "pixel size" in msg
 
 
+def test_measure_one_um2_without_pixel_size_fails_with_empty_df(tmp_path):
+    """measure_one's µm² failure path must return an empty DataFrame, not
+    the partially-built one — otherwise the runner stages a parquet with
+    a schema that diverges from successful datasets (group_<round> and
+    area_um2 columns are merged AFTER the resolve, so a partial df would
+    be missing them and break the downstream concat)."""
+    store = _build_store_with_labels(tmp_path / "ds.h5", pixel_size_um=None)
+    settings = ParticleSettings(min_area=0.5, min_area_unit="um2")
+
+    from percell4.workflows.phases import measure_one
+
+    df, failure, msg = measure_one(
+        store,
+        [_round_spec("puncta")],
+        metric_names=["median_intensity"],
+        particle_settings=settings,
+    )
+    assert failure == DatasetFailure.MEASUREMENT_ERROR
+    assert "pixel size" in msg
+    assert df.empty
+
+
 def test_measure_particles_one_px_mode_zero_regression(tmp_path):
     """px mode behaves identically with or without pixel_size_um."""
     settings = ParticleSettings(min_area=10.0, min_area_unit="px")
