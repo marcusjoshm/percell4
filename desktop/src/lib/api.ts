@@ -71,6 +71,25 @@ export async function getChannelImage(req: ChannelImageRequest): Promise<Blob> {
   return r.blob();
 }
 
+export interface LabelsImageRequest {
+  path: string;
+  segmentation: string;
+  view_bin?: number;
+}
+
+export async function getLabelsImage(req: LabelsImageRequest): Promise<Blob> {
+  const r = await fetch(`${BASE}/labels_image`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `labels_image failed: HTTP ${r.status}`);
+  }
+  return r.blob();
+}
+
 export async function getMeasurements(req: MeasureRequest): Promise<MeasurementsResponse> {
   const r = await fetch(`${BASE}/measurements`, {
     method: "POST",

@@ -35,6 +35,10 @@ export function ImageViewer() {
     runCellpose,
     imageURL,
     imageLoading,
+    labelsImageURL,
+    labelsOpacity,
+    setLabelsOpacity,
+    segmentation,
   } = usePerCell();
   const [hover, setHover] = useState<{ x: number; y: number; intensity: number } | null>(
     null,
@@ -100,6 +104,29 @@ export function ImageViewer() {
             <Plus className="size-3" />
             Add layer
           </button>
+
+          {/* Segmentation overlay control — the one real, reactive
+              layer control. Hidden until a segmentation is active. */}
+          {segmentation && labelsImageURL && (
+            <div className="border-t border-border pt-2 mt-1 space-y-1.5">
+              <div className="flex items-center gap-1.5 text-[10px] mono">
+                <span className="size-2 rounded-sm shrink-0 bg-accent" />
+                <span className="truncate flex-1">{segmentation}</span>
+                <span className="text-muted-foreground">
+                  {Math.round(labelsOpacity * 100)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(labelsOpacity * 100)}
+                onChange={(e) => setLabelsOpacity(+e.target.value / 100)}
+                className="w-full h-1 accent-[color:var(--accent)]"
+                title="Segmentation overlay opacity"
+              />
+            </div>
+          )}
 
           <div className="border-t border-border pt-2 mt-1">
             <div className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1.5 px-1">
@@ -189,6 +216,22 @@ export function ImageViewer() {
               alt={`channel ${channel}`}
               className="absolute inset-0 w-full h-full object-contain select-none pointer-events-none"
               style={{ imageRendering: "pixelated" }}
+              draggable={false}
+            />
+          )}
+          {/* Segmentation overlay — stacked over the channel raster
+              at user-controlled opacity. Both use object-contain so
+              they align pixel-for-pixel as long as view_bin matches
+              (loadLabelsImage uses the same bin as loadChannelImage). */}
+          {imageURL && labelsImageURL && (
+            <img
+              src={labelsImageURL}
+              alt={`segmentation ${segmentation}`}
+              className="absolute inset-0 w-full h-full object-contain select-none pointer-events-none"
+              style={{
+                imageRendering: "pixelated",
+                opacity: labelsOpacity,
+              }}
               draggable={false}
             />
           )}

@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { CELLS, CHANNELS, MASKS, SEGMENTATIONS, type CellId } from "./mock";
-import { getChannelImage, getMeasurements, loadImage, startCellpose } from "@/lib/api";
+import {
+  getChannelImage,
+  getLabelsImage,
+  getMeasurements,
+  loadImage,
+  startCellpose,
+} from "@/lib/api";
 
 export type HubCategory =
   | "io"
@@ -67,6 +73,15 @@ interface State {
   // show a "Loading…" spinner instead of the stale image.
   imageLoading: boolean;
 
+  // Object URL of the active segmentation as a colorized RGBA PNG from
+  // /labels_image. Stacked over the channel raster at user-controlled
+  // opacity. Null when no segmentation is selected or fetch failed.
+  labelsImageURL: string | null;
+  // 0..1 — CSS opacity of the labels overlay. Default 0.5 — visible
+  // enough to read cell colors, transparent enough to see the channel
+  // raster underneath.
+  labelsOpacity: number;
+
   selection: Set<CellId>;
   filter: Set<CellId> | null;
 
@@ -113,6 +128,8 @@ interface State {
   loadDataset: (path: string) => Promise<void>;
   measureCells: (metrics?: string[]) => Promise<void>;
   loadChannelImage: () => Promise<void>;
+  loadLabelsImage: () => Promise<void>;
+  setLabelsOpacity: (v: number) => void;
 
   // Backend event handlers — called by the WS bridge in main.tsx.
   // Underscore prefix marks "framework plumbing, not for UI".
@@ -156,6 +173,9 @@ export const usePerCell = create<State>((set, get) => ({
   imageURL: null,
   imageLoading: false,
 
+  labelsImageURL: null,
+  labelsOpacity: 0.5,
+
   selection: new Set(),
   filter: null,
 
@@ -179,10 +199,14 @@ export const usePerCell = create<State>((set, get) => ({
     void get().loadChannelImage();
   },
   setMask: (m) => set({ mask: m, status: `Mask → ${m}` }),
-  setSegmentation: (s) => set({ segmentation: s, status: `Segmentation → ${s}` }),
+  setSegmentation: (s) => {
+    set({ segmentation: s, status: `Segmentation → ${s}` });
+    void get().loadLabelsImage();
+  },
   setViewBin: (n) => {
     set({ viewBin: n, status: `View bin → ${n}` });
     void get().loadChannelImage();
+    void get().loadLabelsImage();
   },
   setAlwaysOnTop: (v) => set({ alwaysOnTop: v }),
   setLayoutPreset: (p) => set({ layoutPreset: p, status: `Layout → ${p}` }),
@@ -292,12 +316,14 @@ export const usePerCell = create<State>((set, get) => ({
         `${meta.segmentation_names.length} segmentation(s), ` +
         `${meta.mask_names.length} mask(s)`,
     });
-    // Drop the stale blob URL from the previous dataset. Refetch the
-    // first channel of the new one.
-    const prevURL = get().imageURL;
-    if (prevURL) URL.revokeObjectURL(prevURL);
-    set({ imageURL: null });
+    // Drop the stale blob URLs from the previous dataset. Refetch the
+    // first channel + first segmentation of the new one.
+    const prev = get();
+    if (prev.imageURL) URL.revokeObjectURL(prev.imageURL);
+    if (prev.labelsImageURL) URL.revokeObjectURL(prev.labelsImageURL);
+    set({ imageURL: null, labelsImageURL: null });
     void get().loadChannelImage();
+    void get().loadLabelsImage();
   },
 
   // POST /measurements against the currently loaded dataset using the
@@ -398,7 +424,10 @@ export const usePerCell = create<State>((set, get) => ({
       get()
         .refreshDatasetMetadata()
         .then(() => {
-          if (newSeg) set({ segmentation: newSeg });
+          if (newSeg) {
+            set({ segmentation: newSeg });
+            void get().loadLabelsImage();
+          }
         });
     }
   },
@@ -439,6 +468,48 @@ export const usePerCell = create<State>((set, get) => ({
     if (cur.imageURL) URL.revokeObjectURL(cur.imageURL);
     set({ imageURL: url, imageLoading: false });
   },
+
+  // Fetch the active segmentation as a colorized RGBA PNG. Symmetric
+  // with loadChannelImage; same staleness-guard and blob-URL recycling
+  // discipline.
+  loadLabelsImage: async () => {
+    const s = get();
+    if (!s.datasetPath || !s.segmentation) {
+      if (s.labelsImageURL) URL.revokeObjectURL(s.labelsImageURL);
+      set({ labelsImageURL: null });
+      return;
+    }
+    let blob: Blob;
+    try {
+      blob = await getLabelsImage({
+        path: s.datasetPath,
+        segmentation: s.segmentation,
+        view_bin: s.viewBin,
+      });
+    } catch (e) {
+      // Don't toast labels-fetch failures in the status bar — they
+      // race with the much more meaningful cellpose/load messages.
+      // Just drop the overlay.
+      const prev = get().labelsImageURL;
+      if (prev) URL.revokeObjectURL(prev);
+      set({ labelsImageURL: null });
+      console.warn("labels_image fetch failed:", e);
+      return;
+    }
+    const cur = get();
+    if (
+      cur.segmentation !== s.segmentation ||
+      cur.datasetPath !== s.datasetPath
+    ) {
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    if (cur.labelsImageURL) URL.revokeObjectURL(cur.labelsImageURL);
+    set({ labelsImageURL: url });
+  },
+
+  setLabelsOpacity: (v) =>
+    set({ labelsOpacity: Math.max(0, Math.min(1, v)) }),
 
   refreshDatasetMetadata: async () => {
     const s = get();

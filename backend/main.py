@@ -304,6 +304,97 @@ def channel_image(payload: dict[str, Any]) -> Response:
     return Response(content=buf.getvalue(), media_type="image/png")
 
 
+@app.post("/labels_image")
+def labels_image(payload: dict[str, Any]) -> Response:
+    """Return a colorized PNG of the active segmentation labels.
+
+    Companion to /channel_image: produces the overlay the React viewer
+    stacks over the channel raster. Each unique cell ID gets a distinct
+    color from a fixed 20-color palette indexed by `id % 20`; pixels
+    with label 0 (background) are fully transparent so CSS opacity
+    blending in the WebView works.
+
+    Request body:
+        path:         absolute .h5 path (required)
+        segmentation: label layer name in /labels/ (required)
+        view_bin:     optional downsample factor, default 1
+
+    Response: image/png (RGBA) bytes.
+    """
+    path = payload.get("path")
+    seg_name = payload.get("segmentation")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not seg_name:
+        raise HTTPException(status_code=400, detail="segmentation is required")
+
+    view_bin = int(payload.get("view_bin", 1))
+
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from percell4.store import DatasetStore
+
+    store = DatasetStore(path)
+    if not store.exists():
+        raise HTTPException(status_code=404, detail=f"file not found: {path}")
+
+    try:
+        with store.open_read() as s:
+            labels = s.read_labels(seg_name, view_bin=view_bin)
+    except KeyError as e:
+        raise HTTPException(
+            status_code=404, detail=f"segmentation '{seg_name}' not found",
+        ) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail=f"failed to read labels: {e}",
+        ) from e
+
+    # 20-color perceptually-distinct palette (R, G, B, A). Background
+    # gets alpha=0; cells get full alpha and CSS-side opacity blends
+    # the overlay over the channel image.
+    PALETTE = np.array(
+        [
+            [0xE7, 0x4C, 0x3C, 255],  # red
+            [0x2E, 0xCC, 0x71, 255],  # green
+            [0x34, 0x98, 0xDB, 255],  # blue
+            [0xF1, 0xC4, 0x0F, 255],  # yellow
+            [0x9B, 0x59, 0xB6, 255],  # purple
+            [0x1A, 0xBC, 0x9C, 255],  # teal
+            [0xE6, 0x7E, 0x22, 255],  # orange
+            [0xEC, 0x40, 0x7A, 255],  # pink
+            [0x16, 0xA0, 0x85, 255],  # dark teal
+            [0xF3, 0x9C, 0x12, 255],  # amber
+            [0x8E, 0x44, 0xAD, 255],  # dark purple
+            [0x27, 0xAE, 0x60, 255],  # dark green
+            [0x29, 0x80, 0xB9, 255],  # dark blue
+            [0xC0, 0x39, 0x2B, 255],  # dark red
+            [0xD3, 0x54, 0x00, 255],  # dark orange
+            [0x73, 0xC6, 0xB6, 255],  # mint
+            [0xF5, 0xB7, 0xB1, 255],  # light pink
+            [0xA9, 0xCC, 0xE3, 255],  # light blue
+            [0xFA, 0xD7, 0xA0, 255],  # light orange
+            [0xD2, 0xB4, 0xDE, 255],  # light purple
+        ],
+        dtype=np.uint8,
+    )
+
+    h, w = labels.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    nonzero = labels > 0
+    if nonzero.any():
+        color_idx = (labels[nonzero].astype(np.int64) % len(PALETTE))
+        rgba[nonzero] = PALETTE[color_idx]
+    # Background pixels already (0, 0, 0, 0) — transparent.
+
+    buf = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG", optimize=False)
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
 @app.post("/phasor/histogram")
 def phasor_histogram(payload: dict[str, Any]) -> dict[str, Any]:
     """Stub: phasor density points (g, s) for a channel."""
