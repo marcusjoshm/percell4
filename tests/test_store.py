@@ -508,3 +508,118 @@ def test_decay_chunking_64(store):
         assert chunks[0] == 64
         assert chunks[1] == 64
         assert chunks[2] == 256  # full TCSPC axis
+
+
+# ── Time-lapse: leading T axis (U2) ───────────────────────────
+
+
+def _make_timelapse_store(store, t=3, c=0, h=8, w=8):
+    """Initialize ``store`` with a time-lapse /intensity so n_timepoints>1.
+
+    c=0 -> (T,H,W) single channel; c>0 -> (T,C,H,W).
+    """
+    if c == 0:
+        intensity = np.zeros((t, h, w), dtype=np.float32)
+        dims = ["T", "H", "W"]
+    else:
+        intensity = np.zeros((t, c, h, w), dtype=np.float32)
+        dims = ["T", "C", "H", "W"]
+    store.write_array("intensity", intensity, attrs={"dims": dims})
+    return store
+
+
+def test_metadata_reports_n_timepoints_from_dims(store):
+    """A leading-T /intensity surfaces n_timepoints; native_shape is (H,W)."""
+    _make_timelapse_store(store, t=4, c=2, h=8, w=10)
+    meta = store.metadata
+    assert meta["n_timepoints"] == 4
+    assert meta["native_shape"] == (8, 10)
+
+
+def test_metadata_n_timepoints_defaults_to_one(store):
+    """A 2D /intensity (no T axis) reports n_timepoints == 1."""
+    store.write_array("intensity", np.zeros((8, 8), dtype=np.float32))
+    assert store.metadata["n_timepoints"] == 1
+
+
+def test_write_read_time_stacked_labels(store):
+    """(T,H,W) labels round-trip whole-stack and per-frame."""
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    labels = np.zeros((3, 8, 8), dtype=np.int32)
+    labels[0, 0, 0] = 1
+    labels[2, 1, 1] = 5
+    store.write_labels("tracked", labels)
+
+    full = store.read_labels("tracked")
+    assert full.shape == (3, 8, 8)
+    np.testing.assert_array_equal(full, labels)
+    # Per-frame read returns just that (H,W) slice.
+    frame2 = store.read_labels("tracked", timepoint=2)
+    assert frame2.shape == (8, 8)
+    assert frame2[1, 1] == 5
+
+
+def test_write_time_stacked_mask(store):
+    """(T,H,W) masks round-trip; per-frame read works."""
+    _make_timelapse_store(store, t=2, h=8, w=8)
+    mask = np.zeros((2, 8, 8), dtype=np.uint8)
+    mask[1, 2, 2] = 1
+    store.write_mask("roi", mask)
+    assert store.read_mask("roi").shape == (2, 8, 8)
+    assert store.read_mask("roi", timepoint=1)[2, 2] == 1
+
+
+def test_time_stacked_labels_dims_attr(store):
+    """Time-stacked labels are tagged dims=[T,H,W]."""
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    store.write_labels("tracked", np.zeros((3, 8, 8), dtype=np.int32))
+    with h5py.File(store.path, "r") as f:
+        dims = [str(d) for d in f["labels/tracked"].attrs["dims"]]
+    assert dims == ["T", "H", "W"]
+
+
+def test_labels_3d_rejected_on_non_timelapse_dataset(store):
+    """A 3D label on a single-timepoint dataset still raises (2D contract)."""
+    store.write_array("intensity", np.zeros((8, 8), dtype=np.float32))
+    with pytest.raises(ValueError, match="2D"):
+        store.write_labels("bad", np.zeros((3, 8, 8), dtype=np.int32))
+
+
+def test_time_stacked_labels_wrong_frame_count_raises(store):
+    """(T,H,W) labels whose T != n_timepoints is rejected."""
+    from percell4.store import LayerSizeMismatchError
+
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    with pytest.raises(LayerSizeMismatchError, match="timepoints"):
+        store.write_labels("tracked", np.zeros((2, 8, 8), dtype=np.int32))
+
+
+def test_time_stacked_labels_wrong_hw_raises(store):
+    """(T,H,W) labels whose trailing dims != native_shape is rejected."""
+    from percell4.store import LayerSizeMismatchError
+
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    with pytest.raises(LayerSizeMismatchError, match="native_shape"):
+        store.write_labels("tracked", np.zeros((3, 8, 10), dtype=np.int32))
+
+
+def test_time_stacked_labels_view_bin_per_frame(store):
+    """view_bin>1 on (T,H,W) labels modes each frame and keeps T."""
+    _make_timelapse_store(store, t=2, h=4, w=4)
+    labels = np.ones((2, 4, 4), dtype=np.int32)
+    labels[1] = 3
+    store.write_labels("tracked", labels)
+    binned = store.read_labels("tracked", view_bin=2)
+    assert binned.shape == (2, 2, 2)
+    assert binned[0, 0, 0] == 1
+    assert binned[1, 0, 0] == 3
+
+
+def test_time_stacked_intensity_view_bin_per_frame(store):
+    """view_bin>1 on (T,C,H,W) intensity sum-bins each frame, keeps T and C."""
+    intensity = np.ones((2, 2, 4, 4), dtype=np.float32)
+    store.write_array("intensity", intensity, attrs={"dims": ["T", "C", "H", "W"]})
+    binned = store.read_array("intensity", view_bin=2)
+    assert binned.shape == (2, 2, 2, 2)
+    # Each binned pixel sums 2x2 source ones.
+    assert binned[0, 0, 0, 0] == 4.0

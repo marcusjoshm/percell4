@@ -78,10 +78,17 @@ def _infer_bin_metadata(f: h5py.File) -> dict[str, Any]:
     Pure read of the open file handle -- does not mutate or close.
     """
     native_shape: tuple[int, int] | None = None
+    n_timepoints = 1
     if "intensity" in f:
-        shape = f["intensity"].shape
+        ds = f["intensity"]
+        shape = ds.shape
         if len(shape) >= 2:
             native_shape = (int(shape[-2]), int(shape[-1]))
+        # A leading "T" in the dims attr marks a time-lapse stack; its
+        # length is the timepoint count. Absent/2D => single timepoint.
+        dims = ds.attrs.get("dims")
+        if dims is not None and len(dims) > 0 and str(dims[0]) == "T":
+            n_timepoints = int(shape[0])
     elif "decay" in f:
         decay_grp = f["decay"]
         children = list(decay_grp.keys())
@@ -93,7 +100,11 @@ def _infer_bin_metadata(f: h5py.File) -> dict[str, Any]:
     creation_bin = 1
     if "metadata" in f and "creation_bin" in f["metadata"].attrs:
         creation_bin = int(f["metadata"].attrs["creation_bin"])
-    return {"native_shape": native_shape, "creation_bin": creation_bin}
+    return {
+        "native_shape": native_shape,
+        "creation_bin": creation_bin,
+        "n_timepoints": n_timepoints,
+    }
 
 
 # Provenance-attribute keys for masks captured by "Apply Current Phasor
@@ -357,6 +368,50 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
+    def read_array_frame(
+        self, hdf5_path: str, timepoint: int, view_bin: int = 1
+    ) -> NDArray:
+        """Read a single timepoint frame ``arr[timepoint]`` from a leading-T array.
+
+        Slices on disk so only one frame is loaded (cheap given per-frame
+        chunking). The path's view-bin rule is applied to the slice, which
+        is one rank lower than the stored array (``(T,H,W)`` -> ``(H,W)``;
+        ``(T,C,H,W)`` -> ``(C,H,W)``). For a non-time-stacked array,
+        ``timepoint`` must be 0 and the whole array is returned.
+        """
+        if view_bin < 1:
+            raise ValueError(f"view_bin must be >= 1, got {view_bin}")
+        f = self._open_read()
+        try:
+            if hdf5_path not in f:
+                raise KeyError(f"Dataset not found: {hdf5_path}")
+            obj = f[hdf5_path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{hdf5_path} is a group, not a dataset")
+            dims = obj.attrs.get("dims")
+            is_time_stacked = (
+                dims is not None and len(dims) > 0 and str(dims[0]) == "T"
+            )
+            if not is_time_stacked:
+                if timepoint != 0:
+                    raise IndexError(
+                        f"timepoint={timepoint} out of range: {hdf5_path} is "
+                        "not time-stacked"
+                    )
+                arr = obj[()]
+            else:
+                n_t = obj.shape[0]
+                if not 0 <= timepoint < n_t:
+                    raise IndexError(
+                        f"timepoint={timepoint} out of range [0, {n_t})"
+                    )
+                arr = obj[timepoint]
+            if view_bin == 1:
+                return arr
+            return _apply_view_bin(hdf5_path, arr, view_bin)
+        finally:
+            self._close_if_not_session(f)
+
     # ── DataFrame operations ──────────────────────────────────
 
     def write_dataframe(self, hdf5_path: str, df: pd.DataFrame) -> int:
@@ -388,6 +443,55 @@ class DatasetStore:
 
     # ── Convenience: labels ───────────────────────────────────
 
+    def _native_shape_and_timepoints(self) -> tuple[tuple[int, int] | None, int]:
+        """Return ``(native_shape | None, n_timepoints)`` for write validation.
+
+        Reads ``/metadata`` and infers from ``/intensity``. Returns
+        ``(None, 1)`` when the file doesn't exist yet or carries no spatial
+        array, so callers can skip the cross-check in that case.
+        """
+        if not self.path.exists():
+            return None, 1
+        meta = self.metadata
+        ns = meta.get("native_shape")
+        if ns is not None:
+            ns = tuple(int(x) for x in ns)
+        nt = int(meta.get("n_timepoints", 1) or 1)
+        return ns, nt
+
+    def _validate_layer_shape(self, array: NDArray, kind: str) -> list[str]:
+        """Validate a label/mask array shape and return its ``dims`` attr.
+
+        Accepts 2D ``(H, W)`` (always) or time-stacked ``(T, H, W)`` where
+        the trailing two dims equal the dataset's ``native_shape`` and the
+        leading axis equals ``n_timepoints``. Anything else raises.
+        """
+        if array.ndim == 2:
+            return ["H", "W"]
+        ns, nt = self._native_shape_and_timepoints()
+        # A 3D array is a legitimate time stack only on a time-lapse dataset
+        # (n_timepoints > 1). On any other dataset — including an empty one
+        # whose timepoint count is unknown (defaults to 1) — keep the old
+        # "labels/masks must be 2D" contract.
+        if array.ndim != 3 or nt <= 1:
+            raise ValueError(
+                f"{kind} must be 2D (H,W); got {array.ndim}D. A 3D (T,H,W) "
+                "stack is only accepted on a time-lapse dataset "
+                "(n_timepoints > 1)."
+            )
+        th, tw = int(array.shape[-2]), int(array.shape[-1])
+        if ns is not None and (th, tw) != ns:
+            raise LayerSizeMismatchError(
+                f"{kind} (T,H,W) trailing dims {(th, tw)} disagree with "
+                f"dataset native_shape {ns}."
+            )
+        if int(array.shape[0]) != nt:
+            raise LayerSizeMismatchError(
+                f"{kind} has {int(array.shape[0])} frame(s) but the dataset "
+                f"has {nt} timepoints; the time axis would mis-stack."
+            )
+        return ["T", "H", "W"]
+
     def write_labels(
         self,
         name: str,
@@ -396,27 +500,37 @@ class DatasetStore:
     ) -> int:
         """Write a segmentation label array at /labels/<name>.
 
-        Enforces int32 dtype. Returns element count.
+        Enforces int32 dtype. Accepts 2D ``(H, W)`` or time-stacked
+        ``(T, H, W)`` (validated against the dataset's ``native_shape`` and
+        ``n_timepoints``). Returns element count.
 
-        ``attrs`` (optional) are merged onto the canonical ``{"dims":
-        ["H", "W"]}`` so Phase-6 Creators can stamp ``created_at_bin``
-        without bypassing the chokepoint.
+        ``attrs`` (optional) are merged onto the canonical ``{"dims": ...}``
+        so Phase-6 Creators can stamp ``created_at_bin`` without bypassing
+        the chokepoint.
         """
-        if array.ndim != 2:
-            raise ValueError(f"Labels must be 2D, got {array.ndim}D")
+        dims = self._validate_layer_shape(array, "Labels")
         array = array.astype(np.int32, copy=False)
-        merged_attrs: dict[str, Any] = {"dims": ["H", "W"]}
+        merged_attrs: dict[str, Any] = {"dims": dims}
         if attrs:
             merged_attrs.update(attrs)
         return self.write_array(f"labels/{name}", array, attrs=merged_attrs)
 
-    def read_labels(self, name: str, view_bin: int = 1) -> NDArray[np.int32]:
+    def read_labels(
+        self, name: str, view_bin: int = 1, timepoint: int | None = None
+    ) -> NDArray[np.int32]:
         """Read a segmentation label array from /labels/<name>.
 
         ``view_bin`` follows the same rule as :meth:`read_array`. Labels
-        downsample via block mode (ties resolve to 0).
+        downsample via block mode (ties resolve to 0). When ``timepoint``
+        is given, returns only that frame of a time-stacked ``(T, H, W)``
+        labels resource (``(H, W)``); leave it ``None`` to read the whole
+        array (the full stack for time-lapse, or the 2D array otherwise).
         """
-        return self.read_array(f"labels/{name}", view_bin=view_bin)
+        if timepoint is None:
+            return self.read_array(f"labels/{name}", view_bin=view_bin)
+        return self.read_array_frame(
+            f"labels/{name}", timepoint, view_bin=view_bin
+        )
 
     def list_labels(self) -> list[str]:
         """List all label set names under /labels/."""
@@ -437,25 +551,35 @@ class DatasetStore:
         - Multi-label: 0=outside, 1..N=ROI labels
         Returns element count.
 
-        ``attrs`` (optional) are merged onto the canonical ``{"dims":
-        ["H", "W"]}`` so Phase-6 Creators can stamp ``created_at_bin``
-        and any provenance keys without bypassing the chokepoint.
+        Accepts 2D ``(H, W)`` or time-stacked ``(T, H, W)`` (validated
+        against the dataset's ``native_shape`` and ``n_timepoints``).
+
+        ``attrs`` (optional) are merged onto the canonical ``{"dims": ...}``
+        so Phase-6 Creators can stamp ``created_at_bin`` and any provenance
+        keys without bypassing the chokepoint.
         """
-        if array.ndim != 2:
-            raise ValueError(f"Mask must be 2D, got {array.ndim}D")
+        dims = self._validate_layer_shape(array, "Mask")
         array = array.astype(np.uint8, copy=False)
-        merged_attrs: dict[str, Any] = {"dims": ["H", "W"]}
+        merged_attrs: dict[str, Any] = {"dims": dims}
         if attrs:
             merged_attrs.update(attrs)
         return self.write_array(f"masks/{name}", array, attrs=merged_attrs)
 
-    def read_mask(self, name: str, view_bin: int = 1) -> NDArray[np.uint8]:
+    def read_mask(
+        self, name: str, view_bin: int = 1, timepoint: int | None = None
+    ) -> NDArray[np.uint8]:
         """Read a mask from /masks/<name>.
 
         ``view_bin`` follows the same rule as :meth:`read_array`. Masks
-        downsample via majority vote (>= ceil(k**2 / 2)).
+        downsample via majority vote (>= ceil(k**2 / 2)). When ``timepoint``
+        is given, returns only that frame of a time-stacked ``(T, H, W)``
+        mask resource.
         """
-        return self.read_array(f"masks/{name}", view_bin=view_bin)
+        if timepoint is None:
+            return self.read_array(f"masks/{name}", view_bin=view_bin)
+        return self.read_array_frame(
+            f"masks/{name}", timepoint, view_bin=view_bin
+        )
 
     def list_masks(self) -> list[str]:
         """List all mask names under /masks/."""
@@ -528,6 +652,8 @@ class DatasetStore:
                 attrs["native_shape"] = tuple(int(x) for x in ns)
             if "creation_bin" in attrs:
                 attrs["creation_bin"] = int(attrs["creation_bin"])
+            if "n_timepoints" in attrs:
+                attrs["n_timepoints"] = int(attrs["n_timepoints"])
             return attrs
         finally:
             self._close_if_not_session(f)

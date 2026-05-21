@@ -128,12 +128,30 @@ def mode_labels(arr: NDArray, k: int) -> NDArray:
     Ties resolve to 0 (background) -- conservatively dropping ambiguous
     pixels rather than picking arbitrarily.
 
+    Rank-polymorphic on the trailing two axes (same contract as
+    :func:`sum_bin_2d`): ``(H, W)`` and time-stacked ``(T, H, W)`` (or any
+    rank >= 2) both work -- each leading frame is moded independently.
     Residual rows/cols truncated.
     """
     _validate_k(k)
     if k == 1:
         return arr.astype(np.int32, copy=False)
     truncated, h_b, w_b = _truncate_trailing_hw(arr, k)
+    lead = truncated.shape[:-2]
+    if lead:
+        # Mode each leading frame independently, then restore the leading
+        # shape. Flatten leading axes so the per-frame loop stays simple.
+        flat = truncated.reshape(-1, truncated.shape[-2], truncated.shape[-1])
+        out = np.stack(
+            [_mode_labels_2d(flat[i], k, h_b, w_b) for i in range(flat.shape[0])],
+            axis=0,
+        )
+        return out.reshape(*lead, h_b, w_b)
+    return _mode_labels_2d(truncated, k, h_b, w_b)
+
+
+def _mode_labels_2d(truncated: NDArray, k: int, h_b: int, w_b: int) -> NDArray:
+    """Block-mode a single already-truncated 2D label plane."""
     # Reshape to (h_b, k, w_b, k) then move both k axes adjacent so we can
     # consider each k*k block as a flat vector of source labels.
     reshaped = truncated.reshape(h_b, k, w_b, k)

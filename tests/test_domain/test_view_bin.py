@@ -249,6 +249,27 @@ def test_mode_labels_background_dominates():
     assert out[0, 0] == 0
 
 
+def test_mode_labels_rank_polymorphic_time_stack():
+    # (T, H, W) labels: each frame moded independently, T preserved.
+    frame0 = np.array([[1, 1], [1, 2]], dtype=np.int32)  # mode 1
+    frame1 = np.array([[3, 3], [3, 3]], dtype=np.int32)  # mode 3
+    stack = np.stack([frame0, frame1], axis=0)  # (2, 2, 2)
+    out = mode_labels(stack, 2)
+    assert out.shape == (2, 1, 1)
+    assert out[0, 0, 0] == 1
+    assert out[1, 0, 0] == 3
+    assert out.dtype == np.int32
+
+
+def test_mode_labels_time_stack_matches_per_frame():
+    # The stacked result equals applying the 2D mode frame-by-frame.
+    rng = np.random.default_rng(0)
+    stack = rng.integers(0, 4, size=(3, 6, 6)).astype(np.int32)
+    out = mode_labels(stack, 2)
+    for t in range(3):
+        np.testing.assert_array_equal(out[t], mode_labels(stack[t], 2))
+
+
 # ---------------------------------------------------------------------------
 # nn_upsample_2d
 # ---------------------------------------------------------------------------
