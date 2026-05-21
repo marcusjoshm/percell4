@@ -14,10 +14,8 @@
 
 - [Tech Stack](#tech-stack)
 - [Workflow Protocol](#workflow-protocol)
-  - [Loading TIFF files](#loading-tiff-files)
   - [Channel, mask, and segmentation naming](#channel-mask-and-segmentation-naming)
-  - [Step-by-step workflow walkthrough](#step-by-step-workflow-walkthrough)
-  - [Batch TIFF export pointer](#batch-tiff-export-pointer)
+  - [Step-by-step protocol](#step-by-step-protocol)
 - [Batch TIFF Export (CLI)](#batch-tiff-export-cli)
 - [Features](#features)
 - [Installation](#installation)
@@ -49,35 +47,7 @@ Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `fli
 
 This is the canonical end-to-end protocol. Read it top-to-bottom before opening the app. Input is a directory of microscope `.tif` files (and optionally Becker & Hickl `.sdt` files for FLIM). Output is one `.h5` per experiment plus a `run_<timestamp>/` folder containing `measurements.parquet`, `combined.csv`, `per_dataset/<DS>.csv`, `summary_groups.csv`, and `summary_datasets.csv`.
 
-The workflow runs as eight phases. Phases marked **[unattended]** complete without input; phases marked **[interactive]** queue datasets one at a time and wait for you in a modal.
-
-```mermaid
-flowchart LR
-    A[Compress<br/>TIFF→.h5] --> B[Cellpose<br/>Segment]
-    B --> C[Segmentation<br/>QC]
-    C --> D[Grouped<br/>Threshold ×N]
-    D --> E[Threshold<br/>QC ×N]
-    E --> F[Dilute<br/>optional]
-    F --> G[Measure]
-    G --> H[Aggregate +<br/>Export]
-```
-
-If the diagram does not render, the same eight phases are: **Compress → Cellpose Segment → Segmentation QC → Grouped Thresholding (1..N) → Threshold QC (1..N) → Dilute (optional) → Measure → Aggregate + Export**.
-
-### Loading TIFF files
-
-1. **Launch the app** from the repo root with the venv active:
-   ```bash
-   python main.py
-   ```
-   Or, after `pip install -e .`, from anywhere with the venv active: `percell4-gui`.
-2. **Click the `I/O` tab** in the launcher sidebar. This panel owns all dataset-level actions (import, load, append, close, export).
-3. Choose one of three entry points:
-   - **`Import` → Compress TIFFs** for a fresh dataset from microscope TIFFs. The compress dialog scans the source directory, presents the detected channels, and lets you rename channels before writing the `.h5`. Accept defaults to get `ch00`, `ch01`, … or rename — the importer always preserves the `ch` prefix on the canonical channel name.
-   - **`Load`** to open an existing `.h5` dataset.
-   - **`Batch TCSPC append`** to add Becker & Hickl `.sdt` files (FLIM) to an existing `.h5`.
-
-Source TIFFs are typically organized as one channel per `.tif` file, with channels distinguished by filename token (e.g., `*_ch00.tif`, `*_ch01.tif`). The compress dialog discovers this layout automatically; verify the detected channel map before clicking **Compress**.
+The workflow runs as eight phases. Some phases run unattended; others queue datasets one at a time and wait for you in a QC modal. The naming conventions below are load-bearing — read them before step 1.
 
 ### Channel, mask, and segmentation naming
 
@@ -88,39 +58,100 @@ PerCell4 enforces a small, strict naming contract so the workflow runner, thresh
 - **Mask layers** live at `/masks/<name>`. Each grouped-thresholding round writes `/masks/<round_name>` (e.g., `/masks/puncta_bright`). The optional dilute-phase pass writes `/masks/<dilute_name>`. **The dilute mask name must not collide with any thresholding round name in the same run** — the workflow validates this at Start and refuses with an inline error.
 - **Workflow round names become parquet columns.** Every thresholding round name becomes a `group_<round>` column in `measurements.parquet`, `combined.csv`, and the per-dataset CSVs. Pick names that read well in pandas — `puncta_bright`, `puncta_dim`, `condensates` — not generic `round_1`.
 
-### Step-by-step workflow walkthrough
+### Step-by-step protocol
 
-Open the launcher and follow the phases in order. Most batch runs are driven from the **Workflows** sidebar tab → **Single-cell thresholding analysis workflow**, which orchestrates phases 1–8 through one configuration dialog.
+1. **Launch the app.**
 
-1. **Compress** (`I/O` → Import → Compress TIFFs) — **[unattended]**
-   Source TIFFs → one `.h5` per dataset. The compress dialog handles channel detection and naming (see [naming conventions](#channel-mask-and-segmentation-naming) above).
+   On a **Mac**, open Terminal and run:
+   ```bash
+   cd ~/percell4
+   source .venv/bin/activate
+   python main.py
+   ```
 
-2. **Cellpose segmentation** (`Workflows` → Single-cell thresholding analysis workflow) — **[unattended within phase]**
-   Configure the run once: pick the datasets to include, choose Cellpose settings (model, diameter, channel), choose the edge-cell mode (`exclude` / `include_as_normal` / `include_as_size_normalized_cohort`), define the ordered list of thresholding rounds, optionally enable dilute-phase generation, pick the CSV column set, and pick the output parent directory. Click **Start**. Cellpose runs over the queue and writes `/labels/cellpose` for every dataset.
+   On the **Lee Lab analysis PC** (Windows), press `Windows + R`, type `cmd`, and press Enter to open Command Prompt. Then run:
+   ```bat
+   E:
+   cd percell4
+   .venv\Scripts\activate
+   python main.py
+   ```
 
-3. **Segmentation QC** — **[interactive queue]**
-   The Viewer window opens with each dataset in turn, labels overlaid on the segmentation channel. Use napari shortcuts to add, remove, paint, or fill labels. Press the workflow's **Accept** control to write `/labels/cellpose_qc` for the current dataset and advance to the next.
+   The PerCell4 launcher window opens.
 
-4. **Grouped thresholding rounds 1..N** — **[unattended within each round]**
-   For each configured round, the workflow clusters QC'd cells by intensity in the round's target channel, applies per-group autothresholding, and writes `/masks/<round_name>`.
+2. **Open the workflow.**
+   Click the **Workflows** tab in the launcher sidebar. Click the **Single-cell thresholding analysis workflow** button. The workflow configuration dialog opens.
 
-5. **Threshold QC rounds 1..N** — **[interactive queue]**
-   The Threshold QC modal opens per dataset. Review the mask overlay against the source channel; draw a circular ROI to refine autothresholding if needed; **Accept** to advance. The workflow updates `/masks/<round_name>` with your refinements.
+3. **Add your datasets.**
+   Click the **.tiff file icon** in the Datasets panel of the dialog to add a new dataset from microscope TIFFs. A file dialog opens — pick the source folder. The compress dialog then opens with the detected channels listed; rename channels here if you want (the importer keeps the `chNN` prefix automatically — see naming conventions above). Click **OK** to queue the dataset. Repeat for every dataset you want in this run.
 
-6. **Dilute-phase mask (optional)** — **[interactive queue]**
-   Only runs if you enabled dilute-phase generation in the config dialog. For each dataset, the dilute panel opens with the locked-in settings. Iterate the round loop — **Compute → Threshold QC → Accept → dilate + NaN-subtract** — for as many rounds as the dataset needs. Click **Done** when satisfied. The accumulated condensed-mask union is dilated and persisted to `/masks/<dilute_name>`. Different datasets in the same run may complete different numbers of dilute rounds.
+   To add an already-compressed dataset, click the **.h5 icon** instead of the .tiff icon and pick the existing `.h5` file.
 
-7. **Per-cell measurement** — **[unattended]**
-   Reads every `/labels/<seg>` and `/masks/<mask>` for each dataset, computes the configured per-channel metrics, and writes a per-dataset staging parquet.
+4. **Configure Cellpose.**
+   In the **Cellpose** group of the dialog, pick the segmentation model (typically `cyto3` for cytoplasm or `nuclei` for nuclear segmentation), set the cell diameter in pixels, and pick the channel to segment on. These settings apply to every dataset in the queue.
 
-8. **Aggregate + export** — **[unattended]**
-   Concatenates staging parquets into `measurements.parquet`, writes `combined.csv` and `per_dataset/<DS>.csv`, and adds two summary CSVs: `summary_groups.csv` (one row per `dataset` × `round` × `group`) and `summary_datasets.csv` (one row per dataset, with edge mode, round counts, and failure reasons). Output lands in `run_<timestamp>/` under the chosen output parent.
+5. **Choose the edge-cell mode.** Pick one of three options for cells touching the image border:
+   - **exclude** (default) — discard edge cells from every downstream step.
+   - **include_as_normal** — keep edge cells as ordinary rows in the parquet, flagged with `is_edge=True`.
+   - **include_as_size_normalized_cohort** — keep edge cells AND emit one synthetic cohort row per dataset (`is_edge_synthetic=True`) normalized by mean whole-cell area.
 
-**Pausing and resuming.** The workflow writes `run_state.json` after each phase. Use the **Workflows** → **Resume run...** entry to pick up an interrupted run.
+6. **Define the thresholding rounds.**
+   For each round you want to run:
+   - Click **Add round** in the Thresholding rounds table.
+   - Name the round (e.g., `puncta_bright`). The name becomes a `group_<round>` column in the output parquet — pick something readable.
+   - Pick the target channel (using the full `chNN_*` name).
+   - Set the number of intensity groups.
 
-### Batch TIFF export pointer
+   Add as many rounds as you need. The workflow runs them in the order shown in the table.
 
-If you only need TIFFs out of an existing `.h5` — for ImageJ, custom downstream code, or sharing with a colleague — use the headless CLI documented in the next section. The GUI's `I/O` → **Export Images** dialog drives the same lens (`sum_bin_2d` for intensity, `mode_labels` for labels, `majority_vote_mask` for masks); pick whichever fits your workflow. Use the CLI for batch jobs and unattended pipelines; use the GUI dialog when you want to preview before exporting.
+7. **(Optional) Enable the dilute-phase mask.**
+   Check **Generate dilute-phase mask** if you want a dilute-phase mask generated in this run. Then set:
+   - **Dilute mask name** — must not collide with any thresholding round name (the dialog blocks Start if it does).
+   - **Dilation radius** in pixels — used every dilute round.
+
+8. **Pick output columns and the output directory.**
+   In the **Output** group of the dialog, choose which metric columns to include in the parquet and CSV exports. Pick the output parent directory — the workflow creates a `run_<timestamp>/` subfolder inside it.
+
+9. **Start the run.**
+   Click **Start**. The dialog locks in. The workflow runs Phase 0 (compress TIFFs to `.h5`) and Phase 1 (Cellpose segmentation across every dataset) unattended. Watch progress in the launcher status bar.
+
+10. **QC the Cellpose segmentation (interactive).**
+    When Cellpose finishes, the Viewer window opens with the first dataset. Cell labels overlay the segmentation channel. Refine the labels with napari tools:
+    - Select the labels layer in the napari layer list, then use the paint, erase, and fill controls on the layer toolbar.
+    - Press `M` to merge selected labels.
+
+    Click **Accept** to write `/labels/cellpose_qc` for that dataset and advance to the next. Repeat for every dataset in the queue.
+
+11. **QC the thresholding rounds (interactive).**
+    For each thresholding round, the Threshold QC modal opens for the first dataset. The candidate mask overlays the round's target channel. Either:
+    - Click **Accept** to keep the autothresholded mask, or
+    - Draw a circular ROI on the canvas to guide refinement, then click **Accept** — the workflow recomputes the threshold inside the ROI and writes the refined mask to `/masks/<round_name>`.
+
+    Repeat for every dataset, then for every configured round.
+
+12. **(Optional) Build the dilute-phase mask (interactive).**
+    If you enabled dilute in step 7, the dilute panel opens for the first dataset. For each dataset:
+    - Click **Compute** to generate the candidate condensed mask.
+    - The Threshold QC modal opens — review the mask and click **Accept** to keep this round.
+    - The accepted mask is dilated and NaN-subtracted in memory.
+    - Click **Another round** to refine further on the same dataset, or **Done** to advance to the next dataset.
+
+    Different datasets may need different numbers of dilute rounds. The accumulated union is persisted to `/masks/<dilute_name>` when you click **Done**.
+
+13. **Wait for measurement and export (unattended).**
+    The workflow measures every cell across every `/labels/<seg>` and `/masks/<mask>` layer, then concatenates per-dataset staging parquets into the final outputs. No interaction needed.
+
+14. **Find your results.**
+    Open the output parent you chose in step 8. Inside, find `run_<timestamp>/`:
+    - `measurements.parquet` — every per-cell row across every dataset (the canonical output).
+    - `combined.csv` — the same data as a flat CSV.
+    - `per_dataset/<DS>.csv` — one CSV per dataset.
+    - `summary_groups.csv` — one row per `(dataset, round, group)` with means, medians, std, and cell counts.
+    - `summary_datasets.csv` — one row per dataset with edge mode, round counts, and failure reasons.
+
+**Pausing and resuming.** The workflow writes `run_state.json` after each phase. To pick up an interrupted run, open the launcher, click the **Workflows** tab, and click **Resume run...** instead of starting a new workflow.
+
+**Headless TIFF export.** If you only need TIFFs out of an existing `.h5` — for ImageJ, custom downstream code, or sharing with a colleague — use the CLI documented in the next section.
 
 ---
 
