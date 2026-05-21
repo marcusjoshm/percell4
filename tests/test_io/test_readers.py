@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import tifffile
 
-from percell4.adapters.readers import read_flim_bin, read_tiff
+from percell4.adapters.readers import (
+    read_flim_bin,
+    read_tiff,
+    read_tiff_metadata,
+)
 
 
 def test_read_tiff(tmp_path):
@@ -28,6 +32,80 @@ def test_read_tiff_uint16(tmp_path):
 
     result = read_tiff(path)
     assert result["array"].dtype == np.uint16
+
+
+# ── pixel_size_um decoding ────────────────────────────────────
+
+
+def test_read_tiff_pixel_size_um_centimeter_unit(tmp_path):
+    """ResolutionUnit=3 (cm) → pixel_size_um = (den/num) × 10000."""
+    data = np.zeros((16, 16), dtype=np.uint16)
+    path = tmp_path / "px_cm.tif"
+    # 5538 pixels/cm in both axes ⇒ ~1.8056 µm/px.
+    tifffile.imwrite(
+        str(path), data,
+        resolution=(5538.0, 5538.0), resolutionunit="CENTIMETER",
+    )
+
+    meta = read_tiff_metadata(path)
+    assert "pixel_size_um" in meta
+    # 1 cm / 5538 px = 1.8056e-4 cm/px = 1.8056 µm/px
+    assert meta["pixel_size_um"] == pytest.approx(1.8056, rel=1e-3)
+
+
+def test_read_tiff_pixel_size_um_inch_unit(tmp_path):
+    """ResolutionUnit=2 (inch) → pixel_size_um = (den/num) × 25400."""
+    data = np.zeros((16, 16), dtype=np.uint16)
+    path = tmp_path / "px_in.tif"
+    # 300 dpi ⇒ 25400/300 = 84.667 µm/px.
+    tifffile.imwrite(
+        str(path), data,
+        resolution=(300.0, 300.0), resolutionunit="INCH",
+    )
+
+    meta = read_tiff_metadata(path)
+    assert meta["pixel_size_um"] == pytest.approx(25400.0 / 300.0, rel=1e-3)
+
+
+def test_read_tiff_pixel_size_um_no_unit_returns_none(tmp_path):
+    """ResolutionUnit=1 (no unit) → pixel_size_um is omitted (can't convert)."""
+    data = np.zeros((16, 16), dtype=np.uint16)
+    path = tmp_path / "px_none.tif"
+    tifffile.imwrite(
+        str(path), data,
+        resolution=(100.0, 100.0), resolutionunit="NONE",
+    )
+
+    meta = read_tiff_metadata(path)
+    assert "pixel_size_um" not in meta
+
+
+def test_read_tiff_pixel_size_um_missing_resolution_returns_none(tmp_path):
+    """No resolution tag → pixel_size_um is omitted."""
+    data = np.zeros((16, 16), dtype=np.uint16)
+    path = tmp_path / "px_missing.tif"
+    tifffile.imwrite(str(path), data)  # no resolution kwarg
+
+    meta = read_tiff_metadata(path)
+    assert "pixel_size_um" not in meta
+
+
+def test_read_tiff_pixel_size_um_imagej_style_rational(tmp_path):
+    """ImageJ-style encoding (large numerator, small denominator with
+    cm unit) decodes correctly. Mirrors the form the user's microscope
+    writes: XResolution = (4294967295, 77546), ResolutionUnit = cm."""
+    data = np.zeros((16, 16), dtype=np.uint16)
+    path = tmp_path / "px_imagej.tif"
+    tifffile.imwrite(
+        str(path), data,
+        resolution=(4294967295.0 / 77546.0, 4294967295.0 / 77546.0),
+        resolutionunit="CENTIMETER",
+    )
+
+    meta = read_tiff_metadata(path)
+    # 4294967295/77546 ≈ 55382 px/cm ⇒ 77546/4294967295 cm/px
+    # × 10000 µm/cm ≈ 0.1806 µm/px
+    assert meta["pixel_size_um"] == pytest.approx(0.1806, rel=1e-3)
 
 
 # ── .bin reader ───────────────────────────────────────────────

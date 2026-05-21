@@ -493,24 +493,28 @@ def import_dataset(
         all_metadata["native_shape"] = native_shape
 
     # Persist pixel_size_um from the first intensity file's TIFF
-    # resolution tag (DiscoveredFile.pixel_size_um is set by the
-    # scanner). Downstream measurement code uses this to emit
+    # resolution tag. Downstream measurement code uses this to emit
     # `<area_col>_um2` sibling columns so areas can be reported in
     # physical units without out-of-band knowledge of the
-    # microscope's calibration. Gracefully omitted when the source
-    # files don't carry a resolution tag.
+    # microscope's calibration. The scanner doesn't read TIFF tags
+    # (domain/ can't import adapters/), so we read the first
+    # intensity file's metadata here and convert via
+    # read_tiff_metadata's XResolution + ResolutionUnit handling.
     if intensity_files:
-        first_px = getattr(intensity_files[0], "pixel_size_um", None)
+        from percell4.adapters.readers import read_tiff_metadata
+
+        try:
+            tiff_meta = read_tiff_metadata(intensity_files[0].path)
+            first_px = tiff_meta.get("pixel_size_um")
+        except Exception:
+            first_px = None
         if first_px is not None and first_px > 0:
-            all_metadata["pixel_size_um"] = float(first_px)
             # Pre-bake creation_bin into the persisted value so
             # measurements made on the binned (H, W) plane stay
             # consistent — every binned pixel is creation_bin pixels
             # wide in the source.
-            if int(creation_bin) > 1:
-                all_metadata["pixel_size_um"] = (
-                    float(first_px) * int(creation_bin)
-                )
+            scaled = float(first_px) * max(1, int(creation_bin))
+            all_metadata["pixel_size_um"] = scaled
 
     if metadata:
         all_metadata.update(metadata)
