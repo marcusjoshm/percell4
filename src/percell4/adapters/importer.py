@@ -491,6 +491,27 @@ def import_dataset(
     }
     if native_shape is not None:
         all_metadata["native_shape"] = native_shape
+
+    # Persist pixel_size_um from the first intensity file's TIFF
+    # resolution tag (DiscoveredFile.pixel_size_um is set by the
+    # scanner). Downstream measurement code uses this to emit
+    # `<area_col>_um2` sibling columns so areas can be reported in
+    # physical units without out-of-band knowledge of the
+    # microscope's calibration. Gracefully omitted when the source
+    # files don't carry a resolution tag.
+    if intensity_files:
+        first_px = getattr(intensity_files[0], "pixel_size_um", None)
+        if first_px is not None and first_px > 0:
+            all_metadata["pixel_size_um"] = float(first_px)
+            # Pre-bake creation_bin into the persisted value so
+            # measurements made on the binned (H, W) plane stay
+            # consistent — every binned pixel is creation_bin pixels
+            # wide in the source.
+            if int(creation_bin) > 1:
+                all_metadata["pixel_size_um"] = (
+                    float(first_px) * int(creation_bin)
+                )
+
     if metadata:
         all_metadata.update(metadata)
 

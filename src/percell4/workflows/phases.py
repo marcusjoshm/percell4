@@ -633,6 +633,88 @@ def _build_summary_datasets(
 _NON_METRIC_COLUMNS = frozenset({"label", "cell_id", "is_edge", "is_edge_synthetic"})
 
 
+def _read_pixel_size_um(store: DatasetStore) -> float | None:
+    """Read /metadata.pixel_size_um from the store, or None if absent / invalid.
+
+    Persisted by ``import_dataset`` from the first source TIFF's resolution
+    tag. Returns ``None`` when:
+      - the dataset was imported before this metadata was persisted, OR
+      - the source TIFFs didn't carry a resolution tag, OR
+      - the persisted value is non-positive (defensive guard).
+    """
+    try:
+        meta = store.metadata
+    except Exception:
+        return None
+    raw = meta.get("pixel_size_um")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _add_area_um2_columns(
+    df: pd.DataFrame, pixel_size_um: float | None
+) -> pd.DataFrame:
+    """Emit `<area_col>_um2` sibling columns for every area column in ``df``.
+
+    No-ops when ``pixel_size_um`` is ``None``. Otherwise, for every column
+    whose name is exactly ``area`` OR ends with ``_area`` OR contains
+    ``_area_in_``, add a sibling ``<name>_um2`` column whose values are
+    the pixel-count area multiplied by ``pixel_size_um ** 2``.
+
+    Idempotent — running twice doesn't double-add. Pixel-side columns
+    are preserved alongside (lossless).
+    """
+    if pixel_size_um is None or pixel_size_um <= 0:
+        return df
+
+    factor = pixel_size_um * pixel_size_um
+    new_cols: dict[str, NDArray] = {}
+    for col in df.columns:
+        if col.endswith("_um2"):
+            continue
+        is_area = (
+            col == "area"
+            or col.endswith("_area")
+            or "_area_in_" in col
+            or col.endswith("_particle_area")
+        )
+        if not is_area:
+            continue
+        sibling = f"{col}_um2"
+        if sibling in df.columns:
+            continue
+        # Multiply numeric values; non-numeric columns (shouldn't happen
+        # for area) are left as-is via pandas' default float coercion.
+        try:
+            new_cols[sibling] = df[col].astype(float) * factor
+        except Exception:
+            logger.exception(
+                "failed to compute %s from %s — skipping", sibling, col
+            )
+
+    if not new_cols:
+        return df
+
+    # Insert each um2 column immediately after its pixel-side sibling
+    # so the parquet/CSV columns stay readable left-to-right.
+    result = df.copy()
+    for col_name, values in new_cols.items():
+        result[col_name] = values
+    # Reorder so each _um2 column sits next to its source.
+    ordered: list[str] = []
+    for col in df.columns:
+        ordered.append(col)
+        sibling = f"{col}_um2"
+        if sibling in new_cols:
+            ordered.append(sibling)
+    return result[ordered]
+
+
 def _append_synthetic_row(
     df: pd.DataFrame,
     edge_label_set: set[int],
@@ -849,6 +931,12 @@ def measure_one(
     if out_cols:
         df = df.drop(columns=out_cols)
 
+    # Read pixel_size_um from store metadata (persisted by
+    # import_dataset from the source TIFFs' resolution tags). Used
+    # below to emit `<area_col>_um2` sibling columns so areas are
+    # reported in both pixel count and physical units.
+    pixel_size_um = _read_pixel_size_um(store)
+
     # Per-cell identity + cohort columns. ``cell_id`` mirrors the
     # post-relabel sequential ``label`` for real cells (synthetic row
     # below carries ``cell_id=-1``). ``(dataset, cell_id)`` is the
@@ -931,6 +1019,11 @@ def measure_one(
             continue
         g_df = g_df.rename(columns={cols[1]: f"group_{round_name}"})
         df = df.merge(g_df, on="label", how="left")
+
+    # Emit _um2 sibling columns for every area-style column (cell area,
+    # particle area summaries, per-round mask intersection areas). No-op
+    # when pixel_size_um is missing from the h5 metadata.
+    df = _add_area_um2_columns(df, pixel_size_um)
 
     return df, None, f"{len(df)} cells, {len(df.columns)} columns"
 
@@ -1049,6 +1142,12 @@ def measure_particles_one(
         return pd.DataFrame(), None, "no particles detected in any round"
 
     combined = pd.concat(frames, ignore_index=True)
+
+    # Each per-particle row carries an ``area`` column. Emit an
+    # ``area_um2`` sibling when pixel_size_um is in the h5 metadata.
+    pixel_size_um = _read_pixel_size_um(store)
+    combined = _add_area_um2_columns(combined, pixel_size_um)
+
     return combined, None, f"{len(combined)} particles across {len(frames)} rounds"
 
 

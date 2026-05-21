@@ -404,6 +404,73 @@ def test_apply_threshold_headless_handles_unknown_channel(
 # ── measure_one ─────────────────────────────────────────────────────────
 
 
+def test_measure_one_adds_area_um2_sibling_when_pixel_size_metadata_present(
+    tmp_path,
+):
+    """When pixel_size_um is in /metadata, measure_one emits an
+    `area_um2` sibling column alongside every area column."""
+    store = _make_fixture_h5(tmp_path / "DSpx.h5")
+    # Patch in the pixel size that import_dataset would normally write.
+    store.set_metadata({"pixel_size_um": 0.5})
+    _write_synthetic_labels(store)
+
+    df, failure, _ = measure_one(store, round_specs=[])
+    assert failure is None
+
+    # area column has an area_um2 sibling
+    assert "area" in df.columns
+    assert "area_um2" in df.columns
+    # 0.5 µm/px ⇒ pixel_size² = 0.25 ⇒ area_um2 = area * 0.25
+    assert (df["area_um2"] == df["area"] * 0.25).all()
+
+
+def test_measure_one_no_area_um2_when_pixel_size_missing(
+    fixture_store_with_labels,
+):
+    """When pixel_size_um is absent, no _um2 sibling columns are added."""
+    df, failure, _ = measure_one(fixture_store_with_labels, round_specs=[])
+    assert failure is None
+    # Fixture h5 has no pixel_size_um in metadata
+    assert "area" in df.columns
+    assert "area_um2" not in df.columns
+    assert not any(c.endswith("_um2") for c in df.columns)
+
+
+def test_measure_particles_one_includes_area_um2_when_pixel_size_present(
+    tmp_path,
+):
+    """Per-particle detail rows get an `area_um2` sibling when pixel_size_um
+    is known."""
+    from percell4.workflows.models import ParticleSettings
+
+    store = _make_fixture_h5(tmp_path / "DSpx_part.h5")
+    store.set_metadata({"pixel_size_um": 0.25})
+    _write_synthetic_labels(store)
+
+    round_spec = ThresholdingRound(
+        name="GFP_split",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+    apply_threshold_headless(store, round_spec, grouping)
+
+    particles, failure, _ = measure_particles_one(
+        store,
+        round_specs=[round_spec],
+        particle_settings=ParticleSettings(min_area=0),
+    )
+    assert failure is None
+    if not particles.empty:
+        assert "area" in particles.columns
+        assert "area_um2" in particles.columns
+        # 0.25 µm/px ⇒ pixel² = 0.0625
+        assert (particles["area_um2"] == particles["area"] * 0.0625).all()
+
+
 def test_measure_one_with_no_masks(fixture_store_with_labels):
     """Measuring without any round masks produces the base per-channel table."""
     df, failure, msg = measure_one(fixture_store_with_labels, round_specs=[])
