@@ -174,6 +174,134 @@ def test_import_bin_only_splits_channels_by_token(tmp_path):
     assert "ch01" in decay_groups, f"ch01 missing — got {decay_groups}"
 
 
+# ── Time-lapse import (U1) ──────────────────────────────────────────────
+
+
+def _create_timelapse_dir(tmp_path, n_channels=1, n_timepoints=3):
+    """Create synthetic TIFFs with ``_t<NN>_ch<NN>`` tokens.
+
+    Pixel value encodes (timepoint, channel) as t*1000 + ch so tests can
+    assert frames landed in the right order.
+    """
+    src = tmp_path / "raw"
+    src.mkdir()
+    for t in range(n_timepoints):
+        for ch in range(n_channels):
+            name = f"movie_t{t:02d}_ch{ch:02d}.tif"
+            data = np.full((16, 16), t * 1000 + ch, dtype=np.uint16)
+            tifffile.imwrite(str(src / name), data)
+    return src
+
+
+def test_import_single_channel_timelapse_stacks_T(tmp_path):
+    """A _tN single-channel series imports as one (T, H, W) /intensity."""
+    src = _create_timelapse_dir(tmp_path, n_channels=1, n_timepoints=3)
+    h5_path = tmp_path / "movie.h5"
+
+    import_dataset(src, h5_path)
+
+    store = DatasetStore(h5_path)
+    intensity = store.read_array("intensity")
+    assert intensity.shape == (3, 16, 16)
+    assert store.metadata["n_timepoints"] == 3
+    # Frames in numeric timepoint order: t0 plane == 0, t2 plane == 2000.
+    assert intensity[0, 0, 0] == 0.0
+    assert intensity[2, 0, 0] == 2000.0
+
+
+def test_import_multichannel_timelapse_stacks_TCHW(tmp_path):
+    """Two channels x three timepoints -> (T, C, H, W)."""
+    src = _create_timelapse_dir(tmp_path, n_channels=2, n_timepoints=3)
+    h5_path = tmp_path / "movie.h5"
+
+    n_ch = import_dataset(src, h5_path)
+
+    assert n_ch == 2
+    store = DatasetStore(h5_path)
+    intensity = store.read_array("intensity")
+    assert intensity.shape == (3, 2, 16, 16)
+    # (t=1, ch=1) plane encodes 1*1000 + 1 = 1001.
+    assert intensity[1, 1, 0, 0] == 1001.0
+
+
+def test_import_timepoints_numeric_order_not_lexical(tmp_path):
+    """_t2 must precede _t10 — lexical order would place t10 first."""
+    src = tmp_path / "raw"
+    src.mkdir()
+    for t in (1, 2, 10):
+        data = np.full((8, 8), t, dtype=np.uint16)
+        tifffile.imwrite(str(src / f"movie_t{t:02d}_ch00.tif"), data)
+
+    h5_path = tmp_path / "movie.h5"
+    import_dataset(src, h5_path)
+
+    intensity = DatasetStore(h5_path).read_array("intensity")
+    assert intensity.shape == (3, 8, 8)
+    # Numeric order => planes are [t1, t2, t10] => values [1, 2, 10].
+    assert [int(intensity[i, 0, 0]) for i in range(3)] == [1, 2, 10]
+
+
+def test_import_single_timepoint_unchanged(tmp_path):
+    """No _t token => no T axis; layout byte-identical to today, n_timepoints=1."""
+    src = _create_tiff_dir(tmp_path, n_channels=1, n_z=1)
+    h5_path = tmp_path / "output.h5"
+
+    import_dataset(src, h5_path)
+
+    store = DatasetStore(h5_path)
+    intensity = store.read_array("intensity")
+    assert intensity.ndim == 2
+    assert intensity.shape == (64, 64)
+    assert store.metadata["n_timepoints"] == 1
+
+
+def test_import_timepoint_missing_channel_frame_raises(tmp_path):
+    """A channel that doesn't cover every timepoint aborts cleanly."""
+    import pytest
+    from percell4.store import SourceShapeMismatchError
+
+    src = tmp_path / "raw"
+    src.mkdir()
+    # ch00 has t0,t1,t2; ch01 only has t0,t1 -> mis-stack risk.
+    for t in range(3):
+        tifffile.imwrite(
+            str(src / f"movie_t{t:02d}_ch00.tif"),
+            np.full((8, 8), t, dtype=np.uint16),
+        )
+    for t in range(2):
+        tifffile.imwrite(
+            str(src / f"movie_t{t:02d}_ch01.tif"),
+            np.full((8, 8), t, dtype=np.uint16),
+        )
+
+    h5_path = tmp_path / "movie.h5"
+    with pytest.raises(SourceShapeMismatchError, match="timepoint"):
+        import_dataset(src, h5_path)
+    assert not h5_path.exists()
+
+
+def test_import_timelapse_with_z_projection(tmp_path):
+    """Each timepoint z-projects independently, then stacks on T."""
+    src = tmp_path / "raw"
+    src.mkdir()
+    # 2 timepoints x 3 z-slices. MIP per timepoint picks the max z value.
+    for t in range(2):
+        for z in range(3):
+            tifffile.imwrite(
+                str(src / f"movie_t{t:02d}_ch00_z{z:02d}.tif"),
+                np.full((8, 8), t * 100 + z, dtype=np.uint16),
+            )
+
+    h5_path = tmp_path / "movie.h5"
+    import_dataset(src, h5_path, z_project_method="mip")
+
+    intensity = DatasetStore(h5_path).read_array("intensity")
+    assert intensity.shape == (2, 8, 8)
+    # MIP over z: t0 -> max(0,1,2)=2; t1 -> max(100,101,102)=102.
+    assert intensity[0, 0, 0] == 2.0
+    assert intensity[1, 0, 0] == 102.0
+
+
 def test_import_progress_callback(tmp_path):
     """Progress callback is called during import."""
     src = _create_tiff_dir(tmp_path, n_channels=1)

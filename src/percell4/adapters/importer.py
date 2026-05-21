@@ -15,7 +15,12 @@ from typing import Any
 import numpy as np
 
 from percell4.adapters.readers import read_tiff
-from percell4.domain.io.assembler import assemble_channels, assemble_tiles, project_z
+from percell4.domain.io.assembler import (
+    assemble_channels,
+    assemble_tiles,
+    project_z,
+    stack_timepoints,
+)
 from percell4.domain.io.cross_format import (
     IntensityChannel,
     match_bin_to_intensity,
@@ -29,6 +34,10 @@ from percell4.domain.io.models import (
     ZeroPadOffsetRule,
 )
 from percell4.domain.io.scanner import FileScanner
+from percell4.domain.io.timepoints import (
+    count_timepoints,
+    ordered_timepoint_tokens,
+)
 from percell4.domain.io.view_bin import (
     majority_vote_mask,
     mode_labels,
@@ -186,10 +195,17 @@ def import_dataset(
     for f in intensity_files:
         if "channel" in f.tokens:
             intensity_result.channels.add(f.tokens["channel"])
+        if "timepoint" in f.tokens:
+            intensity_result.timepoints.add(f.tokens["timepoint"])
         if "tile" in f.tokens:
             intensity_result.tiles.add(f.tokens["tile"])
         if "z_slice" in f.tokens:
             intensity_result.z_slices.add(f.tokens["z_slice"])
+
+    # Time-lapse axis: the leading T axis is added only when more than one
+    # timepoint token is present across the intensity files. Single-timepoint
+    # (or no _t token) datasets keep today's exact 2D / (C, H, W) layout.
+    n_timepoints = count_timepoints(intensity_result.timepoints)
 
     channel_groups = _group_by_channel(intensity_result) if intensity_files else {}
 
@@ -210,20 +226,27 @@ def import_dataset(
         files = channel_groups[ch_key]
         default_name = f"ch{ch_key}" if ch_key else "ch0"
 
-        z_groups = _group_by_z(files)
-
-        if len(z_groups) > 1 and z_project_method is not None:
-            z_images = []
-            for z_key in sorted(z_groups.keys()):
-                z_file = z_groups[z_key]
-                img = _load_and_stitch(z_file, tile_config)
-                z_images.append(img)
-            channel_img = project_z(z_images, method=z_project_method)
+        if n_timepoints > 1:
+            # Time-lapse: assemble one plane per timepoint, then stack on a
+            # leading T axis. Numeric (not lexical) timepoint ordering comes
+            # from the canonical helper so _t2 precedes _t10.
+            tp_groups = _group_by_timepoint(files)
+            tp_tokens = ordered_timepoint_tokens(tp_groups.keys())
+            if len(tp_tokens) != n_timepoints:
+                raise SourceShapeMismatchError(
+                    f"Channel {default_name!r} covers {len(tp_tokens)} "
+                    f"timepoint(s) but the dataset has {n_timepoints}. Every "
+                    "channel must cover the same timepoints; a missing frame "
+                    "would mis-stack the time axis.\n"
+                    f"  found: {tp_tokens}"
+                )
+            planes = [
+                _assemble_plane(tp_groups[tp], tile_config, z_project_method)
+                for tp in tp_tokens
+            ]
+            channel_img = stack_timepoints(planes)
         else:
-            all_files = []
-            for z_key in sorted(z_groups.keys()):
-                all_files.extend(z_groups[z_key])
-            channel_img = _load_and_stitch(all_files, tile_config)
+            channel_img = _assemble_plane(files, tile_config, z_project_method)
 
         # Route to correct layer type based on assignment
         assignment = layer_assignments.get(ch_key) if layer_assignments else None
@@ -488,6 +511,7 @@ def import_dataset(
         "channel_names": channel_names,
         "n_channels": len(channel_images),
         "creation_bin": int(creation_bin),
+        "n_timepoints": int(n_timepoints),
     }
     if native_shape is not None:
         all_metadata["native_shape"] = native_shape
@@ -543,11 +567,19 @@ def import_dataset(
 
     store.create(metadata=all_metadata)
 
-    # Write intensity
+    # Write intensity. With a time axis (n_timepoints > 1) each channel image
+    # is already (T, H, W); single-channel writes (T, H, W) and multi-channel
+    # stacks on axis=1 to (T, C, H, W). Without a time axis the layout is the
+    # historical (H, W) / (C, H, W).
     if channel_images:
+        time_lapse = n_timepoints > 1
         if len(channel_images) == 1:
-            dims = ["H", "W"]
+            dims = ["T", "H", "W"] if time_lapse else ["H", "W"]
             store.write_array("intensity", channel_images[0], attrs={"dims": dims})
+        elif time_lapse:
+            intensity = np.stack(channel_images, axis=1)  # (T, C, H, W)
+            dims = ["T", "C", "H", "W"]
+            store.write_array("intensity", intensity, attrs={"dims": dims})
         else:
             intensity = assemble_channels(channel_images)
             dims = ["C", "H", "W"]
@@ -668,6 +700,42 @@ def _group_by_z(files: list) -> dict[str, list]:
         z = f.tokens.get("z_slice", "")
         groups[z].append(f)
     return dict(groups)
+
+
+def _group_by_timepoint(files: list) -> dict[str, list]:
+    """Group files by timepoint token (the digits captured by ``_t(\\d+)``).
+
+    Files with no timepoint token group under the empty-string key — the
+    single-timepoint degenerate case the caller handles by not stacking.
+    """
+    groups: dict[str, list] = defaultdict(list)
+    for f in files:
+        tp = f.tokens.get("timepoint", "")
+        groups[tp].append(f)
+    return dict(groups)
+
+
+def _assemble_plane(
+    files: list,
+    tile_config: TileConfig | None,
+    z_project_method: str | None,
+) -> np.ndarray:
+    """Assemble one channel's files for a single timepoint into a 2D plane.
+
+    Groups by z-slice and either z-projects (when multiple z and a method is
+    given) or stitches/loads. This is the per-(channel, timepoint) unit of
+    assembly; the caller stacks planes across timepoints when needed.
+    """
+    z_groups = _group_by_z(files)
+    if len(z_groups) > 1 and z_project_method is not None:
+        z_images = []
+        for z_key in sorted(z_groups.keys()):
+            z_images.append(_load_and_stitch(z_groups[z_key], tile_config))
+        return project_z(z_images, method=z_project_method)
+    all_files = []
+    for z_key in sorted(z_groups.keys()):
+        all_files.extend(z_groups[z_key])
+    return _load_and_stitch(all_files, tile_config)
 
 
 def _load_and_stitch(files: list, tile_config: TileConfig | None) -> np.ndarray:

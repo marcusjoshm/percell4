@@ -140,6 +140,26 @@ def assemble_channels(channel_images: list[NDArray]) -> NDArray:
     return np.stack(channel_images, axis=0).astype(np.float32)
 
 
+def stack_timepoints(planes: list[NDArray]) -> NDArray:
+    """Stack per-timepoint planes into a leading time axis.
+
+    Each plane is the fully-assembled image for one timepoint — a 2D
+    ``(H, W)`` plane (single channel) or any higher-rank array, as long as
+    all planes share a shape. The result adds a leading ``T`` axis:
+    ``(T, H, W)`` from 2D planes. Dtype is preserved.
+
+    Used by the importer after grouping a channel's files by timepoint;
+    a single plane should be returned directly by the caller (no singleton
+    time axis) to keep non-time-lapse datasets byte-identical.
+    """
+    if not planes:
+        raise ValueError("No timepoints to stack")
+    shapes = {p.shape for p in planes}
+    if len(shapes) > 1:
+        raise ValueError(f"Timepoint planes have different shapes: {shapes}")
+    return np.stack(planes, axis=0)
+
+
 def project_z(
     z_slices: list[NDArray] | None = None,
     method: str = "mip",
