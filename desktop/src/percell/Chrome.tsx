@@ -16,6 +16,7 @@ import {
 import { usePerCell, type HubCategory, type LayoutPreset } from "./store";
 import { CELLS } from "./mock";
 import { cn } from "@/lib/utils";
+import logoUrl from "@/assets/percell_logo.png";
 
 const HUB: { id: HubCategory; label: string; Icon: typeof FileInput }[] = [
   { id: "io", label: "I/O", Icon: FileInput },
@@ -33,7 +34,12 @@ export function MenuBar() {
   return (
     <div className="h-7 flex items-center px-2 gap-4 border-b border-border bg-surface text-[11px] shrink-0">
       <div className="flex items-center gap-2">
-        <div className="size-3 bg-accent rounded-sm" />
+        <img
+          src={logoUrl}
+          alt="PerCell4"
+          className="size-4 select-none"
+          draggable={false}
+        />
         <span className="font-semibold tracking-wider uppercase text-[10px]">
           PerCell<span className="text-accent">4</span>
         </span>
