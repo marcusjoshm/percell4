@@ -12,11 +12,10 @@
 
 ## Table of Contents
 
-- [Tech Stack](#tech-stack)
 - [Workflow Protocol](#workflow-protocol)
-  - [Channel, mask, and segmentation naming](#channel-mask-and-segmentation-naming)
   - [Step-by-step protocol](#step-by-step-protocol)
 - [Batch TIFF Export (CLI)](#batch-tiff-export-cli)
+- [Tech Stack](#tech-stack)
 - [Features](#features)
 - [Installation](#installation)
   - [macOS](#macos)
@@ -83,33 +82,39 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 
    Add as many rounds as you need. The workflow runs them in the order shown in the table.
 
-7. **(Optional) Enable the dilute-phase mask.**
+7. **Include particle analysis.**
+   The **Include particle analysis** box is checked by default. When it is checked, the app counts and measures particles (e.g., puncta) inside each cell for every thresholding round. Set:
+   - **Min particle area** — the smallest particle the app will keep. Anything smaller is treated as noise and dropped. Pick the unit on the right: **px** (pixels — the same threshold is used for every dataset) or **µm²** (square microns — converted per dataset using each TIFF's pixel size). Leave at `0` to keep every particle, including single-pixel ones.
+
+   Uncheck the **Include particle analysis** box if you do not want particle analysis.
+
+8. **(Optional) Enable the dilute-phase mask.**
    Check **Generate dilute-phase mask** if you want a dilute-phase mask generated in this run. Then set:
    - **Dilute mask name** — must be different from every thresholding round name (the app will not let the run start until you fix it).
    - **Dilation radius** in pixels — used every dilute round.
    - Use the same grouping and filter settings you would use for grouped thresholding.
 
-8. **Pick output columns and the output folder.**
+9. **Pick output columns and the output folder.**
    In the **Output** group of the setup window, choose which measurement columns to include in your results files. Pick the output folder — the app creates a new subfolder named with the date and time of the run.
 
-9. **Start the run.**
-   Click **Start**. The app first compresses your TIFFs into datasets, then runs Cellpose to find every cell in every dataset. You do not need to do anything during this part — watch progress in the launcher status bar.
+10. **Start the run.**
+    Click **Start**. The app first compresses your TIFFs into datasets, then runs Cellpose to find every cell in every dataset. You do not need to do anything during this part — watch progress in the launcher status bar.
 
-10. **Review the cell outlines (your input needed).**
+11. **Review the cell outlines (your input needed).**
     When Cellpose finishes, the Viewer window opens with the first dataset. Cell outlines are shown on top of your image. Refine them if needed:
     - Click the cell outlines layer in the layer list on the left, then use the paint, erase, and fill tools above the image.
 
     Click **Accept** to move on to the next dataset. Repeat for every dataset.
 
-11. **Review each thresholding mask (your input needed).**
+12. **Review each thresholding mask (your input needed).**
     For each thresholding round, a review window opens for the first dataset. The proposed mask is shown on top of the target channel. Either:
     - Click **Accept** to keep the proposed mask, or
     - Draw a circular region on the image to guide refinement, then click **Accept** — the app recalculates the mask using only that region.
 
     Repeat for every dataset, then for every round.
 
-12. **(Optional) Build the dilute-phase mask (your input needed).**
-    If you enabled the dilute-phase mask in step 7, the dilute window opens for the first dataset. For each dataset:
+13. **(Optional) Build the dilute-phase mask (your input needed).**
+    If you enabled the dilute-phase mask in step 8, the dilute window opens for the first dataset. For each dataset:
     - Click **Compute** to generate the proposed condensed mask.
     - A review window opens — look over the mask and click **Accept** to keep this round.
     - The accepted mask is automatically expanded slightly and removed from the input for the next round.
@@ -117,11 +122,11 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 
     Different datasets may need different numbers of rounds. The final mask is saved when you click **Done**.
 
-13. **Wait for the app to measure and save your results.**
+14. **Wait for the app to measure and save your results.**
     The app measures every cell across every segmentation and mask, then saves the results. You do not need to do anything during this part.
 
-14. **Find your results.**
-    Open the output folder you chose in step 8. Inside, find a new folder named with the date and time of the run. It contains:
+15. **Find your results.**
+    Open the output folder you chose in step 9. Inside, find a new folder named with the date and time of the run. It contains:
     - `combined.csv` — every cell from every dataset in one spreadsheet (open this in Excel, Numbers, or Google Sheets).
     - `per_dataset/<DS>.csv` — one spreadsheet per dataset.
     - `summary_groups.csv` — one row per dataset × round × group, with means, medians, standard deviations, and cell counts.
