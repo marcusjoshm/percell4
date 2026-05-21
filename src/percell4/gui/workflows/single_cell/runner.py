@@ -852,11 +852,6 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 edge_margin_px=self._config.edge_margin_px,
                 seg_name=self._config.cellpose_segmentation_name,
                 particle_settings=self._config.particle_settings,
-                pixel_size_um_override=(
-                    self._config.pixel_size_um
-                    if self._config.pixel_size_um > 0
-                    else None
-                ),
             )
             # Soft failures from _append_synthetic_row (e.g. AE2: zero
             # whole cells in edge-cohort mode) leave df populated so
@@ -910,11 +905,6 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                         round_specs=list(self._config.thresholding_rounds),
                         particle_settings=self._config.particle_settings,
                         seg_name=self._config.cellpose_segmentation_name,
-                        pixel_size_um_override=(
-                            self._config.pixel_size_um
-                            if self._config.pixel_size_um > 0
-                            else None
-                        ),
                     )
                     if pfail is not None:
                         record_failure(

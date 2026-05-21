@@ -424,34 +424,6 @@ def test_measure_one_adds_area_um2_sibling_when_pixel_size_metadata_present(
     assert (df["area_um2"] == df["area"] * 0.25).all()
 
 
-def test_measure_one_pixel_size_override_beats_metadata(tmp_path):
-    """When pixel_size_um_override > 0, it wins over /metadata.pixel_size_um."""
-    store = _make_fixture_h5(tmp_path / "DSpx_override.h5")
-    store.set_metadata({"pixel_size_um": 0.5})  # h5 says 0.5
-    _write_synthetic_labels(store)
-
-    df, failure, _ = measure_one(
-        store, round_specs=[], pixel_size_um_override=1.0
-    )
-    assert failure is None
-    # Override (1.0) → factor 1.0; not 0.25 (which would be h5's 0.5)
-    assert (df["area_um2"] == df["area"] * 1.0).all()
-
-
-def test_measure_one_zero_override_falls_back_to_metadata(tmp_path):
-    """pixel_size_um_override of 0 (or None) → fall back to /metadata."""
-    store = _make_fixture_h5(tmp_path / "DSpx_zero.h5")
-    store.set_metadata({"pixel_size_um": 0.5})
-    _write_synthetic_labels(store)
-
-    df, failure, _ = measure_one(
-        store, round_specs=[], pixel_size_um_override=0.0
-    )
-    assert failure is None
-    # Should use the h5 value of 0.5 ⇒ factor 0.25
-    assert (df["area_um2"] == df["area"] * 0.25).all()
-
-
 def test_measure_one_no_area_um2_when_pixel_size_missing(
     fixture_store_with_labels,
 ):

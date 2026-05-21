@@ -278,13 +278,6 @@ class WorkflowConfig:
     # particle summary columns to the measurements parquet and writes
     # a separate particles.parquet/csv with per-particle detail.
     particle_settings: ParticleSettings | None = None
-    # Pixel size in µm/px. When > 0, this value overrides any
-    # /metadata.pixel_size_um already in the h5 (auto-detected at
-    # import time from TIFF resolution tags). 0 = use whatever the
-    # h5 carries (or stay in pixel units if absent). Drives the
-    # `area_um2` sibling columns emitted by measure_one and
-    # measure_particles_one.
-    pixel_size_um: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.datasets:
@@ -300,10 +293,6 @@ class WorkflowConfig:
         if self.edge_margin_px < 0:
             raise ValueError(
                 f"edge_margin_px must be >= 0, got {self.edge_margin_px}"
-            )
-        if self.pixel_size_um < 0:
-            raise ValueError(
-                f"pixel_size_um must be >= 0, got {self.pixel_size_um}"
             )
         if not _ROUND_NAME_RE.match(self.cellpose_segmentation_name):
             raise ValueError(

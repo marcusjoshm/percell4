@@ -720,30 +720,10 @@ def test_picker_emits_area_um2_siblings(dialog, h5_ds1, tmp_path):
     assert "GFP_mean_intensity_um2" not in cols
 
 
-def test_pixel_size_override_carried_into_config(dialog, h5_ds1, tmp_path):
-    """U7: pixel_size_um from the Cellpose group ends up on WorkflowConfig."""
-    dialog._add_h5_paths([h5_ds1])
-    dialog._on_add_round()
-    dialog._output_edit.setText(str(tmp_path / "runs"))
-
-    dialog._cp_pixel_size.setValue(0.325)
-    dialog._on_start_clicked()
-
-    cfg = dialog.workflow_config
-    assert cfg is not None
-    assert cfg.pixel_size_um == pytest.approx(0.325)
-
-
-def test_pixel_size_default_is_zero_meaning_auto(dialog, h5_ds1, tmp_path):
-    """When the user leaves Pixel size at 0, cfg.pixel_size_um is 0 and
-    measure_one falls back to /metadata.pixel_size_um."""
-    dialog._add_h5_paths([h5_ds1])
-    dialog._on_add_round()
-    dialog._output_edit.setText(str(tmp_path / "runs"))
-    dialog._on_start_clicked()
-    cfg = dialog.workflow_config
-    assert cfg is not None
-    assert cfg.pixel_size_um == 0.0
+def test_no_pixel_size_override_field(dialog):
+    """Pixel size is sourced from /metadata.pixel_size_um (TIFF tags) only —
+    the dialog exposes no override field."""
+    assert not hasattr(dialog, "_cp_pixel_size")
 
 
 def test_dialog_remains_scroll_wrap_compliant(dialog):
