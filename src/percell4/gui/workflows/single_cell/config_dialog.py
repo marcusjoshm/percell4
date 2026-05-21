@@ -390,6 +390,27 @@ class WorkflowConfigDialog(QDialog):
         )
         form.addRow("Segmentation layer name:", self._cp_seg_name)
 
+        # Pixel size (µm/px) — when > 0, overrides whatever the h5 carries
+        # in /metadata.pixel_size_um (or fills in the value when the TIFF
+        # source didn't include a resolution tag). Drives the `area_um2`
+        # sibling columns measure_one and measure_particles_one emit.
+        # 0 = auto: use the h5's persisted value (or stay in pixel units).
+        self._cp_pixel_size = QDoubleSpinBox()
+        self._cp_pixel_size.setRange(0.0, 100.0)
+        self._cp_pixel_size.setDecimals(4)
+        self._cp_pixel_size.setSingleStep(0.01)
+        self._cp_pixel_size.setValue(0.0)
+        self._cp_pixel_size.setToolTip(
+            "Pixel size in µm/px. When > 0, this value drives `area_um2` "
+            "sibling columns in measurements.parquet / particles.parquet "
+            "and the corresponding CSVs.\n\n"
+            "0 = auto: use /metadata.pixel_size_um from the h5 (set at "
+            "import time from the TIFF resolution tag). When neither this "
+            "field nor the h5 metadata has a positive value, areas stay "
+            "in pixel units only and no `_um2` columns appear."
+        )
+        form.addRow("Pixel size (µm/px):", self._cp_pixel_size)
+
         # Edge-mode selector. Replaces the pre-evolution "edge cells
         # always removed" invariant with a per-run choice. Labels and
         # tooltips are researcher-facing, not implementation-facing.
@@ -1534,6 +1555,7 @@ class WorkflowConfigDialog(QDialog):
                 cellpose_segmentation_name=self._cp_seg_name.text().strip()
                 or "cellpose_qc",
                 particle_settings=particle_settings,
+                pixel_size_um=float(self._cp_pixel_size.value()),
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")
@@ -1715,6 +1737,22 @@ class WorkflowConfigDialog(QDialog):
             for ch in channels:
                 for m in sorted(self._selected_csv_particle_per_channel):
                     cols.append(f"{rn}_{ch}_{m}")
+
+        # Emit `<col>_um2` sibling for every area-style column already
+        # in the list. The actual `<col>_um2` value is only produced by
+        # measure_one when /metadata.pixel_size_um is known; if it's
+        # absent the CSV writer's `c in df.columns` guard silently
+        # filters these out, so pre-selecting them is safe.
+        siblings: list[str] = []
+        for c in cols:
+            if (
+                c == "area"
+                or c.endswith("_area")
+                or "_area_in_" in c
+                or c.endswith("_particle_area")
+            ):
+                siblings.append(f"{c}_um2")
+        cols.extend(siblings)
 
         return cols
 

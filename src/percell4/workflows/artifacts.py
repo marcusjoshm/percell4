@@ -259,6 +259,7 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
             if cfg.particle_settings is not None
             else None
         ),
+        "pixel_size_um": cfg.pixel_size_um,
     }
 
 
@@ -293,6 +294,7 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
             if particle_blob is not None
             else None
         ),
+        pixel_size_um=float(data.get("pixel_size_um", 0.0)),
     )
 
 

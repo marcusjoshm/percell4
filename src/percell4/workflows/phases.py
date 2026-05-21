@@ -820,6 +820,7 @@ def measure_one(
     edge_margin_px: int = 0,
     seg_name: str = "cellpose_qc",
     particle_settings: ParticleSettings | None = None,
+    pixel_size_um_override: float | None = None,
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Measure one dataset: all channels × all metrics × all round masks.
 
@@ -931,11 +932,17 @@ def measure_one(
     if out_cols:
         df = df.drop(columns=out_cols)
 
-    # Read pixel_size_um from store metadata (persisted by
-    # import_dataset from the source TIFFs' resolution tags). Used
-    # below to emit `<area_col>_um2` sibling columns so areas are
-    # reported in both pixel count and physical units.
-    pixel_size_um = _read_pixel_size_um(store)
+    # Pixel size precedence: explicit override (> 0) beats whatever is
+    # in /metadata.pixel_size_um (auto-detected at import time from
+    # TIFF resolution tags). Either drives the `<area_col>_um2`
+    # sibling columns emitted near the end of this function. Returns
+    # None if neither source provides a positive value — measure_one
+    # then stays in pixel units only.
+    pixel_size_um: float | None
+    if pixel_size_um_override is not None and pixel_size_um_override > 0:
+        pixel_size_um = float(pixel_size_um_override)
+    else:
+        pixel_size_um = _read_pixel_size_um(store)
 
     # Per-cell identity + cohort columns. ``cell_id`` mirrors the
     # post-relabel sequential ``label`` for real cells (synthetic row
@@ -1055,6 +1062,7 @@ def measure_particles_one(
     round_specs: list[ThresholdingRound],
     particle_settings: ParticleSettings,
     seg_name: str = "cellpose_qc",
+    pixel_size_um_override: float | None = None,
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Per-particle detail rows for one dataset across every round.
 
@@ -1144,8 +1152,12 @@ def measure_particles_one(
     combined = pd.concat(frames, ignore_index=True)
 
     # Each per-particle row carries an ``area`` column. Emit an
-    # ``area_um2`` sibling when pixel_size_um is in the h5 metadata.
-    pixel_size_um = _read_pixel_size_um(store)
+    # ``area_um2`` sibling when pixel_size_um is available. Override
+    # (> 0) beats /metadata.pixel_size_um.
+    if pixel_size_um_override is not None and pixel_size_um_override > 0:
+        pixel_size_um = float(pixel_size_um_override)
+    else:
+        pixel_size_um = _read_pixel_size_um(store)
     combined = _add_area_um2_columns(combined, pixel_size_um)
 
     return combined, None, f"{len(combined)} particles across {len(frames)} rounds"

@@ -640,6 +640,75 @@ def test_particle_metrics_not_added_when_unselected(dialog, h5_ds1, tmp_path):
     assert not any("particle" in c for c in cols)
 
 
+def test_picker_emits_area_um2_siblings(dialog, h5_ds1, tmp_path):
+    """Every area-style column the user picks gets an `<col>_um2` sibling.
+    The CSV writer's `c in df.columns` guard drops siblings whose value
+    doesn't exist; this just means CSVs include _um2 when measure_one
+    produced it."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.item(0, 0).setText("puncta")
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+
+    dialog._selected_csv_channels = {"GFP"}
+    # 'area' is in _CORE_OPTIONAL_COLUMNS so it's always emitted.
+    # Also pick the per-cell particle area metrics.
+    dialog._selected_csv_metrics = {"mean_intensity", "area"}
+    dialog._selected_csv_particle_per_cell = {
+        "total_particle_area",
+        "mean_particle_area",
+        "max_particle_area",
+    }
+
+    intersected = ["GFP", "RFP", "DAPI"]
+    rounds = dialog._rounds_from_table(intersected)
+    cols = dialog._build_selected_csv_columns(intersected, rounds)
+
+    # Core cell area + sibling
+    assert "area" in cols
+    assert "area_um2" in cols
+    # Whole-cell area metric × channel
+    assert "GFP_area" in cols
+    assert "GFP_area_um2" in cols
+    # Per-round inside area (from the `area` metric × round)
+    assert "GFP_area_in_puncta" in cols
+    assert "GFP_area_in_puncta_um2" in cols
+    # Per-cell particle area aggregates × round
+    assert "puncta_total_particle_area" in cols
+    assert "puncta_total_particle_area_um2" in cols
+    assert "puncta_mean_particle_area_um2" in cols
+    assert "puncta_max_particle_area_um2" in cols
+    # Non-area columns get NO um2 sibling
+    assert "GFP_mean_intensity" in cols
+    assert "GFP_mean_intensity_um2" not in cols
+
+
+def test_pixel_size_override_carried_into_config(dialog, h5_ds1, tmp_path):
+    """U7: pixel_size_um from the Cellpose group ends up on WorkflowConfig."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+
+    dialog._cp_pixel_size.setValue(0.325)
+    dialog._on_start_clicked()
+
+    cfg = dialog.workflow_config
+    assert cfg is not None
+    assert cfg.pixel_size_um == pytest.approx(0.325)
+
+
+def test_pixel_size_default_is_zero_meaning_auto(dialog, h5_ds1, tmp_path):
+    """When the user leaves Pixel size at 0, cfg.pixel_size_um is 0 and
+    measure_one falls back to /metadata.pixel_size_um."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    dialog._on_start_clicked()
+    cfg = dialog.workflow_config
+    assert cfg is not None
+    assert cfg.pixel_size_um == 0.0
+
+
 def test_dialog_remains_scroll_wrap_compliant(dialog):
     """U3: dialog still uses wrap_in_scroll — adding sections did not regress
     the dialog-scroll compliance pattern (per docs/solutions/ui-bugs/
