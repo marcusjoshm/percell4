@@ -50,6 +50,27 @@ export interface MeasurementsResponse {
   rows: Record<string, number | string | null>[];
 }
 
+export interface ChannelImageRequest {
+  path: string;
+  channel: string;
+  view_bin?: number;
+  contrast_low?: number;
+  contrast_high?: number;
+}
+
+export async function getChannelImage(req: ChannelImageRequest): Promise<Blob> {
+  const r = await fetch(`${BASE}/channel_image`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `channel_image failed: HTTP ${r.status}`);
+  }
+  return r.blob();
+}
+
 export async function getMeasurements(req: MeasureRequest): Promise<MeasurementsResponse> {
   const r = await fetch(`${BASE}/measurements`, {
     method: "POST",

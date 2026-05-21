@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # When running from source (`python -m backend.main`), the `percell4`
@@ -214,6 +214,94 @@ def measurements(payload: dict[str, Any]) -> dict[str, Any]:
         "columns": list(df.columns),
         "rows": df.to_dict(orient="records"),
     }
+
+
+@app.post("/channel_image")
+def channel_image(payload: dict[str, Any]) -> Response:
+    """Return a single channel as an auto-contrasted grayscale PNG.
+
+    This is the per-channel raster the React viewer renders inside the
+    Tauri WebView. napari can't run in the WebView (Qt + OpenGL); this
+    endpoint is the equivalent: read the channel from /intensity in
+    the .h5, normalize to 8-bit via percentile contrast, encode as PNG.
+
+    Multi-channel composites + label/mask overlays + zoom/pan are
+    deferred — this proves the wire shape for image data.
+
+    Request body:
+        path:           absolute .h5 path (required)
+        channel:        channel name to render (required)
+        view_bin:       optional downsample k, default 1
+        contrast_low:   percentile (0..100), default 1
+        contrast_high:  percentile (0..100), default 99
+
+    Response: image/png bytes (HTTP 200 with binary body, not JSON).
+    """
+    path = payload.get("path")
+    channel = payload.get("channel")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not channel:
+        raise HTTPException(status_code=400, detail="channel is required")
+
+    view_bin = int(payload.get("view_bin", 1))
+    contrast_low = float(payload.get("contrast_low", 1.0))
+    contrast_high = float(payload.get("contrast_high", 99.0))
+
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from percell4.store import DatasetStore
+
+    store = DatasetStore(path)
+    if not store.exists():
+        raise HTTPException(status_code=404, detail=f"file not found: {path}")
+
+    # Read just the requested channel slice. Multi-channel files store
+    # /intensity as (C, H, W); single-channel as (H, W). Channel index
+    # comes from the dataset's metadata-declared channel_names order.
+    try:
+        meta = store.metadata
+        channel_names = list(meta.get("channel_names", []))
+        if channel not in channel_names:
+            raise HTTPException(
+                status_code=400,
+                detail=f"channel '{channel}' not in dataset; "
+                f"valid: {channel_names}",
+            )
+        idx = channel_names.index(channel)
+        with store.open_read() as s:
+            intensity = s.read_array("intensity", view_bin=view_bin)
+        if intensity.ndim == 3:
+            image_2d = intensity[idx]
+        elif intensity.ndim == 2:
+            image_2d = intensity
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported /intensity shape {intensity.shape}",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail=f"failed to read channel: {e}",
+        ) from e
+
+    # Auto-contrast: clip to percentile band, rescale to [0, 255].
+    arr = image_2d.astype(np.float32, copy=False)
+    lo, hi = np.percentile(arr, [contrast_low, contrast_high])
+    if hi <= lo:
+        # Flat image — emit black so nothing accidentally looks bright.
+        scaled = np.zeros_like(arr, dtype=np.uint8)
+    else:
+        scaled = np.clip((arr - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
+
+    buf = io.BytesIO()
+    Image.fromarray(scaled, mode="L").save(buf, format="PNG", optimize=False)
+    return Response(content=buf.getvalue(), media_type="image/png")
 
 
 @app.post("/phasor/histogram")

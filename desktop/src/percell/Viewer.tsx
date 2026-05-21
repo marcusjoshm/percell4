@@ -33,6 +33,8 @@ export function ImageViewer() {
     channel,
     viewBin,
     runCellpose,
+    imageURL,
+    imageLoading,
   } = usePerCell();
   const [hover, setHover] = useState<{ x: number; y: number; intensity: number } | null>(
     null,
@@ -162,10 +164,14 @@ export function ImageViewer() {
         />
         <div
           className="flex-1 relative overflow-hidden"
-          style={{
-            background:
-              "radial-gradient(ellipse at 30% 40%, oklch(0.28 0.04 220) 0%, oklch(0.1 0.01 250) 60%)",
-          }}
+          style={
+            imageURL
+              ? { background: "oklch(0.08 0 0)" }
+              : {
+                  background:
+                    "radial-gradient(ellipse at 30% 40%, oklch(0.28 0.04 220) 0%, oklch(0.1 0.01 250) 60%)",
+                }
+          }
           onMouseMove={(e) => {
             const r = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
             const x = ((e.clientX - r.left) / r.width) * 1024;
@@ -174,31 +180,55 @@ export function ImageViewer() {
           }}
           onMouseLeave={() => setHover(null)}
         >
-          {/* Soft cell glow underlay */}
-          <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-            <defs>
-              <radialGradient id="cellGlow">
-                <stop offset="0%" stopColor="oklch(0.85 0.18 200 / 0.5)" />
-                <stop offset="100%" stopColor="oklch(0.85 0.18 200 / 0)" />
-              </radialGradient>
-            </defs>
-            {CELLS.map((c) => {
-              const dimmed = filter && !filter.has(c.id);
-              return (
-                <circle
-                  key={`g${c.id}`}
-                  cx={c.x}
-                  cy={c.y}
-                  r={c.r * 1.6}
-                  fill="url(#cellGlow)"
-                  opacity={dimmed ? 0.05 : 0.5}
-                />
-              );
-            })}
-          </svg>
+          {/* Real channel raster from /channel_image. Fills the canvas
+              area while preserving aspect ratio. Falls back to the
+              cell-glow + SVG-circles mock when no image is loaded. */}
+          {imageURL && (
+            <img
+              src={imageURL}
+              alt={`channel ${channel}`}
+              className="absolute inset-0 w-full h-full object-contain select-none pointer-events-none"
+              style={{ imageRendering: "pixelated" }}
+              draggable={false}
+            />
+          )}
+          {imageLoading && (
+            <div className="absolute inset-0 grid place-items-center text-[10px] mono text-muted-foreground bg-black/30">
+              loading channel…
+            </div>
+          )}
 
-          {/* Cells */}
-          <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+          {/* Mock SVG cells are only shown until real cell positions
+              are wired from /measurements (deferred). Hidden once a
+              real image is up so we don't draw fake overlays on real
+              data. */}
+          {!imageURL && (
+            <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+              <defs>
+                <radialGradient id="cellGlow">
+                  <stop offset="0%" stopColor="oklch(0.85 0.18 200 / 0.5)" />
+                  <stop offset="100%" stopColor="oklch(0.85 0.18 200 / 0)" />
+                </radialGradient>
+              </defs>
+              {CELLS.map((c) => {
+                const dimmed = filter && !filter.has(c.id);
+                return (
+                  <circle
+                    key={`g${c.id}`}
+                    cx={c.x}
+                    cy={c.y}
+                    r={c.r * 1.6}
+                    fill="url(#cellGlow)"
+                    opacity={dimmed ? 0.05 : 0.5}
+                  />
+                );
+              })}
+            </svg>
+          )}
+
+          {/* Cells overlay — also mock for now; hidden when a real
+              image is up to avoid drawing fake markers on real data. */}
+          {!imageURL && <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
             {CELLS.map((c) => {
               const selected = selection.has(c.id);
               const isStaged = staged.has(c.id);
@@ -224,7 +254,7 @@ export function ImageViewer() {
                 />
               );
             })}
-          </svg>
+          </svg>}
 
           {/* HUD */}
           <div className="absolute bottom-2 left-2 px-2 py-1.5 bg-black/60 backdrop-blur-md border border-white/10 rounded mono text-[10px] flex gap-3">

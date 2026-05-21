@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { CELLS, CHANNELS, MASKS, SEGMENTATIONS, type CellId } from "./mock";
-import { getMeasurements, loadImage, startCellpose } from "@/lib/api";
+import { getChannelImage, getMeasurements, loadImage, startCellpose } from "@/lib/api";
 
 export type HubCategory =
   | "io"
@@ -56,6 +56,17 @@ interface State {
   measurementRows: Record<string, number | string | null>[];
   measurementColumns: string[];
 
+  // Blob URL of the current active channel rendered as a PNG by the
+  // backend's /channel_image endpoint. Lifecycle:
+  //   - null when no dataset is loaded
+  //   - URL.createObjectURL(blob) after a successful fetch
+  //   - previous URL is URL.revokeObjectURL()'d before replacement so
+  //     blobs don't pile up across channel switches.
+  imageURL: string | null;
+  // True while a /channel_image fetch is in flight so the viewer can
+  // show a "Loading…" spinner instead of the stale image.
+  imageLoading: boolean;
+
   selection: Set<CellId>;
   filter: Set<CellId> | null;
 
@@ -101,6 +112,7 @@ interface State {
   runCellpose: (params: CellposeParams) => Promise<void>;
   loadDataset: (path: string) => Promise<void>;
   measureCells: (metrics?: string[]) => Promise<void>;
+  loadChannelImage: () => Promise<void>;
 
   // Backend event handlers — called by the WS bridge in main.tsx.
   // Underscore prefix marks "framework plumbing, not for UI".
@@ -141,6 +153,9 @@ export const usePerCell = create<State>((set, get) => ({
   measurementRows: [],
   measurementColumns: [],
 
+  imageURL: null,
+  imageLoading: false,
+
   selection: new Set(),
   filter: null,
 
@@ -157,10 +172,18 @@ export const usePerCell = create<State>((set, get) => ({
 
   setHub: (h) => set({ hub: h }),
   setCompanion: (c) => set({ activeCompanion: c }),
-  setChannel: (c) => set({ channel: c, status: `Channel → ${c}` }),
+  setChannel: (c) => {
+    set({ channel: c, status: `Channel → ${c}` });
+    // Channel switch invalidates the displayed raster. Fire-and-forget;
+    // loadChannelImage handles its own errors via status.
+    void get().loadChannelImage();
+  },
   setMask: (m) => set({ mask: m, status: `Mask → ${m}` }),
   setSegmentation: (s) => set({ segmentation: s, status: `Segmentation → ${s}` }),
-  setViewBin: (n) => set({ viewBin: n, status: `View bin → ${n}` }),
+  setViewBin: (n) => {
+    set({ viewBin: n, status: `View bin → ${n}` });
+    void get().loadChannelImage();
+  },
   setAlwaysOnTop: (v) => set({ alwaysOnTop: v }),
   setLayoutPreset: (p) => set({ layoutPreset: p, status: `Layout → ${p}` }),
 
@@ -261,7 +284,7 @@ export const usePerCell = create<State>((set, get) => ({
       segmentation: meta.segmentation_names[0] ?? "",
       selection: new Set(),
       filter: null,
-      // Dataset switch invalidates any prior measurements.
+      // Dataset switch invalidates any prior measurements + image.
       measurementRows: [],
       measurementColumns: [],
       status:
@@ -269,6 +292,12 @@ export const usePerCell = create<State>((set, get) => ({
         `${meta.segmentation_names.length} segmentation(s), ` +
         `${meta.mask_names.length} mask(s)`,
     });
+    // Drop the stale blob URL from the previous dataset. Refetch the
+    // first channel of the new one.
+    const prevURL = get().imageURL;
+    if (prevURL) URL.revokeObjectURL(prevURL);
+    set({ imageURL: null });
+    void get().loadChannelImage();
   },
 
   // POST /measurements against the currently loaded dataset using the
@@ -372,6 +401,43 @@ export const usePerCell = create<State>((set, get) => ({
           if (newSeg) set({ segmentation: newSeg });
         });
     }
+  },
+
+  // Fetch the current active channel as a PNG and update imageURL.
+  // Idempotent against rapid channel switches: the in-flight blob URL
+  // is created last so a fast follow-up replaces it cleanly.
+  loadChannelImage: async () => {
+    const s = get();
+    if (!s.datasetPath || !s.channel) {
+      // Nothing to render; clear any stale image.
+      if (s.imageURL) URL.revokeObjectURL(s.imageURL);
+      set({ imageURL: null, imageLoading: false });
+      return;
+    }
+    set({ imageLoading: true });
+    let blob: Blob;
+    try {
+      blob = await getChannelImage({
+        path: s.datasetPath,
+        channel: s.channel,
+        view_bin: s.viewBin,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      set({ imageLoading: false, status: `Image fetch failed: ${msg}` });
+      return;
+    }
+    // Only overwrite if the user hasn't moved on to a different channel
+    // mid-flight (last-write-wins is fine when channel still matches).
+    const cur = get();
+    if (cur.channel !== s.channel || cur.datasetPath !== s.datasetPath) {
+      // Stale response; discard.
+      set({ imageLoading: false });
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    if (cur.imageURL) URL.revokeObjectURL(cur.imageURL);
+    set({ imageURL: url, imageLoading: false });
   },
 
   refreshDatasetMetadata: async () => {
