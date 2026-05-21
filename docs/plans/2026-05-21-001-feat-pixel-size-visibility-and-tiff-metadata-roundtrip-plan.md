@@ -1,7 +1,7 @@
 ---
 title: Pixel-size visibility and TIFF metadata round-trip
 type: feat
-status: active
+status: completed
 date: 2026-05-21
 ---
 
