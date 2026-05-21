@@ -26,6 +26,30 @@ from percell4.gui import theme
 from percell4.model import CellDataModel
 
 
+def _format_pixel_size_lines(
+    pixel_size_um: float | None, active_bin: int,
+) -> str:
+    """Format the Dataset Info pixel-size line(s).
+
+    Returns one line for the stored (creation-bin-scaled) pixel size,
+    plus a second line for the view-bin effective size when
+    ``active_bin > 1``. ``None`` pixel size renders as ``unknown`` so
+    legacy datasets without TIFF resolution metadata are explicit.
+    """
+    if pixel_size_um is None or pixel_size_um <= 0:
+        return "Pixel size: unknown"
+    area_um2 = pixel_size_um * pixel_size_um
+    base = f"Pixel size: {pixel_size_um:.4f} µm/px ({area_um2:.5f} µm²/px)"
+    if active_bin and active_bin > 1:
+        eff = pixel_size_um * active_bin
+        eff_area = eff * eff
+        return (
+            f"{base}\n"
+            f"View-bin pixel size: {eff:.4f} µm/px ({eff_area:.5f} µm²/px)"
+        )
+    return base
+
+
 def _read_layer_bin_attrs(store, group: str) -> dict[str, int | None]:
     """Read each ``/{group}/<name>``'s ``created_at_bin`` attr, if present.
 
@@ -300,6 +324,7 @@ class DataPanel(QWidget):
             native_shape = meta.get("native_shape")
             creation_bin = meta.get("creation_bin", 1)
             active_bin = session.active_bin
+            pixel_size_um = meta.get("pixel_size_um")
             native_line = (
                 f"Native: {tuple(native_shape)}"
                 if native_shape is not None
@@ -308,11 +333,15 @@ class DataPanel(QWidget):
             bin_line = (
                 f"Creation bin: {creation_bin}  |  View bin: {active_bin}"
             )
+            pixel_size_lines = _format_pixel_size_lines(
+                pixel_size_um, active_bin,
+            )
             self._info_label.setText(
                 f"File: {Path(h5_path).name}\n"
                 f"Shape: {shape}\n"
                 f"{native_line}\n"
                 f"{bin_line}\n"
+                f"{pixel_size_lines}\n"
                 f"Labels: {n_labels}  |  Masks: {n_masks}"
             )
         except Exception:
