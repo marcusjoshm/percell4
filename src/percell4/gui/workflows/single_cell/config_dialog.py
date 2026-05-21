@@ -926,8 +926,9 @@ class WorkflowConfigDialog(QDialog):
             dialog.deleteLater()
 
         selected_token_ids = sorted(cfg.selected_channels)
+        layer_assignments = cfg.layer_assignments or {}
         channel_names = _derive_tiff_pending_channel_names(
-            selected_token_ids, cfg.layer_assignments or {},
+            selected_token_ids, layer_assignments,
         )
         if not channel_names:
             self._dataset_status.setText(
