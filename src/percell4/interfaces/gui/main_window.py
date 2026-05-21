@@ -1487,6 +1487,11 @@ class LauncherWindow(QMainWindow):
                 return
 
             uc = ExportImages(self._repo)
+            # Fresh metadata read so post-import / post-TCSPC pixel-size
+            # updates surface without reopening the handle.
+            pixel_size_um = self._repo.read_metadata(handle).get(
+                "pixel_size_um"
+            )
             result = uc.execute(
                 handle,
                 ExportRequest(
@@ -1496,6 +1501,7 @@ class LauncherWindow(QMainWindow):
                     labels=labels,
                     masks=masks,
                     view_bin=view_bin,
+                    pixel_size_um=pixel_size_um,
                 ),
             )
             bin_suffix = f" at k={view_bin}" if view_bin > 1 else ""

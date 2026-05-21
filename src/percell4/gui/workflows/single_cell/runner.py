@@ -852,6 +852,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 edge_margin_px=self._config.edge_margin_px,
                 seg_name=self._config.cellpose_segmentation_name,
                 particle_settings=self._config.particle_settings,
+                run_log=self._run_log,
+                dataset_name=entry.name,
             )
             # Soft failures from _append_synthetic_row (e.g. AE2: zero
             # whole cells in edge-cohort mode) leave df populated so
@@ -905,6 +907,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                         round_specs=list(self._config.thresholding_rounds),
                         particle_settings=self._config.particle_settings,
                         seg_name=self._config.cellpose_segmentation_name,
+                        run_log=self._run_log,
+                        dataset_name=entry.name,
                     )
                     if pfail is not None:
                         record_failure(

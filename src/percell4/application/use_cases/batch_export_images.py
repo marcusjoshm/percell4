@@ -223,6 +223,10 @@ def _process_one_dataset(
         channels = _enumerate_channels(intensity_shape, channel_names)
         labels = store.list_labels()
         masks = store.list_masks()
+        # Fresh metadata read so TCSPC-import or compress-side updates
+        # to pixel_size_um are picked up without re-opening the handle.
+        fresh_meta = repo.read_metadata(handle)
+        pixel_size_um = fresh_meta.get("pixel_size_um")
     except Exception as exc:  # noqa: BLE001
         return BatchExportItemResult(
             h5_path=h5_path,
@@ -244,6 +248,7 @@ def _process_one_dataset(
         labels=labels,
         masks=masks,
         view_bin=view_bin,
+        pixel_size_um=pixel_size_um,
     )
 
     try:

@@ -34,11 +34,14 @@ import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from percell4.workflows.run_log import RunLog
 
 from percell4.domain.measure.grouper import GroupingResult, group_cells_gmm, group_cells_kmeans
 from percell4.domain.measure.measurer import measure_cells, measure_multichannel_with_masks
@@ -656,6 +659,37 @@ def _read_pixel_size_um(store: DatasetStore) -> float | None:
     return value if value > 0 else None
 
 
+def _resolve_min_area_px(
+    particle_settings: ParticleSettings,
+    pixel_size_um: float | None,
+    *,
+    dataset_name: str = "",
+) -> int:
+    """Convert a ParticleSettings.min_area into an integer pixel threshold.
+
+    px mode is a straight ``int(round(value))``. µm² mode divides by the
+    dataset's pixel area; a µm² threshold against a dataset without a
+    known pixel size raises ``ValueError`` so the workflow phase can
+    record the failure rather than silently default to ``pixel_size_um=1``
+    (which would produce a threshold orders of magnitude off).
+    """
+    unit = particle_settings.min_area_unit
+    value = float(particle_settings.min_area)
+    if unit == "px":
+        return int(round(value))
+    if unit == "um2":
+        if pixel_size_um is None or pixel_size_um <= 0:
+            label = f" for dataset {dataset_name!r}" if dataset_name else ""
+            raise ValueError(
+                f"µm² particle threshold requires a known pixel size{label}; "
+                "re-import the dataset with TIFF resolution metadata or "
+                "switch the workflow Min particle area unit to px."
+            )
+        return int(round(value / (pixel_size_um * pixel_size_um)))
+    # __post_init__ guards against unknown units, but stay defensive.
+    raise ValueError(f"unknown min_area_unit: {unit!r}")
+
+
 def _add_area_um2_columns(
     df: pd.DataFrame, pixel_size_um: float | None
 ) -> pd.DataFrame:
@@ -820,6 +854,8 @@ def measure_one(
     edge_margin_px: int = 0,
     seg_name: str = "cellpose_qc",
     particle_settings: ParticleSettings | None = None,
+    run_log: "RunLog | None" = None,
+    dataset_name: str = "",
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Measure one dataset: all channels × all metrics × all round masks.
 
@@ -962,13 +998,60 @@ def measure_one(
     if particle_settings is not None:
         from percell4.domain.measure.particle import analyze_particles
 
+        # Resolve the configured min_area into a per-dataset pixel
+        # threshold. µm² mode requires this dataset's pixel size — fail
+        # the dataset's particle phase explicitly when missing rather
+        # than silently default. Return an empty df (not the partially
+        # built one) so the runner doesn't stage a schema-divergent
+        # parquet — the rest of measure_one's per-cell columns
+        # (group_<round>, area_um2 siblings) have not been merged yet
+        # at this point in the function.
+        try:
+            resolved_min_area_px = _resolve_min_area_px(
+                particle_settings, pixel_size_um, dataset_name=dataset_name,
+            )
+        except ValueError as e:
+            logger.error("particle threshold resolve failed: %s", e)
+            if run_log is not None:
+                run_log.log(
+                    phase="measure",
+                    dataset=dataset_name,
+                    event="min_area_resolve_failed",
+                    min_area_value=float(particle_settings.min_area),
+                    min_area_unit=particle_settings.min_area_unit,
+                    pixel_size_um=pixel_size_um,
+                    error=str(e),
+                )
+            return (
+                pd.DataFrame(),
+                DatasetFailure.MEASUREMENT_ERROR,
+                f"particle threshold resolve failed: {e}",
+            )
+        logger.info(
+            "particle min_area resolved: %.4f %s -> %d px (pixel_size_um=%s)",
+            particle_settings.min_area,
+            particle_settings.min_area_unit,
+            resolved_min_area_px,
+            pixel_size_um,
+        )
+        if run_log is not None:
+            run_log.log(
+                phase="measure",
+                dataset=dataset_name,
+                event="min_area_resolved",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                resolved_min_area_px=resolved_min_area_px,
+            )
+
         for round_name, round_mask in round_masks.items():
             try:
                 particle_summary = analyze_particles(
                     images=images,
                     labels=labels,
                     mask=round_mask,
-                    min_area=particle_settings.min_area,
+                    min_area=resolved_min_area_px,
                 )
             except Exception as e:
                 logger.exception(
@@ -1056,6 +1139,8 @@ def measure_particles_one(
     round_specs: list[ThresholdingRound],
     particle_settings: ParticleSettings,
     seg_name: str = "cellpose_qc",
+    run_log: "RunLog | None" = None,
+    dataset_name: str = "",
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Per-particle detail rows for one dataset across every round.
 
@@ -1116,6 +1201,49 @@ def measure_particles_one(
     if int(labels.max()) == 0:
         return pd.DataFrame(), None, "empty labels — no particles to detail"
 
+    # Resolve min_area once per dataset using its own pixel_size_um.
+    # µm² mode against a dataset without a known pixel size fails
+    # explicitly rather than silently default.
+    pixel_size_um = _read_pixel_size_um(store)
+    try:
+        resolved_min_area_px = _resolve_min_area_px(
+            particle_settings, pixel_size_um, dataset_name=dataset_name,
+        )
+    except ValueError as e:
+        logger.error("particle threshold resolve failed: %s", e)
+        if run_log is not None:
+            run_log.log(
+                phase="particles",
+                dataset=dataset_name,
+                event="min_area_resolve_failed",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                error=str(e),
+            )
+        return (
+            pd.DataFrame(),
+            DatasetFailure.MEASUREMENT_ERROR,
+            f"particle threshold resolve failed: {e}",
+        )
+    logger.info(
+        "particle min_area resolved: %.4f %s -> %d px (pixel_size_um=%s)",
+        particle_settings.min_area,
+        particle_settings.min_area_unit,
+        resolved_min_area_px,
+        pixel_size_um,
+    )
+    if run_log is not None:
+        run_log.log(
+            phase="particles",
+            dataset=dataset_name,
+            event="min_area_resolved",
+            min_area_value=float(particle_settings.min_area),
+            min_area_unit=particle_settings.min_area_unit,
+            pixel_size_um=pixel_size_um,
+            resolved_min_area_px=resolved_min_area_px,
+        )
+
     from percell4.domain.measure.particle import analyze_particles_detail
 
     frames: list[pd.DataFrame] = []
@@ -1125,7 +1253,7 @@ def measure_particles_one(
                 images=images,
                 labels=labels,
                 mask=round_mask,
-                min_area=particle_settings.min_area,
+                min_area=resolved_min_area_px,
             )
         except Exception:
             logger.exception(
@@ -1146,7 +1274,6 @@ def measure_particles_one(
 
     # Each per-particle row carries an ``area`` column. Emit an
     # ``area_um2`` sibling when /metadata.pixel_size_um is available.
-    pixel_size_um = _read_pixel_size_um(store)
     combined = _add_area_um2_columns(combined, pixel_size_um)
 
     return combined, None, f"{len(combined)} particles across {len(frames)} rounds"

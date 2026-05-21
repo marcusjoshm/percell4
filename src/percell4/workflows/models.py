@@ -146,16 +146,28 @@ class ParticleSettings:
     written to a separate ``particles.parquet`` / ``particles.csv``
     in the run folder.
 
-    ``min_area`` filters out connected components below that pixel area
-    before counting / measuring. 0 = keep every component.
+    ``min_area`` filters out connected components below that area before
+    counting / measuring. 0 keeps every component. The unit is
+    interpreted per ``min_area_unit``:
+
+    - ``"px"`` — area in pixels. Applied uniformly across datasets.
+    - ``"um2"`` — area in µm². Converted to a per-dataset pixel
+      threshold inside the workflow phase using that dataset's
+      ``pixel_size_um``; datasets missing ``pixel_size_um`` fail their
+      particle phase explicitly rather than silently using ``1`` µm/px.
     """
 
-    min_area: int = 0
+    min_area: float = 0.0
+    min_area_unit: str = "px"
 
     def __post_init__(self) -> None:
         if self.min_area < 0:
             raise ValueError(
                 f"min_area must be >= 0, got {self.min_area}"
+            )
+        if self.min_area_unit not in ("px", "um2"):
+            raise ValueError(
+                f"min_area_unit must be 'px' or 'um2', got {self.min_area_unit!r}"
             )
 
 
