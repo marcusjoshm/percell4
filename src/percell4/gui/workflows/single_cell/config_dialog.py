@@ -62,7 +62,10 @@ from percell4.workflows.channels import ChannelSource, intersect_channels
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    DiluteSettings,
+    EdgeMode,
     GmmCriterion,
+    ParticleSettings,
     ThresholdAlgorithm,
     ThresholdingRound,
     WorkflowConfig,
@@ -92,6 +95,37 @@ _CORE_OPTIONAL_COLUMNS = (
     "bbox_h",
     "bbox_w",
     "area",
+)
+
+# Particle-analysis per-cell summary metrics (U7). Single value per cell;
+# the CSV column shape is "<round_name>_<metric>" — one column per
+# (round × metric) when particle analysis is enabled.
+_PARTICLE_PER_CELL_METRICS = (
+    "particle_count",
+    "total_particle_area",
+    "mean_particle_area",
+    "max_particle_area",
+    "particle_coverage_fraction",
+)
+
+# Particle-analysis per-channel summary metrics (U7). One value per
+# (cell, channel). The CSV column shape is "<round_name>_<channel>_<metric>"
+# — one column per (round × channel × metric).
+#
+# The set mirrors BUILTIN_METRICS' intensity metrics (area is excluded
+# since the particle's area is a per-cell quantity rolled up via
+# particle_count / total_particle_area / mean_particle_area).
+# Aggregation per cell uses each metric's natural reducer (see
+# _PARTICLE_AGGREGATORS in particle.py).
+_PARTICLE_PER_CHANNEL_METRICS = (
+    "particle_mean_intensity",
+    "particle_max_intensity",
+    "particle_min_intensity",
+    "particle_integrated_intensity",
+    "particle_std_intensity",
+    "particle_median_intensity",
+    "particle_mode_intensity",
+    "particle_sg_ratio",
 )
 
 # Matches the `_ROUND_NAME_RE` in `workflows/models.py`. Duplicated here so
@@ -195,8 +229,25 @@ class WorkflowConfigDialog(QDialog):
 
         # State
         self._pending_datasets: list[_PendingDataset] = []
+        # Default CSV column selection (user can change via Configure
+        # CSV Export). Channels auto-select to all intersected until the
+        # user makes an explicit choice (tracked by _csv_channels_auto).
         self._selected_csv_channels: set[str] = set()
-        self._selected_csv_metrics: set[str] = set()
+        self._csv_channels_auto = True
+        self._selected_csv_metrics: set[str] = {
+            "area",
+            "integrated_intensity",
+            "mean_intensity",
+        }
+        # U7 particle metrics — independent picker state (only applied
+        # to CSV columns when particle analysis is enabled at run time).
+        self._selected_csv_particle_per_cell: set[str] = {
+            "particle_count",
+            "total_particle_area",
+        }
+        self._selected_csv_particle_per_channel: set[str] = {
+            "particle_mean_intensity",
+        }
         self._workflow_config: WorkflowConfig | None = None
 
         self._build_ui()
@@ -219,6 +270,8 @@ class WorkflowConfigDialog(QDialog):
         layout.addWidget(self._build_datasets_group(), stretch=3)
         layout.addWidget(self._build_cellpose_group())
         layout.addWidget(self._build_rounds_group(), stretch=2)
+        layout.addWidget(self._build_particles_group())
+        layout.addWidget(self._build_dilute_group())
         layout.addWidget(self._build_columns_group())
         layout.addWidget(self._build_output_group())
         layout.addStretch()
@@ -269,13 +322,15 @@ class WorkflowConfigDialog(QDialog):
         btn_add_h5_folder.clicked.connect(self._on_add_h5_folder)
         btn_row.addWidget(btn_add_h5_folder)
 
-        btn_add_tiff = QPushButton("Add .tiff source...")
-        btn_add_tiff.clicked.connect(self._on_add_tiff_source)
+        btn_add_tiff = QPushButton("Add .tiff files...")
+        btn_add_tiff.setToolTip(
+            "Open the compress dataset dialog to discover .tiff files "
+            "(single dataset or a folder of datasets) and configure "
+            "compression. Channels you rename or deselect there are "
+            "carried into this run's config."
+        )
+        btn_add_tiff.clicked.connect(self._on_add_tiff_files)
         btn_row.addWidget(btn_add_tiff)
-
-        btn_add_tiff_folder = QPushButton("Add .tiff folder...")
-        btn_add_tiff_folder.clicked.connect(self._on_add_tiff_folder)
-        btn_row.addWidget(btn_add_tiff_folder)
 
         btn_remove = QPushButton("Remove")
         btn_remove.clicked.connect(self._on_remove_dataset)
@@ -308,9 +363,9 @@ class WorkflowConfigDialog(QDialog):
         form.addRow("Model:", self._cp_model)
 
         self._cp_diameter = QDoubleSpinBox()
-        self._cp_diameter.setRange(0.0, 500.0)
+        self._cp_diameter.setRange(0.0, 1000.0)
         self._cp_diameter.setSingleStep(1.0)
-        self._cp_diameter.setValue(30.0)
+        self._cp_diameter.setValue(300.0)
         self._cp_diameter.setToolTip("0 = auto-detect")
         form.addRow("Diameter (px):", self._cp_diameter)
 
@@ -335,11 +390,77 @@ class WorkflowConfigDialog(QDialog):
         self._cp_min_size.setValue(15)
         form.addRow("Min cell size (px):", self._cp_min_size)
 
-        note = QLabel(
-            "Edge-touching cells are always removed (workflow invariant)."
+        # Segmentation-layer name (was hardcoded as "cellpose_qc" before
+        # this evolution; now configurable so a researcher can keep
+        # multiple Cellpose parameterizations on the same .h5).
+        self._cp_seg_name = QLineEdit("cp_mask")
+        self._cp_seg_name.setToolTip(
+            "HDF5 path component for the Cellpose-produced segmentation "
+            "(/labels/<name>). Downstream phases (seg-QC, thresholding, "
+            "dilute, measure) all read and write under this name. Pick a "
+            "different name to keep multiple Cellpose parameterizations "
+            "on the same .h5 without overwriting each other."
         )
-        note.setStyleSheet("color: #888; font-style: italic;")
-        form.addRow("", note)
+        form.addRow("Segmentation layer name:", self._cp_seg_name)
+
+        # Edge-mode selector. Replaces the pre-evolution "edge cells
+        # always removed" invariant with a per-run choice. Labels and
+        # tooltips are researcher-facing, not implementation-facing.
+        self._edge_mode = QComboBox()
+        self._edge_mode.addItem(
+            "Exclude (default)", EdgeMode.EXCLUDE
+        )
+        self._edge_mode.addItem(
+            "Include — count as whole cells",
+            EdgeMode.INCLUDE_AS_NORMAL,
+        )
+        self._edge_mode.addItem(
+            "Include — synthesize edge-cohort row",
+            EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+        )
+        # Default to the size-normalized cohort mode (the workflow's
+        # primary use case is phase-separation analysis where the edge
+        # cohort matters). The user can switch to Exclude / Include-as-normal.
+        self._edge_mode.setCurrentIndex(
+            self._edge_mode.findData(EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT)
+        )
+        self._edge_mode.setToolTip(
+            "How the workflow handles cells touching the image border.\n\n"
+            "Exclude — Remove edge cells in Phase 1. They are not measured. "
+            "Recommended default: edge cells are partial and would bias "
+            "sum/area metrics.\n\n"
+            "Include — count as whole cells — Keep edge cells in labels. "
+            "They participate in clustering, thresholding, and per-cell "
+            "measurement as if they were whole cells. They appear in the "
+            "parquet flagged with is_edge=True; their metric values are "
+            "biased low for sum/area-style metrics.\n\n"
+            "Include — synthesize edge-cohort row — Keep edge cells like "
+            "above AND emit one extra synthetic row per dataset "
+            "(cell_id=-1, is_edge_synthetic=True) whose metric values are "
+            "sum(M across edge cells) / N_theoretical, where "
+            "N_theoretical = sum(edge_area) / mean(whole_area). The "
+            "synthetic row represents the edge ring as a count-normalized "
+            "whole-cell equivalent."
+        )
+        form.addRow("Edge cells:", self._edge_mode)
+
+        # Edge margin (px) — applies to both Phase 1's edge filter
+        # (when edge_mode == EXCLUDE) and Phase 7's edge-cohort identification
+        # (when edge_mode == INCLUDE_AS_SIZE_NORMALIZED_COHORT). 0 = strict
+        # border-touching only.
+        self._edge_margin = QSpinBox()
+        self._edge_margin.setRange(0, 500)
+        self._edge_margin.setValue(100)
+        self._edge_margin.setToolTip(
+            "Pixel margin from the image border that counts as 'edge'.\n\n"
+            "0 (default): strict border-touching cells only.\n"
+            "N > 0: cells within N pixels of any border are treated as edge.\n\n"
+            "Used by Phase 1 filtering in 'Exclude' mode, and by the "
+            "edge-cohort identification at measurement time in "
+            "'synthesize edge-cohort row' mode. Has no effect in "
+            "'count as whole cells' mode (every cell is treated equally)."
+        )
+        form.addRow("Edge margin (px):", self._edge_margin)
 
         return box
 
@@ -349,14 +470,28 @@ class WorkflowConfigDialog(QDialog):
 
         self._rounds_table = QTableWidget(0, _ROUND_COL_COUNT)
         self._rounds_table.setHorizontalHeaderLabels(_ROUND_COL_HEADERS)
-        self._rounds_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeToContents
-        )
-        self._rounds_table.horizontalHeader().setStretchLastSection(False)
+        # Interactive column resizing — the user can drag column borders.
+        # Seed sensible initial widths so the embedded combos/spinboxes
+        # aren't cramped on first open; the last column stretches to fill.
+        header = self._rounds_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(True)
+        _initial_round_col_widths = {
+            _ROUND_COL_NAME: 110,
+            _ROUND_COL_CHANNEL: 150,
+            _ROUND_COL_METRIC: 190,
+            _ROUND_COL_ALGO: 110,
+            _ROUND_COL_GMM_MAX: 100,
+            _ROUND_COL_KMEANS_K: 100,
+            _ROUND_COL_SIGMA: 90,
+        }
+        for col, width in _initial_round_col_widths.items():
+            self._rounds_table.setColumnWidth(col, width)
         self._rounds_table.verticalHeader().setVisible(False)
         self._rounds_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._rounds_table.setSelectionMode(QTableWidget.SingleSelection)
-        self._rounds_table.setMinimumHeight(100)
+        # Taller default so several rounds are visible without scrolling.
+        self._rounds_table.setMinimumHeight(200)
         self._rounds_table.itemChanged.connect(self._on_round_item_changed)
         outer.addWidget(self._rounds_table, stretch=1)
 
@@ -383,6 +518,143 @@ class WorkflowConfigDialog(QDialog):
 
         btn_row.addStretch()
         outer.addLayout(btn_row)
+
+        return box
+
+    def _build_particles_group(self) -> QGroupBox:
+        """Optional particle analysis (U7).
+
+        When the group is checked, the measure phase additionally:
+        - Merges per-cell particle summary columns (counts, total/mean/max
+          area, coverage_fraction, per-channel intensity aggregates) into
+          measurements.parquet, prefixed by the round name.
+        - Writes a per-particle detail file (particles.parquet +
+          particles.csv) to the run folder, with one row per detected
+          particle (cell_id, round_name, particle_id, area, centroid,
+          per-channel intensities).
+        """
+        box = QGroupBox("Include particle analysis")
+        box.setCheckable(True)
+        box.setChecked(True)
+        box.setToolTip(
+            "Optional: count and measure connected-component particles "
+            "within each cell, using each grouped-threshold round's mask "
+            "as the particle-vs-background classifier. Adds per-cell "
+            "summary columns to measurements.parquet (prefixed with the "
+            "round name) and writes per-particle detail rows to "
+            "particles.parquet/csv in the run folder."
+        )
+        form = QFormLayout(box)
+
+        self._particle_min_area = QSpinBox()
+        self._particle_min_area.setRange(0, 1_000_000)
+        self._particle_min_area.setValue(0)
+        self._particle_min_area.setToolTip(
+            "Minimum particle area in pixels. Connected components "
+            "smaller than this are dropped. 0 = keep every component "
+            "(including single-pixel hits)."
+        )
+        form.addRow("Min particle area (px):", self._particle_min_area)
+
+        note = QLabel(
+            "Particle analysis runs against every thresholding round's "
+            "mask. To analyze only a subset of rounds, configure fewer "
+            "rounds — there is no per-round toggle in this version."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888; font-style: italic;")
+        form.addRow("", note)
+
+        return box
+
+    def _build_dilute_group(self) -> QGroupBox:
+        """Optional Phase 5 (dilute-phase mask) configuration.
+
+        Wraps `mask_name`, `dilation_radius_px`, `channel`, and a
+        ThresholdingRound-shaped settings block in a checkable group box.
+        Settings here are locked at workflow Start — the runner picks
+        them up once and never re-reads. Per origin R11.
+        """
+        box = QGroupBox("Generate dilute-phase mask")
+        box.setCheckable(True)
+        box.setChecked(True)
+        box.setToolTip(
+            "Optional: insert a per-dataset interactive dilute-phase mask "
+            "generation phase between thresholding rounds and measurement. "
+            "Reuses the existing single-dataset dilute UI as the inner loop; "
+            "each dataset runs as many rounds as the researcher decides."
+        )
+        form = QFormLayout(box)
+
+        # Default mask name so the checked-by-default group doesn't block
+        # Start with an empty-required-field warning. The user can rename
+        # or uncheck the group.
+        self._dilute_mask_name = QLineEdit("dilute")
+        self._dilute_mask_name.setPlaceholderText("e.g. dilute")
+        self._dilute_mask_name.setToolTip(
+            "Name of the final dilute mask. Written to /masks/<name> in "
+            "each dataset's h5. Must be unique against every thresholding "
+            "round name in this run."
+        )
+        form.addRow("Mask name:", self._dilute_mask_name)
+
+        self._dilute_channel = QComboBox()
+        self._dilute_channel.setToolTip(
+            "Which channel from /intensity to feed to the per-round metric "
+            "computation. Populated from the channel intersection across "
+            "selected datasets."
+        )
+        form.addRow("Channel:", self._dilute_channel)
+
+        self._dilute_dilation_px = QSpinBox()
+        self._dilute_dilation_px.setRange(1, 200)
+        self._dilute_dilation_px.setValue(5)
+        self._dilute_dilation_px.setToolTip(
+            "Pixel radius used to dilate each round's accepted condensed "
+            "mask before subtracting it from the working buffer."
+        )
+        form.addRow("Dilation radius (px):", self._dilute_dilation_px)
+
+        self._dilute_metric = QComboBox()
+        self._dilute_metric.addItems(sorted(BUILTIN_METRICS.keys()))
+        self._dilute_metric.setCurrentText("median_intensity")
+        form.addRow("Metric:", self._dilute_metric)
+
+        self._dilute_algorithm = QComboBox()
+        self._dilute_algorithm.addItem("GMM", ThresholdAlgorithm.GMM)
+        self._dilute_algorithm.addItem("K-means", ThresholdAlgorithm.KMEANS)
+        form.addRow("Algorithm:", self._dilute_algorithm)
+
+        self._dilute_gmm_criterion = QComboBox()
+        self._dilute_gmm_criterion.addItem("BIC", GmmCriterion.BIC)
+        self._dilute_gmm_criterion.addItem("Silhouette", GmmCriterion.SILHOUETTE)
+        form.addRow("GMM criterion:", self._dilute_gmm_criterion)
+
+        self._dilute_gmm_max = QSpinBox()
+        self._dilute_gmm_max.setRange(2, 20)
+        self._dilute_gmm_max.setValue(10)
+        form.addRow("GMM max components:", self._dilute_gmm_max)
+
+        self._dilute_kmeans_n = QSpinBox()
+        self._dilute_kmeans_n.setRange(2, 20)
+        self._dilute_kmeans_n.setValue(3)
+        form.addRow("K-means n_clusters:", self._dilute_kmeans_n)
+
+        self._dilute_sigma = QDoubleSpinBox()
+        self._dilute_sigma.setRange(0.0, 50.0)
+        self._dilute_sigma.setSingleStep(0.1)
+        self._dilute_sigma.setValue(0.0)
+        form.addRow("Gaussian σ:", self._dilute_sigma)
+
+        # Settings-lock note (Tier 2 doc-review finding).
+        lock_note = QLabel(
+            "These settings are locked at workflow Start and apply to "
+            "every dataset in this run. Each dataset runs as many rounds "
+            "as you choose interactively."
+        )
+        lock_note.setWordWrap(True)
+        lock_note.setStyleSheet("color: #888; font-style: italic;")
+        form.addRow("", lock_note)
 
         return box
 
@@ -466,10 +738,12 @@ class WorkflowConfigDialog(QDialog):
         added, skipped = self._add_h5_paths(h5_files)
         self._toast_add_result(added, skipped)
 
-    def _on_add_tiff_source(self) -> None:
-        self._add_tiff_via_compress_dialog()
+    def _on_add_tiff_files(self) -> None:
+        """Open the compress dataset dialog for tiff discovery + config.
 
-    def _on_add_tiff_folder(self) -> None:
+        The CompressDialog itself handles both single-source and
+        folder-of-datasets cases — this single entry point covers both.
+        """
         self._add_tiff_via_compress_dialog()
 
     def _on_remove_dataset(self) -> None:
@@ -567,12 +841,37 @@ class WorkflowConfigDialog(QDialog):
         finally:
             dialog.deleteLater()
 
-        channel_names = sorted(cfg.selected_channels)
+        # Resolve channel display names from the dialog's layer assignments.
+        # The user may have renamed token channels (e.g. "00" -> "mNG") in
+        # the manual-mode mapping. cfg.selected_channels carries the
+        # token-side IDs ("00"); cfg.layer_assignments maps each to its
+        # LayerAssignment, whose .name field is the user-facing name.
+        # Fall back to the token when no override was set.
+        selected_token_ids = sorted(cfg.selected_channels)
+        layer_assignments = cfg.layer_assignments or {}
+        channel_names = [
+            (layer_assignments[ch_id].name
+             if ch_id in layer_assignments and layer_assignments[ch_id].name
+             else ch_id)
+            for ch_id in selected_token_ids
+        ]
         if not channel_names:
             self._dataset_status.setText(
                 "No channels selected in the compress dialog — nothing to add."
             )
             return
+
+        # Serialize layer_assignments so Phase 0 (compress_one) can pass
+        # them through to import_dataset. Each entry is JSON-safe.
+        layer_assignments_payload = {
+            ch_id: {
+                "layer_type": assignment.layer_type.value
+                if hasattr(assignment.layer_type, "value")
+                else str(assignment.layer_type),
+                "name": assignment.name,
+            }
+            for ch_id, assignment in layer_assignments.items()
+        }
 
         added = 0
         skipped: list[str] = []
@@ -591,7 +890,8 @@ class WorkflowConfigDialog(QDialog):
                     "files": [str(f.path) for f in ds.files],
                     "output_path": str(ds.output_path),
                     "z_project_method": cfg.z_project_method,
-                    "selected_channels": sorted(cfg.selected_channels),
+                    "selected_channels": selected_token_ids,
+                    "layer_assignments": layer_assignments_payload,
                 },
             )
             if self._add_pending(pd):
@@ -674,7 +974,7 @@ class WorkflowConfigDialog(QDialog):
         # Metric combo
         metric_combo = QComboBox()
         metric_combo.addItems(sorted(BUILTIN_METRICS.keys()))
-        metric_combo.setCurrentText("mean_intensity")
+        metric_combo.setCurrentText("median_intensity")
         self._rounds_table.setCellWidget(row, _ROUND_COL_METRIC, metric_combo)
 
         # Algorithm combo — toggles which of gmm_max / kmeans_k is enabled.
@@ -690,7 +990,7 @@ class WorkflowConfigDialog(QDialog):
         # GMM max components
         gmm_spin = QSpinBox()
         gmm_spin.setRange(2, 20)
-        gmm_spin.setValue(4)
+        gmm_spin.setValue(10)
         self._rounds_table.setCellWidget(row, _ROUND_COL_GMM_MAX, gmm_spin)
 
         # KMeans k
@@ -703,7 +1003,7 @@ class WorkflowConfigDialog(QDialog):
         sigma_spin = QDoubleSpinBox()
         sigma_spin.setRange(0.0, 20.0)
         sigma_spin.setSingleStep(0.1)
-        sigma_spin.setValue(1.0)
+        sigma_spin.setValue(0.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_SIGMA, sigma_spin)
 
         self._update_algo_columns_enabled(row)
@@ -871,9 +1171,31 @@ class WorkflowConfigDialog(QDialog):
             self._cp_seg_channel.setEnabled(False)
         self._cp_seg_channel.blockSignals(False)
 
-        # Prune selected channels/metrics to those still valid.
+        # Mirror the same channel-list population for the dilute combo.
+        prev_dilute = self._dilute_channel.currentText()
+        self._dilute_channel.blockSignals(True)
+        self._dilute_channel.clear()
+        if intersected:
+            self._dilute_channel.addItems(intersected)
+            self._dilute_channel.setEnabled(True)
+            idx = self._dilute_channel.findText(prev_dilute)
+            if idx >= 0:
+                self._dilute_channel.setCurrentIndex(idx)
+        else:
+            self._dilute_channel.addItem("(add datasets first)")
+            self._dilute_channel.setEnabled(False)
+        self._dilute_channel.blockSignals(False)
+
+        # Channel selection: until the user makes an explicit choice in
+        # the Configure CSV Export dialog, default to ALL intersected
+        # channels (so the common "export every channel" case needs no
+        # interaction). Once the user has picked explicitly
+        # (_csv_channels_auto = False), just prune to valid channels.
         valid_channels = set(intersected)
-        self._selected_csv_channels &= valid_channels
+        if self._csv_channels_auto:
+            self._selected_csv_channels = set(valid_channels)
+        else:
+            self._selected_csv_channels &= valid_channels
 
         self._update_csv_summary()
 
@@ -881,8 +1203,10 @@ class WorkflowConfigDialog(QDialog):
         """Update the summary label under the Configure CSV Export button."""
         n_ch = len(self._selected_csv_channels)
         n_met = len(self._selected_csv_metrics)
+        n_ppc = len(self._selected_csv_particle_per_cell)
+        n_ppch = len(self._selected_csv_particle_per_channel)
         round_names = self._round_names_from_table()
-        if n_ch == 0 and n_met == 0:
+        if n_ch == 0 and n_met == 0 and n_ppc == 0 and n_ppch == 0:
             self._csv_summary_label.setText(
                 "No channels or metrics selected yet. "
                 "Click 'Configure CSV Export...' to choose."
@@ -891,6 +1215,8 @@ class WorkflowConfigDialog(QDialog):
             parts = [f"{n_ch} channel(s)", f"{n_met} metric(s)"]
             if round_names:
                 parts.append(f"{len(round_names)} round(s)")
+            if n_ppc or n_ppch:
+                parts.append(f"{n_ppc + n_ppch} particle metric(s)")
             col_count = self._estimate_csv_column_count()
             self._csv_summary_label.setText(
                 f"CSV export: {', '.join(parts)} → ~{col_count} columns. "
@@ -901,15 +1227,21 @@ class WorkflowConfigDialog(QDialog):
         """Rough count of the CSV columns that will be produced."""
         n_ch = len(self._selected_csv_channels)
         n_met = len(self._selected_csv_metrics)
+        n_ppc = len(self._selected_csv_particle_per_cell)
+        n_ppch = len(self._selected_csv_particle_per_channel)
         round_names = self._round_names_from_table()
         n_rounds = len(round_names)
         # identity (3) + core (7) + ch×met + group_per_round + ch×met×round×2 (in/out)
+        # + per-cell particle cols (round × ppc) + per-channel particle cols (round × ch × ppch)
         return (
             len(_ALWAYS_ON_COLUMNS)
             + len(_CORE_OPTIONAL_COLUMNS)
             + n_ch * n_met
             + n_rounds
-            + n_ch * n_met * n_rounds * 2
+            # ch × met × round (in_<round> only — no _out_)
+            + n_ch * n_met * n_rounds
+            + n_rounds * n_ppc
+            + n_rounds * n_ch * n_ppch
         )
 
     def _on_configure_csv_export(self) -> None:
@@ -933,8 +1265,20 @@ class WorkflowConfigDialog(QDialog):
         dialog = QDialog(self)
         dialog.setWindowTitle("Configure CSV Export Columns")
         dialog.setModal(True)
-        dialog.resize(450, 640)
-        layout = QVBoxLayout(dialog)
+        dialog.resize(560, 720)
+
+        # Outer layout holds the scroll area + the OK/Cancel button row.
+        # Each section keeps its natural height inside the scroll area;
+        # the dialog itself is capped to a screen-friendly size.
+        outer_layout = QVBoxLayout(dialog)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Scrollable content widget.
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setSpacing(10)
+        layout.setContentsMargins(12, 12, 12, 12)
 
         # ── Channels section ──
         ch_box = QGroupBox("Channels to include in CSV")
@@ -979,32 +1323,117 @@ class WorkflowConfigDialog(QDialog):
         met_layout.addLayout(met_btn_row)
         layout.addWidget(met_box)
 
+        # ── Particle metrics (per cell) ──
+        # Always shown so the picker is stateful regardless of whether
+        # particle analysis is currently enabled. When it's off, the
+        # CSV writer in export_run filters out columns that don't
+        # exist in the df, so pre-selected particle metrics are safe.
+        ppc_box = QGroupBox(
+            "Particle metrics — per cell "
+            "(used only when particle analysis is enabled)"
+        )
+        ppc_layout = QVBoxLayout(ppc_box)
+        ppc_cbs: dict[str, QCheckBox] = {}
+        for name in _PARTICLE_PER_CELL_METRICS:
+            cb = QCheckBox(name.replace("_", " ").title())
+            cb.setObjectName(name)
+            cb.setChecked(name in self._selected_csv_particle_per_cell)
+            ppc_cbs[name] = cb
+            ppc_layout.addWidget(cb)
+
+        ppc_btn_row = QHBoxLayout()
+        ppc_all = QPushButton("All")
+        ppc_all.clicked.connect(
+            lambda: [cb.setChecked(True) for cb in ppc_cbs.values()]
+        )
+        ppc_btn_row.addWidget(ppc_all)
+        ppc_none = QPushButton("None")
+        ppc_none.clicked.connect(
+            lambda: [cb.setChecked(False) for cb in ppc_cbs.values()]
+        )
+        ppc_btn_row.addWidget(ppc_none)
+        ppc_btn_row.addStretch()
+        ppc_layout.addLayout(ppc_btn_row)
+        layout.addWidget(ppc_box)
+
+        # ── Particle metrics (per channel) ──
+        ppch_box = QGroupBox(
+            "Particle metrics — per channel "
+            "(used only when particle analysis is enabled)"
+        )
+        ppch_layout = QVBoxLayout(ppch_box)
+        ppch_cbs: dict[str, QCheckBox] = {}
+        for name in _PARTICLE_PER_CHANNEL_METRICS:
+            cb = QCheckBox(name.replace("_", " ").title())
+            cb.setObjectName(name)
+            cb.setChecked(name in self._selected_csv_particle_per_channel)
+            ppch_cbs[name] = cb
+            ppch_layout.addWidget(cb)
+
+        ppch_btn_row = QHBoxLayout()
+        ppch_all = QPushButton("All")
+        ppch_all.clicked.connect(
+            lambda: [cb.setChecked(True) for cb in ppch_cbs.values()]
+        )
+        ppch_btn_row.addWidget(ppch_all)
+        ppch_none = QPushButton("None")
+        ppch_none.clicked.connect(
+            lambda: [cb.setChecked(False) for cb in ppch_cbs.values()]
+        )
+        ppch_btn_row.addWidget(ppch_none)
+        ppch_btn_row.addStretch()
+        ppch_layout.addLayout(ppch_btn_row)
+        layout.addWidget(ppch_box)
+
         # ── Note ──
         note = QLabel(
             "The exported CSVs will contain every combination of the "
             "selected channels × metrics, plus core columns (label, "
             "centroid, area), group assignments per round, and per-round "
-            "inside/outside columns. The full measurements.parquet "
+            "inside/outside columns. When particle analysis is enabled, "
+            "the selected per-cell particle metrics produce one column "
+            "per round (<round>_<metric>) and the per-channel particle "
+            "metrics produce one column per round × channel "
+            "(<round>_<channel>_<metric>). The full measurements.parquet "
             "always contains everything regardless of this selection."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #888;")
         layout.addWidget(note)
 
-        # ── Buttons ──
+        # Put the content in a scroll area so each section keeps its
+        # natural height while the dialog stays at a screen-friendly
+        # size. Without this the metrics list compresses to fit when
+        # all five sections are expanded (iteration-3 user feedback).
+        outer_layout.addWidget(wrap_in_scroll(content), stretch=1)
+
+        # ── Buttons (outside the scroll area, always visible) ──
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        btn_bar = QWidget()
+        btn_layout = QHBoxLayout(btn_bar)
+        btn_layout.setContentsMargins(12, 6, 12, 12)
+        btn_layout.addWidget(buttons)
+        outer_layout.addWidget(btn_bar)
 
         if dialog.exec_() != QDialog.Accepted:
             return
 
+        # The user made an explicit channel choice — stop auto-selecting
+        # all channels on subsequent dataset changes.
+        self._csv_channels_auto = False
         self._selected_csv_channels = {
             ch for ch, cb in ch_cbs.items() if cb.isChecked()
         }
         self._selected_csv_metrics = {
             name for name, cb in met_cbs.items() if cb.isChecked()
+        }
+        self._selected_csv_particle_per_cell = {
+            name for name, cb in ppc_cbs.items() if cb.isChecked()
+        }
+        self._selected_csv_particle_per_channel = {
+            name for name, cb in ppch_cbs.items() if cb.isChecked()
         }
         self._update_csv_summary()
 
@@ -1112,6 +1541,30 @@ class WorkflowConfigDialog(QDialog):
             self._warn("Choose a segmentation channel in the Cellpose settings.")
             return None
 
+        # Edge-mode selector value.
+        edge_mode = self._edge_mode.currentData()
+        if edge_mode is None:
+            edge_mode = EdgeMode.EXCLUDE
+
+        # Optional dilute settings.
+        dilute_settings = self._try_build_dilute_settings(intersected)
+        if dilute_settings is False:
+            # Validation error already surfaced.
+            return None
+
+        # Optional particle analysis. The group is checkable so we can
+        # detect enabled vs disabled directly from the group's state.
+        particle_settings: ParticleSettings | None = None
+        particle_group = self._particle_min_area.parent()
+        if isinstance(particle_group, QGroupBox) and particle_group.isChecked():
+            try:
+                particle_settings = ParticleSettings(
+                    min_area=int(self._particle_min_area.value()),
+                )
+            except ValueError as e:
+                self._warn(f"Particle settings invalid: {e}")
+                return None
+
         entries = [pd.to_entry() for pd in kept_datasets]
         try:
             return WorkflowConfig(
@@ -1121,10 +1574,66 @@ class WorkflowConfigDialog(QDialog):
                 selected_csv_columns=selected_cols,
                 output_parent=output_parent,
                 seg_channel_name=seg_channel,
+                edge_mode=edge_mode,
+                edge_margin_px=int(self._edge_margin.value()),
+                dilute_settings=dilute_settings,
+                cellpose_segmentation_name=self._cp_seg_name.text().strip()
+                or "cp_mask",
+                particle_settings=particle_settings,
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")
             return None
+
+    def _try_build_dilute_settings(
+        self, intersected_channels: list[str]
+    ) -> DiluteSettings | None | bool:
+        """Construct DiluteSettings from the dilute group when checked.
+
+        Returns ``None`` when the group is unchecked (dilute disabled).
+        Returns a ``DiluteSettings`` instance on success. Returns
+        ``False`` (sentinel for "validation failed; dialog stays open")
+        when the user enabled dilute but the inputs are invalid.
+        """
+        dilute_group = self._dilute_mask_name.parent()
+        if not isinstance(dilute_group, QGroupBox) or not dilute_group.isChecked():
+            return None
+
+        mask_name = self._dilute_mask_name.text().strip()
+        if not mask_name:
+            self._warn(
+                "Dilute mask name is required when dilute generation is enabled."
+            )
+            return False
+
+        channel = self._dilute_channel.currentText()
+        if not channel or channel.startswith("("):
+            self._warn(
+                "Pick a dilute channel from the intersection of dataset channels."
+            )
+            return False
+        if intersected_channels and channel not in intersected_channels:
+            self._warn(
+                f"Dilute channel {channel!r} is not in the channel intersection "
+                f"{intersected_channels}."
+            )
+            return False
+
+        try:
+            return DiluteSettings(
+                mask_name=mask_name,
+                dilation_radius_px=int(self._dilute_dilation_px.value()),
+                channel=channel,
+                metric=self._dilute_metric.currentText(),
+                algorithm=self._dilute_algorithm.currentData() or ThresholdAlgorithm.GMM,
+                gmm_criterion=self._dilute_gmm_criterion.currentData() or GmmCriterion.BIC,
+                gmm_max_components=int(self._dilute_gmm_max.value()),
+                kmeans_n_clusters=int(self._dilute_kmeans_n.value()),
+                gaussian_sigma=float(self._dilute_sigma.value()),
+            )
+        except ValueError as e:
+            self._warn(f"Dilute settings invalid: {e}")
+            return False
 
     def _resolve_channel_intersection(
         self,
@@ -1231,12 +1740,43 @@ class WorkflowConfigDialog(QDialog):
         for rn in round_names:
             cols.append(f"group_{rn}")
 
-        # {channel}_{metric}_in_{round} / _out_{round} columns
+        # {channel}_{metric}_in_{round} columns. The _out_<round>
+        # variants are intentionally NOT emitted in this workflow —
+        # measure_one drops them from the parquet too. See the
+        # iteration-3 feedback in the requirements doc.
         for ch in channels:
             for m in metrics:
                 for rn in round_names:
                     cols.append(f"{ch}_{m}_in_{rn}")
-                    cols.append(f"{ch}_{m}_out_{rn}")
+
+        # U7 particle columns. Per-cell metrics: <round>_<metric>;
+        # per-channel metrics: <round>_<channel>_<metric>.
+        # When particle analysis is disabled at run time, these columns
+        # won't exist in the df and the CSV writer filters them out
+        # (see export_run's `[c for c in config.selected_csv_columns
+        # if c in df.columns]` guard).
+        for rn in round_names:
+            for m in sorted(self._selected_csv_particle_per_cell):
+                cols.append(f"{rn}_{m}")
+            for ch in channels:
+                for m in sorted(self._selected_csv_particle_per_channel):
+                    cols.append(f"{rn}_{ch}_{m}")
+
+        # Emit `<col>_um2` sibling for every area-style column already
+        # in the list. The actual `<col>_um2` value is only produced by
+        # measure_one when /metadata.pixel_size_um is known; if it's
+        # absent the CSV writer's `c in df.columns` guard silently
+        # filters these out, so pre-selecting them is safe.
+        siblings: list[str] = []
+        for c in cols:
+            if (
+                c == "area"
+                or c.endswith("_area")
+                or "_area_in_" in c
+                or c.endswith("_particle_area")
+            ):
+                siblings.append(f"{c}_um2")
+        cols.extend(siblings)
 
         return cols
 

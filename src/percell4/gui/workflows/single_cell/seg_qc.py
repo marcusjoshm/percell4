@@ -84,6 +84,7 @@ class SegmentationQCController(QObject):
         queue_total: int,
         on_complete: Callable[[PhaseResult], None],
         channel_idx: int = 0,
+        seg_name: str = "cellpose_qc",
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -92,6 +93,7 @@ class SegmentationQCController(QObject):
         self._queue_total = queue_total
         self._on_complete = on_complete
         self._channel_idx = channel_idx
+        self._seg_name = seg_name
 
         # Loaded per-dataset state
         self._store: DatasetStore | None = None
@@ -137,7 +139,7 @@ class SegmentationQCController(QObject):
             self._intensity = self._store.read_channel(
                 "intensity", self._channel_idx
             )
-            self._labels = self._store.read_labels("cellpose_qc")
+            self._labels = self._store.read_labels(self._seg_name)
         except Exception as e:
             logger.exception("seg QC failed to load dataset %s", self._entry.name)
             self._finish(
@@ -545,13 +547,13 @@ class SegmentationQCController(QObject):
                 )
                 if answer != QMessageBox.Yes:
                     return
-            self._store.write_labels("cellpose_qc", final_labels)
+            self._store.write_labels(self._seg_name, final_labels)
         except Exception as e:
             logger.exception("seg QC write_labels failed for %s", self._entry.name)
             self._finish(
                 PhaseResult(
                     success=False,
-                    message=f"write /labels/cellpose_qc failed: {e}",
+                    message=f"write /labels/{self._seg_name} failed: {e}",
                 )
             )
             return

@@ -7,6 +7,7 @@ import numpy as np
 from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
+    get_edge_labels,
     relabel_sequential,
 )
 
@@ -62,6 +63,68 @@ def test_filter_edge_does_not_mutate_input():
     original = labels.copy()
     filter_edge_cells(labels)
     np.testing.assert_array_equal(labels, original)
+
+
+# ── get_edge_labels ──────────────────────────────────────────
+
+
+def test_get_edge_labels_returns_border_set():
+    """Border-touching label IDs are returned without modifying labels."""
+    labels = _make_labels()
+    edges = get_edge_labels(labels)
+    assert edges == {1, 4}
+
+
+def test_get_edge_labels_no_borders_empty():
+    """Interior-only labels return an empty set."""
+    labels = np.zeros((50, 50), dtype=np.int32)
+    labels[10:20, 10:20] = 1
+    edges = get_edge_labels(labels)
+    assert edges == set()
+
+
+def test_get_edge_labels_all_on_border():
+    """Labels where every cell touches the border return every non-zero ID."""
+    labels = np.zeros((10, 10), dtype=np.int32)
+    labels[0:2, 0:2] = 1
+    labels[8:10, 8:10] = 2
+    edges = get_edge_labels(labels)
+    assert edges == {1, 2}
+
+
+def test_get_edge_labels_with_margin():
+    """edge_margin extends the border region."""
+    labels = np.zeros((20, 20), dtype=np.int32)
+    labels[2:5, 2:5] = 1  # 2 pixels from edge
+    labels[10:15, 10:15] = 2  # interior
+    edges = get_edge_labels(labels, edge_margin=2)
+    assert edges == {1}
+
+
+def test_get_edge_labels_does_not_mutate_input():
+    """Input labels array is not modified."""
+    labels = _make_labels()
+    original = labels.copy()
+    get_edge_labels(labels)
+    np.testing.assert_array_equal(labels, original)
+
+
+def test_get_edge_labels_matches_filter_edge_cells_removals():
+    """get_edge_labels returns exactly the IDs that filter_edge_cells removes."""
+    labels = _make_labels()
+    edge_set = get_edge_labels(labels)
+    filtered, _count = filter_edge_cells(labels)
+    # The labels present BEFORE filter but absent AFTER are the edge labels.
+    before = set(np.unique(labels)) - {0}
+    after = set(np.unique(filtered)) - {0}
+    removed = before - after
+    assert removed == edge_set
+
+
+def test_get_edge_labels_empty_labels():
+    """All-zero labels (no cells) return an empty set."""
+    labels = np.zeros((20, 20), dtype=np.int32)
+    assert get_edge_labels(labels) == set()
 
 
 # ── filter_small_cells ────────────────────────────────────────

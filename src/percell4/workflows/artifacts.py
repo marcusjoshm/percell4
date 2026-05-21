@@ -26,7 +26,10 @@ from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    DiluteSettings,
+    EdgeMode,
     GmmCriterion,
+    ParticleSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -178,6 +181,42 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
     )
 
 
+def _particle_to_dict(p: ParticleSettings) -> dict[str, Any]:
+    return {"min_area": p.min_area}
+
+
+def _particle_from_dict(d: dict[str, Any]) -> ParticleSettings:
+    return ParticleSettings(min_area=int(d.get("min_area", 0)))
+
+
+def _dilute_to_dict(d: DiluteSettings) -> dict[str, Any]:
+    return {
+        "mask_name": d.mask_name,
+        "dilation_radius_px": d.dilation_radius_px,
+        "channel": d.channel,
+        "metric": d.metric,
+        "algorithm": d.algorithm.value,
+        "gmm_criterion": d.gmm_criterion.value,
+        "gmm_max_components": d.gmm_max_components,
+        "kmeans_n_clusters": d.kmeans_n_clusters,
+        "gaussian_sigma": d.gaussian_sigma,
+    }
+
+
+def _dilute_from_dict(d: dict[str, Any]) -> DiluteSettings:
+    return DiluteSettings(
+        mask_name=d["mask_name"],
+        dilation_radius_px=d["dilation_radius_px"],
+        channel=d["channel"],
+        metric=d["metric"],
+        algorithm=ThresholdAlgorithm(d["algorithm"]),
+        gmm_criterion=GmmCriterion(d.get("gmm_criterion", "bic")),
+        gmm_max_components=d.get("gmm_max_components", 4),
+        kmeans_n_clusters=d.get("kmeans_n_clusters", 3),
+        gaussian_sigma=d.get("gaussian_sigma", 1.0),
+    )
+
+
 def _entry_to_dict(e: WorkflowDatasetEntry) -> dict[str, Any]:
     return {
         "name": e.name,
@@ -207,11 +246,31 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
         "selected_csv_columns": list(cfg.selected_csv_columns),
         "output_parent": str(cfg.output_parent),
         "seg_channel_name": cfg.seg_channel_name,
+        "edge_mode": cfg.edge_mode.value,
+        "edge_margin_px": cfg.edge_margin_px,
+        "dilute_settings": (
+            _dilute_to_dict(cfg.dilute_settings)
+            if cfg.dilute_settings is not None
+            else None
+        ),
+        "cellpose_segmentation_name": cfg.cellpose_segmentation_name,
+        "particle_settings": (
+            _particle_to_dict(cfg.particle_settings)
+            if cfg.particle_settings is not None
+            else None
+        ),
     }
 
 
 def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
-    """Reconstruct a WorkflowConfig from its JSON-safe dict form."""
+    """Reconstruct a WorkflowConfig from its JSON-safe dict form.
+
+    Pre-evolution payloads (no ``edge_mode`` or ``dilute_settings`` keys)
+    deserialize with safe defaults: ``EdgeMode.EXCLUDE`` and ``None``
+    respectively, preserving the historical workflow invariant on Resume.
+    """
+    dilute_blob = data.get("dilute_settings")
+    particle_blob = data.get("particle_settings")
     return WorkflowConfig(
         datasets=[_entry_from_dict(d) for d in data["datasets"]],
         cellpose=_cellpose_from_dict(data["cellpose"]),
@@ -221,6 +280,19 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
         selected_csv_columns=list(data["selected_csv_columns"]),
         output_parent=Path(data["output_parent"]),
         seg_channel_name=data.get("seg_channel_name", ""),
+        edge_mode=EdgeMode(data.get("edge_mode", EdgeMode.EXCLUDE.value)),
+        edge_margin_px=int(data.get("edge_margin_px", 0)),
+        dilute_settings=(
+            _dilute_from_dict(dilute_blob) if dilute_blob is not None else None
+        ),
+        cellpose_segmentation_name=data.get(
+            "cellpose_segmentation_name", "cellpose_qc"
+        ),
+        particle_settings=(
+            _particle_from_dict(particle_blob)
+            if particle_blob is not None
+            else None
+        ),
     )
 
 
@@ -255,10 +327,17 @@ def metadata_to_dict(meta: RunMetadata) -> dict[str, Any]:
         "finished_at": meta.finished_at.isoformat() if meta.finished_at else None,
         "intersected_channels": list(meta.intersected_channels),
         "failures": [_failure_to_dict(f) for f in meta.failures],
+        "per_dataset_dilute_round_counts": dict(meta.per_dataset_dilute_round_counts),
     }
 
 
 def metadata_from_dict(data: dict[str, Any]) -> RunMetadata:
+    """Reconstruct a RunMetadata from its JSON-safe dict form.
+
+    Pre-evolution payloads (no ``per_dataset_dilute_round_counts`` key)
+    deserialize with an empty dict, preserving Resume on run folders
+    written before the schema evolution.
+    """
     return RunMetadata(
         run_id=data["run_id"],
         run_folder=Path(data["run_folder"]),
@@ -270,6 +349,9 @@ def metadata_from_dict(data: dict[str, Any]) -> RunMetadata:
         ),
         intersected_channels=list(data.get("intersected_channels", [])),
         failures=[_failure_from_dict(f) for f in data.get("failures", [])],
+        per_dataset_dilute_round_counts=dict(
+            data.get("per_dataset_dilute_round_counts", {})
+        ),
     )
 
 

@@ -243,3 +243,170 @@ def test_run_config_file_is_written_atomically(tmp_path: Path) -> None:
 
     # No .tmp residue
     assert not (folder / "run_config.json.tmp").exists()
+
+
+# ── Pre-evolution back-compat (characterization-first) ───────
+#
+# These tests pin the load behavior for run_config.json files produced by
+# the workflow BEFORE the EdgeMode / DiluteSettings / per_dataset_dilute_round_counts
+# evolution lands. They are the load-time safety net for Resume on
+# pre-existing run folders.
+
+
+def _pre_evolution_payload() -> dict:
+    """A run_config.json payload in the pre-EdgeMode/DiluteSettings shape.
+
+    Constructed by hand to match the serializer's output shape PRIOR to
+    the schema evolution: no ``edge_mode`` key on ``config``, no
+    ``dilute_settings`` key on ``config``, no ``per_dataset_dilute_round_counts``
+    key on ``metadata``.
+    """
+    return {
+        "config": {
+            "datasets": [
+                {
+                    "name": "DS1",
+                    "source": "h5_existing",
+                    "h5_path": "/tmp/DS1.h5",
+                    "channel_names": ["GFP", "RFP"],
+                    "compress_plan": None,
+                },
+            ],
+            "cellpose": {
+                "model": "cpsam",
+                "diameter": 30.0,
+                "gpu": True,
+                "flow_threshold": 0.4,
+                "cellprob_threshold": 0.0,
+                "min_size": 15,
+            },
+            "thresholding_rounds": [
+                {
+                    "name": "GFP_bright",
+                    "channel": "GFP",
+                    "metric": "mean_intensity",
+                    "algorithm": "gmm",
+                    "gmm_criterion": "bic",
+                    "gmm_max_components": 4,
+                    "kmeans_n_clusters": 3,
+                    "gaussian_sigma": 1.0,
+                },
+            ],
+            "selected_csv_columns": ["GFP_mean_intensity"],
+            "output_parent": "/tmp/percell4_runs",
+            "seg_channel_name": "GFP",
+        },
+        "metadata": {
+            "run_id": "run_test_pre_evolution",
+            "run_folder": "/tmp/percell4_runs/run_pre_evolution",
+            "started_at": "2026-04-10T14:30:22+00:00",
+            "finished_at": None,
+            "intersected_channels": ["GFP", "RFP"],
+            "failures": [],
+        },
+    }
+
+
+def test_pre_evolution_config_loads_with_default_edge_mode() -> None:
+    """A run_config.json without edge_mode defaults to EXCLUDE."""
+    from percell4.workflows.models import EdgeMode
+
+    payload = _pre_evolution_payload()
+    cfg = config_from_dict(payload["config"])
+
+    assert cfg.edge_mode is EdgeMode.EXCLUDE
+
+
+def test_pre_evolution_config_loads_with_no_dilute_settings() -> None:
+    """A run_config.json without dilute_settings defaults to None."""
+    payload = _pre_evolution_payload()
+    cfg = config_from_dict(payload["config"])
+
+    assert cfg.dilute_settings is None
+
+
+def test_pre_evolution_metadata_loads_with_empty_dilute_round_counts() -> None:
+    """A run_config.json without per_dataset_dilute_round_counts defaults to {}."""
+    from percell4.workflows.artifacts import metadata_from_dict
+
+    payload = _pre_evolution_payload()
+    meta = metadata_from_dict(payload["metadata"])
+
+    assert meta.per_dataset_dilute_round_counts == {}
+
+
+def test_pre_evolution_run_config_loads_from_disk(tmp_path: Path) -> None:
+    """Full path: write a pre-evolution payload to disk, then read_run_config it."""
+    from percell4.workflows.models import EdgeMode
+
+    folder = tmp_path / "run_pre_evolution"
+    folder.mkdir()
+    (folder / "run_config.json").write_text(
+        json.dumps(_pre_evolution_payload()), encoding="utf-8"
+    )
+
+    cfg, meta = read_run_config(folder)
+
+    assert cfg.edge_mode is EdgeMode.EXCLUDE
+    assert cfg.dilute_settings is None
+    assert meta.per_dataset_dilute_round_counts == {}
+    # Existing fields still load correctly
+    assert len(cfg.thresholding_rounds) == 1
+    assert cfg.thresholding_rounds[0].name == "GFP_bright"
+
+
+def test_post_evolution_round_trip_preserves_new_fields(tmp_path: Path) -> None:
+    """A run_config.json written with the new fields round-trips through read_run_config."""
+    from percell4.workflows.models import DiluteSettings, EdgeMode
+
+    folder = create_run_folder(tmp_path)
+    cfg = WorkflowConfig(
+        datasets=[
+            WorkflowDatasetEntry(
+                name="DS1",
+                source=DatasetSource.H5_EXISTING,
+                h5_path=Path("/tmp/DS1.h5"),
+                channel_names=["GFP", "RFP"],
+            ),
+        ],
+        cellpose=CellposeSettings(),
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="GFP_bright",
+                channel="GFP",
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.GMM,
+            ),
+        ],
+        selected_csv_columns=["GFP_mean_intensity"],
+        output_parent=Path("/tmp/percell4_runs"),
+        edge_mode=EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT,
+        dilute_settings=DiluteSettings(
+            mask_name="dilute",
+            dilation_radius_px=3,
+            channel="GFP",
+            metric="mean_intensity",
+            algorithm=ThresholdAlgorithm.GMM,
+            gmm_criterion=GmmCriterion.BIC,
+            gmm_max_components=4,
+            gaussian_sigma=1.0,
+        ),
+    )
+    meta = RunMetadata(
+        run_id="run_test_post_evolution",
+        run_folder=folder,
+        started_at=datetime(2026, 5, 20, 14, 30, 22, tzinfo=UTC),
+        per_dataset_dilute_round_counts={"DS1": 3, "DS2": 5},
+    )
+
+    write_run_config(folder, cfg, meta)
+    loaded_cfg, loaded_meta = read_run_config(folder)
+
+    assert loaded_cfg.edge_mode is EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
+    assert loaded_cfg.dilute_settings is not None
+    assert loaded_cfg.dilute_settings.mask_name == "dilute"
+    assert loaded_cfg.dilute_settings.dilation_radius_px == 3
+    assert loaded_cfg.dilute_settings.channel == "GFP"
+    assert loaded_cfg.dilute_settings.algorithm is ThresholdAlgorithm.GMM
+    assert loaded_cfg.dilute_settings.gmm_criterion is GmmCriterion.BIC
+    assert loaded_meta.per_dataset_dilute_round_counts == {"DS1": 3, "DS2": 5}

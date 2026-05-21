@@ -199,7 +199,7 @@ def test_runner_produces_expected_artifacts_when_segment_succeeds(
     # Patch segment_one to a no-op success that returns the existing labels.
     original_segment = phases.segment_one
 
-    def _noop_segment(store, cfg_, cellpose_model=None, channel_idx=0):
+    def _noop_segment(store, cfg_, cellpose_model=None, channel_idx=0, edge_mode=None):
         try:
             labels = store.read_labels("cellpose_qc")
         except KeyError:
@@ -292,7 +292,7 @@ def test_runner_records_failure_and_continues_other_datasets(
 
     call_counter = {"n": 0}
 
-    def _flaky_segment(store, cfg_, cellpose_model=None, channel_idx=0):
+    def _flaky_segment(store, cfg_, cellpose_model=None, channel_idx=0, edge_mode=None):
         call_counter["n"] += 1
         if call_counter["n"] == 1:
             return (

@@ -250,6 +250,24 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                         ),
                     )
 
+        # ── Phase 5: Dilute-phase mask (optional, INTERACTIVE) ──
+        # Runs only when the user enabled dilute generation in the
+        # config dialog AND we're in interactive mode. In headless
+        # tests we skip Phase 5 entirely — the dilute UI is inherently
+        # user-driven (adaptive per-dataset round count) and has no
+        # meaningful auto-mode equivalent.
+        if cfg.dilute_settings is not None and self._interactive_qc:
+            active = datasets_without_failures(self._working_entries, meta)
+            for idx, entry in enumerate(active):
+                yield PhaseRequest(
+                    kind=PhaseKind.INTERACTIVE,
+                    phase_name="dilute",
+                    dataset_index=idx,
+                    dataset_total=len(active),
+                    dataset_name=entry.name,
+                    handler=self._make_dilute_handler(entry, idx, len(active)),
+                )
+
         # ── Phase 7: measurement ──────────────────────────
         active = datasets_without_failures(self._working_entries, meta)
         for idx, entry in enumerate(active):
@@ -347,6 +365,9 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 self._config.cellpose,
                 cellpose_model=self._cellpose_model,
                 channel_idx=self._seg_channel_idx(store),
+                edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
+                seg_name=self._config.cellpose_segmentation_name,
             )
             if failure is not None:
                 record_failure(
@@ -417,6 +438,10 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             seg_ch_idx = self._seg_channel_idx(store)
 
+            edge_mode = self._config.edge_mode
+            edge_margin_px = self._config.edge_margin_px
+            seg_name = self._config.cellpose_segmentation_name
+
             def _do_segment() -> tuple:
                 """Runs in the Worker thread. Pure numpy + h5py, no Qt."""
                 return segment_one(
@@ -424,6 +449,9 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     self._config.cellpose,
                     cellpose_model=self._cellpose_model,
                     channel_idx=seg_ch_idx,
+                    edge_mode=edge_mode,
+                    edge_margin_px=edge_margin_px,
+                    seg_name=seg_name,
                 )
 
             worker = Worker(_do_segment)
@@ -523,10 +551,111 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
                 channel_idx=seg_ch,
+                seg_name=self._config.cellpose_segmentation_name,
             )
             self._active_qc_controller = controller
             self._log(phase="seg_qc", dataset=entry.name, event="opened")
             controller.start()
+
+        return handler
+
+    def _make_dilute_handler(self, entry, queue_index: int, queue_total: int):
+        """Factory for the Phase 5 INTERACTIVE dilute-phase handler.
+
+        Per the U5 plan, the handler instantiates a
+        :class:`DilutePhaseQueueEntry` that wraps the existing
+        :class:`DilutePhaseMaskController` in session-free mode.
+        Per-dataset round counts are persisted into
+        ``RunMetadata.per_dataset_dilute_round_counts`` so the
+        ``summary_datasets.csv`` builder can populate ``n_rounds_dilute``.
+        """
+        def handler(on_complete):
+            from percell4.gui.workflows.single_cell.dilute_queue import (
+                DilutePhaseQueueEntry,
+            )
+
+            if self._host is None:
+                on_complete(
+                    PhaseResult(success=False, message="no host for dilute queue")
+                )
+                return
+            if self._config.dilute_settings is None:
+                on_complete(
+                    PhaseResult(
+                        success=True,
+                        message="dilute disabled (no dilute_settings)",
+                    )
+                )
+                return
+
+            viewer_win = self._host.get_viewer_window()
+            data_model = self._host.get_data_model()
+            session = self._host.get_session()
+
+            def _wrapped_complete(result: PhaseResult) -> None:
+                # Explicit cancelled flag (new in U5) — the substring
+                # sniff stays as a backward-compat fallback for handlers
+                # that haven't migrated yet.
+                if result.cancelled or (
+                    not result.success and "cancel" in result.message.lower()
+                ):
+                    self.request_cancel()
+                if not result.success and not result.cancelled:
+                    record_failure(
+                        self._metadata,
+                        dataset_name=entry.name,
+                        phase_name="dilute",
+                        failure=DatasetFailure.MEASUREMENT_ERROR,
+                        message=result.message,
+                    )
+                self._log(
+                    phase="dilute",
+                    dataset=entry.name,
+                    event="done" if result.success else "failed",
+                    message=result.message,
+                )
+                on_complete(result)
+
+            def _record_round_count(name: str, n: int) -> None:
+                """Callback from the queue entry at workflow_done."""
+                self._metadata.per_dataset_dilute_round_counts[name] = n
+
+            try:
+                qentry = DilutePhaseQueueEntry(
+                    entry=entry,
+                    dilute_settings=self._config.dilute_settings,
+                    viewer_win=viewer_win,
+                    data_model=data_model,
+                    session=session,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    on_complete=_wrapped_complete,
+                    on_round_complete=_record_round_count,
+                    seg_name=self._config.cellpose_segmentation_name,
+                )
+            except Exception as e:
+                logger.exception("dilute queue entry init failed")
+                _wrapped_complete(
+                    PhaseResult(
+                        success=False,
+                        message=f"dilute queue init failed: {e}",
+                    )
+                )
+                return
+
+            # Strong-ref slot to defeat Qt GC mid-flight.
+            self._active_qc_controller = qentry
+            self._log(phase="dilute", dataset=entry.name, event="opened")
+            try:
+                qentry.start()
+            except Exception as e:
+                logger.exception("dilute queue entry start raised")
+                _wrapped_complete(
+                    PhaseResult(
+                        success=False,
+                        message=f"dilute queue start failed: {e}",
+                    )
+                )
 
         return handler
 
@@ -549,7 +678,11 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
-            grouping, failure, msg = threshold_compute_one(store, round_spec)
+            grouping, failure, msg = threshold_compute_one(
+                store,
+                round_spec,
+                seg_name=self._config.cellpose_segmentation_name,
+            )
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -600,7 +733,12 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
-            failure, msg = apply_threshold_headless(store, round_spec, grouping)
+            failure, msg = apply_threshold_headless(
+                store,
+                round_spec,
+                grouping,
+                seg_name=self._config.cellpose_segmentation_name,
+            )
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -679,6 +817,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 queue_index=queue_index,
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
+                seg_name=self._config.cellpose_segmentation_name,
             )
             # Hold a reference to prevent GC.
             self._active_qc_controller = queue_entry
@@ -709,7 +848,17 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             df, failure, msg = measure_one(
                 store,
                 round_specs=list(self._config.thresholding_rounds),
+                edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
+                seg_name=self._config.cellpose_segmentation_name,
+                particle_settings=self._config.particle_settings,
             )
+            # Soft failures from _append_synthetic_row (e.g. AE2: zero
+            # whole cells in edge-cohort mode) leave df populated so
+            # the dataset's per-cell rows still reach staging — only
+            # the synthetic row is missing. Hard failures (read error,
+            # empty labels, measure crash) return an empty df and we
+            # skip staging entirely.
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -720,7 +869,10 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 self._log(phase="measure", dataset=entry.name, event="failed",
                           failure=failure.value, message=msg)
-                return PhaseResult(success=False, message=msg)
+                if df.empty:
+                    return PhaseResult(success=False, message=msg)
+                # Fall through: stage the soft-failure df so its
+                # per-cell rows reach the parquet.
 
             try:
                 write_staging_parquet(
@@ -736,6 +888,45 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     message=f"staging write failed: {e}",
                 )
                 return PhaseResult(success=False, message=str(e))
+
+            # Particle analysis: per-particle detail. Per-cell columns
+            # were already merged into df inside measure_one. Errors
+            # here are recorded but non-fatal — per-cell measurements
+            # have already landed.
+            if self._config.particle_settings is not None:
+                try:
+                    from percell4.workflows.phases import (
+                        measure_particles_one,
+                        write_staging_particles_parquet,
+                    )
+
+                    particles_df, pfail, pmsg = measure_particles_one(
+                        store,
+                        round_specs=list(self._config.thresholding_rounds),
+                        particle_settings=self._config.particle_settings,
+                        seg_name=self._config.cellpose_segmentation_name,
+                    )
+                    if pfail is not None:
+                        record_failure(
+                            self._metadata,
+                            dataset_name=entry.name,
+                            phase_name="particles",
+                            failure=pfail,
+                            message=pmsg,
+                        )
+                    elif not particles_df.empty:
+                        write_staging_particles_parquet(
+                            self._metadata.run_folder, entry.name, particles_df
+                        )
+                except Exception as e:
+                    logger.exception("particle staging failed for %s", entry.name)
+                    record_failure(
+                        self._metadata,
+                        dataset_name=entry.name,
+                        phase_name="particles",
+                        failure=DatasetFailure.MEASUREMENT_ERROR,
+                        message=f"particle staging failed: {e}",
+                    )
 
             self._log(phase="measure", dataset=entry.name, event="done",
                       message=msg)
