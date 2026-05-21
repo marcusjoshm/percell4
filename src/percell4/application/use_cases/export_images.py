@@ -24,6 +24,13 @@ class ExportRequest:
     # majority_vote_mask for /masks), producing downsampled TIFFs at
     # the GUI's current viewing resolution.
     view_bin: int = 1
+    # Stored (creation-bin-scaled) linear pixel size in µm/px, or
+    # ``None`` for legacy datasets without TIFF resolution metadata.
+    # The caller resolves this from ``repo.read_metadata(handle)``
+    # per-dataset so the use case stays adapter-free; the writer
+    # applies ``view_bin`` scaling so the exported file is
+    # self-describing.
+    pixel_size_um: float | None = None
 
 
 @dataclass
@@ -46,10 +53,15 @@ class ExportImages:
         self._repo = repo
 
     def execute(self, handle: "DatasetHandle", request: ExportRequest) -> ExportResult:
-        import tifffile
+        from percell4.adapters.tiff_writer import write_tiff_with_metadata
 
         request.output_folder.mkdir(parents=True, exist_ok=True)
         exported = 0
+
+        write_kwargs = {
+            "pixel_size_um": request.pixel_size_um,
+            "view_bin": request.view_bin,
+        }
 
         # Export intensity channels
         if request.channels:
@@ -62,7 +74,7 @@ class ExportImages:
                 else:
                     data = intensity
                 out_path = request.output_folder / f"{request.dataset_name}_{name}.tif"
-                tifffile.imwrite(str(out_path), data)
+                write_tiff_with_metadata(out_path, data, **write_kwargs)
                 exported += 1
 
         # Export segmentation labels
@@ -71,7 +83,7 @@ class ExportImages:
                 handle, name, view_bin=request.view_bin,
             )
             out_path = request.output_folder / f"{request.dataset_name}_{name}.tif"
-            tifffile.imwrite(str(out_path), data)
+            write_tiff_with_metadata(out_path, data, **write_kwargs)
             exported += 1
 
         # Export masks
@@ -80,7 +92,7 @@ class ExportImages:
                 handle, name, view_bin=request.view_bin,
             )
             out_path = request.output_folder / f"{request.dataset_name}_{name}.tif"
-            tifffile.imwrite(str(out_path), data)
+            write_tiff_with_metadata(out_path, data, **write_kwargs)
             exported += 1
 
         return ExportResult(exported_count=exported, output_folder=request.output_folder)
