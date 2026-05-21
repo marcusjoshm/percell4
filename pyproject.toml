@@ -79,6 +79,9 @@ percell4-gui = "percell4.app:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"percell4.resources" = ["*.png", "*.ico", "*.icns"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

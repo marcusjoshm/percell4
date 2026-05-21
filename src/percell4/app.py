@@ -9,12 +9,19 @@ import sys
 
 import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
 
+from qtpy.QtGui import QIcon
 from qtpy.QtWidgets import QApplication
 
 
 def main() -> None:
     """Launch the PerCell4 GUI application."""
     app = QApplication.instance() or QApplication(sys.argv)
+
+    # Application icon: Dock (macOS), taskbar (Windows, Linux). Set as the
+    # QApplication default so every top-level window inherits it.
+    from percell4.resources import app_icon_path
+
+    app.setWindowIcon(QIcon(str(app_icon_path())))
 
     from percell4.gui.theme import apply_theme
 
