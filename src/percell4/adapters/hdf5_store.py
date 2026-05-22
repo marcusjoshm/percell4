@@ -125,9 +125,15 @@ class Hdf5DatasetRepository:
     # ── Segmentation labels ──────────────────────────────────
 
     def read_labels(
-        self, handle: DatasetHandle, name: str, view_bin: int = 1
+        self,
+        handle: DatasetHandle,
+        name: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.int32]:
-        return self._store(handle).read_labels(name, view_bin=view_bin)
+        return self._store(handle).read_labels(
+            name, view_bin=view_bin, timepoint=timepoint
+        )
 
     def write_labels(
         self,

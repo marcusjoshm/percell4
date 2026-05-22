@@ -61,55 +61,17 @@ class MeasureCells:
         if view_bin is None:
             view_bin = self._session.active_bin
 
-        # Read data from repository at the captured bin
-        images = self._repo.read_channel_images(handle, view_bin=view_bin)
-        labels = self._repo.read_labels(handle, seg_name, view_bin=view_bin)
-
-        if labels.max() == 0:
-            raise ValueError("Segmentation has no cells")
-
-        # Apply cell filter if active
-        if self._session.is_filtered and self._session.filter_ids:
-            cell_mask = np.isin(labels, list(self._session.filter_ids))
-            labels = labels.copy()
-            labels[~cell_mask] = 0
-            if labels.max() == 0:
-                raise ValueError("No filtered cells to process")
-
-        # Read active mask (optional)
-        mask = None
-        mask_name = self._session.active_mask
-        if mask_name:
-            try:
-                mask = self._repo.read_mask(handle, mask_name, view_bin=view_bin)
-            except KeyError:
-                logger.warning("Mask '%s' not found, proceeding without mask", mask_name)
-
-        # Run measurement
-        is_multi_roi = mask is not None and mask.max() > 1
-        if is_multi_roi:
-            if not roi_names:
-                unique_labels = np.unique(mask[mask > 0])
-                roi_names = {int(v): f"roi_{v}" for v in unique_labels}
-            df = measure_multichannel_multi_roi(
-                images, labels, mask, roi_names, metrics=metrics,
+        # Time-lapse datasets measure every timepoint and tag each row; a
+        # single-timepoint dataset takes the historical path (no timepoint
+        # column — byte-identical output).
+        if self._session.n_timepoints > 1:
+            df = self._measure_timelapse(
+                handle, seg_name, metrics, roi_names, view_bin
             )
         else:
-            df = measure_multichannel(images, labels, mask=mask, metrics=metrics)
-
-        # Bin-aware unit conversion: pixel-count metrics scale by k**2
-        # so areas measured at view_bin=3 are reported in k=1-equivalent
-        # pixels (a binned pixel = k**2 source pixels). This makes
-        # cross-bin comparison physically meaningful in the same
-        # DataFrame.
-        if view_bin > 1:
-            scale = view_bin * view_bin
-            for col in list(df.columns):
-                if col == "area_pixels" or col.endswith("_area"):
-                    df[col] = df[col] * scale
-
-        # Tag every row so downstream plots can group/filter by bin.
-        df["bin_at_measure"] = int(view_bin)
+            df = self._measure_single(
+                handle, seg_name, metrics, roi_names, view_bin
+            )
 
         # Merge stored group columns (survive re-measurement)
         groups_df = self._repo.read_group_columns(handle)
@@ -123,4 +85,138 @@ class MeasureCells:
         self._repo.write_measurements(handle, df)
         self._session.set_measurements(df)
 
+        return df
+
+    def _measure_single(
+        self, handle, seg_name, metrics, roi_names, view_bin
+    ) -> pd.DataFrame:
+        """Historical single-timepoint measurement (no ``timepoint`` column)."""
+        images = self._repo.read_channel_images(handle, view_bin=view_bin)
+        labels = self._repo.read_labels(handle, seg_name, view_bin=view_bin)
+
+        if labels.max() == 0:
+            raise ValueError("Segmentation has no cells")
+
+        if self._session.is_filtered and self._session.filter_ids:
+            cell_mask = np.isin(labels, list(self._session.filter_ids))
+            labels = labels.copy()
+            labels[~cell_mask] = 0
+            if labels.max() == 0:
+                raise ValueError("No filtered cells to process")
+
+        mask = self._read_active_mask(handle, view_bin)
+        return self._measure_one(images, labels, mask, metrics, roi_names, view_bin)
+
+    def _measure_timelapse(
+        self, handle, seg_name, metrics, roi_names, view_bin
+    ) -> pd.DataFrame:
+        """Measure every timepoint; tag rows with ``timepoint`` and join lineage.
+
+        A frame with no cells (death / field-of-view exit) simply contributes
+        no rows, so per-timepoint counts may legitimately differ.
+        """
+        n_timepoints = self._session.n_timepoints
+        mask_full = self._read_active_mask(handle, view_bin)
+        filter_ids = (
+            list(self._session.filter_ids)
+            if (self._session.is_filtered and self._session.filter_ids)
+            else None
+        )
+
+        frames: list[pd.DataFrame] = []
+        any_cells = False
+        for t in range(n_timepoints):
+            labels_t = self._repo.read_labels(
+                handle, seg_name, view_bin=view_bin, timepoint=t
+            )
+            if labels_t.max() == 0:
+                continue
+            any_cells = True
+            if filter_ids is not None:
+                cell_mask = np.isin(labels_t, filter_ids)
+                labels_t = labels_t.copy()
+                labels_t[~cell_mask] = 0
+                if labels_t.max() == 0:
+                    continue
+            images_t = self._repo.read_channel_images(
+                handle, view_bin=view_bin, timepoint=t
+            )
+            mask_t = (
+                mask_full[t]
+                if (mask_full is not None and mask_full.ndim == 3)
+                else mask_full
+            )
+            df_t = self._measure_one(
+                images_t, labels_t, mask_t, metrics, roi_names, view_bin
+            )
+            df_t["timepoint"] = t
+            frames.append(df_t)
+
+        if not frames:
+            raise ValueError(
+                "No filtered cells to process" if any_cells
+                else "Segmentation has no cells"
+            )
+        df = pd.concat(frames, ignore_index=True)
+        return self._join_lineage(handle, seg_name, df)
+
+    def _read_active_mask(self, handle, view_bin):
+        """Read the active mask (full array), or None when absent/missing."""
+        mask_name = self._session.active_mask
+        if not mask_name:
+            return None
+        try:
+            return self._repo.read_mask(handle, mask_name, view_bin=view_bin)
+        except KeyError:
+            logger.warning("Mask '%s' not found, proceeding without mask", mask_name)
+            return None
+
+    def _measure_one(
+        self, images, labels, mask, metrics, roi_names, view_bin
+    ) -> pd.DataFrame:
+        """Measure one frame (images + 2D labels + optional mask) -> DataFrame."""
+        is_multi_roi = mask is not None and mask.max() > 1
+        if is_multi_roi:
+            rn = roi_names
+            if not rn:
+                unique_labels = np.unique(mask[mask > 0])
+                rn = {int(v): f"roi_{v}" for v in unique_labels}
+            df = measure_multichannel_multi_roi(
+                images, labels, mask, rn, metrics=metrics,
+            )
+        else:
+            df = measure_multichannel(images, labels, mask=mask, metrics=metrics)
+
+        # Bin-aware unit conversion: pixel-count metrics scale by k**2 so areas
+        # measured at view_bin>1 are reported in k=1-equivalent pixels.
+        if view_bin > 1:
+            scale = view_bin * view_bin
+            for col in list(df.columns):
+                if col == "area_pixels" or col.endswith("_area"):
+                    df[col] = df[col] * scale
+
+        df["bin_at_measure"] = int(view_bin)
+        return df
+
+    def _join_lineage(self, handle, seg_name, df: pd.DataFrame) -> pd.DataFrame:
+        """Attach track_id + lineage columns when ``seg_name`` is tracked.
+
+        For a tracked segmentation the label value IS the (1-based) track id,
+        so ``track_id == label``; ``tree_id`` / ``parent_track_id`` are joined
+        from ``/tracks/<seg_name>``. A raw (untracked) segmentation gets only
+        the ``timepoint`` column.
+        """
+        if "label" not in df.columns:
+            return df
+        try:
+            tracks = self._repo.read_tracks(handle, seg_name)
+        except KeyError:
+            return df  # untracked segmentation
+        df = df.copy()
+        df["track_id"] = df["label"]
+        if tracks is not None and not tracks.empty:
+            tree_lut = dict(zip(tracks["track_id"], tracks["tree_id"]))
+            parent_lut = dict(zip(tracks["track_id"], tracks["parent_track_id"]))
+            df["tree_id"] = df["track_id"].map(tree_lut)
+            df["parent_track_id"] = df["track_id"].map(parent_lut)
         return df

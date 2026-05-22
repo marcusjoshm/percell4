@@ -54,10 +54,13 @@ class DatasetRepository(Protocol):
         handle: DatasetHandle,
         name: str,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.int32]:
         """Read a segmentation label array by name.
 
-        ``view_bin`` downsamples via block mode (ties resolve to 0).
+        ``view_bin`` downsamples via block mode (ties resolve to 0). When
+        ``timepoint`` is given, returns that single frame of a time-stacked
+        ``(T, H, W)`` labels resource.
         """
         ...
 
