@@ -141,6 +141,25 @@ class SegmentationPanel(QWidget):
 
         layout.addWidget(cp_group)
 
+        # ── Tracking section (time-lapse) ──────────────────────
+        track_group = QGroupBox("Tracking (time-lapse)")
+        track_layout = QVBoxLayout(track_group)
+        track_layout.addWidget(QLabel(
+            "Link the active segmentation across timepoints so each\n"
+            "cell keeps one ID over time. Divisions are recorded as\n"
+            "parent → daughter lineage."
+        ))
+        self._btn_track = QPushButton("Track Cells Across Timepoints")
+        self._btn_track.setToolTip(
+            "Requires a time-lapse dataset (filenames with _tN tokens) and a\n"
+            "segmentation covering every timepoint. Writes a new "
+            "'<segmentation>_tracked' resource where the label value is the "
+            "track ID."
+        )
+        self._btn_track.clicked.connect(self._on_track_cells)
+        track_layout.addWidget(self._btn_track)
+        layout.addWidget(track_group)
+
         # ── Manual Editing section ─────────────────────────────
         draw_group = QGroupBox("Manual Editing")
         draw_layout = QVBoxLayout(draw_group)
@@ -496,6 +515,67 @@ class SegmentationPanel(QWidget):
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is not None:
             viewer_win.add_labels(result.labels, name=result.seg_name)
+
+    # ── Tracking (time-lapse) ─────────────────────────────────
+
+    def _on_track_cells(self) -> None:
+        """Creator: track the active segmentation across timepoints.
+
+        Runs TrackCells synchronously (it mutates the session, which must
+        stay on the main thread), then adds the tracked labels layer to the
+        viewer. TrackCells already wrote the resource, refreshed the
+        inventory, and set it active (Creator contract).
+        """
+        from percell4.adapters.hdf5_store import Hdf5DatasetRepository
+        from percell4.adapters.laptrack_tracker import LaptrackTracker
+        from percell4.application.use_cases.track_cells import TrackCells
+        from percell4.domain.errors import NoDatasetError
+
+        session = self.data_model.session
+        if session.n_timepoints <= 1:
+            self._show_status(
+                "Tracking needs a time-lapse dataset (filenames with _tN tokens)."
+            )
+            return
+        seg_name = session.active_segmentation
+        if not seg_name:
+            self._show_status("Select a segmentation to track first.")
+            return
+
+        self._show_status(
+            f"Tracking cells across {session.n_timepoints} timepoints..."
+        )
+        repo = Hdf5DatasetRepository()
+        uc = TrackCells(repo, session, LaptrackTracker())
+        try:
+            result = uc.execute(seg_name)
+        except (ValueError, NoDatasetError) as e:
+            self._show_status(f"Tracking failed: {e}")
+            return
+
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        if viewer_win is not None:
+            # Creator step: reflect the new tracked labels in the viewer.
+            viewer_win.add_labels(result.tracked_labels, name=result.seg_name)
+            # Overlay tracks/lineage if measurements for this resource exist.
+            try:
+                lineage = repo.read_tracks(session.dataset, result.seg_name)
+            except KeyError:
+                lineage = None
+            measurements = self.data_model.df
+            if (
+                measurements is not None
+                and not measurements.empty
+                and "track_id" in measurements.columns
+            ):
+                viewer_win.show_tracks_from_measurements(
+                    measurements, lineage_df=lineage, name=f"{result.seg_name}_tracks"
+                )
+
+        self._show_status(
+            f"Tracked: {result.n_tracks} tracks, {result.n_divisions} divisions. "
+            f"Saved as '{result.seg_name}'."
+        )
 
     # ── Load ROIs ─────────────────────────────────────────────
 

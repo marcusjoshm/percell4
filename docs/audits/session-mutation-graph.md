@@ -8,6 +8,23 @@ deliverable_of_plan: docs/plans/2026-05-01-refactor-gui-state-handling-audit-pla
 
 # Session Mutation Graph
 
+> **2026-05-21 update (feat/time-lapse-tracking-lineage).** Adds a sixth
+> selection field, `session.active_timepoint` (int, the displayed timepoint
+> of a time-lapse stack). Writers:
+> - **Selector** — `ViewerWindow._on_dims_current_step` (the napari dims
+>   slider) is the sole UI writer, via `session.set_active_timepoint`. It is a
+>   `dims.events.current_step` subscription, distinct from the forbidden
+>   layer-list-selection path, guarded by a dedicated `_timepoint_originator`
+>   flag. The reverse direction (`session` → napari `dims.current_step`) is a
+>   one-way push in `ViewerWindow._push_timepoint_to_napari`.
+> - **Lifecycle** — `Session.set_dataset` / `Session.clear` reset
+>   `active_timepoint` to 0 (change-gated emit), mirroring `active_bin`.
+>
+> Tracking adds a **Creator** (`segmentation_panel._on_track_cells` →
+> `TrackCells`) that writes `active_segmentation` to the new tracked
+> resource — the standard Creator four-step, no new rule.
+>
+
 > **2026-05-13 update.** The Data-tab Selector combos and the per-panel
 > channel-override combos were retired in favor of a single canonical
 > SessionWindow. The Selector entries below for `active_channel`,

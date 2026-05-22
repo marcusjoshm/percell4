@@ -188,6 +188,7 @@ Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `fli
 
 - **HDF5-backed projects.** One `.h5` per experiment holds intensity channels, segmentation labels, masks, phasor maps, and measurement staging — no separate database, no scattered files.
 - **Cellpose segmentation with interactive QC.** Run Cellpose batch-style across many datasets, then QC each dataset's labels in the napari viewer with paint/erase/fill shortcuts.
+- **Time-lapse tracking and lineage.** Import `.tiff` series with `_tN` timepoint tokens as a single multi-timepoint dataset, scroll the timepoints in napari, segment every frame, then track cells so each keeps one ID across time. Cells that die or leave the field of view end their track; dividing cells are linked parent → daughter as lineage (powered by [laptrack](https://github.com/yfukai/laptrack)). The tracked segmentation stores the track ID as the label value, and a napari Tracks layer shows trajectories and divisions.
 - **Grouped thresholding.** Cluster cells by intensity, apply per-group autothresholding, refine with a circular ROI per dataset, write the result to `/masks/<round>`. Run multiple rounds in one workflow.
 - **FLIM phasor analysis.** Compute phasor maps from `.sdt` data, plot with `nipy_spectral` density on a Qt-native histogram, draw multi-ROI selections, save the union as a mask layer.
 - **Per-cell measurements.** Configurable per-channel metrics across every segmentation and mask layer, exported as a tidy parquet plus CSV mirrors.

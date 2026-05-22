@@ -8,6 +8,22 @@ counts:
   selector: 16
   creator: 17
   action: 172
+# 2026-05-21 update (feat/time-lapse-tracking-lineage U4, U10):
+#   Adds a sixth session selection field, active_timepoint, and two new
+#   classified GUI elements:
+#     - ViewerWindow timepoint dims slider (napari dims.events.current_step)
+#       => SELECTOR. It is the sole writer of session.active_timepoint. This
+#       is a dims event, NOT a layer-list-selection event, so it does not
+#       violate the "napari -> session forbidden for layer-list events" rule.
+#       Guarded by a dedicated _timepoint_originator flag (separate from
+#       _is_originator) so it cannot collide with selection/active-layer
+#       pushes. session -> napari is the one-way push in
+#       ViewerWindow._push_timepoint_to_napari.
+#     - segmentation_panel "Track Cells Across Timepoints" button => CREATOR.
+#       Runs TrackCells, which writes /labels/<seg>_tracked + /tracks/<seg>,
+#       refreshes the segmentation inventory, and set_active_segmentation()s
+#       the tracked resource (Creator four-step; viewer add done by the panel).
+#   No new Action writers of session fields.
 # 2026-05-13 update (feat/session-selection-window):
 #   Retires the per-panel channel-override pattern (PR #11 era) and the
 #   three Data-tab Selector combos in favor of a single canonical
