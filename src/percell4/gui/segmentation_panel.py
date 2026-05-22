@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.config import viewer_presets as vp
+from percell4.gui import theme
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
 
@@ -73,6 +74,10 @@ class SegmentationPanel(QWidget):
         self.data_model.state_changed.connect(self._on_state_changed)
 
     def _on_state_changed(self, change) -> None:
+        if change.segmentation or change.data:
+            # Relabel sequential renumbers labels, which would scramble the
+            # track ids of a tracked segmentation — disable it for those.
+            self._sync_relabel_enabled()
         if change.data:
             # A dataset was loaded (or cleared). Wire auto-save so that any
             # napari-level paint/erase or in-place mutations on Labels
@@ -189,7 +194,9 @@ class SegmentationPanel(QWidget):
         btn_add_label.clicked.connect(self._on_add_new_label)
         draw_layout.addWidget(btn_add_label)
 
-        btn_relabel = QPushButton("Clean Up Labels (relabel sequential)")
+        btn_relabel = self._btn_relabel = QPushButton(
+            "Clean Up Labels (relabel sequential)"
+        )
         btn_relabel.setToolTip(
             "Renumber all labels to be sequential [1, 2, 3, ...]\n"
             "after adding or deleting cells."
@@ -660,6 +667,40 @@ class SegmentationPanel(QWidget):
             return int(dims.current_step[0])
         return 0
 
+    def _active_seg_is_tracked(self) -> bool:
+        """True when the active segmentation has a stored lineage table.
+
+        A tracked segmentation's label value IS the track id, so relabeling
+        or compacting ids would break cross-timepoint identity.
+        """
+        name = self.data_model.active_segmentation
+        if not name:
+            return False
+        store = (
+            getattr(self._launcher, "_current_store", None)
+            if self._launcher is not None
+            else None
+        )
+        if store is None:
+            return False
+        try:
+            return name in store.list_tracks()
+        except Exception:  # noqa: BLE001 — advisory check, never fatal
+            return False
+
+    def _sync_relabel_enabled(self) -> None:
+        """Disable relabel-sequential when the active segmentation is tracked."""
+        btn = getattr(self, "_btn_relabel", None)
+        if btn is None:
+            return
+        tracked = self._active_seg_is_tracked()
+        btn.setEnabled(not tracked)
+        if tracked:
+            btn.setToolTip(
+                "Disabled for a tracked segmentation: relabeling would scramble "
+                "the track IDs that link cells across timepoints."
+            )
+
     def _on_delete_selected_label(self) -> None:
         labels_layer = self._get_active_labels_layer()
         if labels_layer is None:
@@ -731,14 +772,29 @@ class SegmentationPanel(QWidget):
         if labels_layer is None:
             self._show_status("No labels layer active")
             return
+        if self._active_seg_is_tracked():
+            self._show_status(
+                "Relabel is disabled for a tracked segmentation — it would "
+                "scramble the track IDs."
+            )
+            return
         from percell4.domain.segmentation.postprocess import relabel_sequential
-        old_data = labels_layer.data
-        new_data = relabel_sequential(np.asarray(old_data, dtype=np.int32))
-        n_cells = int(new_data.max())
-        labels_layer.data = new_data
+        data = np.asarray(labels_layer.data, dtype=np.int32).copy()
+        # Frame-scope on a time-lapse stack: renumber only the displayed
+        # timepoint so the other frames' labels are untouched.
+        if data.ndim == 3:
+            t = max(0, min(self._current_timepoint(), data.shape[0] - 1))
+            data[t] = relabel_sequential(data[t])
+            n_cells = int(data[t].max())
+            scope = f" at timepoint {t}"
+        else:
+            data = relabel_sequential(data)
+            n_cells = int(data.max())
+            scope = ""
+        labels_layer.data = data
         labels_layer.refresh()
         self._persist_labels_layer(labels_layer)
-        self._show_status(f"Relabeled to {n_cells} sequential cells")
+        self._show_status(f"Relabeled to {n_cells} sequential cells{scope}")
 
     # ── Label Cleanup ─────────────────────────────────────────
 
@@ -768,7 +824,15 @@ class SegmentationPanel(QWidget):
             self._cleanup_status.setStyleSheet(f"color: {theme.ERROR};")
             return
 
-        labels = np.asarray(labels_layer.data, dtype=np.int32)
+        full = np.asarray(labels_layer.data, dtype=np.int32)
+        # Frame-scope on a time-lapse stack: preview removals only in the
+        # displayed timepoint.
+        t = None
+        if full.ndim == 3:
+            t = max(0, min(self._current_timepoint(), full.shape[0] - 1))
+            labels = full[t]
+        else:
+            labels = full
         filtered, edge_removed, small_removed, total_removed = (
             self._run_cleanup_filters(labels)
         )
@@ -789,7 +853,14 @@ class SegmentationPanel(QWidget):
             return
 
         removed_mask = (labels > 0) & (filtered == 0)
-        highlight = np.where(removed_mask, 1, 0).astype(np.int32)
+        frame_highlight = np.where(removed_mask, 1, 0).astype(np.int32)
+        # Build an overlay matching the layer's rank so it tracks the slider;
+        # only the displayed frame is marked for a time-lapse stack.
+        if t is not None:
+            highlight = np.zeros(full.shape, dtype=np.int32)
+            highlight[t] = frame_highlight
+        else:
+            highlight = frame_highlight
         viewer_win.viewer.add_labels(
             highlight,
             name="_cleanup_preview",
@@ -817,15 +888,31 @@ class SegmentationPanel(QWidget):
 
         from percell4.domain.segmentation.postprocess import relabel_sequential
 
-        labels = np.asarray(labels_layer.data, dtype=np.int32)
+        full = np.asarray(labels_layer.data, dtype=np.int32).copy()
+        tracked = self._active_seg_is_tracked()
+        # Frame-scope on a time-lapse stack: clean up only the displayed frame.
+        t = None
+        if full.ndim == 3:
+            t = max(0, min(self._current_timepoint(), full.shape[0] - 1))
+            frame = full[t]
+        else:
+            frame = full
         filtered, edge_removed, small_removed, total_removed = (
-            self._run_cleanup_filters(labels)
+            self._run_cleanup_filters(frame)
         )
 
-        filtered = relabel_sequential(filtered)
-        n_remaining = int(filtered.max())
+        # Compacting ids would break a tracked segmentation's track IDs, so
+        # skip the relabel step there — just remove the filtered cells.
+        if not tracked:
+            filtered = relabel_sequential(filtered)
+        n_remaining = int((np.unique(filtered) > 0).sum())
 
-        labels_layer.data = filtered
+        if t is not None:
+            full[t] = filtered
+            out_data = full
+        else:
+            out_data = filtered
+        labels_layer.data = out_data
         labels_layer.refresh()
         self._persist_labels_layer(labels_layer)
 
