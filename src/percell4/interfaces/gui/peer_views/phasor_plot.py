@@ -273,11 +273,18 @@ class PhasorPlotWindow(QMainWindow):
         self.setWindowTitle("PerCell4 — Phasor Plot")
         self.resize(850, 600)
 
+        # _g_map / _s_map are always the truly-unfiltered canonical maps.
+        # _g_map_wavelet / _s_map_wavelet hold the DTCWT result when one has
+        # been computed (else None). The median view is derived on demand
+        # from the unfiltered maps and cached in _median_cache as
+        # (kernel_size, g_median, s_median). The three views — unfiltered,
+        # median, wavelet — are mutually exclusive (see _get_active_gs_maps).
         self._g_map: np.ndarray | None = None
         self._s_map: np.ndarray | None = None
         self._intensity: np.ndarray | None = None
-        self._g_map_unfiltered: np.ndarray | None = None
-        self._s_map_unfiltered: np.ndarray | None = None
+        self._g_map_wavelet: np.ndarray | None = None
+        self._s_map_wavelet: np.ndarray | None = None
+        self._median_cache: tuple[int, np.ndarray, np.ndarray] | None = None
         self._labels: np.ndarray | None = None
         self._labels_flat: np.ndarray | None = None
         self._total_valid_pixels: int = 0
@@ -367,12 +374,40 @@ class PhasorPlotWindow(QMainWindow):
         self._harmonic_combo.addItems(["1", "2", "3"])
         controls.addWidget(self._harmonic_combo)
 
+        # Mutually-exclusive filter views over the unfiltered g/s. Both
+        # unchecked → truly unfiltered. Median is derived on demand from the
+        # unfiltered maps at the kernel size in _median_kernel_spin; wavelet
+        # shows the DTCWT result (only available once it has been computed).
         controls.addSpacing(16)
-        self._filtered_check = QCheckBox("Filtered")
-        # Checkbox styling inherited from global theme
-        self._filtered_check.setEnabled(False)
-        self._filtered_check.toggled.connect(self._on_filtered_toggled)
-        controls.addWidget(self._filtered_check)
+        self._median_check = QCheckBox("Median filter")
+        self._median_check.setToolTip(
+            "Show a spatial median of the unfiltered phasor. Kernel is the "
+            "side length in pixels (k×k window). Mutually exclusive with the "
+            "wavelet filter."
+        )
+        self._median_check.toggled.connect(self._on_median_toggled)
+        controls.addWidget(self._median_check)
+
+        self._median_kernel_spin = QSpinBox()
+        self._median_kernel_spin.setRange(3, 15)
+        self._median_kernel_spin.setSingleStep(2)
+        self._median_kernel_spin.setValue(3)
+        self._median_kernel_spin.setEnabled(False)
+        self._median_kernel_spin.setToolTip(
+            "Median window side length k (odd, 3–15). Total pixels per "
+            "median = k². k=3 reproduces the legacy unfiltered output."
+        )
+        self._median_kernel_spin.valueChanged.connect(self._on_median_kernel_changed)
+        controls.addWidget(self._median_kernel_spin)
+
+        self._wavelet_check = QCheckBox("Wavelet filter")
+        self._wavelet_check.setEnabled(False)
+        self._wavelet_check.setToolTip(
+            "Show the DTCWT wavelet-filtered phasor. Available after Apply "
+            "Wavelet Filter. Mutually exclusive with the median filter."
+        )
+        self._wavelet_check.toggled.connect(self._on_wavelet_toggled)
+        controls.addWidget(self._wavelet_check)
 
         controls.addSpacing(16)
         self._mask_filter_check = QCheckBox("Filter by active mask")
@@ -1315,11 +1350,35 @@ class PhasorPlotWindow(QMainWindow):
     # ── Combined mask ─────────────────────────────────────────
 
     def _get_active_gs_maps(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return filtered or unfiltered G/S maps based on checkbox."""
-        use_filtered = self._filtered_check.isChecked()
-        if not use_filtered and self._g_map_unfiltered is not None:
-            return self._g_map_unfiltered, self._s_map_unfiltered
+        """Return the G/S maps for the active filter view.
+
+        Wavelet and median are mutually exclusive (enforced by the toggle
+        handlers); both unchecked yields the truly-unfiltered maps. This is
+        the single chokepoint every visible-pixel consumer reads through, so
+        the histogram, napari preview, and apply-as-mask always agree.
+        """
+        if self._wavelet_check.isChecked() and self._g_map_wavelet is not None:
+            return self._g_map_wavelet, self._s_map_wavelet
+        if self._median_check.isChecked() and self._g_map is not None:
+            return self._median_gs(self._median_kernel_spin.value())
         return self._g_map, self._s_map
+
+    def _median_gs(self, size: int) -> tuple[np.ndarray, np.ndarray]:
+        """Median-filtered unfiltered maps, cached by kernel size.
+
+        Recomputed only when the kernel changes or a new (g, s) frame
+        lands (set_phasor_data clears the cache), so toggling the checkbox
+        or refreshing the histogram does not re-run the filter.
+        """
+        if self._g_map is None or self._s_map is None:
+            return self._g_map, self._s_map
+        if self._median_cache is not None and self._median_cache[0] == size:
+            return self._median_cache[1], self._median_cache[2]
+        from percell4.domain.flim.phasor import median_filter_gs
+
+        g_med, s_med = median_filter_gs(self._g_map, self._s_map, size=size)
+        self._median_cache = (size, g_med, s_med)
+        return g_med, s_med
 
     def _compute_visible_valid_2d(self) -> np.ndarray | None:
         """Return the 2D boolean mask of pixels visible in the histogram.
@@ -1481,14 +1540,22 @@ class PhasorPlotWindow(QMainWindow):
         g_map: np.ndarray,
         s_map: np.ndarray,
         intensity: np.ndarray | None = None,
-        g_unfiltered: np.ndarray | None = None,
-        s_unfiltered: np.ndarray | None = None,
+        g_wavelet: np.ndarray | None = None,
+        s_wavelet: np.ndarray | None = None,
         labels: np.ndarray | None = None,
     ) -> None:
-        """Set phasor data and refresh the histogram."""
+        """Install a new phasor frame and refresh the histogram.
+
+        ``g_map`` / ``s_map`` are the truly-unfiltered canonical maps and
+        are always required. ``g_wavelet`` / ``s_wavelet`` are the optional
+        DTCWT result; when supplied, the wavelet view is enabled and
+        auto-selected (matching the old "compute wavelet → show filtered"
+        behavior). The on-demand median cache is reset to the new frame.
+        """
         self._g_map = g_map
         self._s_map = s_map
         self._intensity = intensity
+        self._median_cache = None
         self._labels = labels
         self._labels_flat = labels.ravel() if labels is not None else None
         self._total_valid_pixels = int(
@@ -1514,25 +1581,60 @@ class PhasorPlotWindow(QMainWindow):
         self._active_mask_array = None
         self._active_mask_flat = None
 
-        if g_unfiltered is not None:
-            self._g_map_unfiltered = g_unfiltered
-            self._s_map_unfiltered = s_unfiltered
-            self._filtered_check.setEnabled(True)
-            self._filtered_check.setChecked(True)
+        if g_wavelet is not None:
+            self._g_map_wavelet = g_wavelet
+            self._s_map_wavelet = s_wavelet
+            self._wavelet_check.setEnabled(True)
+            # Auto-select the wavelet view (and clear median) without
+            # re-entrant refreshes; the final _refresh_histogram below
+            # paints the chosen view once.
+            self._wavelet_check.blockSignals(True)
+            self._wavelet_check.setChecked(True)
+            self._wavelet_check.blockSignals(False)
+            self._median_check.blockSignals(True)
+            self._median_check.setChecked(False)
+            self._median_check.blockSignals(False)
+            self._median_kernel_spin.setEnabled(False)
         else:
-            self._g_map_unfiltered = None
-            self._s_map_unfiltered = None
-            self._filtered_check.setEnabled(False)
-            self._filtered_check.setChecked(False)
+            self._g_map_wavelet = None
+            self._s_map_wavelet = None
+            self._wavelet_check.blockSignals(True)
+            self._wavelet_check.setChecked(False)
+            self._wavelet_check.setEnabled(False)
+            self._wavelet_check.blockSignals(False)
 
         self._refresh_apply_buttons_enabled()
         self._refresh_histogram()
 
-    def _on_filtered_toggled(self, checked: bool) -> None:
-        # Invalidate all caches when switching filtered/unfiltered
+    def _on_median_toggled(self, checked: bool) -> None:
+        """Show the median view; mutually exclusive with wavelet."""
+        if checked and self._wavelet_check.isChecked():
+            self._wavelet_check.blockSignals(True)
+            self._wavelet_check.setChecked(False)
+            self._wavelet_check.blockSignals(False)
+        self._median_kernel_spin.setEnabled(checked)
         for w in self._roi_widgets:
             w.cached_mask = None
         self._refresh_histogram()
+
+    def _on_wavelet_toggled(self, checked: bool) -> None:
+        """Show the wavelet view; mutually exclusive with median."""
+        if checked and self._median_check.isChecked():
+            self._median_check.blockSignals(True)
+            self._median_check.setChecked(False)
+            self._median_check.blockSignals(False)
+            self._median_kernel_spin.setEnabled(False)
+        for w in self._roi_widgets:
+            w.cached_mask = None
+        self._refresh_histogram()
+
+    def _on_median_kernel_changed(self, _value: int) -> None:
+        """Re-derive the median view when the kernel size changes."""
+        self._median_cache = None
+        if self._median_check.isChecked():
+            for w in self._roi_widgets:
+                w.cached_mask = None
+            self._refresh_histogram()
 
     def _on_filter_changed(self) -> None:
         """Handle filter changes — debounced histogram refresh."""
@@ -1561,8 +1663,9 @@ class PhasorPlotWindow(QMainWindow):
         # Invalidate per-dataset coordinate maps and intensity caches
         self._g_map = None
         self._s_map = None
-        self._g_map_unfiltered = None
-        self._s_map_unfiltered = None
+        self._g_map_wavelet = None
+        self._s_map_wavelet = None
+        self._median_cache = None
         self._intensity = None
         self._labels = None
         self._labels_flat = None
@@ -1587,10 +1690,14 @@ class PhasorPlotWindow(QMainWindow):
 
         # Reset checkbox states. _on_active_mask_changed will re-enable
         # the mask-filter checkbox if the new dataset auto-selected a mask.
-        self._filtered_check.blockSignals(True)
-        self._filtered_check.setChecked(False)
-        self._filtered_check.setEnabled(False)
-        self._filtered_check.blockSignals(False)
+        self._median_check.blockSignals(True)
+        self._median_check.setChecked(False)
+        self._median_check.blockSignals(False)
+        self._median_kernel_spin.setEnabled(False)
+        self._wavelet_check.blockSignals(True)
+        self._wavelet_check.setChecked(False)
+        self._wavelet_check.setEnabled(False)
+        self._wavelet_check.blockSignals(False)
         self._mask_filter_check.blockSignals(True)
         self._mask_filter_check.setChecked(False)
         self._mask_filter_check.blockSignals(False)
@@ -2077,7 +2184,7 @@ class PhasorPlotWindow(QMainWindow):
         in-session-staleness compound learning so future cache additions
         update this function):
 
-          * _g_map, _g_map_unfiltered, _s_map, _s_map_unfiltered
+          * _g_map, _g_map_wavelet, _s_map, _s_map_wavelet, _median_cache
           * _intensity (decay.sum(-1) derived)
           * _labels, _labels_flat
           * _active_mask_array, _active_mask_flat
@@ -2101,8 +2208,9 @@ class PhasorPlotWindow(QMainWindow):
         """
         self._g_map = None
         self._s_map = None
-        self._g_map_unfiltered = None
-        self._s_map_unfiltered = None
+        self._g_map_wavelet = None
+        self._s_map_wavelet = None
+        self._median_cache = None
         self._intensity = None
         self._labels = None
         self._labels_flat = None
@@ -2156,16 +2264,15 @@ class PhasorPlotWindow(QMainWindow):
 
         # Cache hit — choose call shape based on whether wavelet is cached.
         if cached.g_filtered is not None and cached.s_filtered is not None:
-            # Mirror apply_wavelet's call: filtered as displayed g/s,
-            # raw as the unfiltered toggle source.
+            # Unfiltered raw maps are canonical; wavelet is the optional view.
             self.set_phasor_data(
-                cached.g_filtered, cached.s_filtered,
+                cached.g_map, cached.s_map,
                 intensity=cached.intensity,
-                g_unfiltered=cached.g_map, s_unfiltered=cached.s_map,
+                g_wavelet=cached.g_filtered, s_wavelet=cached.s_filtered,
                 labels=None,  # cell filter degraded; user re-clicks Compute to re-engage
             )
         else:
-            # Mirror compute_phasor's call: raw only, no unfiltered counterpart.
+            # No wavelet cached: unfiltered only.
             self.set_phasor_data(
                 cached.g_map, cached.s_map,
                 intensity=cached.intensity,
@@ -2184,8 +2291,9 @@ class PhasorPlotWindow(QMainWindow):
         """
         self._g_map = None
         self._s_map = None
-        self._g_map_unfiltered = None
-        self._s_map_unfiltered = None
+        self._g_map_wavelet = None
+        self._s_map_wavelet = None
+        self._median_cache = None
         self._intensity = None
         self._labels = None
         self._labels_flat = None

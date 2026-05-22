@@ -417,9 +417,9 @@ class FlimPanel(QWidget):
                     phasor_win = self._get_phasor_window()
                     if phasor_win is not None:
                         phasor_win.set_phasor_data(
-                            cached.g_filtered, cached.s_filtered,
+                            cached.g_map, cached.s_map,
                             intensity=cached.intensity,
-                            g_unfiltered=cached.g_map, s_unfiltered=cached.s_map,
+                            g_wavelet=cached.g_filtered, s_wavelet=cached.s_filtered,
                             labels=seg_labels,
                         )
                     self._show_status(
@@ -488,13 +488,22 @@ class FlimPanel(QWidget):
             except KeyError:
                 pass
 
+        # The unfiltered g/s are the canonical maps the window stores; the
+        # wavelet result is the optional view. Raw maps should always exist
+        # after a successful wavelet run (wavelet reads them), but fall back
+        # to the filtered maps as the base if the read somehow failed.
+        if g_unfiltered is None or s_unfiltered is None:
+            base_g, base_s = result.g_filtered, result.s_filtered
+        else:
+            base_g, base_s = g_unfiltered, s_unfiltered
+
         seg_labels = self._get_active_seg_labels()
         phasor_win = self._get_phasor_window()
         if phasor_win is not None:
                 phasor_win.set_phasor_data(
-                    result.g_filtered, result.s_filtered,
+                    base_g, base_s,
                     intensity=intensity.astype(np.float32) if intensity is not None else None,
-                    g_unfiltered=g_unfiltered, s_unfiltered=s_unfiltered,
+                    g_wavelet=result.g_filtered, s_wavelet=result.s_filtered,
                     labels=seg_labels,
                 )
 
@@ -681,7 +690,10 @@ class FlimPanel(QWidget):
                 else None
             ),
             mask_filter_active=phasor_win._mask_filter_check.isChecked(),
-            use_filtered_gs=phasor_win._filtered_check.isChecked(),
+            # GMM reads persisted maps from HDF5: wavelet view → g_filtered,
+            # otherwise the raw g/s. The on-demand median view is not a
+            # persisted resource, so GMM runs on raw g/s when it is active.
+            use_filtered_gs=phasor_win._wavelet_check.isChecked(),
             harmonic=int(phasor_win._harmonic_combo.currentText()),
             # Capture session.active_bin at worker-construction (race-safe
             # per the U12 capture pattern) so a mid-flight bin toggle
