@@ -403,101 +403,103 @@ def track_one(
 # ── Phase 3/5/...: Threshold compute + headless apply ──────────────────
 
 
+def _group_image_labels(
+    image: NDArray, labels: NDArray, round_spec: ThresholdingRound
+) -> tuple[GroupingResult | None, DatasetFailure | None, str]:
+    """Measure the round metric on one 2D frame and group its cells.
+
+    Returns ``(GroupingResult | None, failure, message)``. Shared by the
+    single-frame and per-timepoint threshold-compute paths.
+    """
+    if int(labels.max()) == 0:
+        return None, DatasetFailure.THRESHOLD_EMPTY, "no cells"
+    try:
+        measure_df = measure_cells(image, labels, metrics=[round_spec.metric])
+    except Exception as e:
+        logger.exception("measure_cells failed for threshold_compute")
+        return None, DatasetFailure.THRESHOLD_ERROR, f"measure_cells failed: {e}"
+    if len(measure_df) == 0:
+        return None, DatasetFailure.THRESHOLD_EMPTY, "measure_cells returned 0 rows"
+
+    values = measure_df[round_spec.metric].to_numpy(dtype=np.float64)
+    cell_labels = measure_df["label"].to_numpy(dtype=np.int32)
+    try:
+        if round_spec.algorithm is ThresholdAlgorithm.GMM:
+            result = group_cells_gmm(
+                values, cell_labels,
+                criterion=round_spec.gmm_criterion.value,
+                max_components=round_spec.gmm_max_components,
+            )
+        else:
+            result = group_cells_kmeans(
+                values, cell_labels, n_clusters=round_spec.kmeans_n_clusters,
+            )
+    except Exception as e:
+        logger.exception("grouping failed")
+        return None, DatasetFailure.THRESHOLD_ERROR, f"grouping failed: {e}"
+    if result.n_groups == 0:
+        return None, DatasetFailure.THRESHOLD_EMPTY, "grouping produced 0 groups"
+    return result, None, f"{result.n_groups} groups"
+
+
 def threshold_compute_one(
     store: DatasetStore,
     round_spec: ThresholdingRound,
     seg_name: str = "cellpose_qc",
-) -> tuple[GroupingResult | None, DatasetFailure | None, str]:
+) -> tuple[object | None, DatasetFailure | None, str]:
     """Compute the per-cell grouping for one round on one dataset.
 
-    Reads the round's channel and the QC-accepted labels, computes the
-    per-cell metric, and runs GMM or K-means grouping. Returns a
-    :class:`GroupingResult` on success.
+    Single-timepoint: returns a :class:`GroupingResult`. Time-lapse
+    (``n_timepoints > 1``): groups each frame independently and returns a
+    ``dict[int, GroupingResult]`` keyed by timepoint (frames with no
+    groupable cells are omitted). The runner caches whatever is returned;
+    :func:`apply_threshold_headless` handles both shapes.
     """
     try:
         channel_idx = _channel_index(store, round_spec.channel)
     except (KeyError, ValueError) as e:
         return None, DatasetFailure.THRESHOLD_ERROR, str(e)
 
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+    if n_timepoints > 1:
+        per_frame: dict[int, GroupingResult] = {}
+        for t in range(n_timepoints):
+            try:
+                image = _channel_from_frame(
+                    store.read_array_frame("intensity", t), channel_idx
+                )
+                labels = store.read_labels(seg_name, timepoint=t)
+            except KeyError as e:
+                return None, DatasetFailure.THRESHOLD_ERROR, f"missing h5 key: {e}"
+            grouping, _failure, _msg = _group_image_labels(image, labels, round_spec)
+            if grouping is not None:
+                per_frame[t] = grouping
+        if not per_frame:
+            return None, DatasetFailure.THRESHOLD_EMPTY, "no groups in any timepoint"
+        return per_frame, None, f"{len(per_frame)} timepoint(s) grouped"
+
     try:
         image = store.read_channel("intensity", channel_idx)
         labels = store.read_labels(seg_name)
     except KeyError as e:
         return None, DatasetFailure.THRESHOLD_ERROR, f"missing h5 key: {e}"
-
-    if int(labels.max()) == 0:
-        return None, DatasetFailure.THRESHOLD_EMPTY, f"no cells in /labels/{seg_name}"
-
-    try:
-        measure_df = measure_cells(image, labels, metrics=[round_spec.metric])
-    except Exception as e:
-        logger.exception("measure_cells failed for threshold_compute")
-        return None, DatasetFailure.THRESHOLD_ERROR, f"measure_cells failed: {e}"
-
-    if len(measure_df) == 0:
-        return None, DatasetFailure.THRESHOLD_EMPTY, "measure_cells returned 0 rows"
-
-    values = measure_df[round_spec.metric].to_numpy(dtype=np.float64)
-    cell_labels = measure_df["label"].to_numpy(dtype=np.int32)
-
-    try:
-        if round_spec.algorithm is ThresholdAlgorithm.GMM:
-            result = group_cells_gmm(
-                values,
-                cell_labels,
-                criterion=round_spec.gmm_criterion.value,
-                max_components=round_spec.gmm_max_components,
-            )
-        else:
-            result = group_cells_kmeans(
-                values,
-                cell_labels,
-                n_clusters=round_spec.kmeans_n_clusters,
-            )
-    except Exception as e:
-        logger.exception("grouping failed")
-        return None, DatasetFailure.THRESHOLD_ERROR, f"grouping failed: {e}"
-
-    if result.n_groups == 0:
-        return None, DatasetFailure.THRESHOLD_EMPTY, "grouping produced 0 groups"
-
-    return result, None, f"{result.n_groups} groups"
+    return _group_image_labels(image, labels, round_spec)
 
 
-def apply_threshold_headless(
-    store: DatasetStore,
-    round_spec: ThresholdingRound,
+def _apply_threshold_frame(
+    image: NDArray,
+    labels: NDArray,
     grouping: GroupingResult,
-    seg_name: str = "cellpose_qc",
-) -> tuple[DatasetFailure | None, str]:
-    """Headless per-group Otsu thresholding — the Phase 4 QC stand-in.
+    round_spec: ThresholdingRound,
+) -> tuple[NDArray | None, pd.DataFrame | None, str]:
+    """Per-group Otsu threshold on one 2D frame.
 
-    For each group returned by :func:`threshold_compute_one`, we:
-
-    1. Mask the channel image to the cells belonging to that group
-       (values outside the group are zeroed).
-    2. Apply a Gaussian smoothing pass at ``round_spec.gaussian_sigma``.
-    3. Compute an Otsu threshold over the non-zero pixels.
-    4. Take pixels above the threshold as the group's binary mask.
-
-    The per-group masks are unioned into one combined ``uint8`` mask.
-    We write ``/masks/<round_spec.name>`` and a ``/groups/<round_spec.name>``
-    DataFrame to the store — the same shape :class:`ThresholdQCController._finalize`
-    produces, so downstream :func:`measure_one` can load both without
-    caring whether the thresholds were interactive or headless.
-
-    This function will be replaced by the interactive
-    ``ThresholdQCController`` path when Phase 6 lands. Headless mode
-    will remain as a fallback for unattended runs.
+    Returns ``(combined_mask uint8, group_df, error_message)``. On success
+    ``error_message`` is empty; on Otsu failure the mask/df are ``None`` and
+    the message describes the failure. The ``group_df`` has columns
+    ``["label", "group_<channel>_<metric>"]`` (the same shape the interactive
+    controller writes). No store writes — the caller persists.
     """
-    try:
-        channel_idx = _channel_index(store, round_spec.channel)
-        image = store.read_channel("intensity", channel_idx)
-        labels = store.read_labels(seg_name)
-    except (KeyError, ValueError) as e:
-        return DatasetFailure.THRESHOLD_ERROR, str(e)
-
-    # Pre-smooth the whole channel once; per-group processing just masks it.
     if round_spec.gaussian_sigma > 0:
         smoothed = apply_gaussian_smoothing(
             image.astype(np.float32), round_spec.gaussian_sigma
@@ -506,71 +508,127 @@ def apply_threshold_headless(
         smoothed = image.astype(np.float32)
 
     combined = np.zeros(labels.shape, dtype=np.uint8)
-
-    # Group assignments Series has index=cell_label, value=group_id (1-based).
     for group_id in range(1, grouping.n_groups + 1):
         cells_in_group = grouping.group_assignments.index[
             grouping.group_assignments.values == group_id
         ].to_numpy(dtype=np.int32)
         if len(cells_in_group) == 0:
             continue
-
-        # Mask the smoothed channel to only this group's cells.
         group_label_mask = np.isin(labels, list(cells_in_group))
         if not group_label_mask.any():
             continue
-
         group_pixels = smoothed[group_label_mask]
         if group_pixels.size == 0 or not np.isfinite(group_pixels).any():
             continue
-
         try:
-            # threshold_otsu expects the sub-image (nonzero pixels), so
-            # we pass the masked values and broadcast the result back.
-            # The helper returns (binary_mask, threshold_value) on the
-            # FULL image shape when given a full image — but we want
-            # per-group application, so we compute the threshold
-            # ourselves on the group's pixels and broadcast.
             from skimage.filters import threshold_otsu as sk_otsu
 
             if np.unique(group_pixels).size < 2:
-                # Constant group — cannot compute a meaningful threshold.
-                # Accept every pixel of the group as "positive" (safer
-                # than accepting none).
+                # Constant group — accept every pixel (safer than none).
                 group_mask = group_label_mask
             else:
                 thr = float(sk_otsu(group_pixels))
                 group_mask = group_label_mask & (smoothed >= thr)
         except Exception as e:
             logger.exception("otsu failed for group %d", group_id)
-            return (
-                DatasetFailure.THRESHOLD_ERROR,
-                f"otsu for group {group_id}: {e}",
-            )
-
-        # Union into combined mask.
+            return None, None, f"otsu for group {group_id}: {e}"
         np.maximum(combined, group_mask.astype(np.uint8), out=combined)
 
-    try:
-        store.write_mask(round_spec.name, combined)
-    except Exception as e:
-        logger.exception("write_mask failed")
-        return DatasetFailure.THRESHOLD_ERROR, f"write_mask failed: {e}"
-
-    # Persist the group assignments DataFrame — same shape the
-    # ThresholdQCController writes so measure_one can consume it
-    # regardless of source (interactive vs headless).
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
     group_df.columns = ["label", col_name]
+    return combined, group_df, ""
 
+
+def apply_threshold_headless(
+    store: DatasetStore,
+    round_spec: ThresholdingRound,
+    grouping: object,
+    seg_name: str = "cellpose_qc",
+) -> tuple[DatasetFailure | None, str]:
+    """Headless per-group Otsu thresholding — the Phase 4 QC stand-in.
+
+    For each group returned by :func:`threshold_compute_one`, masks the
+    channel to that group's cells, smooths, computes a per-group Otsu
+    threshold, and unions the per-group masks. Writes
+    ``/masks/<round_spec.name>`` and ``/groups/<round_spec.name>`` — the same
+    shape the interactive ``ThresholdQCController`` produces.
+
+    Single-timepoint: ``grouping`` is a :class:`GroupingResult`, the mask is
+    2D. Time-lapse (``n_timepoints > 1``): ``grouping`` is the
+    ``dict[int, GroupingResult]`` from :func:`threshold_compute_one`; each
+    frame is thresholded with its own grouping, masks are stacked into a
+    ``(T, H, W)`` mask, and the ``/groups`` table gains a ``timepoint`` column.
+    """
+    try:
+        channel_idx = _channel_index(store, round_spec.channel)
+    except (KeyError, ValueError) as e:
+        return DatasetFailure.THRESHOLD_ERROR, str(e)
+
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+
+    if n_timepoints > 1:
+        per_frame: dict[int, GroupingResult] = grouping  # type: ignore[assignment]
+        mask_frames: list[NDArray] = []
+        group_dfs: list[pd.DataFrame] = []
+        for t in range(n_timepoints):
+            try:
+                labels = store.read_labels(seg_name, timepoint=t)
+                image = _channel_from_frame(
+                    store.read_array_frame("intensity", t), channel_idx
+                )
+            except (KeyError, ValueError) as e:
+                return DatasetFailure.THRESHOLD_ERROR, str(e)
+            g = per_frame.get(t)
+            if g is None:
+                # No groups for this frame — empty mask, no group rows.
+                mask_frames.append(np.zeros(labels.shape, dtype=np.uint8))
+                continue
+            mask, gdf, err = _apply_threshold_frame(image, labels, g, round_spec)
+            if err:
+                return DatasetFailure.THRESHOLD_ERROR, err
+            mask_frames.append(mask)
+            gdf = gdf.copy()
+            gdf["timepoint"] = t
+            group_dfs.append(gdf)
+        combined = np.stack(mask_frames, axis=0).astype(np.uint8)  # (T, H, W)
+        try:
+            store.write_mask(round_spec.name, combined)
+        except Exception as e:
+            logger.exception("write_mask failed")
+            return DatasetFailure.THRESHOLD_ERROR, f"write_mask failed: {e}"
+        groups_all = (
+            pd.concat(group_dfs, ignore_index=True)
+            if group_dfs
+            else pd.DataFrame(columns=["label", f"group_{round_spec.channel}_{round_spec.metric}", "timepoint"])
+        )
+        try:
+            store.write_dataframe(f"/groups/{round_spec.name}", groups_all)
+        except Exception as e:
+            logger.exception("write_dataframe /groups failed")
+            return DatasetFailure.THRESHOLD_ERROR, f"write /groups failed: {e}"
+        return None, f"{int(combined.sum())} positive pixels across {len(group_dfs)} timepoint(s)"
+
+    # Single-timepoint path.
+    try:
+        image = store.read_channel("intensity", channel_idx)
+        labels = store.read_labels(seg_name)
+    except (KeyError, ValueError) as e:
+        return DatasetFailure.THRESHOLD_ERROR, str(e)
+    mask, group_df, err = _apply_threshold_frame(image, labels, grouping, round_spec)
+    if err:
+        return DatasetFailure.THRESHOLD_ERROR, err
+    try:
+        store.write_mask(round_spec.name, mask)
+    except Exception as e:
+        logger.exception("write_mask failed")
+        return DatasetFailure.THRESHOLD_ERROR, f"write_mask failed: {e}"
     try:
         store.write_dataframe(f"/groups/{round_spec.name}", group_df)
     except Exception as e:
         logger.exception("write_dataframe /groups failed")
         return DatasetFailure.THRESHOLD_ERROR, f"write /groups failed: {e}"
-
-    return None, f"{int(combined.sum())} positive pixels across {grouping.n_groups} groups"
+    return None, f"{int(mask.sum())} positive pixels across {grouping.n_groups} groups"
 
 
 def _channel_index(store: DatasetStore, channel_name: str) -> int:
