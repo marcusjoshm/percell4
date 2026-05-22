@@ -75,9 +75,9 @@ def test_tracked_labels_are_stable_across_frames():
     assert len(set(ids)) == 1
     assert ids[0] >= 1  # 1-based; 0 is background
     assert result.n_tracks == 1
-    # Tracking replaces the segmentation IN PLACE — same name, no _tracked copy.
-    assert result.seg_name == "cellpose_raw"
-    assert list(repo.labels.keys()) == ["cellpose_raw"]
+    # Tracking writes a NEW resource and KEEPS the original raw segmentation.
+    assert result.seg_name == "cellpose_raw_tracked"
+    assert set(repo.labels.keys()) == {"cellpose_raw", "cellpose_raw_tracked"}
 
 
 def test_tracked_segmentation_auto_selected_and_listed():

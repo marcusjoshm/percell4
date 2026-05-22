@@ -157,9 +157,10 @@ class SegmentationPanel(QWidget):
         self._btn_track = QPushButton("Track Cells Across Timepoints")
         self._btn_track.setToolTip(
             "Requires a time-lapse dataset (filenames with _tN tokens) and a\n"
-            "segmentation covering every timepoint. Replaces the active\n"
-            "segmentation in place: each cell's label value becomes its track\n"
-            "ID (stable across timepoints) and a lineage table is recorded."
+            "segmentation covering every timepoint. Writes a new "
+            "'<segmentation>_tracked' resource (the original is kept for easy\n"
+            "editing) where each cell's label value is its track ID, plus a\n"
+            "lineage table."
         )
         self._btn_track.clicked.connect(self._on_track_cells)
         track_layout.addWidget(self._btn_track)
@@ -562,9 +563,9 @@ class SegmentationPanel(QWidget):
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is not None:
-            # Creator step: tracking replaces the segmentation in place, so
-            # update the existing napari layer rather than adding a duplicate.
-            viewer_win.update_labels(result.tracked_labels, name=result.seg_name)
+            # Creator step: add the new tracked layer to the viewer. The raw
+            # segmentation layer is preserved (both remain selectable).
+            viewer_win.add_labels(result.tracked_labels, name=result.seg_name)
             # Overlay tracks/lineage if measurements for this resource exist.
             try:
                 lineage = repo.read_tracks(session.dataset, result.seg_name)
