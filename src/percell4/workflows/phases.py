@@ -1627,6 +1627,30 @@ def write_staging_particles_parquet(
 # ── Phase 8: Export ─────────────────────────────────────────────────────
 
 
+def _ordered_csv_columns(
+    df: pd.DataFrame,
+    selected_csv_columns: list[str],
+    extra_identity: tuple[str, ...] = (),
+) -> list[str]:
+    """Identity columns + user-selected columns, de-duplicated, order-preserving.
+
+    Identity columns (``dataset``, ``cell_id``, ``label``, plus any
+    ``extra_identity`` such as the tracking columns) come first and are always
+    kept when present in ``df``, even if absent from ``selected_csv_columns``.
+    The user-selected columns follow in their configured order. Any column not
+    present in ``df`` is dropped. Shared by ``combined.csv`` and
+    ``complete_tracks.csv`` so both honour the column selection identically.
+    """
+    identity = ["dataset", "cell_id", "label", *extra_identity]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for c in [*identity, *selected_csv_columns]:
+        if c in df.columns and c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return ordered
+
+
 def export_run(
     run_folder: Path,
     config: WorkflowConfig,
@@ -1704,15 +1728,7 @@ def export_run(
         )
 
     # Build the CSV export subset.
-    identity_cols = [c for c in ("dataset", "cell_id", "label") if c in df.columns]
-    selected = [c for c in config.selected_csv_columns if c in df.columns]
-    # De-duplicate while preserving order.
-    csv_cols: list[str] = []
-    seen: set[str] = set()
-    for c in identity_cols + selected:
-        if c not in seen:
-            seen.add(c)
-            csv_cols.append(c)
+    csv_cols = _ordered_csv_columns(df, config.selected_csv_columns)
 
     combined_csv = run_folder / "combined.csv"
     try:
@@ -1829,11 +1845,19 @@ def export_run(
             complete_df = (
                 pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0]
             )
+            # Same column selection as combined.csv, plus the per-timepoint
+            # tracking identity columns (the whole point of this report). The
+            # one row per (track, timepoint) IS the per-timepoint analysis.
+            complete_cols = _ordered_csv_columns(
+                complete_df,
+                config.selected_csv_columns,
+                extra_identity=("timepoint", "track_id", "tree_id", "parent_track_id"),
+            )
             write_atomic(
                 run_folder / "complete_tracks.csv",
                 lambda tmp: complete_df.to_csv(
-                    tmp, index=False, float_format="%.6g", na_rep="",
-                    encoding="utf-8", lineterminator="\n",
+                    tmp, columns=complete_cols, index=False, float_format="%.6g",
+                    na_rep="", encoding="utf-8", lineterminator="\n",
                 ),
             )
         except Exception as e:

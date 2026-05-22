@@ -68,6 +68,37 @@ def test_export_writes_complete_tracks_csv(tmp_path):
     assert sorted(df["timepoint"]) == [0, 1, 2]
 
 
+def test_complete_tracks_respects_selected_columns(tmp_path):
+    """complete_tracks.csv carries only the selected columns + identity/track
+    columns — not every measured column (regression: it dumped all 50+)."""
+    run_folder = create_run_folder(tmp_path / "runs")
+    # Add an unselected measurement column that must be filtered out, plus a
+    # tree_id identity column that must be kept.
+    df = _staging_df()
+    df["GFP_max_intensity"] = 999.0          # measured but NOT selected
+    df["round_1_particle_count"] = 3          # measured but NOT selected
+    df["tree_id"] = df["track_id"]            # tracking identity -> kept
+    write_staging_parquet(run_folder, "DS1", df)
+    cfg = _config(tmp_path)  # selected_csv_columns = ["GFP_mean_intensity"]
+    meta = RunMetadata(run_id=run_folder.name, run_folder=run_folder,
+                       started_at=datetime.now(UTC), intersected_channels=["GFP"])
+
+    failure, _msg = export_run(run_folder, cfg, meta)
+    assert failure is None
+
+    out = pd.read_csv(run_folder / "complete_tracks.csv")
+    # Selected measurement column present; unselected ones absent.
+    assert "GFP_mean_intensity" in out.columns
+    assert "GFP_max_intensity" not in out.columns
+    assert "round_1_particle_count" not in out.columns
+    # Identity + per-timepoint tracking columns are always kept.
+    for col in ("dataset", "cell_id", "label", "timepoint", "track_id",
+                "tree_id", "parent_track_id"):
+        assert col in out.columns, col
+    # Still per-timepoint: one row per timepoint for the one complete track.
+    assert sorted(out["timepoint"]) == [0, 1, 2]
+
+
 def test_export_no_complete_tracks_file_when_untracked(tmp_path):
     run_folder = create_run_folder(tmp_path / "runs")
     # A non-time-lapse staging df: no track_id column.
