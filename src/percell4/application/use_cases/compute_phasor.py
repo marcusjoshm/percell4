@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.ndimage import median_filter
 
 from percell4.application.session import Session
 from percell4.domain.flim.phasor import compute_phasor
@@ -31,8 +30,9 @@ class PhasorResult:
 class ComputePhasor:
     """Compute phasor G/S from TCSPC decay data for a given channel.
 
-    Reads decay data from the repository, applies calibration and
-    median filtering, writes results to store.
+    Reads decay data from the repository, applies calibration, and writes
+    truly-unfiltered results to the store. Spatial filtering (median or
+    wavelet) is applied downstream as an opt-in view, not here.
     """
 
     def __init__(self, repo: DatasetRepository, session: Session) -> None:
@@ -113,9 +113,12 @@ class ComputePhasor:
             g_map = g_cal.astype(np.float32)
             s_map = s_cal.astype(np.float32)
 
-        # Spatial median filter (3x3)
-        g_map = median_filter(g_map, size=3).astype(np.float32)
-        s_map = median_filter(s_map, size=3).astype(np.float32)
+        # No spatial filtering here: the canonical /phasor/<ch>/{g,s} are
+        # written truly unfiltered. Median and wavelet filtering are
+        # mutually-exclusive, opt-in views derived from these raw maps at
+        # display time (phasor plot) and at lifetime-compute time — see
+        # domain/flim/phasor.median_filter_gs and ApplyWavelet. (A size=3
+        # median reproduces the legacy flimfret-equivalent output.)
 
         # Bin-aware write: upsample to native_shape so the canonical
         # /phasor/<ch>/{g,s} stays at native regardless of the bin the

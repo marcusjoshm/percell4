@@ -508,6 +508,75 @@ class TestComputePhasorInvalidatesWavelet:
         assert result.g_map.shape == (4, 4)
 
 
+# ── ComputePhasor: truly-unfiltered output ───────────────────
+
+
+class TestComputePhasorNoMedianFilter:
+    """The canonical /phasor/<ch>/{g,s} must be written truly unfiltered.
+
+    Regression guard for the FLIM filter-options change: ComputePhasor
+    used to apply an unconditional scipy.ndimage.median_filter(size=3)
+    before saving, so the 'unfiltered' cloud was secretly 3x3-median
+    filtered. Median filtering is now an opt-in downstream view.
+    """
+
+    def _make_decay_with_outlier(self) -> np.ndarray:
+        """4x4 decay, uniform except one pixel with a distinct lifetime.
+
+        The lone fast-decay pixel gives a (g, s) that differs sharply from
+        its neighbours, so a 3x3 median would visibly overwrite it.
+        """
+        H, W, T = 4, 4, 64
+        t = np.arange(T, dtype=np.float32)
+        decay = np.broadcast_to(
+            np.exp(-t / 8.0), (H, W, T)
+        ).astype(np.float32).copy()
+        decay[1, 1, :] = np.exp(-t / 1.5) * 1000.0  # outlier pixel
+        return decay
+
+    def test_saved_gs_equal_raw_compute_phasor(self):
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+        from percell4.domain.flim.phasor import compute_phasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        decay = self._make_decay_with_outlier()
+        repo.written_arrays["decay/ch0"] = decay
+        repo.disk_metadata = {}  # no calibration → identity transform
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1)
+
+        expected_g, expected_s = compute_phasor(decay, harmonic=1)
+        # No calibration and no low-photon pixels here, so the saved maps
+        # must equal the raw transform exactly. A 3x3 median would change
+        # the outlier pixel and its neighbours.
+        np.testing.assert_array_equal(repo.written_arrays["phasor/ch0/g"], expected_g)
+        np.testing.assert_array_equal(repo.written_arrays["phasor/ch0/s"], expected_s)
+
+    def test_outlier_pixel_survives(self):
+        """The distinct outlier pixel is preserved (not median-smoothed)."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+        from percell4.domain.flim.phasor import compute_phasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        decay = self._make_decay_with_outlier()
+        repo.written_arrays["decay/ch0"] = decay
+        repo.disk_metadata = {}
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1)
+
+        raw_g, _ = compute_phasor(decay, harmonic=1)
+        saved_g = repo.written_arrays["phasor/ch0/g"]
+        # Outlier pixel keeps its raw value; a median would replace it with
+        # the surrounding neighbourhood median.
+        assert saved_g[1, 1] == pytest.approx(float(raw_g[1, 1]))
+
+
 # ── RunPhasorGMM (U3) ────────────────────────────────────────
 
 
