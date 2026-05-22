@@ -585,6 +585,25 @@ class DatasetStore:
         """List all mask names under /masks/."""
         return self.list_groups("masks")
 
+    # ── Convenience: tracks (lineage tables) ──────────────────
+
+    def write_tracks(self, name: str, df: pd.DataFrame) -> int:
+        """Write a lineage table at /tracks/<name> (CSV-string, like measurements).
+
+        ``df`` is the per-track lineage table (track_id, tree_id, begin_t,
+        end_t, parent_track_id). Stored as a sibling of the matching
+        ``/labels/<name>`` tracked segmentation.
+        """
+        return self.write_dataframe(f"tracks/{name}", df)
+
+    def read_tracks(self, name: str) -> pd.DataFrame:
+        """Read the lineage table from /tracks/<name>."""
+        return self.read_dataframe(f"tracks/{name}")
+
+    def list_tracks(self) -> list[str]:
+        """List all lineage-table names under /tracks/."""
+        return self.list_groups("tracks")
+
     def set_mask_attrs(self, name: str, attrs: dict[str, Any]) -> None:
         """Write HDF5 attributes onto an existing /masks/<name> dataset.
 

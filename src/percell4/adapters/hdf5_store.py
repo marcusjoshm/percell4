@@ -171,6 +171,19 @@ class Hdf5DatasetRepository:
         except KeyError:
             return None
 
+    # ── Tracks (lineage tables) ──────────────────────────────
+
+    def write_tracks(
+        self, handle: DatasetHandle, name: str, df: pd.DataFrame
+    ) -> None:
+        self._store(handle).write_tracks(name, df)
+
+    def read_tracks(self, handle: DatasetHandle, name: str) -> pd.DataFrame:
+        return self._store(handle).read_tracks(name)
+
+    def list_tracks(self, handle: DatasetHandle) -> list[str]:
+        return self._store(handle).list_tracks()
+
     # ── Generic arrays ───────────────────────────────────────
 
     def write_array(

@@ -121,6 +121,22 @@ class DatasetRepository(Protocol):
         """Read the measurements DataFrame, or None if not present."""
         ...
 
+    # ── Tracks (lineage tables) ──────────────────────────────
+
+    def write_tracks(
+        self, handle: DatasetHandle, name: str, df: pd.DataFrame
+    ) -> None:
+        """Write a per-track lineage table at /tracks/<name>."""
+        ...
+
+    def read_tracks(self, handle: DatasetHandle, name: str) -> pd.DataFrame:
+        """Read the lineage table from /tracks/<name>. Raises KeyError if missing."""
+        ...
+
+    def list_tracks(self, handle: DatasetHandle) -> list[str]:
+        """List all lineage-table names under /tracks/."""
+        ...
+
     # ── Generic arrays (phasor maps, decay, etc.) ────────────
 
     def write_array(

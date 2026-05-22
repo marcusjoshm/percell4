@@ -623,3 +623,24 @@ def test_time_stacked_intensity_view_bin_per_frame(store):
     assert binned.shape == (2, 2, 2, 2)
     # Each binned pixel sums 2x2 source ones.
     assert binned[0, 0, 0, 0] == 4.0
+
+
+# ── Tracks (lineage tables) (U7) ──────────────────────────────
+
+
+def test_write_read_list_tracks(store):
+    """A lineage table round-trips through /tracks/<name>."""
+    df = pd.DataFrame(
+        {
+            "track_id": [1, 2, 3],
+            "tree_id": [0, 0, 0],
+            "begin_t": [0, 1, 1],
+            "end_t": [2, 2, 2],
+            "parent_track_id": [-1, 1, 1],
+        }
+    )
+    store.write_tracks("cellpose_tracked", df)
+
+    assert store.list_tracks() == ["cellpose_tracked"]
+    back = store.read_tracks("cellpose_tracked")
+    pd.testing.assert_frame_equal(back, df)
