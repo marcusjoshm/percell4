@@ -57,6 +57,87 @@ def edge_and_interior_masks():
     return masks
 
 
+class FakeSegmenter:
+    """Returns the input as its own label array; records per-call shapes."""
+
+    def __init__(self) -> None:
+        self.call_shapes: list[tuple] = []
+
+    def run(self, image, model_type="cyto3", diameter=None, gpu=False):
+        self.call_shapes.append(image.shape)
+        return image.astype(np.int32)
+
+
+def _interior_cell(value=1, h=20, w=20, box=(8, 12, 8, 12)):
+    arr = np.zeros((h, w), dtype=np.int32)
+    y0, y1, x0, x1 = box
+    arr[y0:y1, x0:x1] = value
+    return arr
+
+
+# ── Time-lapse: segment every timepoint (U5) ──────────────────────
+
+
+class TestRunInferenceStack:
+    def test_runs_inference_per_frame_and_stacks(self, session):
+        seg = FakeSegmenter()
+        uc = SegmentCells(FakeRepo(), session, segmenter=seg)
+        stack = np.stack(
+            [np.full((8, 8), t + 1, dtype=np.int32) for t in range(3)], axis=0
+        )
+
+        raw = uc.run_inference_stack(stack)
+
+        assert raw.shape == (3, 8, 8)
+        # Each frame handed to the segmenter was 2D.
+        assert seg.call_shapes == [(8, 8), (8, 8), (8, 8)]
+
+    def test_progress_callback_per_frame(self, session):
+        seg = FakeSegmenter()
+        uc = SegmentCells(FakeRepo(), session, segmenter=seg)
+        stack = np.zeros((3, 8, 8), dtype=np.int32)
+        calls = []
+        uc.run_inference_stack(stack, progress_callback=lambda t, n: calls.append((t, n)))
+        assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
+class TestFinalizeTimeLapse:
+    def test_finalize_stack_writes_time_axis(self, session):
+        repo = FakeRepo()
+        uc = SegmentCells(repo, session)
+        stack = np.stack([_interior_cell(), _interior_cell()], axis=0)  # (2,20,20)
+
+        result = uc.finalize(stack, min_area=0)
+
+        assert repo.labels[result.seg_name].shape == (2, 20, 20)
+        assert result.n_cells == 1
+
+    def test_finalize_stack_relabels_each_frame_independently(self, session):
+        repo = FakeRepo()
+        uc = SegmentCells(repo, session)
+        f0 = _interior_cell()  # 1 cell
+        f1 = _interior_cell()
+        f1[8:12, 14:18] = 2  # second interior cell in frame 1
+        stack = np.stack([f0, f1], axis=0)
+
+        result = uc.finalize(stack, min_area=0)
+
+        stored = repo.labels[result.seg_name]
+        # n_cells is the max per-frame count.
+        assert result.n_cells == 2
+        assert int(stored[0].max()) == 1
+        assert int(stored[1].max()) == 2
+
+    def test_finalize_single_timepoint_still_2d(self, session, edge_and_interior_masks):
+        """Regression: a 2D raw mask still writes a 2D label resource."""
+        repo = FakeRepo()
+        uc = SegmentCells(repo, session)
+
+        result = uc.finalize(edge_and_interior_masks, min_area=0)
+
+        assert repo.labels[result.seg_name].ndim == 2
+
+
 class TestFinalizeEdgeRemoval:
     def test_default_removes_edge_cells(self, session, edge_and_interior_masks):
         repo = FakeRepo()

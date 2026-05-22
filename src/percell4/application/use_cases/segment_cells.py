@@ -70,6 +70,55 @@ class SegmentCells:
             )
         return self._segmenter.run(image, model_type=model_type, diameter=diameter, gpu=gpu)
 
+    def run_inference_stack(
+        self,
+        images: NDArray,
+        model_type: str = "cyto3",
+        diameter: float | None = None,
+        gpu: bool = False,
+        progress_callback=None,
+    ) -> NDArray[np.int32]:
+        """Run segmentation on every timepoint of a ``(T, H, W)`` stack.
+
+        Returns a ``(T, H, W)`` raw-mask stack (per-frame Cellpose ids,
+        intentionally inconsistent across frames — tracking unifies them).
+        CPU-heavy; call from a worker thread. ``progress_callback(t, n_t)``
+        is invoked after each frame when supplied.
+        """
+        if self._segmenter is None:
+            raise ValueError(
+                "No segmenter injected. Pass a Segmenter at construction "
+                "(e.g., CellposeSegmenter from adapters/cellpose.py)."
+            )
+        n_t = len(images)
+        frames = []
+        for t in range(n_t):
+            frames.append(
+                self._segmenter.run(
+                    images[t], model_type=model_type, diameter=diameter, gpu=gpu
+                )
+            )
+            if progress_callback is not None:
+                progress_callback(t + 1, n_t)
+        return np.stack(frames, axis=0).astype(np.int32)
+
+    @staticmethod
+    def _postprocess_frame(
+        raw: NDArray[np.int32], min_area: int, remove_edge_cells: bool
+    ) -> tuple[NDArray[np.int32], int, int]:
+        """Post-process one 2D label frame: edge filter, small filter, relabel.
+
+        Returns ``(labels, edge_removed, small_removed)``.
+        """
+        if remove_edge_cells:
+            labels, edge_removed = filter_edge_cells(raw)
+        else:
+            labels = raw.copy()
+            edge_removed = 0
+        labels, small_removed = filter_small_cells(labels, min_area=min_area)
+        labels = relabel_sequential(labels)
+        return labels, edge_removed, small_removed
+
     def finalize(
         self,
         raw_masks: NDArray[np.int32],
@@ -101,14 +150,29 @@ class SegmentCells:
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
-        if remove_edge_cells:
-            labels, edge_removed = filter_edge_cells(raw_masks)
-        else:
-            labels = raw_masks.copy()
+        if raw_masks.ndim == 3:
+            # Time-lapse: post-process each frame independently and stack on
+            # the leading T axis. Per-frame ids are intentionally inconsistent
+            # across frames; tracking (TrackCells) makes them consistent.
+            frame_labels = []
             edge_removed = 0
-        labels, small_removed = filter_small_cells(labels, min_area=min_area)
-        labels = relabel_sequential(labels)
-        n_cells = int(labels.max())
+            small_removed = 0
+            per_frame_counts = []
+            for t in range(raw_masks.shape[0]):
+                lab, er, sr = self._postprocess_frame(
+                    raw_masks[t], min_area, remove_edge_cells
+                )
+                frame_labels.append(lab)
+                edge_removed += er
+                small_removed += sr
+                per_frame_counts.append(int(lab.max()))
+            labels = np.stack(frame_labels, axis=0).astype(np.int32)
+            n_cells = max(per_frame_counts) if per_frame_counts else 0
+        else:
+            labels, edge_removed, small_removed = self._postprocess_frame(
+                raw_masks, min_area, remove_edge_cells
+            )
+            n_cells = int(labels.max())
 
         # Default name picks up bin_suffix(); explicit ``name`` from the
         # GUI is assumed to already be the user's final choice (the

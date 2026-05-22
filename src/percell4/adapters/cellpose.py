@@ -123,6 +123,37 @@ def run_cellpose(
     return np.asarray(masks, dtype=np.int32)
 
 
+def run_cellpose_stack(
+    images: NDArray,
+    model_type: str | None = None,
+    diameter: float | None = None,
+    gpu: bool = False,
+    progress_callback=None,
+    **kwargs,
+) -> NDArray[np.int32]:
+    """Segment each timepoint of a ``(T, H, W)`` stack -> ``(T, H, W)`` int32.
+
+    Builds the Cellpose model once and reuses it across frames (avoids the
+    per-frame construction cost). Each frame is segmented independently, so
+    the per-frame label ids are NOT consistent across time — tracking
+    (TrackCells) makes them consistent. ``progress_callback(done, total)``
+    is invoked after each frame when supplied.
+
+    A ``(T, H, W)`` stack must NOT be passed to :func:`run_cellpose`
+    directly: that function reads a 3D array as ``(H, W, C)`` multichannel.
+    """
+    model = build_cellpose_model(model_type=model_type, gpu=gpu)
+    frames = []
+    n = len(images)
+    for t in range(n):
+        frames.append(
+            run_cellpose(images[t], diameter=diameter, model=model, **kwargs)
+        )
+        if progress_callback is not None:
+            progress_callback(t + 1, n)
+    return np.stack(frames, axis=0).astype(np.int32)
+
+
 class CellposeSegmenter:
     """Segmenter port implementation backed by Cellpose.
 

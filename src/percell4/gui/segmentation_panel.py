@@ -421,19 +421,37 @@ class SegmentationPanel(QWidget):
         self._cellpose_pending_name = chosen_name
         self._cellpose_pending_bin = active_bin
 
+        import numpy as np
+
         image = active_layer.data
         model_type = self._cp_model.currentText()
         diameter = self._cp_diameter.value() if self._cp_diameter.value() > 0 else None
         gpu = self._cp_gpu.isChecked()
 
-        self._show_status(f"Running Cellpose ({model_type})...")
-
         from percell4.gui.workers import Worker
-        from percell4.adapters.cellpose import run_cellpose
+        from percell4.adapters.cellpose import run_cellpose, run_cellpose_stack
 
-        self._worker = Worker(
-            run_cellpose, image, model_type=model_type, diameter=diameter, gpu=gpu,
-        )
+        # A time-lapse channel layer is (T, H, W): segment every frame and
+        # write one (T, H, W) raw-label resource. A 2D layer is the historical
+        # single-frame path. (run_cellpose reads a 3D array as multichannel,
+        # so the stack must go through run_cellpose_stack.)
+        if np.asarray(image).ndim == 3:
+            n_t = int(np.asarray(image).shape[0])
+            self._show_status(
+                f"Running Cellpose ({model_type}) on {n_t} timepoints..."
+            )
+            self._worker = Worker(
+                run_cellpose_stack,
+                image,
+                model_type=model_type,
+                diameter=diameter,
+                gpu=gpu,
+            )
+        else:
+            self._show_status(f"Running Cellpose ({model_type})...")
+            self._worker = Worker(
+                run_cellpose, image, model_type=model_type, diameter=diameter, gpu=gpu,
+            )
         self._worker.finished.connect(self._on_cellpose_done)
         self._worker.error.connect(self._on_cellpose_error)
         self._worker.start()
