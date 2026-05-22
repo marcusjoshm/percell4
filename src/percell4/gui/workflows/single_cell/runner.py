@@ -53,6 +53,7 @@ from percell4.workflows.phases import (
     datasets_without_failures,
     export_run,
     measure_one,
+    pick_existing_segmentation,
     record_failure,
     segment_one,
     threshold_compute_one,
@@ -143,6 +144,35 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             entry.name, self._config.cellpose_segmentation_name
         )
 
+    def _detect_existing_segmentation(self, entry) -> str | None:
+        """Pick a pre-existing segmentation for a dataset, or None to segment it.
+
+        Reads the dataset's label inventory and applies
+        ``pick_existing_segmentation`` (prefer ``*_tracked``). Returns None
+        when there are no labels (segment normally) or the store can't be
+        read. Logs a warning when auto-selecting among multiple untracked
+        segmentations so the user knows to use the resume picker to override.
+        """
+        try:
+            names = DatasetStore(entry.h5_path).list_labels()
+        except Exception:
+            logger.exception("could not list labels for %s", entry.name)
+            return None
+        seg = pick_existing_segmentation(names)
+        if (
+            seg is not None
+            and not any(n.endswith("_tracked") for n in names)
+            and len(names) > 1
+        ):
+            logger.warning(
+                "dataset %s has multiple segmentations %r and no tracked "
+                "layer; auto-selected %r (use the resume entry to override)",
+                entry.name,
+                names,
+                seg,
+            )
+        return seg
+
     # ── Phase generator ───────────────────────────────────────
 
     def _phase_generator(
@@ -178,6 +208,15 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         # monkey-patched ``segment_one`` fixtures the tests use.
         active = datasets_without_failures(self._working_entries, meta)
         for idx, entry in enumerate(active):
+            # Auto-skip (U13/R10): if this dataset already has a segmentation
+            # on disk, skip Cellpose + seg-QC and use the existing one
+            # (preferring a tracked layer). TIFF-pending datasets were just
+            # compressed and have no labels yet, so they segment normally.
+            existing = self._detect_existing_segmentation(entry)
+            if existing is not None:
+                self._effective_seg[entry.name] = existing
+                continue
+
             if self._interactive_qc:
                 yield PhaseRequest(
                     kind=PhaseKind.INTERACTIVE,

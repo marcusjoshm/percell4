@@ -206,6 +206,25 @@ def _read_segmentation_channel_stack(
     return np.stack(frames, axis=0)
 
 
+def pick_existing_segmentation(label_names: list[str]) -> str | None:
+    """Pick the default segmentation to use from a dataset's label inventory.
+
+    Rule: prefer a tracked layer (``*_tracked``); else, if exactly one
+    segmentation, use it; else (multiple untracked, no tracked) use the
+    lexicographically first — the caller logs a warning and the resume
+    picker (U12) is where the user overrides. Returns ``None`` when there is
+    no segmentation (``label_names`` is empty), which signals "segment this
+    dataset normally". Note ``store.list_labels()`` already excludes masks
+    (they live in a separate ``/masks/`` group), so no subtraction is needed.
+    """
+    if not label_names:
+        return None
+    tracked = sorted(n for n in label_names if n.endswith("_tracked"))
+    if tracked:
+        return tracked[0]
+    return sorted(label_names)[0]
+
+
 def _postprocess_labels(
     labels: NDArray,
     cfg: CellposeSettings,

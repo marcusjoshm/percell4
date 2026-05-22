@@ -282,27 +282,38 @@ def test_runner_records_failure_and_continues_other_datasets(
     import percell4.gui.workflows.single_cell.runner as runner_mod
     import percell4.workflows.phases as phases
 
-    entries = _make_two_datasets(tmp_path)
+    # DS1 has NO pre-written labels, so the segment phase runs for it (and
+    # the flaky double fails it). DS2 keeps its labels, so the U13 auto-skip
+    # uses them and DS2 succeeds downstream without segmenting.
+    p1 = tmp_path / "DS1.h5"
+    s1 = DatasetStore(p1)
+    s1.create(metadata={"channel_names": ["GFP", "RFP"]})
+    s1.write_array(
+        "intensity", np.zeros((2, 100, 100), dtype=np.float32),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+    p2 = tmp_path / "DS2.h5"
+    _make_dataset(p2, "DS2")
+    entries = [
+        WorkflowDatasetEntry(name="DS1", source=DatasetSource.H5_EXISTING,
+                             h5_path=p1, channel_names=["GFP", "RFP"]),
+        WorkflowDatasetEntry(name="DS2", source=DatasetSource.H5_EXISTING,
+                             h5_path=p2, channel_names=["GFP", "RFP"]),
+    ]
     run_folder = create_run_folder(tmp_path / "runs")
     cfg = _make_config(entries, tmp_path / "runs")
     meta = _make_metadata(run_folder)
 
-    # Fake segment_one: DS1 fails with SEGMENTATION_EMPTY, DS2 succeeds.
+    # Fake segment_one: the only dataset that segments (DS1, no labels) fails
+    # with SEGMENTATION_EMPTY. (**kwargs absorbs edge_margin_px/seg_name.)
     from percell4.workflows.failures import DatasetFailure
 
-    call_counter = {"n": 0}
-
-    def _flaky_segment(store, cfg_, cellpose_model=None, channel_idx=0, edge_mode=None):
-        call_counter["n"] += 1
-        if call_counter["n"] == 1:
-            return (
-                np.zeros((100, 100), dtype=np.int32),
-                DatasetFailure.SEGMENTATION_EMPTY,
-                "ds1 empty",
-            )
-        # DS2 succeeds — leave the pre-written labels alone
-        labels = store.read_labels("cellpose_qc")
-        return labels, None, "ok"
+    def _flaky_segment(store, cfg_, **kwargs):
+        return (
+            np.zeros((100, 100), dtype=np.int32),
+            DatasetFailure.SEGMENTATION_EMPTY,
+            "ds1 empty",
+        )
 
     original_segment = phases.segment_one
     phases.segment_one = _flaky_segment
