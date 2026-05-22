@@ -373,6 +373,24 @@ class ViewerWindow(QObject):
             **kwargs,
         )
 
+    def update_labels(self, data, name: str) -> None:
+        """Replace the data of an existing labels layer in place, or add it.
+
+        Used when a Creator overwrites a segmentation resource (e.g. tracking
+        replacing the raw labels): updates the existing napari layer rather
+        than adding a duplicate, preserving the slider position and layer
+        settings.
+        """
+        import napari
+
+        self._ensure_viewer()
+        for layer in self._viewer.layers:
+            if isinstance(layer, napari.layers.Labels) and layer.name == name:
+                layer.data = data
+                layer.refresh()
+                return
+        self.add_labels(data, name=name)
+
     def add_tracks(self, data, graph: dict | None = None, name: str = "tracks", **kwargs) -> None:
         """Add (or replace) a napari Tracks layer for lineage visualization.
 

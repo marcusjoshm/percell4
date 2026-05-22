@@ -44,12 +44,18 @@ class TrackCells:
     def execute(
         self, raw_seg_name: str, tracked_name: str | None = None
     ) -> TrackResult:
-        """Track ``raw_seg_name`` and write a tracked segmentation + lineage.
+        """Track ``raw_seg_name`` and write the tracked labels + lineage.
 
-        ``tracked_name`` defaults to ``"<raw>_tracked"``. Raises
-        :class:`NoDatasetError` when no dataset is loaded and ``ValueError``
-        when the dataset is not time-lapse or the raw segmentation is not a
-        ``(T, H, W)`` stack.
+        Replaces the segmentation **in place** by default (``tracked_name``
+        defaults to ``raw_seg_name``): the per-frame Cellpose labels are
+        overwritten with track-consistent ids and a ``/tracks/<name>``
+        lineage table is written alongside, so there is exactly one
+        segmentation resource — not a separate ``_tracked`` copy. Pass an
+        explicit ``tracked_name`` to write to a different resource instead.
+
+        Raises :class:`NoDatasetError` when no dataset is loaded and
+        ``ValueError`` when the dataset is not time-lapse or the raw
+        segmentation is not a ``(T, H, W)`` stack.
         """
         handle = self._session.dataset
         if handle is None:
@@ -82,7 +88,9 @@ class TrackCells:
         tracked = relabel_stack_by_track(raw, track_df)
         lineage = build_lineage_table(track_df, split_df)
 
-        seg_name = tracked_name or f"{raw_seg_name}_tracked"
+        # Replace the segmentation in place by default — overwrite the raw
+        # labels rather than spawning a parallel "<name>_tracked" resource.
+        seg_name = tracked_name or raw_seg_name
 
         # Creator: store labels + lineage, refresh inventory, set active.
         self._repo.write_labels(handle, seg_name, tracked)

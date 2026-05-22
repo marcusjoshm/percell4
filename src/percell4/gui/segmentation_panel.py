@@ -152,9 +152,9 @@ class SegmentationPanel(QWidget):
         self._btn_track = QPushButton("Track Cells Across Timepoints")
         self._btn_track.setToolTip(
             "Requires a time-lapse dataset (filenames with _tN tokens) and a\n"
-            "segmentation covering every timepoint. Writes a new "
-            "'<segmentation>_tracked' resource where the label value is the "
-            "track ID."
+            "segmentation covering every timepoint. Replaces the active\n"
+            "segmentation in place: each cell's label value becomes its track\n"
+            "ID (stable across timepoints) and a lineage table is recorded."
         )
         self._btn_track.clicked.connect(self._on_track_cells)
         track_layout.addWidget(self._btn_track)
@@ -555,8 +555,9 @@ class SegmentationPanel(QWidget):
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
         if viewer_win is not None:
-            # Creator step: reflect the new tracked labels in the viewer.
-            viewer_win.add_labels(result.tracked_labels, name=result.seg_name)
+            # Creator step: tracking replaces the segmentation in place, so
+            # update the existing napari layer rather than adding a duplicate.
+            viewer_win.update_labels(result.tracked_labels, name=result.seg_name)
             # Overlay tracks/lineage if measurements for this resource exist.
             try:
                 lineage = repo.read_tracks(session.dataset, result.seg_name)
@@ -647,6 +648,18 @@ class SegmentationPanel(QWidget):
             return
         viewer_win.viewer.layers.selection.active = labels_layer
 
+    def _current_timepoint(self) -> int:
+        """The displayed timepoint (napari dims axis 0), or 0 if not time-lapse."""
+        if self._launcher is None:
+            return 0
+        viewer_win = self._launcher._windows.get("viewer")
+        if viewer_win is None or viewer_win.viewer is None:
+            return 0
+        dims = viewer_win.viewer.dims
+        if dims.ndim >= 3 and len(dims.current_step) > 0:
+            return int(dims.current_step[0])
+        return 0
+
     def _on_delete_selected_label(self) -> None:
         labels_layer = self._get_active_labels_layer()
         if labels_layer is None:
@@ -657,13 +670,27 @@ class SegmentationPanel(QWidget):
             self._show_status("No label selected (click a cell first)")
             return
         data = labels_layer.data.copy()
-        count = int(np.sum(data == selected_id))
-        data[data == selected_id] = 0
+        # For a time-lapse (T, H, W) labels layer, delete only within the
+        # displayed timepoint — the same label id is a different physical cell
+        # in other frames (raw seg) or a cell that legitimately persists
+        # (tracked seg), so it must not be wiped across the whole stack.
+        if data.ndim == 3:
+            t = max(0, min(self._current_timepoint(), data.shape[0] - 1))
+            frame = data[t]
+            count = int(np.sum(frame == selected_id))
+            frame[frame == selected_id] = 0
+            scope = f" at timepoint {t}"
+        else:
+            count = int(np.sum(data == selected_id))
+            data[data == selected_id] = 0
+            scope = ""
         labels_layer.data = data
         labels_layer.selected_label = 0
         labels_layer.refresh()
         self._persist_labels_layer(labels_layer)
-        self._show_status(f"Deleted label {selected_id} ({count} pixels removed)")
+        self._show_status(
+            f"Deleted label {selected_id} ({count} pixels removed{scope})"
+        )
 
     def _on_add_new_label(self) -> None:
         from qtpy.QtCore import QTimer
