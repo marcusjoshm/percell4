@@ -177,6 +177,16 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             )
         return seg
 
+    def _is_timelapse(self, entry) -> bool:
+        """True when the dataset has more than one acquisition timepoint."""
+        try:
+            return int(
+                DatasetStore(entry.h5_path).metadata.get("n_timepoints", 1) or 1
+            ) > 1
+        except Exception:
+            logger.exception("could not read n_timepoints for %s", entry.name)
+            return False
+
     def _should_track(self, entry) -> bool:
         """True when a dataset needs tracking: time-lapse and not yet tracked.
 
@@ -325,7 +335,13 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     # no GroupingResult to QC. Skip.
                     continue
 
-                if self._interactive_qc:
+                # Interactive threshold-QC uses the single-frame
+                # ThresholdQCController, which can't review a (T,H,W) stack or
+                # the per-timepoint grouping dict. For time-lapse datasets,
+                # apply thresholds through the headless per-frame path (U4) —
+                # correct and tested — even in interactive mode. Single-
+                # timepoint datasets keep the interactive QC controller.
+                if self._interactive_qc and not self._is_timelapse(entry):
                     yield PhaseRequest(
                         kind=PhaseKind.INTERACTIVE,
                         phase_name=f"threshold_qc:{round_spec.name}",
@@ -359,6 +375,15 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         if cfg.dilute_settings is not None and self._interactive_qc:
             active = datasets_without_failures(self._working_entries, meta)
             for idx, entry in enumerate(active):
+                # The dilute controller is single-frame and has no headless
+                # per-frame equivalent; skip it for time-lapse datasets (the
+                # per-frame dilute mask is deferred — see plan Scope).
+                if self._is_timelapse(entry):
+                    logger.info(
+                        "skipping interactive dilute for time-lapse dataset %s",
+                        entry.name,
+                    )
+                    continue
                 yield PhaseRequest(
                     kind=PhaseKind.INTERACTIVE,
                     phase_name="dilute",
