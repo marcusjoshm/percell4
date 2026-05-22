@@ -35,6 +35,7 @@ __all__ = [
     "build_napari_graph",
     "build_graph_from_lineage",
     "build_tracks_array",
+    "select_complete_tracks",
 ]
 
 
@@ -99,6 +100,56 @@ def build_tracks_array(measurements: pd.DataFrame) -> NDArray:
         return np.empty((0, 4), dtype=float)
     sub = sub.sort_values(["track_id", "timepoint"])
     return sub.to_numpy(dtype=float)
+
+
+def select_complete_tracks(
+    measurements: pd.DataFrame, lineage_df: pd.DataFrame, n_timepoints: int
+) -> pd.DataFrame:
+    """Return the long-format measurement rows for *complete* tracks only.
+
+    A complete track is followed cleanly through the whole movie: present in
+    **every** timepoint (no gaps), not a division daughter
+    (``parent_track_id == NO_PARENT``), and never itself a division parent.
+
+    ``measurements`` is one dataset's per-``(timepoint, track_id)`` rows (must
+    carry ``timepoint`` and ``track_id`` columns); ``lineage_df`` is that
+    dataset's ``/tracks`` table. Returns the subset of ``measurements`` for
+    the qualifying tracks (empty when none qualify or the inputs lack the
+    required columns).
+    """
+    if (
+        measurements is None
+        or measurements.empty
+        or not {"timepoint", "track_id"} <= set(measurements.columns)
+        or lineage_df is None
+        or lineage_df.empty
+        or n_timepoints < 1
+    ):
+        empty = measurements.iloc[0:0] if measurements is not None else pd.DataFrame()
+        return empty
+
+    # Tracks that divide (appear as a parent of any daughter) are excluded.
+    parents = {
+        int(p) for p in lineage_df["parent_track_id"].astype(int) if p != NO_PARENT
+    }
+    eligible = {
+        int(row["track_id"])
+        for _, row in lineage_df.iterrows()
+        if int(row["parent_track_id"]) == NO_PARENT
+        and int(row["track_id"]) not in parents
+    }
+
+    # Require a row at every timepoint (no gaps; this also implies the track
+    # spans begin_t == 0 to end_t == n_timepoints - 1).
+    full = set(range(n_timepoints))
+    covered = {
+        int(track_id)
+        for track_id, grp in measurements.groupby("track_id")
+        if set(grp["timepoint"].astype(int)) >= full
+    }
+
+    keep = eligible & covered
+    return measurements[measurements["track_id"].astype(int).isin(list(keep))]
 
 
 def build_napari_graph(split_df: pd.DataFrame) -> dict[int, list[int]]:

@@ -1802,6 +1802,49 @@ def export_run(
             message=str(e),
         )
 
+    # Complete-tracks CSV — tracked (time-lapse) datasets only. One row per
+    # (track, timepoint) for tracks followed cleanly through every timepoint
+    # (no gaps, not a division daughter, never a division parent). Derived
+    # per dataset from the staged measurements (track_id / parent_track_id /
+    # timepoint), so no per-dataset store re-open is needed. Non-fatal.
+    if "track_id" in df.columns and "timepoint" in df.columns:
+        try:
+            from percell4.domain.tracking.lineage import select_complete_tracks
+
+            parts: list[pd.DataFrame] = []
+            for _ds_name, ds_df in df.groupby("dataset", observed=True):
+                if "parent_track_id" not in ds_df.columns:
+                    continue
+                ds_df = ds_df.dropna(subset=["track_id"])
+                if ds_df.empty:
+                    continue
+                lineage = ds_df.groupby("track_id", as_index=False)[
+                    "parent_track_id"
+                ].first()
+                n_timepoints = int(ds_df["timepoint"].max()) + 1
+                sub = select_complete_tracks(ds_df, lineage, n_timepoints)
+                if not sub.empty:
+                    parts.append(sub)
+            complete_df = (
+                pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0]
+            )
+            write_atomic(
+                run_folder / "complete_tracks.csv",
+                lambda tmp: complete_df.to_csv(
+                    tmp, index=False, float_format="%.6g", na_rep="",
+                    encoding="utf-8", lineterminator="\n",
+                ),
+            )
+        except Exception as e:
+            logger.exception("complete_tracks.csv write failed")
+            record_failure(
+                metadata,
+                dataset_name="<export>",
+                phase_name="complete_tracks",
+                failure=DatasetFailure.MEASUREMENT_ERROR,
+                message=str(e),
+            )
+
     # Particles export (U7) — concat the per-dataset particle staging
     # files into particles.parquet + particles.csv when present. Errors
     # are recorded but non-fatal (measurements.parquet has landed).
