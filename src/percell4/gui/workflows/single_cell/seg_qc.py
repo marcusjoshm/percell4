@@ -136,9 +136,21 @@ class SegmentationQCController(QObject):
 
         try:
             self._store = DatasetStore(self._entry.h5_path)
-            self._intensity = self._store.read_channel(
-                "intensity", self._channel_idx
-            )
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            if n_timepoints > 1:
+                # Time-lapse: read the seg channel as a (T,H,W) stack via the
+                # per-frame reader (read_channel raises on the 4D layout).
+                from percell4.workflows.phases import (
+                    _read_segmentation_channel_stack,
+                )
+
+                self._intensity = _read_segmentation_channel_stack(
+                    self._store, self._channel_idx, n_timepoints
+                )
+            else:
+                self._intensity = self._store.read_channel(
+                    "intensity", self._channel_idx
+                )
             self._labels = self._store.read_labels(self._seg_name)
         except Exception as e:
             logger.exception("seg QC failed to load dataset %s", self._entry.name)
@@ -376,6 +388,16 @@ class SegmentationQCController(QObject):
 
     # ── Edit handlers ─────────────────────────────────────────
 
+    def _current_timepoint(self) -> int:
+        """Displayed timepoint (napari dims axis 0), or 0 if not time-lapse."""
+        viewer = self._viewer_win.viewer
+        if viewer is None:
+            return 0
+        dims = viewer.dims
+        if dims.ndim >= 3 and len(dims.current_step) > 0:
+            return int(dims.current_step[0])
+        return 0
+
     def _on_delete_selected(self) -> None:
         layer = self._labels_layer()
         if layer is None:
@@ -384,7 +406,14 @@ class SegmentationQCController(QObject):
         if selected_id == 0:
             return
         data = np.asarray(layer.data).copy()
-        data[data == selected_id] = 0
+        # Time-lapse: delete only within the displayed timepoint (the same
+        # label id is a different physical cell in other frames).
+        if data.ndim == 3:
+            t = max(0, min(self._current_timepoint(), data.shape[0] - 1))
+            frame = data[t]
+            frame[frame == selected_id] = 0
+        else:
+            data[data == selected_id] = 0
         layer.data = data
         layer.selected_label = 0
         self._schedule_refresh()
@@ -409,16 +438,29 @@ class SegmentationQCController(QObject):
         layer = self._labels_layer()
         if layer is None:
             return
-        data = np.asarray(layer.data, dtype=np.int32)
-        new_data = relabel_sequential(data)
-        layer.data = new_data
+        data = np.asarray(layer.data, dtype=np.int32).copy()
+        # Time-lapse: renumber only the displayed frame (seg-QC runs before
+        # tracking, so per-frame raw ids are independent anyway).
+        if data.ndim == 3:
+            t = max(0, min(self._current_timepoint(), data.shape[0] - 1))
+            data[t] = relabel_sequential(data[t])
+        else:
+            data = relabel_sequential(data)
+        layer.data = data
         self._schedule_refresh()
 
     def _on_cleanup_preview(self) -> None:
         layer = self._labels_layer()
         if layer is None or self._cleanup_status_label is None:
             return
-        data = np.asarray(layer.data, dtype=np.int32)
+        full = np.asarray(layer.data, dtype=np.int32)
+        # Time-lapse: preview removals only in the displayed frame.
+        tp = None
+        if full.ndim == 3:
+            tp = max(0, min(self._current_timepoint(), full.shape[0] - 1))
+            data = full[tp]
+        else:
+            data = full
         margin = self._cleanup_margin.value() if self._cleanup_margin else 0
         min_area = self._cleanup_min_area.value() if self._cleanup_min_area else 0
 
@@ -448,8 +490,13 @@ class SegmentationQCController(QObject):
                 self._cleanup_apply_btn.setEnabled(False)
             return
 
-        removed_mask = (data > 0) & (filtered == 0)
-        highlight = removed_mask.astype(np.int32)
+        removed_2d = ((data > 0) & (filtered == 0)).astype(np.int32)
+        # Build a slider-aligned overlay; only the displayed frame is marked.
+        if tp is not None:
+            highlight = np.zeros(full.shape, dtype=np.int32)
+            highlight[tp] = removed_2d
+        else:
+            highlight = removed_2d
         viewer.add_labels(
             highlight,
             name=_LAYER_CLEANUP_PREVIEW,
@@ -471,7 +518,14 @@ class SegmentationQCController(QObject):
         layer = self._labels_layer()
         if layer is None:
             return
-        data = np.asarray(layer.data, dtype=np.int32)
+        full = np.asarray(layer.data, dtype=np.int32).copy()
+        # Time-lapse: clean up only the displayed frame.
+        tp = None
+        if full.ndim == 3:
+            tp = max(0, min(self._current_timepoint(), full.shape[0] - 1))
+            data = full[tp]
+        else:
+            data = full
         margin = self._cleanup_margin.value() if self._cleanup_margin else 0
         min_area = self._cleanup_min_area.value() if self._cleanup_min_area else 0
 
@@ -482,7 +536,12 @@ class SegmentationQCController(QObject):
             filtered, _ = filter_small_cells(filtered, min_area=min_area)
         filtered = relabel_sequential(filtered)
 
-        layer.data = filtered
+        if tp is not None:
+            full[tp] = filtered
+            out_data = full
+        else:
+            out_data = filtered
+        layer.data = out_data
         self._schedule_refresh()
 
         # Clear the preview layer.
