@@ -19,3 +19,8 @@ def app_icon_path() -> Path:
     this package are consumed by PyInstaller when building standalone bundles.
     """
     return resource_path("percell4_logo.png")
+
+
+def splash_image_path() -> Path:
+    """Source image for the startup splash screen (the PerCell4 logo)."""
+    return resource_path("percell4_logo.png")
