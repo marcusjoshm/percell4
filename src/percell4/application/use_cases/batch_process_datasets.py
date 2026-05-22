@@ -68,6 +68,8 @@ def batch_process_datasets(
     specs: list[DatasetSpec],
     *,
     seg_channel: str | None = None,
+    channel_names: list[str] | None = None,
+    seg_name: str | None = None,
     cellpose_model: str = "cyto3",
     cellpose_diameter: float | None = None,
     gpu: bool = False,
@@ -79,7 +81,24 @@ def batch_process_datasets(
 ) -> BatchProcessReport:
     """Compress + segment (all timepoints) + track each dataset, headlessly.
 
-    ``seg_channel`` selects the segmentation channel (defaults to the first).
+    ``seg_channel`` selects the segmentation channel (defaults to the first);
+    it is resolved against the *effective* channel names, i.e. after any
+    ``channel_names`` override is applied.
+
+    ``channel_names`` optionally **overrides** the imported channel names
+    (e.g. friendly ``["DAPI", "GFP"]`` in place of the importer's
+    ``ch00``/``ch01``). It must have one name per imported channel — the
+    override is a pure relabel that preserves channel order (channel *i*
+    keeps its pixels). Applied uniformly to every dataset in the batch; a
+    count mismatch is recorded as that dataset's failure and the batch
+    continues.
+
+    ``seg_name`` optionally sets the segmentation layer name (passed to
+    ``SegmentCells.finalize``); defaults to the historical
+    ``cellpose_<n_cells>``. A name that collides with an existing channel or
+    segmentation in the flat HDF5 namespace is rejected (such a collision
+    crashes the GUI on later load).
+
     ``track`` runs tracking for time-lapse datasets (``n_timepoints > 1``).
     ``segmenter`` / ``tracker`` may be injected for testing; otherwise the
     real Cellpose / laptrack adapters are constructed lazily. A per-dataset
@@ -93,6 +112,7 @@ def batch_process_datasets(
     from percell4.application.use_cases.load_dataset import LoadDataset
     from percell4.application.use_cases.segment_cells import SegmentCells
     from percell4.application.use_cases.track_cells import TrackCells
+    from percell4.store import DatasetStore
 
     report = BatchProcessReport()
     total = len(specs)
@@ -104,16 +124,45 @@ def batch_process_datasets(
             repo = Hdf5DatasetRepository()
             session = Session()
             handle = LoadDataset(repo, NullViewerAdapter(), session).execute(spec.output_h5)
-            channel_names = list(handle.metadata.get("channel_names", []))
+            imported_channels = list(handle.metadata.get("channel_names", []))
+
+            # Optional channel-name override (e.g. friendly "DAPI,GFP" in place
+            # of the importer's "ch00,ch01"). One name per imported channel;
+            # order is preserved, so this is a pure relabel.
+            if channel_names is not None:
+                if imported_channels and len(channel_names) != len(imported_channels):
+                    raise ValueError(
+                        f"channel-names has {len(channel_names)} name(s) but dataset "
+                        f"has {len(imported_channels)} channel(s): {imported_channels}"
+                    )
+                DatasetStore(spec.output_h5).set_metadata(
+                    {"channel_names": list(channel_names)}
+                )
+                # Refresh the in-memory snapshot too: re-reading alone can serve
+                # a stale h5py metadata cache within the same process.
+                handle.metadata["channel_names"] = list(channel_names)
+
+            active_channels = list(handle.metadata.get("channel_names", []))
             n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)
 
-            ch = seg_channel or (channel_names[0] if channel_names else None)
+            ch = seg_channel or (active_channels[0] if active_channels else None)
             if ch is None:
                 raise ValueError("dataset has no channels to segment")
-            if channel_names and ch not in channel_names:
+            if active_channels and ch not in active_channels:
                 raise ValueError(
-                    f"seg channel {ch!r} not in dataset; available: {channel_names}"
+                    f"seg channel {ch!r} not in dataset; available: {active_channels}"
                 )
+
+            # Reject a segmentation name that collides with an existing
+            # channel/segmentation in the flat HDF5 namespace — a collision
+            # crashes the GUI on later load.
+            if seg_name is not None:
+                existing = set(active_channels) | set(repo.list_labels(handle))
+                if seg_name in existing:
+                    raise ValueError(
+                        f"seg-name {seg_name!r} collides with an existing channel/"
+                        f"segmentation name: {sorted(existing)}"
+                    )
 
             seg_uc = SegmentCells(
                 repo, session,
@@ -137,7 +186,7 @@ def batch_process_datasets(
                     image, model_type=cellpose_model,
                     diameter=cellpose_diameter, gpu=gpu,
                 )
-            seg_result = seg_uc.finalize(raw)
+            seg_result = seg_uc.finalize(raw, name=seg_name)
 
             n_tracks = 0
             tracked = False

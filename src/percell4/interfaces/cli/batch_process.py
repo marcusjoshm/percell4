@@ -9,11 +9,18 @@ Usage:
     python -m percell4.interfaces.cli.batch_process \\
         /data/dish1 /data/dish2 --output-dir /data/h5 --seg-channel mNG
     percell4-batch /data/dishes/* --output-dir out/ --no-track --quiet
+    percell4-batch /data/dish1 --output-dir out/ \\
+        --channel-names DAPI,GFP,RFP --seg-channel GFP --seg-name nuclei
 
 Each positional argument is one dataset's TIFF source directory; the output
 ``.h5`` is written to ``--output-dir/<source_dirname>.h5``. Time-lapse
 datasets (``_tN`` filename tokens) are segmented across every timepoint and
 tracked unless ``--no-track`` is given.
+
+``--channel-names`` renames the imported channels (one comma-separated name
+per channel, in order); ``--seg-channel`` is then matched against these new
+names. ``--seg-name`` sets the segmentation layer name (default
+``cellpose_<n_cells>``). Both apply to every dataset in the batch.
 
 Exit codes:
     0 -- at least one dataset processed successfully
@@ -70,7 +77,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True, type=Path,
                         help="Directory for the output .h5 files.")
     parser.add_argument("--seg-channel", default=None,
-                        help="Channel name to segment (default: first channel).")
+                        help="Channel name to segment (default: first channel). "
+                             "Matched against --channel-names when given.")
+    parser.add_argument("--channel-names", default=None,
+                        help="Comma-separated names to rename the imported "
+                             "channels, in order (e.g. 'DAPI,GFP,RFP'). Must "
+                             "match the imported channel count.")
+    parser.add_argument("--seg-name", default=None,
+                        help="Name for the segmentation layer "
+                             "(default: cellpose_<n_cells>).")
     parser.add_argument("--cellpose-model", default="cyto3",
                         help="Cellpose model type (default: cyto3).")
     parser.add_argument("--cellpose-diameter", type=float, default=None,
@@ -99,9 +114,18 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"[{done}/{total}] {message}", flush=True)
 
+    channel_names = None
+    if args.channel_names is not None:
+        channel_names = [c.strip() for c in args.channel_names.split(",") if c.strip()]
+        if not channel_names:
+            print("--channel-names was empty after parsing.", file=sys.stderr)
+            return 1
+
     report = batch_process_datasets(
         specs,
         seg_channel=args.seg_channel,
+        channel_names=channel_names,
+        seg_name=args.seg_name,
         cellpose_model=args.cellpose_model,
         cellpose_diameter=args.cellpose_diameter,
         gpu=args.gpu,

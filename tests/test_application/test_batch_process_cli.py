@@ -55,6 +55,32 @@ def test_no_track_flag_forwarded(tmp_path, captured):
     assert captured["kwargs"]["track"] is False
 
 
+def test_channel_names_parsed_to_list_and_forwarded(tmp_path, captured):
+    (tmp_path / "dishA").mkdir()
+    rc = cli.main([str(tmp_path / "dishA"), "--output-dir", str(tmp_path / "o"),
+                   "--channel-names", "DAPI, GFP ,RFP", "--seg-name", "nuclei"])
+    assert rc == 0
+    # Comma-split, whitespace-stripped, empties dropped.
+    assert captured["kwargs"]["channel_names"] == ["DAPI", "GFP", "RFP"]
+    assert captured["kwargs"]["seg_name"] == "nuclei"
+
+
+def test_channel_names_default_none_when_absent(tmp_path, captured):
+    (tmp_path / "dishA").mkdir()
+    rc = cli.main([str(tmp_path / "dishA"), "--output-dir", str(tmp_path / "o")])
+    assert rc == 0
+    assert captured["kwargs"]["channel_names"] is None
+    assert captured["kwargs"]["seg_name"] is None
+
+
+def test_empty_channel_names_returns_one(tmp_path, captured):
+    (tmp_path / "dishA").mkdir()
+    rc = cli.main([str(tmp_path / "dishA"), "--output-dir", str(tmp_path / "o"),
+                   "--channel-names", " , "])
+    assert rc == 1
+    assert "specs" not in captured  # use case never called
+
+
 def test_no_valid_sources_returns_one(tmp_path, captured):
     # A path that isn't a directory is skipped -> no specs -> exit 1.
     rc = cli.main([str(tmp_path / "missing"), "--output-dir", str(tmp_path / "o")])

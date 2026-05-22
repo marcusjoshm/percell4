@@ -113,6 +113,69 @@ def test_batch_track_false_skips_tracking(tmp_path):
     assert not any(n.endswith("_tracked") for n in DatasetStore(out).list_labels())
 
 
+def test_batch_channel_names_override_renames_and_resolves_seg_channel(tmp_path):
+    src = tmp_path / "still"
+    _single_tiff(src)  # imports one channel as "ch00"
+    out = tmp_path / "still.h5"
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        channel_names=["mNG"], seg_channel="mNG",  # seg-channel uses new name
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.items[0].succeeded
+    # The override is persisted to /metadata (relabel, order preserved).
+    assert list(DatasetStore(out).metadata.get("channel_names", [])) == ["mNG"]
+
+
+def test_batch_channel_names_count_mismatch_is_recorded_failure(tmp_path):
+    src = tmp_path / "still"
+    _single_tiff(src)  # one channel
+    out = tmp_path / "still.h5"
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        channel_names=["a", "b"],  # two names for a one-channel dataset
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.n_failed == 1
+    assert "channel-names" in (report.items[0].error or "")
+
+
+def test_batch_seg_name_sets_segmentation_layer_name(tmp_path):
+    src = tmp_path / "movie"
+    _timelapse_tiffs(src, n_t=2)
+    out = tmp_path / "movie.h5"
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        seg_channel="ch00", seg_name="nuclei", track=True,
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.items[0].succeeded
+    labels = DatasetStore(out).list_labels()
+    assert "nuclei" in labels
+    assert "nuclei_tracked" in labels  # tracking derives from the chosen name
+
+
+def test_batch_seg_name_collision_with_channel_is_recorded_failure(tmp_path):
+    src = tmp_path / "still"
+    _single_tiff(src)  # channel "ch00"
+    out = tmp_path / "still.h5"
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        seg_channel="ch00", seg_name="ch00",  # collides with the channel name
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.n_failed == 1
+    assert "collides" in (report.items[0].error or "")
+
+
 def test_batch_continues_after_per_dataset_failure(tmp_path):
     bad = DatasetSpec(source_dir=tmp_path / "nonexistent", output_h5=tmp_path / "bad.h5")
     good_src = tmp_path / "movie"
