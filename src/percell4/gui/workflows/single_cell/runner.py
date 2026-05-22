@@ -80,6 +80,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         metadata: RunMetadata,
         *,
         interactive_qc: bool = True,
+        segmentation_overrides: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._config = config
@@ -105,7 +106,9 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         # tracking phase sets it to ``<seg>_tracked``), when an existing
         # segmentation is auto-detected (U13), or by the resume picker
         # (U12). Kept off the frozen WorkflowConfig and reset per run.
-        self._effective_seg: dict[str, str] = {}
+        # Seeded from ``segmentation_overrides`` (the resume picker's
+        # per-dataset choices), which take precedence over auto-detection.
+        self._effective_seg: dict[str, str] = dict(segmentation_overrides or {})
         # Currently-running interactive QC controller (if any). Held
         # here to prevent Qt GC. Cleared by the terminal callback.
         self._active_qc_controller = None
@@ -227,10 +230,13 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         active = datasets_without_failures(self._working_entries, meta)
         for idx, entry in enumerate(active):
             # Auto-skip (U13/R10): if this dataset already has a segmentation
-            # on disk, skip Cellpose + seg-QC and use the existing one
-            # (preferring a tracked layer). TIFF-pending datasets were just
-            # compressed and have no labels yet, so they segment normally.
-            existing = self._detect_existing_segmentation(entry)
+            # on disk (or an explicit resume-picker override), skip Cellpose +
+            # seg-QC and use it. An override (U12) wins over auto-detection.
+            # TIFF-pending datasets were just compressed and have no labels
+            # yet, so they segment normally.
+            existing = self._effective_seg.get(entry.name)
+            if existing is None:
+                existing = self._detect_existing_segmentation(entry)
             if existing is not None:
                 self._effective_seg[entry.name] = existing
                 continue

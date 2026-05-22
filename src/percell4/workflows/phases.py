@@ -225,6 +225,22 @@ def pick_existing_segmentation(label_names: list[str]) -> str | None:
     return sorted(label_names)[0]
 
 
+def default_segmentation_picks(
+    per_dataset_labels: dict[str, list[str]],
+) -> dict[str, str]:
+    """Default per-dataset segmentation choice for the resume picker (U12).
+
+    Maps each dataset name to its :func:`pick_existing_segmentation` default
+    (tracked-preferred). Datasets with no labels are omitted.
+    """
+    picks: dict[str, str] = {}
+    for name, label_names in per_dataset_labels.items():
+        choice = pick_existing_segmentation(label_names)
+        if choice is not None:
+            picks[name] = choice
+    return picks
+
+
 def _postprocess_labels(
     labels: NDArray,
     cfg: CellposeSettings,
