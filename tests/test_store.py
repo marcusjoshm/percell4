@@ -193,6 +193,23 @@ def test_set_metadata(store):
     assert meta["laser_freq"] == 80.0
 
 
+def test_metadata_channel_names_normalized_to_str_list(store):
+    """channel_names round-trips as a plain list[str], not a numpy array.
+
+    h5py returns a numpy string array for a multi-element sequence attr,
+    whose truthiness is ambiguous downstream (``arr or []`` raises). The
+    metadata reader normalizes it.
+    """
+    store.set_metadata({"channel_names": ["DAPI", "GFP", "RFP"]})
+    cn = store.metadata["channel_names"]
+    assert isinstance(cn, list)
+    assert cn == ["DAPI", "GFP", "RFP"]
+    assert all(isinstance(c, str) for c in cn)
+    # Single-channel case stays a list too.
+    store.set_metadata({"channel_names": ["mNG"]})
+    assert store.metadata["channel_names"] == ["mNG"]
+
+
 # ── Bin metadata: native_shape + creation_bin (U1) ────────────
 
 

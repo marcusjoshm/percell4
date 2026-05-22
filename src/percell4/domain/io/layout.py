@@ -34,7 +34,9 @@ def split_channels_2d(
     ``(C, H, W)`` split uses the historical ``<= 20`` channel heuristic;
     larger leading dims fall back to a single ``"Intensity"`` layer.
     """
-    names = list(channel_names or [])
+    # Don't use ``channel_names or []`` — a numpy string array (what h5py
+    # returns for a multi-element attr) has an ambiguous truth value.
+    names = list(channel_names) if channel_names is not None else []
     if plane.ndim == 2:
         return [(names[0] if names else "Intensity", plane)]
     if plane.ndim == 3 and plane.shape[0] <= _MAX_SPLIT_CHANNELS:
@@ -57,7 +59,9 @@ def split_intensity_layers(
     For a non-time-lapse dataset behavior matches the historical channel
     split (see :func:`split_channels_2d`).
     """
-    names = list(channel_names or [])
+    # Don't use ``channel_names or []`` — a numpy string array (what h5py
+    # returns for a multi-element attr) has an ambiguous truth value.
+    names = list(channel_names) if channel_names is not None else []
     nt = int(n_timepoints or 1)
     if nt <= 1:
         return split_channels_2d(intensity, names)

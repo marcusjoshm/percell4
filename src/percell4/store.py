@@ -669,6 +669,18 @@ class DatasetStore:
                 if hasattr(ns, "tolist"):
                     ns = ns.tolist()
                 attrs["native_shape"] = tuple(int(x) for x in ns)
+            # Normalize channel_names to a Python list[str]: h5py returns a
+            # numpy string array for a multi-element sequence attr, whose
+            # truthiness is ambiguous (``arr or []`` raises). Decode bytes too.
+            if attrs.get("channel_names") is not None:
+                cn = attrs["channel_names"]
+                if isinstance(cn, (str, bytes)):
+                    cn = [cn]
+                elif hasattr(cn, "tolist"):
+                    cn = cn.tolist()
+                attrs["channel_names"] = [
+                    c.decode() if isinstance(c, bytes) else str(c) for c in cn
+                ]
             if "creation_bin" in attrs:
                 attrs["creation_bin"] = int(attrs["creation_bin"])
             if "n_timepoints" in attrs:

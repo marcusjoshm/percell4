@@ -53,6 +53,18 @@ def test_timelapse_multichannel_splits_C_keeps_T():
     assert all(arr.shape == (5, 8, 8) for _, arr in out)
 
 
+def test_channel_names_as_numpy_array_does_not_crash():
+    # h5py returns a numpy string array for a multi-element channel_names
+    # attr; `channel_names or []` would raise "ambiguous truth value".
+    intensity = np.zeros((3, 8, 8), dtype=np.float32)
+    names = np.array(["DAPI", "GFP", "RFP"])
+    out = split_intensity_layers(intensity, names, n_timepoints=1)
+    assert [str(n) for n, _ in out] == ["DAPI", "GFP", "RFP"]
+    # split_channels_2d shares the same guard.
+    out2 = split_channels_2d(intensity, names)
+    assert [str(n) for n, _ in out2] == ["DAPI", "GFP", "RFP"]
+
+
 def test_non_timelapse_3d_splits_into_channels():
     # n_timepoints == 1: (C,H,W) is channels, NOT a time stack.
     intensity = np.zeros((3, 8, 8), dtype=np.float32)
