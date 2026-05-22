@@ -373,6 +373,41 @@ class ViewerWindow(QObject):
             **kwargs,
         )
 
+    def add_tracks(self, data, graph: dict | None = None, name: str = "tracks", **kwargs) -> None:
+        """Add (or replace) a napari Tracks layer for lineage visualization.
+
+        ``data`` is an ``(N, 4)`` array ``[track_id, t, y, x]``; ``graph`` is
+        the ``{child_track_id: [parent_track_id]}`` division map. A no-op for
+        empty data (napari rejects an empty Tracks layer). Any existing layer
+        of the same name is removed first so re-tracking refreshes cleanly.
+        """
+        import numpy as np
+
+        self._ensure_viewer()
+        if name in self._viewer.layers:
+            del self._viewer.layers[name]
+        if data is None or len(np.asarray(data)) == 0:
+            return
+        self._viewer.add_tracks(np.asarray(data), graph=graph or {}, name=name, **kwargs)
+
+    def show_tracks_from_measurements(
+        self, measurements, lineage_df=None, name: str = "tracks"
+    ) -> None:
+        """Build a Tracks layer + division graph from measurements and show it.
+
+        Convenience for Creators: builds the ``[track_id, t, y, x]`` array from
+        the measurements frame and the ``{child: [parent]}`` division graph
+        from a stored lineage table (optional), then calls :meth:`add_tracks`.
+        """
+        from percell4.domain.tracking.lineage import (
+            build_graph_from_lineage,
+            build_tracks_array,
+        )
+
+        data = build_tracks_array(measurements)
+        graph = build_graph_from_lineage(lineage_df) if lineage_df is not None else {}
+        self.add_tracks(data, graph=graph, name=name)
+
     def clear(self) -> None:
         """Remove all layers."""
         self._color_index = 0

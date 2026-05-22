@@ -97,3 +97,63 @@ def test_track_id_zero_is_valid_not_confused_with_no_parent():
     assert out.iloc[0]["track_id"] == 0
     assert out.iloc[0]["parent_track_id"] == NO_PARENT
     assert NO_PARENT == -1
+
+
+# ── tracks array + graph-from-lineage (U9) ────────────────────
+
+
+def _measurements(rows):
+    return pd.DataFrame(
+        rows, columns=["track_id", "timepoint", "centroid_y", "centroid_x", "area"]
+    )
+
+
+def test_build_tracks_array_sorted_by_track_then_time():
+    from percell4.domain.tracking.lineage import build_tracks_array
+
+    m = _measurements(
+        [
+            (2, 1, 5.0, 6.0, 10),
+            (1, 0, 1.0, 2.0, 10),
+            (1, 1, 1.5, 2.5, 10),
+        ]
+    )
+    arr = build_tracks_array(m)
+    assert arr.shape == (3, 4)  # [track_id, t, y, x]
+    # Sorted by track_id then timepoint: track 1 (t0, t1), then track 2.
+    assert arr[:, 0].tolist() == [1.0, 1.0, 2.0]
+    assert arr[0].tolist() == [1.0, 0.0, 1.0, 2.0]
+
+
+def test_build_tracks_array_empty_without_columns():
+    from percell4.domain.tracking.lineage import build_tracks_array
+
+    # A plain (untracked / single-timepoint) measurement lacks track columns.
+    plain = pd.DataFrame({"label": [1, 2], "area": [10, 20]})
+    arr = build_tracks_array(plain)
+    assert arr.shape == (0, 4)
+
+
+def test_build_graph_from_lineage_links_daughters():
+    from percell4.domain.tracking.lineage import build_graph_from_lineage
+
+    lineage = pd.DataFrame(
+        {
+            "track_id": [1, 2, 3],
+            "tree_id": [0, 0, 0],
+            "begin_t": [0, 1, 1],
+            "end_t": [0, 2, 2],
+            "parent_track_id": [-1, 1, 1],  # 2 and 3 are daughters of 1
+        }
+    )
+    graph = build_graph_from_lineage(lineage)
+    assert graph == {2: [1], 3: [1]}
+
+
+def test_build_graph_from_lineage_empty_when_all_roots():
+    from percell4.domain.tracking.lineage import build_graph_from_lineage
+
+    lineage = pd.DataFrame(
+        {"track_id": [1, 2], "tree_id": [0, 1], "begin_t": [0, 0], "end_t": [2, 2], "parent_track_id": [-1, -1]}
+    )
+    assert build_graph_from_lineage(lineage) == {}

@@ -7,7 +7,9 @@ imports (only numpy/pandas). Consumes the engine-agnostic ``track_df`` /
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 # CTC-style lineage table: one row per track. ``parent_track_id == NO_PARENT``
 # marks a root (a track with no detected parent — present from the first
@@ -22,7 +24,18 @@ LINEAGE_COLUMNS = [
     "parent_track_id",
 ]
 
-__all__ = ["NO_PARENT", "LINEAGE_COLUMNS", "build_lineage_table", "build_napari_graph"]
+# Columns a measurements frame must carry to build the napari Tracks array.
+TRACKS_SOURCE_COLUMNS = ["track_id", "timepoint", "centroid_y", "centroid_x"]
+
+__all__ = [
+    "NO_PARENT",
+    "LINEAGE_COLUMNS",
+    "TRACKS_SOURCE_COLUMNS",
+    "build_lineage_table",
+    "build_napari_graph",
+    "build_graph_from_lineage",
+    "build_tracks_array",
+]
 
 
 def build_lineage_table(
@@ -64,6 +77,30 @@ def build_lineage_table(
     )
 
 
+def build_tracks_array(measurements: pd.DataFrame) -> NDArray:
+    """Build the napari Tracks ``data`` array ``[track_id, t, y, x]``.
+
+    Built from a time-lapse measurements frame carrying
+    :data:`TRACKS_SOURCE_COLUMNS`. Rows are sorted by ``track_id`` then
+    ``timepoint`` (napari's expected ordering). Returns an empty ``(0, 4)``
+    array when the required columns are absent (e.g. an untracked or
+    single-timepoint measurement).
+    """
+    if (
+        measurements is None
+        or len(measurements) == 0
+        or not all(c in measurements.columns for c in TRACKS_SOURCE_COLUMNS)
+    ):
+        return np.empty((0, 4), dtype=float)
+    sub = measurements[TRACKS_SOURCE_COLUMNS].dropna(
+        subset=["track_id", "timepoint"]
+    )
+    if sub.empty:
+        return np.empty((0, 4), dtype=float)
+    sub = sub.sort_values(["track_id", "timepoint"])
+    return sub.to_numpy(dtype=float)
+
+
 def build_napari_graph(split_df: pd.DataFrame) -> dict[int, list[int]]:
     """Build the napari Tracks ``graph`` dict ``{child_track_id: [parent...]}``.
 
@@ -77,4 +114,22 @@ def build_napari_graph(split_df: pd.DataFrame) -> dict[int, list[int]]:
         child = int(row["child_track_id"])
         parent = int(row["parent_track_id"])
         graph.setdefault(child, []).append(parent)
+    return graph
+
+
+def build_graph_from_lineage(lineage_df: pd.DataFrame) -> dict[int, list[int]]:
+    """Build the napari Tracks ``graph`` from a stored lineage table.
+
+    The lineage table (see :func:`build_lineage_table`) is per-track with a
+    ``parent_track_id`` column; a row whose parent is not :data:`NO_PARENT`
+    is a division daughter. Returns ``{child_track_id: [parent_track_id]}``.
+    """
+    graph: dict[int, list[int]] = {}
+    if lineage_df is None or len(lineage_df) == 0:
+        return graph
+    for _, row in lineage_df.iterrows():
+        parent = int(row["parent_track_id"])
+        if parent == NO_PARENT:
+            continue
+        graph.setdefault(int(row["track_id"]), []).append(parent)
     return graph
