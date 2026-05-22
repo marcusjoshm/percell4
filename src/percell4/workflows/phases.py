@@ -1044,6 +1044,178 @@ def _append_synthetic_row(
     )
 
 
+def _images_from_plane(
+    plane: NDArray, channel_names: list[str]
+) -> dict[str, NDArray]:
+    """Build a ``{channel_name: 2D image}`` dict from one intensity plane.
+
+    ``plane`` is ``(H, W)`` (single channel) or ``(C, H, W)`` (multichannel)
+    — for a time-lapse dataset this is one timepoint's frame. Raises
+    ``ValueError`` on an unexpected rank.
+    """
+    images: dict[str, NDArray] = {}
+    if plane.ndim == 2:
+        images[channel_names[0] if channel_names else "ch0"] = plane
+    elif plane.ndim == 3:
+        for i, name in enumerate(channel_names):
+            if i < plane.shape[0]:
+                images[name] = plane[i]
+    else:
+        raise ValueError(f"unexpected intensity ndim: {plane.ndim}")
+    return images
+
+
+def _merge_group_dfs(
+    df: pd.DataFrame, group_dfs: dict[str, pd.DataFrame]
+) -> pd.DataFrame:
+    """Left-merge each round's ``group_<round>`` column onto ``df`` by label.
+
+    Each ``group_df`` has columns ``["label", "group_<channel>_<metric>"]``;
+    the metric column is renamed to ``group_<round_name>``.
+    """
+    for round_name, g_df in group_dfs.items():
+        cols = list(g_df.columns)
+        if len(cols) != 2 or cols[0] != "label":
+            logger.warning(
+                "unexpected group_df schema for %s: %s", round_name, cols
+            )
+            continue
+        g_df = g_df.rename(columns={cols[1]: f"group_{round_name}"})
+        df = df.merge(g_df, on="label", how="left")
+    return df
+
+
+def _join_lineage_columns(
+    store: DatasetStore, seg_name: str, df: pd.DataFrame
+) -> pd.DataFrame:
+    """Attach track_id + lineage columns when ``seg_name`` is a tracked layer.
+
+    The tracked segmentation's label value IS the (1-based) track id, so
+    ``track_id == label``; ``tree_id`` / ``parent_track_id`` are joined from
+    ``/tracks/<seg_name>``. A raw (untracked) segmentation is left unchanged
+    (only the ``timepoint`` column from the caller).
+    """
+    if "label" not in df.columns:
+        return df
+    try:
+        tracks = store.read_tracks(seg_name)
+    except KeyError:
+        return df
+    df = df.copy()
+    df["track_id"] = df["label"]
+    if tracks is not None and not tracks.empty:
+        tree = dict(zip(tracks["track_id"], tracks["tree_id"]))
+        parent = dict(zip(tracks["track_id"], tracks["parent_track_id"]))
+        df["tree_id"] = df["track_id"].map(tree)
+        df["parent_track_id"] = df["track_id"].map(parent)
+    return df
+
+
+def _measure_frame(
+    images: dict[str, NDArray],
+    labels: NDArray,
+    round_masks: dict[str, NDArray],
+    group_dfs: dict[str, pd.DataFrame],
+    metric_names: list[str],
+    edge_mode: EdgeMode,
+    edge_margin_px: int,
+    particle_settings: ParticleSettings | None,
+    pixel_size_um: float | None,
+    run_log: "RunLog | None",
+    dataset_name: str,
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Measure one 2D frame: channels × metrics × round masks, + identity/cohort.
+
+    The per-frame core shared by single-timepoint and time-lapse
+    measurement. ``group_dfs`` are 2-column ``[label, group_col]`` (the
+    caller slices the timepoint out for time-lapse). Returns
+    ``(df, failure, message)``; on a soft zero-whole-cells edge-cohort
+    failure the df is preserved (group columns merged) so the caller can
+    still stage rows.
+    """
+    try:
+        df = measure_multichannel_with_masks(
+            images=images, labels=labels, metrics=metric_names, masks=round_masks,
+        )
+    except Exception as e:
+        logger.exception("measure_multichannel_with_masks failed")
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"measure failed: {e}"
+
+    # Keep only "_in_<round>" mask-overlap columns, drop "_out_<round>".
+    out_cols = [c for c in df.columns if "_out_" in c]
+    if out_cols:
+        df = df.drop(columns=out_cols)
+
+    df["cell_id"] = df["label"]
+    edge_label_set = get_edge_labels(
+        labels.astype(np.int32), edge_margin=edge_margin_px
+    )
+    df["is_edge"] = df["label"].isin(edge_label_set)
+    df["is_edge_synthetic"] = False
+
+    if particle_settings is not None:
+        from percell4.domain.measure.particle import analyze_particles
+
+        try:
+            resolved_min_area_px = _resolve_min_area_px(
+                particle_settings, pixel_size_um, dataset_name=dataset_name,
+            )
+        except ValueError as e:
+            logger.error("particle threshold resolve failed: %s", e)
+            if run_log is not None:
+                run_log.log(
+                    phase="measure", dataset=dataset_name,
+                    event="min_area_resolve_failed",
+                    min_area_value=float(particle_settings.min_area),
+                    min_area_unit=particle_settings.min_area_unit,
+                    pixel_size_um=pixel_size_um, error=str(e),
+                )
+            return (
+                pd.DataFrame(),
+                DatasetFailure.MEASUREMENT_ERROR,
+                f"particle threshold resolve failed: {e}",
+            )
+        if run_log is not None:
+            run_log.log(
+                phase="measure", dataset=dataset_name, event="min_area_resolved",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                resolved_min_area_px=resolved_min_area_px,
+            )
+        for round_name, round_mask in round_masks.items():
+            try:
+                particle_summary = analyze_particles(
+                    images=images, labels=labels, mask=round_mask,
+                    min_area=resolved_min_area_px,
+                )
+            except Exception:
+                logger.exception(
+                    "analyze_particles failed for round %s — skipping", round_name
+                )
+                continue
+            if particle_summary.empty:
+                continue
+            rename_map = {
+                c: f"{round_name}_{c}"
+                for c in particle_summary.columns
+                if c != "label"
+            }
+            particle_summary = particle_summary.rename(columns=rename_map)
+            df = df.merge(particle_summary, on="label", how="left")
+
+    df, edge_failure, edge_msg = _append_synthetic_row(
+        df, edge_label_set, edge_mode
+    )
+    if edge_failure is not None:
+        df = _merge_group_dfs(df, group_dfs)
+        return df, edge_failure, edge_msg
+
+    df = _merge_group_dfs(df, group_dfs)
+    df = _add_area_um2_columns(df, pixel_size_um)
+    return df, None, f"{len(df)} cells, {len(df.columns)} columns"
+
+
 def measure_one(
     store: DatasetStore,
     round_specs: list[ThresholdingRound],
@@ -1057,257 +1229,110 @@ def measure_one(
 ) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
     """Measure one dataset: all channels × all metrics × all round masks.
 
-    Opens one session, reads the full intensity cube, labels, and every
-    round's mask and group DataFrame, calls the single-pass
-    :func:`measure_multichannel_with_masks`, then merges the
-    ``group_<round>`` columns from each round's stored DataFrame.
+    Single-timepoint: one frame, no ``timepoint`` column (output unchanged).
+    Time-lapse (``n_timepoints > 1``): measures every timepoint, tags each row
+    with ``timepoint``, and — for a tracked segmentation — joins
+    ``track_id``/``tree_id``/``parent_track_id`` from ``/tracks``. A frame with
+    no cells contributes no rows (per-timepoint counts may differ).
 
     Adds the per-cell identity / cohort columns ``cell_id``, ``is_edge``,
-    and ``is_edge_synthetic`` to every row. When ``edge_mode`` is
-    ``INCLUDE_AS_SIZE_NORMALIZED_COHORT``, additionally appends one
-    synthetic edge-cohort row per origin R7 via
-    :func:`_append_synthetic_row`.
-
-    Returns an empty DataFrame on a hard failure (e.g., read error,
-    empty labels). For the "soft" zero-whole-cells case (R10b), returns
-    the per-cell df with a recorded ``DatasetFailure`` — the runner
-    stages the df anyway so the dataset's per-cell rows reach the
-    parquet, and ``summary_datasets.csv`` notes the failure reason.
+    ``is_edge_synthetic`` per frame. Returns an empty DataFrame on a hard
+    failure; for the soft zero-whole-cells case the per-cell df is returned
+    with a recorded failure (single-timepoint only).
     """
     metric_names = metric_names or sorted(BUILTIN_METRICS.keys())
+    pixel_size_um = _read_pixel_size_um(store)
+    try:
+        meta = store.metadata
+        channel_names = [
+            n.decode() if isinstance(n, bytes) else str(n)
+            for n in meta.get("channel_names", [])
+        ]
+        n_timepoints = int(meta.get("n_timepoints", 1) or 1)
+    except Exception as e:
+        logger.exception("measure_one metadata read failed")
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"metadata read failed: {e}"
 
+    def _read_round_layers(s, timepoint: int | None):
+        round_masks: dict[str, NDArray] = {}
+        group_dfs: dict[str, pd.DataFrame] = {}
+        for round_spec in round_specs:
+            try:
+                round_masks[round_spec.name] = s.read_mask(
+                    round_spec.name, timepoint=timepoint
+                ) if timepoint is not None else s.read_mask(round_spec.name)
+            except KeyError:
+                logger.info(
+                    "dataset missing mask /masks/%s — skipping from measure",
+                    round_spec.name,
+                )
+                continue
+            try:
+                g_df = s.read_dataframe(f"/groups/{round_spec.name}")
+                if timepoint is not None and "timepoint" in g_df.columns:
+                    g_df = g_df[g_df["timepoint"] == timepoint].drop(columns=["timepoint"])
+                group_dfs[round_spec.name] = g_df
+            except KeyError:
+                logger.info(
+                    "dataset missing /groups/%s — group column won't be added",
+                    round_spec.name,
+                )
+        return round_masks, group_dfs
+
+    if n_timepoints > 1:
+        frames: list[pd.DataFrame] = []
+        for t in range(n_timepoints):
+            try:
+                with store.open_read() as s:
+                    plane = s.read_array_frame("intensity", t)
+                    labels = s.read_labels(seg_name, timepoint=t)
+                    round_masks, group_dfs = _read_round_layers(s, t)
+            except Exception as e:
+                logger.exception("measure_one read session failed (t=%d)", t)
+                return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"read session failed: {e}"
+            if int(labels.max()) == 0:
+                continue  # frame with no cells: death / exit / pre-birth
+            try:
+                images = _images_from_plane(plane, channel_names)
+            except ValueError as e:
+                return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, str(e)
+            df_t, _failure, _msg = _measure_frame(
+                images, labels, round_masks, group_dfs, metric_names,
+                edge_mode, edge_margin_px, particle_settings, pixel_size_um,
+                run_log, dataset_name,
+            )
+            if df_t.empty:
+                continue
+            df_t = df_t.copy()
+            df_t["timepoint"] = t
+            frames.append(df_t)
+        if not frames:
+            return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, "no cells in any timepoint"
+        df = pd.concat(frames, ignore_index=True)
+        df = _join_lineage_columns(store, seg_name, df)
+        return df, None, f"{len(df)} cells across {df['timepoint'].nunique()} timepoints"
+
+    # Single-timepoint (output unchanged from the historical path).
     try:
         with store.open_read() as s:
             intensity = s.read_array("intensity")
             labels = s.read_labels(seg_name)
-            meta = s.metadata
-            channel_names_raw = meta.get("channel_names", [])
-            channel_names = [
-                n.decode() if isinstance(n, bytes) else str(n)
-                for n in channel_names_raw
-            ]
-
-            # Build channel → image dict
-            images: dict[str, NDArray] = {}
-            if intensity.ndim == 2:
-                name = channel_names[0] if channel_names else "ch0"
-                images[name] = intensity
-            elif intensity.ndim == 3:
-                for i, name in enumerate(channel_names):
-                    if i < intensity.shape[0]:
-                        images[name] = intensity[i]
-            else:
-                return (
-                    pd.DataFrame(),
-                    DatasetFailure.MEASUREMENT_ERROR,
-                    f"unexpected intensity ndim: {intensity.ndim}",
-                )
-
-            # Load all round masks
-            round_masks: dict[str, NDArray[np.uint8]] = {}
-            group_dfs: dict[str, pd.DataFrame] = {}
-            for round_spec in round_specs:
-                try:
-                    round_masks[round_spec.name] = s.read_mask(round_spec.name)
-                except KeyError:
-                    # Round was skipped for this dataset (e.g. threshold failed).
-                    # Skip it from measure but don't fail the whole dataset.
-                    logger.info(
-                        "dataset missing mask /masks/%s — skipping from measure",
-                        round_spec.name,
-                    )
-                    continue
-                try:
-                    group_dfs[round_spec.name] = s.read_dataframe(
-                        f"/groups/{round_spec.name}"
-                    )
-                except KeyError:
-                    logger.info(
-                        "dataset missing /groups/%s — group column won't be added",
-                        round_spec.name,
-                    )
+            round_masks, group_dfs = _read_round_layers(s, None)
     except Exception as e:
         logger.exception("measure_one read session failed")
-        return (
-            pd.DataFrame(),
-            DatasetFailure.MEASUREMENT_ERROR,
-            f"read session failed: {e}",
-        )
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"read session failed: {e}"
 
     if int(labels.max()) == 0:
-        return (
-            pd.DataFrame(),
-            DatasetFailure.MEASUREMENT_ERROR,
-            "empty labels — nothing to measure",
-        )
-
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, "empty labels — nothing to measure"
     try:
-        df = measure_multichannel_with_masks(
-            images=images,
-            labels=labels,
-            metrics=metric_names,
-            masks=round_masks,
-        )
-    except Exception as e:
-        logger.exception("measure_multichannel_with_masks failed")
-        return (
-            pd.DataFrame(),
-            DatasetFailure.MEASUREMENT_ERROR,
-            f"measure failed: {e}",
-        )
-
-    # Drop the per-round "_out_<round>" columns — this workflow is
-    # interested only in stats INSIDE each round's mask (where the
-    # particles / thresholded signal lives), not the cell-minus-mask
-    # complement. The "_in_<round>" columns are kept. See iteration-3
-    # user feedback.
-    out_cols = [c for c in df.columns if "_out_" in c]
-    if out_cols:
-        df = df.drop(columns=out_cols)
-
-    # Pixel size from /metadata.pixel_size_um (auto-detected at import
-    # time from TIFF resolution tags). Drives the `<area_col>_um2`
-    # sibling columns emitted near the end of this function. None when
-    # the h5 carries no positive value — measure_one then stays in
-    # pixel units only.
-    pixel_size_um = _read_pixel_size_um(store)
-
-    # Per-cell identity + cohort columns. ``cell_id`` mirrors the
-    # post-relabel sequential ``label`` for real cells (synthetic row
-    # below carries ``cell_id=-1``). ``(dataset, cell_id)`` is the
-    # composite key — ``cell_id`` is NOT globally unique across
-    # datasets (see plan's From 2026-05-20 ce-doc-review section on
-    # adversarial finding #1).
-    df["cell_id"] = df["label"]
-
-    # Recompute the edge label set from the post-QC labels (cheap
-    # border-row/column scan; no new HDF5 contract).
-    edge_label_set = get_edge_labels(
-        labels.astype(np.int32), edge_margin=edge_margin_px
+        images = _images_from_plane(intensity, channel_names)
+    except ValueError as e:
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, str(e)
+    return _measure_frame(
+        images, labels, round_masks, group_dfs, metric_names,
+        edge_mode, edge_margin_px, particle_settings, pixel_size_um,
+        run_log, dataset_name,
     )
-    df["is_edge"] = df["label"].isin(edge_label_set)
-    df["is_edge_synthetic"] = False
-
-    # Particle analysis (per-cell summary). For each round mask, count
-    # connected components within each cell and merge the summary
-    # columns into df with a "<round_name>_" prefix. The detailed
-    # per-particle rows are produced separately by
-    # :func:`measure_particles_one` (called by the runner).
-    if particle_settings is not None:
-        from percell4.domain.measure.particle import analyze_particles
-
-        # Resolve the configured min_area into a per-dataset pixel
-        # threshold. µm² mode requires this dataset's pixel size — fail
-        # the dataset's particle phase explicitly when missing rather
-        # than silently default. Return an empty df (not the partially
-        # built one) so the runner doesn't stage a schema-divergent
-        # parquet — the rest of measure_one's per-cell columns
-        # (group_<round>, area_um2 siblings) have not been merged yet
-        # at this point in the function.
-        try:
-            resolved_min_area_px = _resolve_min_area_px(
-                particle_settings, pixel_size_um, dataset_name=dataset_name,
-            )
-        except ValueError as e:
-            logger.error("particle threshold resolve failed: %s", e)
-            if run_log is not None:
-                run_log.log(
-                    phase="measure",
-                    dataset=dataset_name,
-                    event="min_area_resolve_failed",
-                    min_area_value=float(particle_settings.min_area),
-                    min_area_unit=particle_settings.min_area_unit,
-                    pixel_size_um=pixel_size_um,
-                    error=str(e),
-                )
-            return (
-                pd.DataFrame(),
-                DatasetFailure.MEASUREMENT_ERROR,
-                f"particle threshold resolve failed: {e}",
-            )
-        logger.info(
-            "particle min_area resolved: %.4f %s -> %d px (pixel_size_um=%s)",
-            particle_settings.min_area,
-            particle_settings.min_area_unit,
-            resolved_min_area_px,
-            pixel_size_um,
-        )
-        if run_log is not None:
-            run_log.log(
-                phase="measure",
-                dataset=dataset_name,
-                event="min_area_resolved",
-                min_area_value=float(particle_settings.min_area),
-                min_area_unit=particle_settings.min_area_unit,
-                pixel_size_um=pixel_size_um,
-                resolved_min_area_px=resolved_min_area_px,
-            )
-
-        for round_name, round_mask in round_masks.items():
-            try:
-                particle_summary = analyze_particles(
-                    images=images,
-                    labels=labels,
-                    mask=round_mask,
-                    min_area=resolved_min_area_px,
-                )
-            except Exception as e:
-                logger.exception(
-                    "analyze_particles failed for round %s — skipping",
-                    round_name,
-                )
-                continue
-            if particle_summary.empty:
-                continue
-            # Rename non-label columns with a per-round prefix.
-            rename_map = {
-                c: f"{round_name}_{c}"
-                for c in particle_summary.columns
-                if c != "label"
-            }
-            particle_summary = particle_summary.rename(columns=rename_map)
-            df = df.merge(particle_summary, on="label", how="left")
-
-    # Append the size-normalized synthetic row when the mode requires
-    # it. The helper handles all the R10 edge cases and returns a
-    # DatasetFailure for the zero-whole-cells case (df is preserved
-    # so the runner can still stage per-cell rows).
-    df, edge_failure, edge_msg = _append_synthetic_row(
-        df, edge_label_set, edge_mode
-    )
-    if edge_failure is not None:
-        # Surface as the function's failure; the runner stages the
-        # df anyway when it is non-empty (see _make_measure_handler).
-        # Merge group_<round> columns first so the staging parquet
-        # has the same column shape as a successful run.
-        for round_name, g_df in group_dfs.items():
-            cols = list(g_df.columns)
-            if len(cols) != 2 or cols[0] != "label":
-                continue
-            g_df = g_df.rename(columns={cols[1]: f"group_{round_name}"})
-            df = df.merge(g_df, on="label", how="left")
-        return df, edge_failure, edge_msg
-
-    # Merge group_<round> columns from the per-round stored DataFrames.
-    # Each group_df has columns ["label", "group_<channel>_<metric>"]; we
-    # rename the second column to "group_<round_name>" for unambiguous
-    # per-round provenance, then left-merge on label.
-    for round_name, g_df in group_dfs.items():
-        cols = list(g_df.columns)
-        if len(cols) != 2 or cols[0] != "label":
-            logger.warning(
-                "unexpected group_df schema for %s: %s", round_name, cols
-            )
-            continue
-        g_df = g_df.rename(columns={cols[1]: f"group_{round_name}"})
-        df = df.merge(g_df, on="label", how="left")
-
-    # Emit _um2 sibling columns for every area-style column (cell area,
-    # particle area summaries, per-round mask intersection areas). No-op
-    # when pixel_size_um is missing from the h5 metadata.
-    df = _add_area_um2_columns(df, pixel_size_um)
-
-    return df, None, f"{len(df)} cells, {len(df.columns)} columns"
 
 
 def write_staging_parquet(
@@ -1332,6 +1357,103 @@ def write_staging_parquet(
 # ── U7 particle analysis ────────────────────────────────────────────────
 
 
+def _particles_detail_frame(
+    images: dict[str, NDArray],
+    labels: NDArray,
+    round_masks: dict[str, NDArray],
+    min_area_px: int,
+) -> pd.DataFrame:
+    """Per-particle detail across rounds for one 2D frame (no um2, no timepoint).
+
+    Returns the combined per-particle DataFrame with a ``round_name`` column,
+    or an empty DataFrame when no particles are detected.
+    """
+    from percell4.domain.measure.particle import analyze_particles_detail
+
+    frames: list[pd.DataFrame] = []
+    for round_name, round_mask in round_masks.items():
+        try:
+            detail = analyze_particles_detail(
+                images=images, labels=labels, mask=round_mask, min_area=min_area_px,
+            )
+        except Exception:
+            logger.exception(
+                "analyze_particles_detail failed for round %s — skipping", round_name
+            )
+            continue
+        if detail.empty:
+            continue
+        detail = detail.copy()
+        detail.insert(0, "round_name", round_name)
+        frames.append(detail)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _measure_particles_timelapse(
+    store: DatasetStore,
+    round_specs: list[ThresholdingRound],
+    particle_settings: ParticleSettings,
+    seg_name: str,
+    run_log: "RunLog | None",
+    dataset_name: str,
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Per-particle detail for a time-lapse dataset, tagged with ``timepoint``."""
+    pixel_size_um = _read_pixel_size_um(store)
+    try:
+        resolved_min_area_px = _resolve_min_area_px(
+            particle_settings, pixel_size_um, dataset_name=dataset_name,
+        )
+    except ValueError as e:
+        logger.error("particle threshold resolve failed: %s", e)
+        if run_log is not None:
+            run_log.log(
+                phase="particles", dataset=dataset_name,
+                event="min_area_resolve_failed",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um, error=str(e),
+            )
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"particle threshold resolve failed: {e}"
+
+    channel_names = [
+        n.decode() if isinstance(n, bytes) else str(n)
+        for n in store.metadata.get("channel_names", [])
+    ]
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+
+    out_frames: list[pd.DataFrame] = []
+    for t in range(n_timepoints):
+        try:
+            with store.open_read() as s:
+                plane = s.read_array_frame("intensity", t)
+                labels = s.read_labels(seg_name, timepoint=t)
+                round_masks: dict[str, NDArray] = {}
+                for round_spec in round_specs:
+                    try:
+                        round_masks[round_spec.name] = s.read_mask(
+                            round_spec.name, timepoint=t
+                        )
+                    except KeyError:
+                        continue
+        except Exception as e:
+            logger.exception("measure_particles_one read session failed (t=%d)", t)
+            return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"read session failed: {e}"
+        if not round_masks or int(labels.max()) == 0:
+            continue
+        images = _images_from_plane(plane, channel_names)
+        detail = _particles_detail_frame(images, labels, round_masks, resolved_min_area_px)
+        if detail.empty:
+            continue
+        detail["timepoint"] = t
+        out_frames.append(detail)
+
+    if not out_frames:
+        return pd.DataFrame(), None, "no particles detected in any timepoint"
+    combined = pd.concat(out_frames, ignore_index=True)
+    combined = _add_area_um2_columns(combined, pixel_size_um)
+    return combined, None, f"{len(combined)} particles across {combined['timepoint'].nunique()} timepoints"
+
+
 def measure_particles_one(
     store: DatasetStore,
     round_specs: list[ThresholdingRound],
@@ -1351,9 +1473,15 @@ def measure_particles_one(
     - ``{channel}_mean_intensity``, ``{channel}_integrated_intensity``
       for every channel
 
-    Rounds whose mask is missing are skipped silently (consistent with
-    ``measure_one``). On read error returns an empty DataFrame + failure.
+    Time-lapse datasets detail every timepoint (each row tagged
+    ``timepoint``). Rounds whose mask is missing are skipped silently
+    (consistent with ``measure_one``). On read error returns an empty
+    DataFrame + failure.
     """
+    if int(store.metadata.get("n_timepoints", 1) or 1) > 1:
+        return _measure_particles_timelapse(
+            store, round_specs, particle_settings, seg_name, run_log, dataset_name
+        )
     try:
         with store.open_read() as s:
             intensity = s.read_array("intensity")
