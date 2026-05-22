@@ -167,9 +167,62 @@ def _read_segmentation_channel(
     """Read one channel plane from /intensity for segmentation.
 
     Works for both 2D (single-channel) and 3D (C, H, W) layouts by
-    delegating to :meth:`DatasetStore.read_channel`.
+    delegating to :meth:`DatasetStore.read_channel`. Single-timepoint only —
+    ``read_channel`` raises on the 4D ``(T, C, H, W)`` time-lapse layout. Use
+    :func:`_read_segmentation_channel_stack` for time-lapse datasets.
     """
     return store.read_channel("intensity", channel_idx)
+
+
+def _channel_from_frame(frame: NDArray, channel_idx: int) -> NDArray:
+    """Pick the segmentation channel out of one timepoint's intensity frame.
+
+    A frame is ``(H, W)`` (single channel) or ``(C, H, W)`` (multichannel) —
+    one rank below the stored ``(T, H, W)`` / ``(T, C, H, W)`` array.
+    """
+    if frame.ndim == 2:
+        if channel_idx != 0:
+            raise IndexError(
+                f"channel_idx={channel_idx} out of range for single-channel frame"
+            )
+        return frame
+    return frame[channel_idx]
+
+
+def _read_segmentation_channel_stack(
+    store: DatasetStore, channel_idx: int, n_timepoints: int
+) -> NDArray:
+    """Assemble the ``(T, H, W)`` segmentation-channel stack for a time-lapse.
+
+    Reads one timepoint at a time via :meth:`DatasetStore.read_array_frame`
+    (which handles the 4D layout that ``read_channel`` cannot) and picks the
+    channel from each frame. This per-frame read is the load-bearing piece
+    reused by the time-lapse threshold/measure/QC paths.
+    """
+    frames = [
+        _channel_from_frame(store.read_array_frame("intensity", t), channel_idx)
+        for t in range(n_timepoints)
+    ]
+    return np.stack(frames, axis=0)
+
+
+def _postprocess_labels(
+    labels: NDArray,
+    cfg: CellposeSettings,
+    edge_mode: EdgeMode,
+    edge_margin_px: int,
+) -> NDArray[np.int32]:
+    """Edge filter (conditional) + small-cell filter + sequential relabel.
+
+    Shared by the single-frame and per-frame time-lapse segmentation paths.
+    Edge removal is conditional on ``edge_mode``; modes other than EXCLUDE
+    keep edge cells (flagged ``is_edge`` at measure time).
+    """
+    labels = labels.astype(np.int32)
+    if edge_mode == EdgeMode.EXCLUDE:
+        labels, _n_edge = filter_edge_cells(labels, edge_margin=edge_margin_px)
+    labels, _n_small = filter_small_cells(labels, min_area=cfg.min_size)
+    return relabel_sequential(labels)
 
 
 def segment_one(
@@ -200,8 +253,14 @@ def segment_one(
     at measure time (recomputed from labels by ``get_edge_labels`` — no
     persistence here).
     """
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
     try:
-        image = _read_segmentation_channel(store, channel_idx=channel_idx)
+        if n_timepoints > 1:
+            image = _read_segmentation_channel_stack(
+                store, channel_idx, n_timepoints
+            )  # (T, H, W)
+        else:
+            image = _read_segmentation_channel(store, channel_idx=channel_idx)
     except (KeyError, IndexError, ValueError) as e:
         logger.exception("failed to read intensity for segmentation")
         return (
@@ -210,35 +269,39 @@ def segment_one(
             f"read /intensity failed: {e}",
         )
 
-    try:
-        diameter = cfg.diameter if cfg.diameter > 0 else None
-        labels = run_cellpose(
-            image,
+    diameter = cfg.diameter if cfg.diameter > 0 else None
+
+    def _infer(plane: NDArray) -> NDArray:
+        return run_cellpose(
+            plane,
             diameter=diameter,
             gpu=cfg.gpu,
             flow_threshold=cfg.flow_threshold,
             cellprob_threshold=cfg.cellprob_threshold,
             min_size=cfg.min_size,
-            model=cellpose_model,
+            model=cellpose_model,  # reuse the hoisted model across frames
         )
+
+    try:
+        if n_timepoints > 1:
+            # Time-lapse: segment every frame independently (per-frame ids;
+            # tracking unifies them later), reusing the hoisted model.
+            frame_labels = [
+                _postprocess_labels(_infer(image[t]), cfg, edge_mode, edge_margin_px)
+                for t in range(n_timepoints)
+            ]
+            labels = np.stack(frame_labels, axis=0).astype(np.int32)
+        else:
+            labels = _postprocess_labels(
+                _infer(image), cfg, edge_mode, edge_margin_px
+            )
     except Exception as e:
         logger.exception("run_cellpose raised for this dataset")
         return (
-            np.zeros_like(image, dtype=np.int32),
+            np.zeros((0, 0), dtype=np.int32),
             DatasetFailure.SEGMENTATION_ERROR,
             f"Cellpose failed: {type(e).__name__}: {e}",
         )
-
-    # Postprocess: edge removal is conditional on the workflow's edge_mode.
-    # Modes other than EXCLUDE keep edge cells in labels; they will be
-    # flagged with ``is_edge=True`` at measure time (recomputed from the
-    # post-QC labels via ``get_edge_labels`` in U4) — no extra HDF5
-    # persistence here.
-    labels = labels.astype(np.int32)
-    if edge_mode == EdgeMode.EXCLUDE:
-        labels, _n_edge = filter_edge_cells(labels, edge_margin=edge_margin_px)
-    labels, _n_small = filter_small_cells(labels, min_area=cfg.min_size)
-    labels = relabel_sequential(labels)
 
     if int(labels.max()) == 0:
         return (
