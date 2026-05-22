@@ -97,6 +97,13 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         # Cross-phase state: Phase 3/5 compute stashes GroupingResult
         # per (dataset_name, round_name) for Phase 4/6 QC to pick up.
         self._grouping_cache: dict[tuple[str, str], object] = {}
+        # Per-dataset effective segmentation name. Empty by default, so
+        # every phase resolves to ``config.cellpose_segmentation_name``
+        # (unchanged behavior). Populated when a dataset is tracked (the
+        # tracking phase sets it to ``<seg>_tracked``), when an existing
+        # segmentation is auto-detected (U13), or by the resume picker
+        # (U12). Kept off the frozen WorkflowConfig and reset per run.
+        self._effective_seg: dict[str, str] = {}
         # Currently-running interactive QC controller (if any). Held
         # here to prevent Qt GC. Cleared by the terminal callback.
         self._active_qc_controller = None
@@ -122,6 +129,19 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 worker.request_abort()
             except Exception:
                 logger.exception("worker.request_abort raised")
+
+    # ── Effective segmentation name ───────────────────────────
+
+    def _seg_name_for(self, entry) -> str:
+        """The segmentation name a dataset's phases should read/write.
+
+        Defaults to ``config.cellpose_segmentation_name``; overridden per
+        dataset via ``self._effective_seg`` (set by the tracking phase,
+        auto-skip detection, or the resume picker).
+        """
+        return self._effective_seg.get(
+            entry.name, self._config.cellpose_segmentation_name
+        )
 
     # ── Phase generator ───────────────────────────────────────
 
@@ -367,7 +387,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 channel_idx=self._seg_channel_idx(store),
                 edge_mode=self._config.edge_mode,
                 edge_margin_px=self._config.edge_margin_px,
-                seg_name=self._config.cellpose_segmentation_name,
+                seg_name=self._seg_name_for(entry),
             )
             if failure is not None:
                 record_failure(
@@ -440,7 +460,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             edge_mode = self._config.edge_mode
             edge_margin_px = self._config.edge_margin_px
-            seg_name = self._config.cellpose_segmentation_name
+            seg_name = self._seg_name_for(entry)
 
             def _do_segment() -> tuple:
                 """Runs in the Worker thread. Pure numpy + h5py, no Qt."""
@@ -551,7 +571,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
                 channel_idx=seg_ch,
-                seg_name=self._config.cellpose_segmentation_name,
+                seg_name=self._seg_name_for(entry),
             )
             self._active_qc_controller = controller
             self._log(phase="seg_qc", dataset=entry.name, event="opened")
@@ -631,7 +651,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     queue_total=queue_total,
                     on_complete=_wrapped_complete,
                     on_round_complete=_record_round_count,
-                    seg_name=self._config.cellpose_segmentation_name,
+                    seg_name=self._seg_name_for(entry),
                 )
             except Exception as e:
                 logger.exception("dilute queue entry init failed")
@@ -681,7 +701,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             grouping, failure, msg = threshold_compute_one(
                 store,
                 round_spec,
-                seg_name=self._config.cellpose_segmentation_name,
+                seg_name=self._seg_name_for(entry),
             )
             if failure is not None:
                 record_failure(
@@ -737,7 +757,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 store,
                 round_spec,
                 grouping,
-                seg_name=self._config.cellpose_segmentation_name,
+                seg_name=self._seg_name_for(entry),
             )
             if failure is not None:
                 record_failure(
@@ -817,7 +837,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 queue_index=queue_index,
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
-                seg_name=self._config.cellpose_segmentation_name,
+                seg_name=self._seg_name_for(entry),
             )
             # Hold a reference to prevent GC.
             self._active_qc_controller = queue_entry
@@ -850,7 +870,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 round_specs=list(self._config.thresholding_rounds),
                 edge_mode=self._config.edge_mode,
                 edge_margin_px=self._config.edge_margin_px,
-                seg_name=self._config.cellpose_segmentation_name,
+                seg_name=self._seg_name_for(entry),
                 particle_settings=self._config.particle_settings,
                 run_log=self._run_log,
                 dataset_name=entry.name,
@@ -906,7 +926,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                         store,
                         round_specs=list(self._config.thresholding_rounds),
                         particle_settings=self._config.particle_settings,
-                        seg_name=self._config.cellpose_segmentation_name,
+                        seg_name=self._seg_name_for(entry),
                         run_log=self._run_log,
                         dataset_name=entry.name,
                     )
