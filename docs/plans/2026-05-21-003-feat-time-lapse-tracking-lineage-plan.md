@@ -1,7 +1,7 @@
 ---
 title: "feat: Time-lapse support with cell tracking and lineage"
 type: feat
-status: active
+status: completed
 date: 2026-05-21
 deepened: 2026-05-21
 ---

@@ -1,7 +1,7 @@
 ---
 title: "feat: Tracking in the single-cell workflow + headless batch compress/segment/track CLI"
 type: feat
-status: active
+status: completed
 date: 2026-05-22
 deepened: 2026-05-22
 ---
