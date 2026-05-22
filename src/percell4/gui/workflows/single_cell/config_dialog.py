@@ -59,6 +59,7 @@ from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.store import DatasetStore
 from percell4.workflows.channels import ChannelSource, intersect_channels
+from percell4.workflows.phases import pick_existing_segmentation
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
@@ -82,6 +83,9 @@ _QSETTINGS_APP = "PerCell4"
 _QSETTINGS_OUTPUT_KEY = "single_cell_threshold_workflow/output_parent"
 
 _CELLPOSE_MODELS = ("cpsam", "cyto3", "cyto2", "cyto", "nuclei")
+
+# Shown (disabled) in the segmentation picker for datasets with no labels yet.
+_NO_SEGMENTATION_LABEL = "None — Cellpose will segment"
 
 # Always-on identity columns prepended to the CSV column picker.
 _ALWAYS_ON_COLUMNS = ("dataset", "cell_id", "label")
@@ -296,6 +300,7 @@ class WorkflowConfigDialog(QDialog):
 
         layout.addWidget(self._build_datasets_group(), stretch=3)
         layout.addWidget(self._build_cellpose_group())
+        layout.addWidget(self._build_segmentation_group())
         layout.addWidget(self._build_rounds_group(), stretch=2)
         layout.addWidget(self._build_particles_group())
         layout.addWidget(self._build_dilute_group())
@@ -490,6 +495,83 @@ class WorkflowConfigDialog(QDialog):
         form.addRow("Edge margin (px):", self._edge_margin)
 
         return box
+
+    # ── Segmentation selection ────────────────────────────────
+
+    def _build_segmentation_group(self) -> QGroupBox:
+        box = QGroupBox("Segmentation Selection")
+        outer = QVBoxLayout(box)
+        note = QLabel(
+            "Datasets that already have a segmentation skip Cellpose and start "
+            "at thresholding. Choose which segmentation layer each one's "
+            "thresholding rounds and measurement should use (tracked layers "
+            "are preferred by default). Datasets with no segmentation will be "
+            "segmented by Cellpose."
+        )
+        note.setWordWrap(True)
+        outer.addWidget(note)
+
+        # Rebuilt by _refresh_segmentation_picker whenever the dataset queue
+        # changes. Each row: dataset name -> combo of its /labels resources.
+        self._seg_form_host = QWidget()
+        self._seg_form = QFormLayout(self._seg_form_host)
+        self._seg_form.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._seg_form_host)
+        self._seg_combos: list[tuple[_PendingDataset, QComboBox]] = []
+        return box
+
+    def _dataset_segmentations(self, pd: _PendingDataset) -> list[str]:
+        """List a dataset's segmentation (/labels) resources, or [] if none.
+
+        Only existing ``.h5`` datasets can have segmentations; tiff-pending
+        datasets have no labels until Cellpose runs.
+        """
+        if pd.source is not DatasetSource.H5_EXISTING:
+            return []
+        try:
+            return DatasetStore(pd.h5_path).list_labels()
+        except Exception:  # noqa: BLE001 — best-effort; missing/corrupt -> none
+            logger.exception("could not list labels for %s", pd.display_name)
+            return []
+
+    def _refresh_segmentation_picker(self) -> None:
+        """Rebuild the per-dataset segmentation combos from the current queue."""
+        form = getattr(self, "_seg_form", None)
+        if form is None:
+            return
+        while form.rowCount():
+            form.removeRow(0)
+        self._seg_combos = []
+        for pd in self._pending_datasets:
+            labels = self._dataset_segmentations(pd)
+            combo = QComboBox()
+            if labels:
+                combo.addItems(labels)
+                default = pick_existing_segmentation(labels)
+                if default in labels:
+                    combo.setCurrentText(default)
+            else:
+                combo.addItem(_NO_SEGMENTATION_LABEL)
+                combo.setEnabled(False)  # nothing to choose; Cellpose will run
+            self._seg_combos.append((pd, combo))
+            form.addRow(pd.display_name, combo)
+
+    @property
+    def segmentation_overrides(self) -> dict[str, str]:
+        """Per-dataset chosen segmentation, for datasets that already have one.
+
+        Keyed by the dataset's (final) display name; passed to
+        ``SingleCellThresholdingRunner(segmentation_overrides=...)``. Datasets
+        with no segmentation (Cellpose will run) are omitted.
+        """
+        overrides: dict[str, str] = {}
+        for pd, combo in getattr(self, "_seg_combos", []):
+            if not combo.isEnabled():
+                continue
+            choice = combo.currentText()
+            if choice and choice != _NO_SEGMENTATION_LABEL:
+                overrides[pd.display_name] = choice
+        return overrides
 
     def _build_rounds_group(self) -> QGroupBox:
         box = QGroupBox("Thresholding Rounds (ordered)")
@@ -1013,6 +1095,8 @@ class WorkflowConfigDialog(QDialog):
                 ]
             )
             self._dataset_tree.addTopLevelItem(item)
+        # Keep the segmentation picker in sync with the dataset queue.
+        self._refresh_segmentation_picker()
 
     def _toast_add_result(self, added: int, skipped: list[str]) -> None:
         parts: list[str] = []

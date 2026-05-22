@@ -398,6 +398,9 @@ class LauncherWindow(QMainWindow):
                 self.statusBar().showMessage("Workflow configuration cancelled.")
                 return
             cfg = dialog.workflow_config
+            # Per-dataset segmentation choices for already-segmented datasets
+            # (captured before the dialog is destroyed in the finally block).
+            segmentation_overrides = dialog.segmentation_overrides
         finally:
             dialog.deleteLater()
 
@@ -453,7 +456,10 @@ class LauncherWindow(QMainWindow):
             self.data_model.clear()
 
         # Build and wire the runner.
-        runner = SingleCellThresholdingRunner(config=cfg, metadata=metadata)
+        runner = SingleCellThresholdingRunner(
+            config=cfg, metadata=metadata,
+            segmentation_overrides=segmentation_overrides,
+        )
         # Keep a reference so the runner (a QObject) doesn't get GC'd
         # mid-run. Cleared when the run finishes.
         self._active_workflow_runner = runner
