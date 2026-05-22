@@ -1046,3 +1046,110 @@ class TestPhasorWritesViewBin:
         uc = ComputePhasor(repo, session)
         with pytest.raises(ValueError, match="native_shape"):
             uc.execute(channel="ch0", harmonic=1, view_bin=3)
+
+
+# ── ComputeLifetime: explicit source selection ───────────────
+
+
+class TestComputeLifetimeSource:
+    """ComputeLifetime computes from an explicit, caller-chosen source.
+
+    Replaces the old implicit 'filtered-if-exists, else unfiltered'
+    behavior with three explicit sources: unfiltered, median, wavelet.
+    """
+
+    def _setup(self, *, with_wavelet: bool = False):
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {"flim_frequency_mhz": 80.0}
+        g = np.full((5, 5), 0.5, dtype=np.float32)
+        s = np.full((5, 5), 0.3, dtype=np.float32)
+        g[2, 2] = 0.9  # outlier so median differs from raw
+        s[2, 2] = 0.05
+        repo.written_arrays["phasor/ch0/g"] = g
+        repo.written_arrays["phasor/ch0/s"] = s
+        if with_wavelet:
+            repo.written_arrays["phasor/ch0/g_filtered"] = np.full(
+                (5, 5), 0.45, dtype=np.float32
+            )
+            repo.written_arrays["phasor/ch0/s_filtered"] = np.full(
+                (5, 5), 0.28, dtype=np.float32
+            )
+        return session, repo
+
+    def test_unfiltered_reads_raw_and_stamps_source(self):
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+        from percell4.domain.flim.phasor import phasor_to_lifetime
+
+        session, repo = self._setup()
+        result = ComputeLifetime(repo, session).execute(
+            channel="ch0", source="unfiltered"
+        )
+
+        assert result.source == "unfiltered"
+        assert result.median_size is None
+        expected = phasor_to_lifetime(
+            repo.written_arrays["phasor/ch0/g"],
+            repo.written_arrays["phasor/ch0/s"],
+            frequency_mhz=80.0,
+        )
+        np.testing.assert_array_equal(
+            repo.written_arrays["phasor/ch0/lifetime"], expected
+        )
+        assert repo.array_attrs["phasor/ch0/lifetime"]["source"] == "unfiltered"
+
+    def test_median_applies_kernel_and_stamps_size(self):
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+        from percell4.domain.flim.phasor import median_filter_gs, phasor_to_lifetime
+
+        session, repo = self._setup()
+        result = ComputeLifetime(repo, session).execute(
+            channel="ch0", source="median", median_size=3
+        )
+
+        assert result.source == "median"
+        assert result.median_size == 3
+        gm, sm = median_filter_gs(
+            repo.written_arrays["phasor/ch0/g"],
+            repo.written_arrays["phasor/ch0/s"],
+            size=3,
+        )
+        expected = phasor_to_lifetime(gm, sm, frequency_mhz=80.0)
+        np.testing.assert_array_equal(
+            repo.written_arrays["phasor/ch0/lifetime"], expected
+        )
+        assert repo.array_attrs["phasor/ch0/lifetime"]["median_size"] == 3
+
+    def test_wavelet_reads_filtered_maps(self):
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+        from percell4.domain.flim.phasor import phasor_to_lifetime
+
+        session, repo = self._setup(with_wavelet=True)
+        result = ComputeLifetime(repo, session).execute(
+            channel="ch0", source="wavelet"
+        )
+
+        assert result.source == "wavelet"
+        expected = phasor_to_lifetime(
+            repo.written_arrays["phasor/ch0/g_filtered"],
+            repo.written_arrays["phasor/ch0/s_filtered"],
+            frequency_mhz=80.0,
+        )
+        np.testing.assert_array_equal(
+            repo.written_arrays["phasor/ch0/lifetime"], expected
+        )
+
+    def test_wavelet_without_filtered_maps_raises(self):
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session, repo = self._setup(with_wavelet=False)
+        with pytest.raises(ValueError, match="wavelet"):
+            ComputeLifetime(repo, session).execute(channel="ch0", source="wavelet")
+
+    def test_invalid_source_raises(self):
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session, repo = self._setup()
+        with pytest.raises(ValueError, match="source"):
+            ComputeLifetime(repo, session).execute(channel="ch0", source="bogus")
