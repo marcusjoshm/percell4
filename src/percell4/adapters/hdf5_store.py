@@ -13,6 +13,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from percell4.domain.dataset import DatasetHandle, DatasetView
+from percell4.domain.io.layout import split_channels_2d, split_intensity_layers
 from percell4.store import DatasetStore
 
 
@@ -70,16 +71,14 @@ class Hdf5DatasetRepository:
         with store.open_read() as s:
             intensity = s.read_array("intensity")
             channel_names = list(handle.metadata.get("channel_names", []))
+            n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)
 
-            if intensity.ndim == 2:
-                name = channel_names[0] if channel_names else "Intensity"
-                channel_images[name] = intensity.astype(np.float32)
-            elif intensity.ndim == 3 and intensity.shape[0] <= 20:
-                for i in range(intensity.shape[0]):
-                    name = channel_names[i] if i < len(channel_names) else f"ch{i}"
-                    channel_images[name] = intensity[i].astype(np.float32)
-            else:
-                channel_images["Intensity"] = intensity.astype(np.float32)
+            # Keep any leading time axis so napari builds a single dims
+            # slider; disambiguate T-vs-C via n_timepoints.
+            for name, arr in split_intensity_layers(
+                intensity, channel_names, n_timepoints
+            ):
+                channel_images[name] = arr.astype(np.float32)
 
             mask_names = set(s.list_masks())
             for label_name in s.list_labels():
@@ -101,22 +100,26 @@ class Hdf5DatasetRepository:
         self,
         handle: DatasetHandle,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> dict[str, NDArray[np.float32]]:
+        """Return ``{channel_name: 2D plane}`` for compute consumers.
+
+        For a time-lapse dataset a single timepoint is selected (``timepoint``,
+        defaulting to frame 0) and split into 2D per-channel planes, so the
+        ``{name: (H, W)}`` contract holds regardless of the time axis.
+        """
         store = self._store(handle)
+        n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)
+        channel_names = list(handle.metadata.get("channel_names", []))
         result: dict[str, np.ndarray] = {}
         with store.open_read() as s:
-            intensity = s.read_array("intensity", view_bin=view_bin)
-            channel_names = list(handle.metadata.get("channel_names", []))
-
-            if intensity.ndim == 2:
-                name = channel_names[0] if channel_names else "Intensity"
-                result[name] = intensity.astype(np.float32)
-            elif intensity.ndim == 3:
-                for i in range(intensity.shape[0]):
-                    name = channel_names[i] if i < len(channel_names) else f"ch{i}"
-                    result[name] = intensity[i].astype(np.float32)
+            if n_timepoints > 1:
+                t = 0 if timepoint is None else int(timepoint)
+                plane = s.read_array_frame("intensity", t, view_bin=view_bin)
             else:
-                result["Intensity"] = intensity.astype(np.float32)
+                plane = s.read_array("intensity", view_bin=view_bin)
+            for name, arr in split_channels_2d(plane, channel_names):
+                result[name] = arr.astype(np.float32)
         return result
 
     # ── Segmentation labels ──────────────────────────────────

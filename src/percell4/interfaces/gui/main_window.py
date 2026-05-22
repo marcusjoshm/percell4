@@ -36,6 +36,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.config import viewer_presets as vp
+from percell4.domain.io.layout import split_intensity_layers
 from percell4.gui import theme
 from percell4.model import CellDataModel
 
@@ -1043,20 +1044,15 @@ class LauncherWindow(QMainWindow):
                 intensity = s.read_array("intensity", view_bin=view_bin)
                 meta = s.metadata
                 channel_names = meta.get("channel_names", [])
+                n_timepoints = int(meta.get("n_timepoints", 1) or 1)
 
-                if intensity.ndim == 2:
-                    name = channel_names[0] if channel_names else "Intensity"
-                    viewer_win.add_image(intensity, name=name)
-                elif intensity.ndim == 3 and intensity.shape[0] <= 20:
-                    for i in range(intensity.shape[0]):
-                        name = (
-                            channel_names[i]
-                            if i < len(channel_names)
-                            else f"ch{i}"
-                        )
-                        viewer_win.add_image(intensity[i], name=name)
-                else:
-                    viewer_win.add_image(intensity, name="Intensity")
+                # Keep any leading time axis so napari builds a single dims
+                # slider; disambiguate a leading T axis from a leading C axis
+                # via n_timepoints (shapes alone are ambiguous).
+                for name, arr in split_intensity_layers(
+                    intensity, channel_names, n_timepoints
+                ):
+                    viewer_win.add_image(arr, name=name)
 
                 # Load existing labels (skip names that are also masks)
                 mask_names = set(s.list_masks())

@@ -159,6 +159,10 @@ class ViewerWindow(QObject):
         self._qt_window = None
         self._color_index = 0
         self._is_originator = False
+        # Dedicated guard for the timepoint-slider <-> session sync. Kept
+        # separate from _is_originator so a dims event can never collide
+        # with an in-flight label-selection or active-layer push.
+        self._timepoint_originator = False
         self._selected_label_forwarding_suspended = False
         self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
         self._hidden_mask_layers: dict[str, float] = {}  # {layer_name: original_opacity}
@@ -205,6 +209,11 @@ class ViewerWindow(QObject):
         # Wire CellDataModel state changes → napari display.
         # Single signal replaces the old coalescing timer — no rapid-fire to coalesce.
         self.data_model.state_changed.connect(self._on_state_changed)
+
+        # Wire the napari timepoint slider → session.active_timepoint. This
+        # is a dims event (distinct from the forbidden layer-list-selection
+        # events) and acts as the timepoint Selector.
+        self._viewer.dims.events.current_step.connect(self._on_dims_current_step)
 
         self._restore_geometry()
 
@@ -425,6 +434,56 @@ class ViewerWindow(QObject):
                 self.data_model.session.active_segmentation,
                 LAYER_TYPE_SEGMENTATION,
             )
+        if change.timepoint:
+            self._push_timepoint_to_napari(
+                self.data_model.session.active_timepoint
+            )
+
+    def _on_dims_current_step(self, event=None) -> None:
+        """Forward a napari timepoint-slider move to session.active_timepoint.
+
+        The leading axis of our ``(T, ...)`` layers is the time axis, so
+        ``dims.current_step[0]`` is the timepoint. No-op for non-time-lapse
+        datasets. Guarded by the dedicated ``_timepoint_originator`` flag so
+        the session→napari push below cannot loop back.
+        """
+        if self._timepoint_originator or self._is_originator:
+            return
+        if self._viewer is None:
+            return
+        session = self.data_model.session
+        if session.n_timepoints <= 1:
+            return
+        step = self._viewer.dims.current_step
+        if not step:
+            return
+        t = max(0, min(int(step[0]), session.n_timepoints - 1))
+        if t == session.active_timepoint:
+            return
+        self._timepoint_originator = True
+        try:
+            session.set_active_timepoint(t)
+        finally:
+            self._timepoint_originator = False
+
+    def _push_timepoint_to_napari(self, t: int) -> None:
+        """Reflect session.active_timepoint into the napari dims slider (axis 0).
+
+        One-way push: no-op when the viewer is torn down or carries no time
+        slider, and guarded so the resulting dims event is ignored.
+        """
+        if not self._is_alive() or self._viewer is None:
+            return
+        dims = self._viewer.dims
+        if dims.ndim < 3:
+            return  # no time slider present
+        if int(dims.current_step[0]) == int(t):
+            return
+        self._timepoint_originator = True
+        try:
+            dims.set_current_step(0, int(t))
+        finally:
+            self._timepoint_originator = False
 
     def _push_active_layer_to_napari(
         self, layer_name: str | None, percell_type: str

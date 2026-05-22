@@ -34,12 +34,16 @@ class DatasetRepository(Protocol):
         self,
         handle: DatasetHandle,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> dict[str, NDArray[np.float32]]:
-        """Read all channel images from the dataset.
+        """Read channel images from the dataset as ``{name: 2D plane}``.
 
         ``view_bin`` (>= 1) downsamples each channel via ``sum_bin_2d``
         on the trailing two axes. At k=1 the arrays are byte-identical
         to what was written. See ``src/percell4/domain/io/view_bin.py``.
+
+        For a time-lapse dataset, ``timepoint`` selects the frame (default
+        frame 0) so the returned planes are always 2D.
         """
         ...
 
