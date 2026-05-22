@@ -1,4 +1,9 @@
-"""Resume-from-segmented: per-dataset segmentation overrides (U12)."""
+"""Already-segmented datasets: per-dataset segmentation overrides (U12).
+
+These datasets enter the workflow fresh and start at grouped thresholding —
+cellpose/seg-QC/tracking are skipped because that work is already on disk.
+This is not a "resume"; the override just chooses which segmentation to use.
+"""
 
 from __future__ import annotations
 

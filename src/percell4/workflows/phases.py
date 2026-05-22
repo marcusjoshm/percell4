@@ -211,8 +211,9 @@ def pick_existing_segmentation(label_names: list[str]) -> str | None:
 
     Rule: prefer a tracked layer (``*_tracked``); else, if exactly one
     segmentation, use it; else (multiple untracked, no tracked) use the
-    lexicographically first — the caller logs a warning and the resume
-    picker (U12) is where the user overrides. Returns ``None`` when there is
+    lexicographically first — the caller logs a warning and the
+    segmentation-select dialog (U12) is where the user overrides. Returns
+    ``None`` when there is
     no segmentation (``label_names`` is empty), which signals "segment this
     dataset normally". Note ``store.list_labels()`` already excludes masks
     (they live in a separate ``/masks/`` group), so no subtraction is needed.
@@ -228,7 +229,8 @@ def pick_existing_segmentation(label_names: list[str]) -> str | None:
 def default_segmentation_picks(
     per_dataset_labels: dict[str, list[str]],
 ) -> dict[str, str]:
-    """Default per-dataset segmentation choice for the resume picker (U12).
+    """Default per-dataset segmentation choice for the segmentation-select
+    dialog (U12).
 
     Maps each dataset name to its :func:`pick_existing_segmentation` default
     (tracked-preferred). Datasets with no labels are omitted.

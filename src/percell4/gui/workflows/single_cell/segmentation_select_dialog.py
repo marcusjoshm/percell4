@@ -1,9 +1,15 @@
-"""Per-dataset segmentation picker for the resume-from-segmented entry (U12).
+"""Per-dataset segmentation selector for already-segmented datasets (U12).
 
-A small modal dialog: given each pre-segmented dataset's available
-``/labels`` resources, let the user choose which segmentation the workflow
-should use per dataset, defaulting to the tracked layer when present. The
-chosen picks seed ``SingleCellThresholdingRunner(segmentation_overrides=...)``.
+When datasets added to the workflow already carry segmentation (and tracking)
+— e.g. produced overnight by the standalone ``percell4-batch`` CLI — the
+workflow setup recognizes that and starts them at the grouped-threshold step
+(cellpose and tracking are skipped). This small modal lets the user choose
+*which* ``/labels`` resource each such dataset should use when more than one
+exists, defaulting to the tracked layer. The chosen picks seed
+``SingleCellThresholdingRunner(segmentation_overrides=...)``.
+
+This is not a "resume" of a prior run — these datasets enter the workflow
+fresh; they simply skip the phases whose work is already on disk.
 """
 
 from __future__ import annotations
@@ -20,24 +26,29 @@ from qtpy.QtWidgets import (
 from percell4.workflows.phases import default_segmentation_picks
 
 
-class ResumeSegmentationDialog(QDialog):
-    """Choose the segmentation to use per dataset (tracked-preferred default).
+class SegmentationSelectDialog(QDialog):
+    """Choose the segmentation to use per already-segmented dataset.
 
     ``per_dataset_labels`` maps dataset name → its available ``/labels``
     names. After ``exec()`` returns ``Accepted``, :attr:`picks` holds the
-    chosen ``{dataset_name: segmentation_name}`` mapping.
+    chosen ``{dataset_name: segmentation_name}`` mapping (tracked-preferred
+    defaults).
     """
 
     def __init__(self, per_dataset_labels: dict[str, list[str]], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Resume from segmented datasets")
+        self.setWindowTitle("Select segmentation for pre-processed datasets")
         self._combos: dict[str, QComboBox] = {}
 
         defaults = default_segmentation_picks(per_dataset_labels)
 
         layout = QVBoxLayout(self)
         layout.addWidget(
-            QLabel("Choose the segmentation to use for each dataset:")
+            QLabel(
+                "These datasets are already segmented. Choose the "
+                "segmentation to use for each (the workflow will start at "
+                "grouped thresholding):"
+            )
         )
         form = QFormLayout()
         for name, labels in per_dataset_labels.items():

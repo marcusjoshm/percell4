@@ -1,4 +1,4 @@
-"""ResumeSegmentationDialog picker + default_segmentation_picks (U12)."""
+"""SegmentationSelectDialog picker + default_segmentation_picks (U12)."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ def test_default_picks_prefer_tracked():
 
 
 def test_dialog_defaults_to_tracked_and_reflects_changes(qtbot):
-    from percell4.gui.workflows.single_cell.resume_dialog import (
-        ResumeSegmentationDialog,
+    from percell4.gui.workflows.single_cell.segmentation_select_dialog import (
+        SegmentationSelectDialog,
     )
 
-    dlg = ResumeSegmentationDialog({
+    dlg = SegmentationSelectDialog({
         "DS1": ["cellpose", "cellpose_tracked"],
         "DS2": ["manual"],
     })

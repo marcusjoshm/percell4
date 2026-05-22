@@ -104,10 +104,11 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         # every phase resolves to ``config.cellpose_segmentation_name``
         # (unchanged behavior). Populated when a dataset is tracked (the
         # tracking phase sets it to ``<seg>_tracked``), when an existing
-        # segmentation is auto-detected (U13), or by the resume picker
-        # (U12). Kept off the frozen WorkflowConfig and reset per run.
-        # Seeded from ``segmentation_overrides`` (the resume picker's
-        # per-dataset choices), which take precedence over auto-detection.
+        # segmentation is auto-detected (U13), or chosen via the
+        # segmentation-select dialog (U12). Kept off the frozen
+        # WorkflowConfig and reset per run. Seeded from
+        # ``segmentation_overrides`` (the per-dataset picks), which take
+        # precedence over auto-detection.
         self._effective_seg: dict[str, str] = dict(segmentation_overrides or {})
         # Currently-running interactive QC controller (if any). Held
         # here to prevent Qt GC. Cleared by the terminal callback.
@@ -142,7 +143,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
         Defaults to ``config.cellpose_segmentation_name``; overridden per
         dataset via ``self._effective_seg`` (set by the tracking phase,
-        auto-skip detection, or the resume picker).
+        auto-skip detection, or the segmentation-select dialog).
         """
         return self._effective_seg.get(
             entry.name, self._config.cellpose_segmentation_name
@@ -155,7 +156,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         ``pick_existing_segmentation`` (prefer ``*_tracked``). Returns None
         when there are no labels (segment normally) or the store can't be
         read. Logs a warning when auto-selecting among multiple untracked
-        segmentations so the user knows to use the resume picker to override.
+        segmentations so the user knows to use the segmentation-select dialog
+        to override.
         """
         try:
             names = DatasetStore(entry.h5_path).list_labels()
@@ -170,7 +172,8 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         ):
             logger.warning(
                 "dataset %s has multiple segmentations %r and no tracked "
-                "layer; auto-selected %r (use the resume entry to override)",
+                "layer; auto-selected %r (use the segmentation-select dialog "
+                "to override)",
                 entry.name,
                 names,
                 seg,
@@ -240,7 +243,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         active = datasets_without_failures(self._working_entries, meta)
         for idx, entry in enumerate(active):
             # Auto-skip (U13/R10): if this dataset already has a segmentation
-            # on disk (or an explicit resume-picker override), skip Cellpose +
+            # on disk (or an explicit segmentation override), skip Cellpose +
             # seg-QC and use it. An override (U12) wins over auto-detection.
             # TIFF-pending datasets were just compressed and have no labels
             # yet, so they segment normally.
