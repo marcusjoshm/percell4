@@ -129,13 +129,21 @@ def select_complete_tracks(
         return empty
 
     # Tracks that divide (appear as a parent of any daughter) are excluded.
+    # ``parent_track_id`` may contain NaN (a measured track absent from the
+    # lineage table) — skip those rather than casting the column to int.
     parents = {
-        int(p) for p in lineage_df["parent_track_id"].astype(int) if p != NO_PARENT
+        int(p)
+        for p in lineage_df["parent_track_id"]
+        if pd.notna(p) and int(p) != NO_PARENT
     }
+    # Eligible roots: parent == NO_PARENT and never a parent. A NaN parent
+    # cannot be confirmed as a clean root, so it is not eligible.
     eligible = {
         int(row["track_id"])
         for _, row in lineage_df.iterrows()
-        if int(row["parent_track_id"]) == NO_PARENT
+        if pd.notna(row["track_id"])
+        and pd.notna(row["parent_track_id"])
+        and int(row["parent_track_id"]) == NO_PARENT
         and int(row["track_id"]) not in parents
     }
 
@@ -145,11 +153,12 @@ def select_complete_tracks(
     covered = {
         int(track_id)
         for track_id, grp in measurements.groupby("track_id")
-        if set(grp["timepoint"].astype(int)) >= full
+        if pd.notna(track_id) and set(grp["timepoint"].astype(int)) >= full
     }
 
     keep = eligible & covered
-    return measurements[measurements["track_id"].astype(int).isin(list(keep))]
+    sub = measurements[measurements["track_id"].notna()]
+    return sub[sub["track_id"].astype(int).isin(list(keep))]
 
 
 def build_napari_graph(split_df: pd.DataFrame) -> dict[int, list[int]]:

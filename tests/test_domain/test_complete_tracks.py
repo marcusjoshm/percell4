@@ -55,6 +55,29 @@ def test_empty_when_no_complete_tracks():
     assert out.empty
 
 
+def test_nan_parent_track_id_does_not_crash():
+    # A measured track absent from the lineage table yields NaN parent_track_id
+    # (the .map() miss in _join_lineage_columns). select_complete_tracks must
+    # not choke on it (regression: IntCastingNaNError from .astype(int)).
+    import numpy as np
+
+    meas = pd.DataFrame(
+        [
+            (0, 1, -1.0), (1, 1, -1.0), (2, 1, -1.0),   # clean root -> complete
+            (0, 9, np.nan), (1, 9, np.nan), (2, 9, np.nan),  # not in lineage
+        ],
+        columns=["timepoint", "track_id", "parent_track_id"],
+    )
+    # Lineage built like export_run does (groupby track_id, first parent);
+    # track 9's parent is NaN.
+    lineage = pd.DataFrame(
+        {"track_id": [1, 9], "parent_track_id": [-1.0, np.nan]}
+    )
+    out = select_complete_tracks(meas, lineage, n_timepoints=3)
+    # Track 1 qualifies; track 9 (NaN parent, unconfirmable root) is excluded.
+    assert set(out["track_id"].unique()) == {1}
+
+
 def test_single_timepoint_track_complete_when_n_is_one():
     meas = pd.DataFrame([(0, 1, -1)], columns=["timepoint", "track_id", "parent_track_id"])
     lineage = pd.DataFrame({"track_id": [1], "parent_track_id": [-1]})
