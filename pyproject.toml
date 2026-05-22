@@ -79,6 +79,9 @@ dev = [
 [project.gui-scripts]
 percell4-gui = "percell4.app:main"
 
+[project.scripts]
+percell4-batch = "percell4.interfaces.cli.batch_process:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
