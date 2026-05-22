@@ -254,7 +254,7 @@ class FlimPanel(QWidget):
             self._on_lifetime_source_changed
         )
         source_row.addWidget(self._lifetime_source_combo)
-        source_row.addWidget(QLabel("k"))
+        source_row.addWidget(QLabel("Kernel"))
         self._lifetime_median_kernel = QSpinBox()
         self._lifetime_median_kernel.setRange(3, 15)
         self._lifetime_median_kernel.setSingleStep(2)
