@@ -342,6 +342,64 @@ def segment_one(
     return labels, None, f"{int(labels.max())} cells after postprocess"
 
 
+# ── Tracking (time-lapse): link cells across timepoints ────────────────
+
+
+def track_one(
+    store: DatasetStore,
+    raw_seg_name: str,
+    tracked_name: str | None = None,
+    tracker: Any = None,
+) -> tuple[str | None, DatasetFailure | None, str]:
+    """Track a ``(T, H, W)`` raw segmentation; write the tracked labels + lineage.
+
+    Reads ``/labels/<raw_seg_name>`` (a time-lapse stack), runs the tracker
+    (laptrack by default), relabels via the shared
+    :func:`~percell4.domain.tracking.build.build_tracked_result`, and writes
+    a new ``<raw>_tracked`` segmentation plus its ``/tracks/<name>`` lineage
+    table — preserving the raw segmentation. Returns
+    ``(tracked_seg_name, failure, message)``; on failure the tracked name is
+    ``None`` and a :class:`DatasetFailure` is returned so the runner drops the
+    dataset from later phases. Mirrors ``TrackCells`` but on ``DatasetStore``
+    (no Session), sharing the relabel/lineage logic.
+    """
+    from percell4.adapters.laptrack_tracker import LaptrackTracker
+    from percell4.domain.tracking.build import build_tracked_result
+
+    try:
+        raw = store.read_labels(raw_seg_name)
+    except (KeyError, ValueError) as e:
+        return None, DatasetFailure.TRACKING_ERROR, f"read /labels/{raw_seg_name} failed: {e}"
+    if raw.ndim != 3:
+        return (
+            None,
+            DatasetFailure.TRACKING_ERROR,
+            f"/labels/{raw_seg_name} is {raw.ndim}D, not a (T, H, W) stack",
+        )
+
+    tracker = tracker or LaptrackTracker()
+    try:
+        result = tracker.track(raw)
+        built = build_tracked_result(raw, result.track_df, result.split_df)
+    except Exception as e:
+        logger.exception("tracking failed for /labels/%s", raw_seg_name)
+        return None, DatasetFailure.TRACKING_ERROR, f"tracking failed: {type(e).__name__}: {e}"
+
+    seg_name = tracked_name or f"{raw_seg_name}_tracked"
+    try:
+        store.write_labels(seg_name, built.tracked_labels)
+        store.write_tracks(seg_name, built.lineage)
+    except Exception as e:
+        logger.exception("failed to write tracked segmentation %s", seg_name)
+        return None, DatasetFailure.TRACKING_ERROR, f"write {seg_name} failed: {e}"
+
+    return (
+        seg_name,
+        None,
+        f"{built.n_tracks} tracks, {built.n_divisions} divisions",
+    )
+
+
 # ── Phase 3/5/...: Threshold compute + headless apply ──────────────────
 
 

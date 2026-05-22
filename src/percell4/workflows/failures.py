@@ -20,6 +20,7 @@ class DatasetFailure(StrEnum):
     SEGMENTATION_ERROR = "segmentation_error"
     THRESHOLD_EMPTY = "threshold_empty"
     THRESHOLD_ERROR = "threshold_error"
+    TRACKING_ERROR = "tracking_error"
     MEASUREMENT_ERROR = "measurement_error"
 
 

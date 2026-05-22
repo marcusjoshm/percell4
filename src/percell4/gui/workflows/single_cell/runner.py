@@ -57,6 +57,7 @@ from percell4.workflows.phases import (
     record_failure,
     segment_one,
     threshold_compute_one,
+    track_one,
     write_staging_parquet,
 )
 
@@ -173,6 +174,23 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             )
         return seg
 
+    def _should_track(self, entry) -> bool:
+        """True when a dataset needs tracking: time-lapse and not yet tracked.
+
+        Skips single-timepoint datasets and datasets whose effective
+        segmentation is already a tracked layer (auto-detected by U13).
+        """
+        if self._seg_name_for(entry).endswith("_tracked"):
+            return False
+        try:
+            n_timepoints = int(
+                DatasetStore(entry.h5_path).metadata.get("n_timepoints", 1) or 1
+            )
+        except Exception:
+            logger.exception("could not read n_timepoints for %s", entry.name)
+            return False
+        return n_timepoints > 1
+
     # ── Phase generator ───────────────────────────────────────
 
     def _phase_generator(
@@ -256,6 +274,23 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                         dataset_name=entry.name,
                         handler=self._make_seg_qc_handler(entry, idx, len(active)),
                     )
+
+        # ── Tracking (time-lapse): link cells across timepoints ──
+        # Runs after seg-QC for datasets with n_timepoints > 1 that aren't
+        # already tracked. On success the dataset's effective segmentation
+        # switches to the tracked layer, so every downstream phase uses it.
+        active = datasets_without_failures(self._working_entries, meta)
+        for idx, entry in enumerate(active):
+            if not self._should_track(entry):
+                continue
+            yield PhaseRequest(
+                kind=PhaseKind.UNATTENDED,
+                phase_name="track",
+                dataset_index=idx,
+                dataset_total=len(active),
+                dataset_name=entry.name,
+                handler=self._make_track_handler(entry),
+            )
 
         # ── Per-round: threshold compute + apply ────────────
         for round_idx, round_spec in enumerate(cfg.thresholding_rounds):
@@ -382,6 +417,30 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     self._working_entries[i] = updated
                     break
             self._log(phase="compress", dataset=entry.name, event="done")
+            return PhaseResult(success=True, message=msg)
+
+        return handler
+
+    def _make_track_handler(self, entry):
+        def handler() -> PhaseResult:
+            print(f"  [track] {entry.name}...", flush=True)
+            store = DatasetStore(entry.h5_path)
+            raw_seg = self._seg_name_for(entry)
+            tracked_name, failure, msg = track_one(store, raw_seg)
+            if failure is not None:
+                record_failure(
+                    self._metadata,
+                    dataset_name=entry.name,
+                    phase_name="track",
+                    failure=failure,
+                    message=msg,
+                )
+                self._log(phase="track", dataset=entry.name,
+                          event="failed", failure=failure.value, message=msg)
+                return PhaseResult(success=False, message=msg)
+            # Downstream phases now read the tracked segmentation.
+            self._effective_seg[entry.name] = tracked_name
+            self._log(phase="track", dataset=entry.name, event="done", message=msg)
             return PhaseResult(success=True, message=msg)
 
         return handler
