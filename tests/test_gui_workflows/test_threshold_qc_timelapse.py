@@ -1,9 +1,12 @@
-"""Time-lapse threshold-apply routes to the headless per-frame path (U9).
+"""Time-lapse threshold QC runs interactively, one timepoint at a time.
 
-The interactive ThresholdQCController is single-frame and can't consume the
-per-timepoint grouping dict, so time-lapse datasets use the headless per-frame
-apply (U4) even in interactive mode. The interactive dilute controller is
-skipped for time-lapse datasets (no per-frame equivalent).
+In interactive mode a time-lapse dataset yields an INTERACTIVE
+``threshold_qc`` phase (driven by ``TimelapseThresholdQCQueueEntry``), which
+runs the single-frame ThresholdQCController once per timepoint and stacks the
+accepted masks into the (T,H,W) resource — the same UX as the standard
+single-timepoint workflow. Only headless mode (``interactive_qc=False``) uses
+the per-frame ``threshold_apply`` path. The interactive dilute controller is
+still skipped for time-lapse datasets (no per-frame equivalent yet).
 """
 
 from __future__ import annotations
@@ -78,7 +81,7 @@ def _phases(runner):
     return by_ds
 
 
-def test_timelapse_uses_headless_apply_in_interactive_mode(tmp_path):
+def test_timelapse_uses_interactive_qc_in_interactive_mode(tmp_path):
     p = tmp_path / "TL.h5"
     _store(p, n_timepoints=3, labels=["cellpose", "cellpose_tracked"])
     runner = _runner(
@@ -87,8 +90,22 @@ def test_timelapse_uses_headless_apply_in_interactive_mode(tmp_path):
         tmp_path,
     )
     by_ds = _phases(runner)
-    assert "threshold_apply:GFP_split" in by_ds["TL"]      # headless per-frame
-    assert "threshold_qc:GFP_split" not in by_ds["TL"]      # not interactive
+    assert "threshold_qc:GFP_split" in by_ds["TL"]          # interactive per-timepoint
+    assert "threshold_apply:GFP_split" not in by_ds["TL"]   # not headless
+
+
+def test_timelapse_uses_headless_apply_in_headless_mode(tmp_path):
+    p = tmp_path / "TLH.h5"
+    _store(p, n_timepoints=3, labels=["cellpose", "cellpose_tracked"])
+    runner = _runner(
+        [WorkflowDatasetEntry(name="TLH", source=DatasetSource.H5_EXISTING,
+                              h5_path=p, channel_names=["GFP"])],
+        tmp_path,
+    )
+    runner._interactive_qc = False  # headless: per-frame apply, no interactive QC
+    by_ds = _phases(runner)
+    assert "threshold_apply:GFP_split" in by_ds["TLH"]
+    assert "threshold_qc:GFP_split" not in by_ds["TLH"]
 
 
 def test_single_timepoint_keeps_interactive_threshold_qc(tmp_path):

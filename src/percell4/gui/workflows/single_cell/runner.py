@@ -339,12 +339,13 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     continue
 
                 # Interactive threshold-QC uses the single-frame
-                # ThresholdQCController, which can't review a (T,H,W) stack or
-                # the per-timepoint grouping dict. For time-lapse datasets,
-                # apply thresholds through the headless per-frame path (U4) —
-                # correct and tested — even in interactive mode. Single-
-                # timepoint datasets keep the interactive QC controller.
-                if self._interactive_qc and not self._is_timelapse(entry):
+                # ThresholdQCController. Time-lapse datasets run it one
+                # timepoint at a time (TimelapseThresholdQCQueueEntry) so the
+                # user QCs every frame's groups interactively, just like the
+                # standard single-timepoint workflow; the per-frame masks are
+                # stacked into the (T,H,W) /masks resource at the end. The
+                # handler picks the right wrapper from _is_timelapse(entry).
+                if self._interactive_qc:
                     yield PhaseRequest(
                         kind=PhaseKind.INTERACTIVE,
                         phase_name=f"threshold_qc:{round_spec.name}",
@@ -922,6 +923,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         def handler(on_complete):
             from percell4.gui.workflows.single_cell.threshold_qc_queue import (
                 ThresholdQCQueueEntry,
+                TimelapseThresholdQCQueueEntry,
             )
 
             if self._host is None:
@@ -960,17 +962,32 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             viewer_win = self._host.get_viewer_window()
             data_model = self._host.get_data_model()
-            queue_entry = ThresholdQCQueueEntry(
-                viewer_win=viewer_win,
-                data_model=data_model,
-                entry=entry,
-                round_spec=round_spec,
-                grouping_result=grouping,
-                queue_index=queue_index,
-                queue_total=queue_total,
-                on_complete=_wrapped_complete,
-                seg_name=self._seg_name_for(entry),
-            )
+            if self._is_timelapse(entry):
+                # Time-lapse: grouping is a dict[int, GroupingResult]; QC one
+                # timepoint at a time, stacking masks into a (T,H,W) resource.
+                queue_entry = TimelapseThresholdQCQueueEntry(
+                    viewer_win=viewer_win,
+                    data_model=data_model,
+                    entry=entry,
+                    round_spec=round_spec,
+                    grouping_by_timepoint=grouping,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    on_complete=_wrapped_complete,
+                    seg_name=self._seg_name_for(entry),
+                )
+            else:
+                queue_entry = ThresholdQCQueueEntry(
+                    viewer_win=viewer_win,
+                    data_model=data_model,
+                    entry=entry,
+                    round_spec=round_spec,
+                    grouping_result=grouping,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    on_complete=_wrapped_complete,
+                    seg_name=self._seg_name_for(entry),
+                )
             # Hold a reference to prevent GC.
             self._active_qc_controller = queue_entry
             self._log(
