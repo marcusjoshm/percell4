@@ -15,8 +15,7 @@ from numpy.typing import NDArray
 
 from percell4.application.session import Session
 from percell4.domain.errors import NoDatasetError
-from percell4.domain.tracking.lineage import build_lineage_table
-from percell4.domain.tracking.relabel import relabel_stack_by_track
+from percell4.domain.tracking.build import build_tracked_result
 from percell4.ports.dataset_repository import DatasetRepository
 from percell4.ports.tracker import Tracker
 
@@ -72,28 +71,15 @@ class TrackCells:
             )
 
         result = self._tracker.track(raw)
-
-        # Shift track ids to 1-based so the relabeled pixel value can equal the
-        # track id without colliding with background (0). split links shift too
-        # so lineage stays consistent with the stored labels.
-        track_df = result.track_df.copy()
-        if not track_df.empty:
-            track_df["track_id"] = track_df["track_id"].astype(int) + 1
-        split_df = result.split_df.copy()
-        if not split_df.empty:
-            split_df["parent_track_id"] = split_df["parent_track_id"].astype(int) + 1
-            split_df["child_track_id"] = split_df["child_track_id"].astype(int) + 1
-
-        tracked = relabel_stack_by_track(raw, track_df)
-        lineage = build_lineage_table(track_df, split_df)
+        built = build_tracked_result(raw, result.track_df, result.split_df)
 
         # Write a new resource and keep the raw segmentation intact (the raw
         # per-frame labels are easier to correct than the tracked ones).
         seg_name = tracked_name or f"{raw_seg_name}_tracked"
 
         # Creator: store labels + lineage, refresh inventory, set active.
-        self._repo.write_labels(handle, seg_name, tracked)
-        self._repo.write_tracks(handle, seg_name, lineage)
+        self._repo.write_labels(handle, seg_name, built.tracked_labels)
+        self._repo.write_tracks(handle, seg_name, built.lineage)
         mask_set = set(self._repo.list_masks(handle))
         seg_names = [
             n for n in self._repo.list_labels(handle) if n not in mask_set
@@ -101,14 +87,9 @@ class TrackCells:
         self._session.refresh_resource_lists(segmentation_names=seg_names)
         self._session.set_active_segmentation(seg_name)
 
-        n_tracks = int(track_df["track_id"].nunique()) if not track_df.empty else 0
-        # A division is one dividing parent (each yields multiple split rows).
-        n_divisions = (
-            int(split_df["parent_track_id"].nunique()) if not split_df.empty else 0
-        )
         return TrackResult(
-            tracked_labels=tracked,
+            tracked_labels=built.tracked_labels,
             seg_name=seg_name,
-            n_tracks=n_tracks,
-            n_divisions=n_divisions,
+            n_tracks=built.n_tracks,
+            n_divisions=built.n_divisions,
         )
