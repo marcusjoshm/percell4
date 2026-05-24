@@ -63,6 +63,16 @@ class FlimPanel(QWidget):
             Event.DATASET_CHANGED, self._refresh_ref_circle_enabled
         )
         self._refresh_ref_circle_enabled()
+        # Gate the lifetime Wavelet source on whether a wavelet result
+        # exists for the active channel. Refresh on dataset and channel
+        # switches (the long-lived panel doesn't bother unsubscribing).
+        self.data_model.session.subscribe(
+            Event.DATASET_CHANGED, self._refresh_lifetime_source_enabled
+        )
+        self.data_model.session.subscribe(
+            Event.ACTIVE_CHANNEL_CHANGED, self._refresh_lifetime_source_enabled
+        )
+        self._refresh_lifetime_source_enabled()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -228,6 +238,35 @@ class FlimPanel(QWidget):
         # ── Lifetime ──
         lifetime_group = QGroupBox("Lifetime Map")
         lifetime_layout = QVBoxLayout(lifetime_group)
+
+        # Source selector: which phasor maps feed the lifetime. The combo
+        # item order matches ComputeLifetime.LIFETIME_SOURCES.
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Source:"))
+        self._lifetime_source_combo = QComboBox()
+        self._lifetime_source_combo.addItems(["Unfiltered", "Median", "Wavelet"])
+        self._lifetime_source_combo.setToolTip(
+            "Phasor maps used for the lifetime: raw (Unfiltered), a spatial "
+            "median of the raw maps (Median), or the DTCWT result (Wavelet, "
+            "available after Apply Wavelet Filter)."
+        )
+        self._lifetime_source_combo.currentIndexChanged.connect(
+            self._on_lifetime_source_changed
+        )
+        source_row.addWidget(self._lifetime_source_combo)
+        source_row.addWidget(QLabel("Kernel"))
+        self._lifetime_median_kernel = QSpinBox()
+        self._lifetime_median_kernel.setRange(3, 15)
+        self._lifetime_median_kernel.setSingleStep(2)
+        self._lifetime_median_kernel.setValue(3)
+        self._lifetime_median_kernel.setEnabled(False)
+        self._lifetime_median_kernel.setToolTip(
+            "Median window side length k (odd, 3–15); total pixels = k². "
+            "Used only when Source is Median."
+        )
+        source_row.addWidget(self._lifetime_median_kernel)
+        lifetime_layout.addLayout(source_row)
+
         btn_lifetime = QPushButton("Compute Lifetime")
         btn_lifetime.clicked.connect(self._on_compute_lifetime)
         lifetime_layout.addWidget(btn_lifetime)
@@ -313,6 +352,7 @@ class FlimPanel(QWidget):
                     f"Loaded cached phasor (channel: {active_channel})"
                 )
                 self._refresh_ref_circle_enabled()
+                self._refresh_lifetime_source_enabled()
                 return
 
         harmonic = int(self._phasor_harmonic.currentText())
@@ -380,6 +420,9 @@ class FlimPanel(QWidget):
         # flim_frequency_mhz; refresh the reference-circle checkbox state
         # so the user can engage it without re-loading the dataset.
         self._refresh_ref_circle_enabled()
+        # Recomputing phasor invalidated any prior wavelet result → the
+        # Wavelet lifetime source should reflect that it's now unavailable.
+        self._refresh_lifetime_source_enabled()
 
     # ── Wavelet Filter ───────────────────────────────────────
 
@@ -417,9 +460,9 @@ class FlimPanel(QWidget):
                     phasor_win = self._get_phasor_window()
                     if phasor_win is not None:
                         phasor_win.set_phasor_data(
-                            cached.g_filtered, cached.s_filtered,
+                            cached.g_map, cached.s_map,
                             intensity=cached.intensity,
-                            g_unfiltered=cached.g_map, s_unfiltered=cached.s_map,
+                            g_wavelet=cached.g_filtered, s_wavelet=cached.s_filtered,
                             labels=seg_labels,
                         )
                     self._show_status(
@@ -488,13 +531,22 @@ class FlimPanel(QWidget):
             except KeyError:
                 pass
 
+        # The unfiltered g/s are the canonical maps the window stores; the
+        # wavelet result is the optional view. Raw maps should always exist
+        # after a successful wavelet run (wavelet reads them), but fall back
+        # to the filtered maps as the base if the read somehow failed.
+        if g_unfiltered is None or s_unfiltered is None:
+            base_g, base_s = result.g_filtered, result.s_filtered
+        else:
+            base_g, base_s = g_unfiltered, s_unfiltered
+
         seg_labels = self._get_active_seg_labels()
         phasor_win = self._get_phasor_window()
         if phasor_win is not None:
                 phasor_win.set_phasor_data(
-                    result.g_filtered, result.s_filtered,
+                    base_g, base_s,
                     intensity=intensity.astype(np.float32) if intensity is not None else None,
-                    g_unfiltered=g_unfiltered, s_unfiltered=s_unfiltered,
+                    g_wavelet=result.g_filtered, s_wavelet=result.s_filtered,
                     labels=seg_labels,
                 )
 
@@ -504,6 +556,8 @@ class FlimPanel(QWidget):
             f"{verb} level {filter_level} | "
             f"{result.n_valid:,} valid pixels | channel: {active_channel}{suffix}"
         )
+        # A wavelet result now exists → enable the Wavelet lifetime source.
+        self._refresh_lifetime_source_enabled()
 
     # ── Lifetime ─────────────────────────────────────────────
 
@@ -513,13 +567,26 @@ class FlimPanel(QWidget):
             self._show_status("Select a channel in the viewer first")
             return
 
+        # Read the source + kernel from the widgets at click time and pass
+        # them explicitly into the use case (no silent default). The combo
+        # order matches LIFETIME_SOURCES = (unfiltered, median, wavelet).
+        source = ("unfiltered", "median", "wavelet")[
+            self._lifetime_source_combo.currentIndex()
+        ]
+        median_size = int(self._lifetime_median_kernel.value())
+
         try:
             from percell4.application.use_cases.compute_lifetime import ComputeLifetime
 
             repo = self._get_repo()
             uc = ComputeLifetime(repo, self.data_model.session)
             active_bin = self.data_model.session.active_bin
-            result = uc.execute(channel=active_channel, view_bin=active_bin)
+            result = uc.execute(
+                channel=active_channel,
+                source=source,
+                median_size=median_size,
+                view_bin=active_bin,
+            )
         except ValueError as e:
             self._show_status(str(e))
             return
@@ -527,19 +594,15 @@ class FlimPanel(QWidget):
             self._show_status(f"Lifetime computation error: {e}")
             return
 
-        # Add lifetime layer to viewer
+        # Add lifetime layer to viewer. The use case registered the
+        # lifetime as a /intensity channel and refreshed channel_names;
+        # push the freshly computed plane through the normal channel
+        # render path so the colormap resolution (turbo via the
+        # "lifetime" CHANNEL_COLORMAPS entry) and add_image defaults match
+        # what a later reload from disk produces.
         viewer_win = self._get_viewer_window()
         if viewer_win is not None:
-                viewer_win.viewer.add_image(
-                    result.lifetime,
-                    name=f"Lifetime ({active_channel})",
-                    colormap=vp.FLIM_LIFETIME_COLORMAP,
-                    blending=vp.FLIM_LIFETIME_BLENDING,
-                    **vp._optional_kwargs(
-                        opacity=vp.FLIM_LIFETIME_OPACITY,
-                        contrast_limits=vp.FLIM_LIFETIME_CONTRAST_OVERRIDE,
-                    ),
-                )
+            viewer_win.add_image(result.lifetime, name=result.channel_name)
 
         if result.mean_tau is not None:
             self._show_status(
@@ -548,6 +611,50 @@ class FlimPanel(QWidget):
             )
         else:
             self._show_status("Lifetime: no valid pixels")
+
+    def _on_lifetime_source_changed(self, _index: int) -> None:
+        """Enable the median kernel spin only when Source is Median."""
+        is_median = self._lifetime_source_combo.currentText() == "Median"
+        self._lifetime_median_kernel.setEnabled(is_median)
+
+    def _refresh_lifetime_source_enabled(self, *_args) -> None:
+        """Gate the Wavelet lifetime source on a present wavelet result.
+
+        The Wavelet item is disabled (not hidden) unless
+        ``phasor/<ch>/g_filtered`` exists for the active channel — mirrors
+        the phasor plot's wavelet-checkbox enablement so the user can't pick
+        a source the use case would reject. If the active selection becomes
+        disabled, fall back to Unfiltered.
+        """
+        from qtpy.QtCore import Qt
+        from qtpy.QtGui import QStandardItemModel
+
+        has_wavelet = False
+        channel = self._get_active_channel()
+        handle = self.data_model.session.dataset
+        repo = self._get_repo()
+        if channel is not None and handle is not None and repo is not None:
+            try:
+                repo.read_array(handle, f"phasor/{channel}/g_filtered")
+                has_wavelet = True
+            except Exception:
+                has_wavelet = False
+
+        model = self._lifetime_source_combo.model()
+        wavelet_idx = 2  # ("Unfiltered", "Median", "Wavelet")
+        item = None
+        if isinstance(model, QStandardItemModel):
+            item = model.item(wavelet_idx)
+        if item is not None:
+            item.setEnabled(has_wavelet)
+        tip = (
+            "" if has_wavelet
+            else "Apply the wavelet filter first to enable this source."
+        )
+        self._lifetime_source_combo.setItemData(wavelet_idx, tip, Qt.ToolTipRole)
+
+        if not has_wavelet and self._lifetime_source_combo.currentIndex() == wavelet_idx:
+            self._lifetime_source_combo.setCurrentIndex(0)  # Unfiltered
 
     # ── Phasor Filters (U6) ──────────────────────────────────
 
@@ -681,7 +788,10 @@ class FlimPanel(QWidget):
                 else None
             ),
             mask_filter_active=phasor_win._mask_filter_check.isChecked(),
-            use_filtered_gs=phasor_win._filtered_check.isChecked(),
+            # GMM reads persisted maps from HDF5: wavelet view → g_filtered,
+            # otherwise the raw g/s. The on-demand median view is not a
+            # persisted resource, so GMM runs on raw g/s when it is active.
+            use_filtered_gs=phasor_win._wavelet_check.isChecked(),
             harmonic=int(phasor_win._harmonic_combo.currentText()),
             # Capture session.active_bin at worker-construction (race-safe
             # per the U12 capture pattern) so a mid-flight bin toggle

@@ -106,6 +106,10 @@ class FakeRepo:
     def read_metadata(self, handle):
         return dict(self.disk_metadata)
 
+    def write_metadata(self, handle, attrs):
+        # Mirror the on-disk merge semantics of DatasetStore.set_metadata.
+        self.disk_metadata.update(dict(attrs))
+
     def delete_path(self, handle, path):
         return self.written_arrays.pop(path, None) is not None
 
@@ -506,6 +510,75 @@ class TestComputePhasorInvalidatesWavelet:
         result = uc.execute(channel="ch0", harmonic=1)
 
         assert result.g_map.shape == (4, 4)
+
+
+# ── ComputePhasor: truly-unfiltered output ───────────────────
+
+
+class TestComputePhasorNoMedianFilter:
+    """The canonical /phasor/<ch>/{g,s} must be written truly unfiltered.
+
+    Regression guard for the FLIM filter-options change: ComputePhasor
+    used to apply an unconditional scipy.ndimage.median_filter(size=3)
+    before saving, so the 'unfiltered' cloud was secretly 3x3-median
+    filtered. Median filtering is now an opt-in downstream view.
+    """
+
+    def _make_decay_with_outlier(self) -> np.ndarray:
+        """4x4 decay, uniform except one pixel with a distinct lifetime.
+
+        The lone fast-decay pixel gives a (g, s) that differs sharply from
+        its neighbours, so a 3x3 median would visibly overwrite it.
+        """
+        H, W, T = 4, 4, 64
+        t = np.arange(T, dtype=np.float32)
+        decay = np.broadcast_to(
+            np.exp(-t / 8.0), (H, W, T)
+        ).astype(np.float32).copy()
+        decay[1, 1, :] = np.exp(-t / 1.5) * 1000.0  # outlier pixel
+        return decay
+
+    def test_saved_gs_equal_raw_compute_phasor(self):
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+        from percell4.domain.flim.phasor import compute_phasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        decay = self._make_decay_with_outlier()
+        repo.written_arrays["decay/ch0"] = decay
+        repo.disk_metadata = {}  # no calibration → identity transform
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1)
+
+        expected_g, expected_s = compute_phasor(decay, harmonic=1)
+        # No calibration and no low-photon pixels here, so the saved maps
+        # must equal the raw transform exactly. A 3x3 median would change
+        # the outlier pixel and its neighbours.
+        np.testing.assert_array_equal(repo.written_arrays["phasor/ch0/g"], expected_g)
+        np.testing.assert_array_equal(repo.written_arrays["phasor/ch0/s"], expected_s)
+
+    def test_outlier_pixel_survives(self):
+        """The distinct outlier pixel is preserved (not median-smoothed)."""
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+        from percell4.domain.flim.phasor import compute_phasor
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        decay = self._make_decay_with_outlier()
+        repo.written_arrays["decay/ch0"] = decay
+        repo.disk_metadata = {}
+
+        uc = ComputePhasor(repo, session)
+        uc.execute(channel="ch0", harmonic=1)
+
+        raw_g, _ = compute_phasor(decay, harmonic=1)
+        saved_g = repo.written_arrays["phasor/ch0/g"]
+        # Outlier pixel keeps its raw value; a median would replace it with
+        # the surrounding neighbourhood median.
+        assert saved_g[1, 1] == pytest.approx(float(raw_g[1, 1]))
 
 
 # ── RunPhasorGMM (U3) ────────────────────────────────────────
@@ -942,8 +1015,9 @@ class TestPhasorWritesViewBin:
         assert repo.array_attrs["phasor/ch0/g_filtered"]["created_at_bin"] == 3
         assert repo.array_attrs["phasor/ch0/s_filtered"]["created_at_bin"] == 3
 
-    def test_compute_lifetime_view_bin_3_stamps_attr_and_upsamples(self):
-        """ComputeLifetime upsamples lifetime to native + stamps attr."""
+    def test_compute_lifetime_view_bin_3_upsamples_to_native(self):
+        """ComputeLifetime upsamples the binned lifetime to native_shape
+        before appending it as a /intensity channel slice."""
         from percell4.application.use_cases.compute_lifetime import ComputeLifetime
 
         session = Session()
@@ -953,15 +1027,16 @@ class TestPhasorWritesViewBin:
             "native_shape": (12, 12),
             "flim_frequency_mhz": 80.0,
         }
-        # Filtered g/s at binned shape; no filtered path -> falls back.
+        # g/s live at the binned shape; the lifetime is upsampled to native.
         repo.written_arrays["phasor/ch0/g"] = np.full((4, 4), 0.5, dtype=np.float32)
         repo.written_arrays["phasor/ch0/s"] = np.full((4, 4), 0.3, dtype=np.float32)
 
         uc = ComputeLifetime(repo, session)
         uc.execute(channel="ch0", view_bin=3)
 
-        assert repo.written_arrays["phasor/ch0/lifetime"].shape == (12, 12)
-        assert repo.array_attrs["phasor/ch0/lifetime"]["created_at_bin"] == 3
+        # First lifetime channel → /intensity is the bare 2D plane.
+        assert repo.written_arrays["intensity"].shape == (12, 12)
+        assert repo.array_attrs["intensity"]["created_at_bin"] == 3
 
     def test_compute_phasor_view_bin_gt_one_no_native_shape_raises(self):
         """Missing native_shape with view_bin > 1 is an error."""
@@ -977,3 +1052,173 @@ class TestPhasorWritesViewBin:
         uc = ComputePhasor(repo, session)
         with pytest.raises(ValueError, match="native_shape"):
             uc.execute(channel="ch0", harmonic=1, view_bin=3)
+
+
+# ── ComputeLifetime: explicit source selection ───────────────
+
+
+class TestComputeLifetimeSource:
+    """ComputeLifetime computes from an explicit, caller-chosen source.
+
+    Replaces the old implicit 'filtered-if-exists, else unfiltered'
+    behavior with three explicit sources: unfiltered, median, wavelet.
+    """
+
+    def _setup(self, *, with_wavelet: bool = False):
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {"flim_frequency_mhz": 80.0}
+        g = np.full((5, 5), 0.5, dtype=np.float32)
+        s = np.full((5, 5), 0.3, dtype=np.float32)
+        g[2, 2] = 0.9  # outlier so median differs from raw
+        s[2, 2] = 0.05
+        repo.written_arrays["phasor/ch0/g"] = g
+        repo.written_arrays["phasor/ch0/s"] = s
+        if with_wavelet:
+            repo.written_arrays["phasor/ch0/g_filtered"] = np.full(
+                (5, 5), 0.45, dtype=np.float32
+            )
+            repo.written_arrays["phasor/ch0/s_filtered"] = np.full(
+                (5, 5), 0.28, dtype=np.float32
+            )
+        return session, repo
+
+    def test_unfiltered_registers_channel_and_writes_intensity(self):
+        from percell4.application.use_cases.compute_lifetime import (
+            ComputeLifetime, lifetime_channel_name,
+        )
+        from percell4.domain.flim.phasor import phasor_to_lifetime
+
+        session, repo = self._setup()
+        result = ComputeLifetime(repo, session).execute(
+            channel="ch0", source="unfiltered"
+        )
+
+        assert result.source == "unfiltered"
+        assert result.median_size is None
+        assert result.channel_name == lifetime_channel_name("ch0", "unfiltered")
+        expected = phasor_to_lifetime(
+            repo.written_arrays["phasor/ch0/g"],
+            repo.written_arrays["phasor/ch0/s"],
+            frequency_mhz=80.0,
+        )
+        # /intensity now holds the lifetime channel (first channel, since
+        # the fixture has no prior intensity).
+        intensity = repo.written_arrays["intensity"]
+        assert intensity.shape == expected.shape  # single-channel, 2D
+        np.testing.assert_array_equal(intensity, expected.astype(np.float32))
+        # channel_names was registered and persisted to /metadata + session.
+        assert result.channel_name in repo.disk_metadata["channel_names"]
+        assert repo.disk_metadata["n_channels"] == len(
+            repo.disk_metadata["channel_names"]
+        )
+        # No bespoke phasor/<ch>/lifetime path was written.
+        assert "phasor/ch0/lifetime" not in repo.written_arrays
+
+    def test_median_applies_kernel_and_returns_size(self):
+        from percell4.application.use_cases.compute_lifetime import (
+            ComputeLifetime, lifetime_channel_name,
+        )
+        from percell4.domain.flim.phasor import median_filter_gs, phasor_to_lifetime
+
+        session, repo = self._setup()
+        result = ComputeLifetime(repo, session).execute(
+            channel="ch0", source="median", median_size=3
+        )
+
+        assert result.source == "median"
+        assert result.median_size == 3
+        assert result.channel_name == lifetime_channel_name("ch0", "median")
+        gm, sm = median_filter_gs(
+            repo.written_arrays["phasor/ch0/g"],
+            repo.written_arrays["phasor/ch0/s"],
+            size=3,
+        )
+        expected = phasor_to_lifetime(gm, sm, frequency_mhz=80.0)
+        np.testing.assert_array_equal(
+            repo.written_arrays["intensity"], expected.astype(np.float32)
+        )
+
+    def test_wavelet_reads_filtered_maps(self):
+        from percell4.application.use_cases.compute_lifetime import (
+            ComputeLifetime, lifetime_channel_name,
+        )
+        from percell4.domain.flim.phasor import phasor_to_lifetime
+
+        session, repo = self._setup(with_wavelet=True)
+        result = ComputeLifetime(repo, session).execute(
+            channel="ch0", source="wavelet"
+        )
+
+        assert result.source == "wavelet"
+        assert result.channel_name == lifetime_channel_name("ch0", "wavelet")
+        expected = phasor_to_lifetime(
+            repo.written_arrays["phasor/ch0/g_filtered"],
+            repo.written_arrays["phasor/ch0/s_filtered"],
+            frequency_mhz=80.0,
+        )
+        np.testing.assert_array_equal(
+            repo.written_arrays["intensity"], expected.astype(np.float32)
+        )
+
+    def test_wavelet_without_filtered_maps_raises(self):
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session, repo = self._setup(with_wavelet=False)
+        with pytest.raises(ValueError, match="wavelet"):
+            ComputeLifetime(repo, session).execute(channel="ch0", source="wavelet")
+
+    def test_invalid_source_raises(self):
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session, repo = self._setup()
+        with pytest.raises(ValueError, match="source"):
+            ComputeLifetime(repo, session).execute(channel="ch0", source="bogus")
+
+    def test_appends_when_intensity_already_exists(self):
+        """An existing /intensity channel survives; lifetime is added as C+1."""
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session, repo = self._setup()
+        # Seed an existing single-channel /intensity.
+        repo.written_arrays["intensity"] = np.full((5, 5), 10.0, dtype=np.float32)
+        repo.disk_metadata["channel_names"] = ["ch0"]
+
+        result = ComputeLifetime(repo, session).execute(
+            channel="ch0", source="unfiltered"
+        )
+
+        intensity = repo.written_arrays["intensity"]
+        # 2D → (2, H, W) after the append.
+        assert intensity.shape == (2, 5, 5)
+        np.testing.assert_array_equal(intensity[0], np.full((5, 5), 10.0))
+        assert repo.disk_metadata["channel_names"] == ["ch0", result.channel_name]
+        assert repo.disk_metadata["n_channels"] == 2
+
+    def test_recompute_same_source_overwrites_slice(self):
+        """Re-running with the same source overwrites that channel's slice."""
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session, repo = self._setup()
+        repo.written_arrays["intensity"] = np.full((5, 5), 10.0, dtype=np.float32)
+        repo.disk_metadata["channel_names"] = ["ch0"]
+
+        ComputeLifetime(repo, session).execute(channel="ch0", source="unfiltered")
+        # Bump the raw maps so the second run produces a different lifetime.
+        repo.written_arrays["phasor/ch0/g"] = np.full((5, 5), 0.7, dtype=np.float32)
+        ComputeLifetime(repo, session).execute(channel="ch0", source="unfiltered")
+
+        # Still two channels, not three — same name → in-place replace.
+        assert repo.written_arrays["intensity"].shape == (2, 5, 5)
+        assert len(repo.disk_metadata["channel_names"]) == 2
+
+    def test_time_lapse_raises(self):
+        """Time-lapse intensity shape isn't supported yet — must raise."""
+        from percell4.application.use_cases.compute_lifetime import ComputeLifetime
+
+        session, repo = self._setup()
+        repo.disk_metadata["n_timepoints"] = 4
+
+        with pytest.raises(ValueError, match="time-lapse"):
+            ComputeLifetime(repo, session).execute(channel="ch0", source="unfiltered")

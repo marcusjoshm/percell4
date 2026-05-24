@@ -75,6 +75,41 @@ def compute_phasor(
     return g.astype(np.float32), s.astype(np.float32)
 
 
+def median_filter_gs(
+    g_map: NDArray,
+    s_map: NDArray,
+    size: int = 3,
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Apply a square spatial median filter to phasor G/S maps.
+
+    Thin wrapper over ``scipy.ndimage.median_filter`` parameterized by the
+    kernel side-length. At ``size=3`` the result is byte-identical to the
+    fixed 3x3 median that ``ComputePhasor`` used to apply unconditionally —
+    a ``size=3`` median therefore reproduces the legacy "unfiltered"
+    (flimfret-equivalent) output.
+
+    Parameters
+    ----------
+    g_map, s_map : (H, W) phasor coordinate maps. NaN (zero-photon) pixels
+        are passed straight to scipy; NaN propagation matches scipy's
+        default ``median_filter`` behavior (no NaN-aware normalization).
+    size : odd kernel side-length in pixels (>= 3). The window is
+        ``size x size``, i.e. ``size**2`` pixels feed each median.
+
+    Returns
+    -------
+    (g_filtered, s_filtered) : each shape (H, W) float32.
+    """
+    if not isinstance(size, (int, np.integer)) or size < 3 or size % 2 == 0:
+        raise ValueError(f"size must be an odd integer >= 3, got {size!r}")
+
+    from scipy.ndimage import median_filter
+
+    g_filtered = median_filter(g_map, size=int(size)).astype(np.float32)
+    s_filtered = median_filter(s_map, size=int(size)).astype(np.float32)
+    return g_filtered, s_filtered
+
+
 def compute_phasor_chunked(
     decay_dset,
     harmonic: int = 1,

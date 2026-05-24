@@ -719,16 +719,35 @@ widgets:
     keystroke: null
     notes: "No callback connected. Display-only operand carried by the window state."
 
-  - id: phasor_plot.filtered_checkbox
+  - id: phasor_plot.median_checkbox
     class: Action
     path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
-    lines: "192-196, 621-625"
     widget_type: QCheckBox
-    handler: _on_filtered_toggled
+    handler: _on_median_toggled
     reads: []
     writes: []
     keystroke: null
-    notes: "Switches between filtered and unfiltered g/s maps; internal to the phasor window. No session write."
+    notes: "Shows an on-demand median view of the unfiltered g/s (kernel from median_kernel_spin). Mutually exclusive with wavelet_checkbox. Internal to the phasor window; no session write."
+
+  - id: phasor_plot.median_kernel_spin
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QSpinBox
+    handler: _on_median_kernel_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Median window side length (odd, 3-15). Re-derives the median view when changed. Display-only operand; no session write."
+
+  - id: phasor_plot.wavelet_checkbox
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QCheckBox
+    handler: _on_wavelet_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Shows the DTCWT wavelet-filtered g/s when present (enabled only after Apply Wavelet). Mutually exclusive with median_checkbox. Internal to the phasor window; no session write."
 
   - id: phasor_plot.mask_filter_checkbox
     class: Action

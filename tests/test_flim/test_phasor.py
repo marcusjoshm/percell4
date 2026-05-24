@@ -8,6 +8,7 @@ import pytest
 from percell4.domain.flim.phasor import (
     compute_phasor,
     measure_phasor_per_cell,
+    median_filter_gs,
     phasor_roi_to_mask,
     phasor_to_lifetime,
 )
@@ -174,3 +175,69 @@ def test_per_cell_empty_labels():
 
     result = measure_phasor_per_cell(g, s, labels)
     assert len(result["label"]) == 0
+
+
+# ── median_filter_gs ─────────────────────────────────────────────────
+
+
+def test_median_filter_gs_removes_outlier():
+    """A salt-pepper outlier is removed by a 3x3 median; shape/dtype hold."""
+    g = np.full((5, 5), 0.5, dtype=np.float32)
+    s = np.full((5, 5), 0.3, dtype=np.float32)
+    g[2, 2] = 10.0  # outlier spike
+    s[2, 2] = -10.0
+
+    gf, sf = median_filter_gs(g, s, size=3)
+
+    assert gf.shape == (5, 5)
+    assert gf.dtype == np.float32
+    assert sf.dtype == np.float32
+    # The lone spike is surrounded by 0.5 / 0.3 neighbours → median wipes it.
+    assert gf[2, 2] == pytest.approx(0.5)
+    assert sf[2, 2] == pytest.approx(0.3)
+
+
+def test_median_filter_gs_matches_legacy_size3():
+    """size=3 reproduces the legacy inline scipy median_filter(size=3)."""
+    from scipy.ndimage import median_filter
+
+    rng = np.random.default_rng(0)
+    g = rng.standard_normal((8, 8)).astype(np.float32)
+    s = rng.standard_normal((8, 8)).astype(np.float32)
+
+    gf, sf = median_filter_gs(g, s, size=3)
+
+    np.testing.assert_array_equal(gf, median_filter(g, size=3).astype(np.float32))
+    np.testing.assert_array_equal(sf, median_filter(s, size=3).astype(np.float32))
+
+
+def test_median_filter_gs_larger_kernel_differs():
+    """A larger kernel produces a different (smoother) result than size=3."""
+    rng = np.random.default_rng(1)
+    g = rng.standard_normal((12, 12)).astype(np.float32)
+    s = rng.standard_normal((12, 12)).astype(np.float32)
+
+    g3, _ = median_filter_gs(g, s, size=3)
+    g5, _ = median_filter_gs(g, s, size=5)
+
+    assert not np.array_equal(g3, g5)
+
+
+def test_median_filter_gs_nan_does_not_crash():
+    """NaN (zero-photon) pixels pass through without raising."""
+    g = np.full((4, 4), 0.5, dtype=np.float32)
+    s = np.full((4, 4), 0.3, dtype=np.float32)
+    g[0, 0] = np.nan
+    s[0, 0] = np.nan
+
+    gf, sf = median_filter_gs(g, s, size=3)  # must not raise
+    assert gf.shape == (4, 4)
+
+
+@pytest.mark.parametrize("bad_size", [1, 2, 4, 0, -3])
+def test_median_filter_gs_rejects_invalid_size(bad_size):
+    """Even kernels and sizes < 3 are rejected."""
+    g = np.zeros((4, 4), dtype=np.float32)
+    s = np.zeros((4, 4), dtype=np.float32)
+    with pytest.raises(ValueError):
+        median_filter_gs(g, s, size=bad_size)
