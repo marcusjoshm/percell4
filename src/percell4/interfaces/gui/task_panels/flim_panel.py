@@ -594,19 +594,15 @@ class FlimPanel(QWidget):
             self._show_status(f"Lifetime computation error: {e}")
             return
 
-        # Add lifetime layer to viewer
+        # Add lifetime layer to viewer. The use case registered the
+        # lifetime as a /intensity channel and refreshed channel_names;
+        # push the freshly computed plane through the normal channel
+        # render path so the colormap resolution (turbo via the
+        # "lifetime" CHANNEL_COLORMAPS entry) and add_image defaults match
+        # what a later reload from disk produces.
         viewer_win = self._get_viewer_window()
         if viewer_win is not None:
-                viewer_win.viewer.add_image(
-                    result.lifetime,
-                    name=f"Lifetime ({active_channel})",
-                    colormap=vp.FLIM_LIFETIME_COLORMAP,
-                    blending=vp.FLIM_LIFETIME_BLENDING,
-                    **vp._optional_kwargs(
-                        opacity=vp.FLIM_LIFETIME_OPACITY,
-                        contrast_limits=vp.FLIM_LIFETIME_CONTRAST_OVERRIDE,
-                    ),
-                )
+            viewer_win.add_image(result.lifetime, name=result.channel_name)
 
         if result.mean_tau is not None:
             self._show_status(

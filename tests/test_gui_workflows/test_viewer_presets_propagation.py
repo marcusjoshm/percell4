@@ -286,8 +286,14 @@ def test_flim_lifetime_contrast_propagates_when_set(monkeypatch):
     assert assembled == {"contrast_limits": (0.5, 5.0)}
 
 
-def test_flim_lifetime_call_site_uses_helper():
-    """Source-level guard for flim_panel.py lifetime add_image."""
+def test_flim_lifetime_renders_through_channel_path():
+    """Source-level guard for flim_panel.py lifetime add_image.
+
+    The lifetime layer is now a /intensity channel (registered by
+    ComputeLifetime) rendered through the standard ``viewer_win.add_image``
+    path — no bespoke FLIM_LIFETIME_* kwargs at the call site. The turbo
+    colormap comes from the ``"lifetime"`` entry in CHANNEL_COLORMAPS.
+    """
     from pathlib import Path
 
     src = (
@@ -295,9 +301,10 @@ def test_flim_lifetime_call_site_uses_helper():
         / "src" / "percell4" / "interfaces" / "gui" / "task_panels" / "flim_panel.py"
     )
     text = src.read_text(encoding="utf-8")
-    assert "vp._optional_kwargs(" in text
-    assert "FLIM_LIFETIME_OPACITY" in text
-    assert "FLIM_LIFETIME_CONTRAST_OVERRIDE" in text
+    assert "viewer_win.add_image(result.lifetime" in text
+    assert "FLIM_LIFETIME_OPACITY" not in text
+    assert "FLIM_LIFETIME_CONTRAST_OVERRIDE" not in text
+    assert vp.CHANNEL_COLORMAPS.get("lifetime") == "turbo"
 
 
 # ── Yellow-ROI shapes (both call sites) ────────────────────────────────

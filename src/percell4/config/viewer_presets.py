@@ -29,7 +29,11 @@ from __future__ import annotations
 from typing import Final
 
 # ── Channel → colormap mapping ──────────────────────────────
+# Substring match on the normalized lower-cased channel name. The
+# ``lifetime`` entry catches derived FLIM channels written by
+# ``ComputeLifetime`` (named ``<source>_<filter>_lifetime``).
 CHANNEL_COLORMAPS: Final[dict[str, str]] = {
+    "lifetime": "turbo",
     "dapi": "blue",
     "hoechst": "blue",
     "gfp": "green",

@@ -176,6 +176,18 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def write_metadata(
+        self, handle: DatasetHandle, attrs: dict[str, Any]
+    ) -> None:
+        """Merge ``attrs`` into the dataset's /metadata group on disk.
+
+        Existing keys are overwritten; unrelated keys are preserved. Used
+        by Creators that need to persist inventory updates (e.g.,
+        ``channel_names`` / ``n_channels`` when a use case appends a
+        derived channel).
+        """
+        ...
+
     def delete_path(self, handle: DatasetHandle, path: str) -> bool:
         """Delete an HDF5 dataset or group at ``path``. Returns True if deleted.
 

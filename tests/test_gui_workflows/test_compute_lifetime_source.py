@@ -74,6 +74,7 @@ def _fake_result(source):
     return LifetimeResult(
         lifetime=np.zeros((8, 8), dtype=np.float32),
         channel="ch0",
+        channel_name=f"ch0_{source}_lifetime",
         source=source,
         mean_tau=1.5,
         frequency_mhz=80.0,
