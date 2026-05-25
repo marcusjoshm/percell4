@@ -625,7 +625,26 @@ class SegmentationPanel(QWidget):
         # even if the user closes the dataset before painting anything.
         new_layer = self._get_active_labels_layer()
         if new_layer is not None and new_layer.name == "manual":
-            self._persist_labels_layer(new_layer)
+            if self._persist_labels_layer(new_layer):
+                # Refresh the session's segmentation inventory so
+                # SessionWindow (and any other SEGMENTATION_LIST_CHANGED
+                # subscriber) learns about the new "manual" entry without
+                # requiring a dataset reload. Mirrors the canonical
+                # Creator pattern at
+                # ``application/use_cases/segment_cells.py:209``.
+                store = (
+                    getattr(self._launcher, "_current_store", None)
+                    if self._launcher
+                    else None
+                )
+                if store is not None:
+                    mask_set = set(store.list_masks())
+                    seg_names = [
+                        n for n in store.list_labels() if n not in mask_set
+                    ]
+                    self.data_model.session.refresh_resource_lists(
+                        segmentation_names=seg_names
+                    )
         self._show_status("Empty labels layer created — use napari tools to draw cells")
 
     def _get_active_labels_layer(self):
