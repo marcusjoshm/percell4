@@ -597,7 +597,13 @@ class BatchTCSPCDialog(QDialog):
     # ────────────────────────────────────────────────────────────
 
     def _discover_bin_tokens(self, group_folder: Path) -> list[str]:
-        """Scan a group's ``.bin`` files for distinct ``_ch(\\d+)`` tokens.
+        """Scan a group's ``.bin`` files for distinct channel tokens.
+
+        Files matching ``_ch(\\d+)`` contribute their captured digit token.
+        Files with no ``_chN`` token (e.g., single-channel LASX exports
+        like ``decay.bin``) contribute token ``"0"`` so the user can pair
+        the single channel via Section 4. Mirrors the same fallback in
+        ``cross_format._extract_token``.
 
         Returns sorted-by-numeric-value list of tokens (so ``"1"`` comes
         before ``"10"`` for typical LAS X exports).
@@ -609,6 +615,10 @@ class BatchTCSPCDialog(QDialog):
             m = re.search(r"_ch(\d+)", p.stem)
             if m:
                 tokens.add(m.group(1))
+            else:
+                # Single-channel fallback: surface "0" so the user can pair
+                # a token-less .bin with their intensity channel.
+                tokens.add("0")
         try:
             return sorted(tokens, key=int)
         except ValueError:

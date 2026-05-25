@@ -404,6 +404,65 @@ def test_channel_token_section_discovers_bin_tokens(qtbot, tmp_path: Path) -> No
     assert "mNG" not in dlg._channel_token_overrides
 
 
+def test_channel_token_section_surfaces_zero_for_single_channel_bins(
+    qtbot, tmp_path: Path
+) -> None:
+    """Single-channel LASX exports omit the _chN suffix on .bin files.
+
+    The discovery should surface token "0" so the user can pair the
+    single channel via Section 4, mirroring the cross_format fallback.
+    Regression for: 'Batch TCSPC append cannot use single-channel .bins
+    without manual renaming'.
+    """
+    h5 = _make_h5(tmp_path / "single_chan.h5", ["mNG"])
+    root = tmp_path / "scan"
+    group = root / "Dish 1 - single chan"
+    group.mkdir(parents=True)
+    # LASX single-channel output: no _ch token at all.
+    (group / "Dish 1 - single chan.bin").write_bytes(b"")
+    (group / "Dish 1 - single chan_s2.bin").write_bytes(b"")
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    assert dlg._available_bin_tokens == ["0"], (
+        f"Single-channel .bins should surface token '0'; got {dlg._available_bin_tokens}"
+    )
+
+
+def test_channel_token_section_mixes_zero_with_real_tokens(
+    qtbot, tmp_path: Path
+) -> None:
+    """A group with BOTH labeled and unlabeled .bins surfaces all tokens.
+
+    Real-world: if someone re-exports one channel without LASX's chN
+    suffix while others have it, the dropdown should expose both.
+    """
+    h5 = _make_h5(tmp_path / "mixed.h5", ["mNG", "mTQ2"])
+    root = tmp_path / "scan"
+    group = root / "Dish"
+    group.mkdir(parents=True)
+    (group / "Dish.bin").write_bytes(b"")  # no token → "0"
+    (group / "Dish_ch2.bin").write_bytes(b"")  # token "2"
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    assert dlg._available_bin_tokens == ["0", "2"]
+
+
 def test_channel_token_override_picks_propagate_to_run(qtbot, tmp_path: Path) -> None:
     """User-picked tokens flow into intensity_channels_overrides at Run time."""
     h5 = _make_h5(tmp_path / "WT_60min.h5", ["CA-SiR", "mNG", "mTQ2"])

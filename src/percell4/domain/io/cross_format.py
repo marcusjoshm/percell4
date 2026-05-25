@@ -252,8 +252,26 @@ def _match_zero_pad_offset(
 
 
 def _extract_token(stem: str, pattern: str) -> str | None:
+    """Extract a channel token from a ``.bin`` file stem.
+
+    Returns the captured group when the pattern matches. When the pattern
+    does NOT match — a single-channel FLIM acquisition where LASX omits
+    the ``_chN`` suffix from the exported decay file — fall back to "0"
+    so the user can pair the single channel with their intensity channel
+    via Section 4 of the Batch TCSPC dialog.
+
+    Returns None only when there is no pattern to match against (i.e.,
+    ``TokenConfig.channel`` is empty / None).
+    """
+    if not pattern:
+        return None
     m = re.search(pattern, stem)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    # Single-channel fallback: assume the .bin belongs to "channel 0".
+    # The matcher will pair it with whichever IntensityChannel the user
+    # has assigned token "0" to; otherwise it falls through to unmatched.
+    return "0"
 
 
 def _transform_token(bin_token: str, pad_width: int, offset: int) -> str | None:
