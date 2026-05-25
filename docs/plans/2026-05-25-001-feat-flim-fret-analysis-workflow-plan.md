@@ -1,7 +1,7 @@
 ---
 title: "feat: FLIM-FRET analysis workflow"
 type: feat
-status: active
+status: completed
 date: 2026-05-25
 origin: docs/brainstorms/2026-05-25-flim-fret-analysis-requirements.md
 ---
