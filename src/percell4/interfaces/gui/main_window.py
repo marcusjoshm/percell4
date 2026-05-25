@@ -361,8 +361,50 @@ class LauncherWindow(QMainWindow):
         )
         layout.addWidget(self._btn_dilute_phase_workflow)
 
+        self._btn_flim_fret_workflow = QPushButton(
+            "FLIM-FRET analysis"
+        )
+        self._btn_flim_fret_workflow.setToolTip(
+            "Batch workflow: compare donor / donor+acceptor dataset pairs; "
+            "compute mean lifetime within (mask ∩ phasor) and a FRET "
+            "efficiency per pair (whole-field) or per cell (single-cell)."
+        )
+        self._btn_flim_fret_workflow.clicked.connect(
+            self._on_open_flim_fret_workflow
+        )
+        layout.addWidget(self._btn_flim_fret_workflow)
+
         layout.addStretch()
         return panel
+
+    def _on_open_flim_fret_workflow(self) -> None:
+        """Open the FLIM-FRET analysis dialog.
+
+        Reentrance-guarded against ``is_workflow_locked``. The dialog
+        drives its own ``QProgressDialog`` per-pair loop on the main
+        thread (no ``BaseWorkflowRunner``), writes a single combined CSV
+        atomically, and accepts on success. The button is an **Action**
+        (no session mutation, no napari layer creation).
+        """
+        if self.is_workflow_locked:
+            self.statusBar().showMessage(
+                "A workflow is already running — click Cancel to stop it first."
+            )
+            return
+
+        from percell4.gui.flim_fret_dialog import FlimFretDialog
+
+        dialog = FlimFretDialog(parent=self)
+        try:
+            dialog.exec_()
+            run_folder = dialog.last_run_folder
+            if run_folder is not None:
+                self.statusBar().showMessage(
+                    f"FLIM-FRET run complete — CSV at {run_folder}/"
+                    "flim_fret_results.csv"
+                )
+        finally:
+            dialog.deleteLater()
 
     def _on_open_single_cell_workflow(self) -> None:
         """Open the single-cell thresholding workflow config dialog.
