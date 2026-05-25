@@ -194,6 +194,35 @@ def test_create_run_folder_two_runs_do_not_collide(tmp_path: Path) -> None:
     assert a.exists() and b.exists()
 
 
+def test_create_run_folder_custom_prefix(tmp_path: Path) -> None:
+    folder = create_run_folder(tmp_path, prefix="flim_fret_run")
+    assert folder.name.startswith("flim_fret_run_")
+    assert folder.exists()
+
+
+def test_create_run_folder_skip_subdirs(tmp_path: Path) -> None:
+    folder = create_run_folder(
+        tmp_path, prefix="flim_fret_run", create_subdirs=False
+    )
+    assert folder.exists()
+    # FLIM-FRET workflow writes a single combined CSV directly under the
+    # run folder; it has no use for per_dataset/ or staging/.
+    assert not (folder / "per_dataset").exists()
+    assert not (folder / "staging").exists()
+
+
+def test_create_run_folder_default_prefix_keeps_single_cell_behavior(
+    tmp_path: Path,
+) -> None:
+    # Defaults must preserve existing callers (single-cell workflow,
+    # base_runner) which call create_run_folder(output_parent) with no
+    # kwargs.
+    folder = create_run_folder(tmp_path)
+    assert folder.name.startswith("run_")
+    assert (folder / "per_dataset").is_dir()
+    assert (folder / "staging").is_dir()
+
+
 # ── config_to_dict / config_from_dict ────────────────────────
 
 

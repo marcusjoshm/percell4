@@ -95,8 +95,13 @@ def write_atomic(path: Path, writer_fn: Callable[[Path], None]) -> None:
 # ── Run folder creation ──────────────────────────────────────────────────
 
 
-def create_run_folder(output_parent: Path) -> Path:
-    """Create a new ``run_<utc-timestamp>_<shortuuid>/`` folder.
+def create_run_folder(
+    output_parent: Path,
+    *,
+    prefix: str = "run",
+    create_subdirs: bool = True,
+) -> Path:
+    """Create a new ``<prefix>_<utc-timestamp>_<shortuuid>/`` folder.
 
     The timestamp is UTC in ``YYYY-MM-DDTHHMMSSZ`` form — matches the
     ``run_log.jsonl`` entries (also UTC), sorts lexicographically, and is
@@ -105,17 +110,25 @@ def create_run_folder(output_parent: Path) -> Path:
     any collision — the caller should surface the error rather than
     silently sharing a folder between runs.
 
-    Subdirectories created up front: ``per_dataset/`` and ``staging/``.
+    ``prefix`` defaults to ``"run"`` (single-cell workflow behavior).
+    The FLIM-FRET workflow passes ``prefix="flim_fret_run"``.
+
+    ``create_subdirs`` controls whether the ``per_dataset/`` and
+    ``staging/`` subdirs are auto-created. Defaults to True so existing
+    single-cell callers see no change. The FLIM-FRET workflow passes
+    ``create_subdirs=False`` since it writes a single combined CSV
+    directly under the run folder.
     """
     output_parent = Path(output_parent)
     output_parent.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
     suffix = uuid.uuid4().hex[:8]
-    folder = output_parent / f"run_{ts}_{suffix}"
+    folder = output_parent / f"{prefix}_{ts}_{suffix}"
     folder.mkdir(parents=True, exist_ok=False)
-    (folder / "per_dataset").mkdir()
-    (folder / "staging").mkdir()
+    if create_subdirs:
+        (folder / "per_dataset").mkdir()
+        (folder / "staging").mkdir()
     return folder
 
 
