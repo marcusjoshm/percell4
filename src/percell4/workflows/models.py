@@ -325,6 +325,146 @@ class WorkflowConfig:
                     )
 
 
+# ── FLIM-FRET workflow ───────────────────────────────────────
+
+
+class FlimFretStatus(StrEnum):
+    """Per-pair outcome for the FLIM-FRET analysis workflow.
+
+    See ``percell4.application.use_cases.run_flim_fret`` for the orchestrator
+    and ``docs/plans/2026-05-25-001-feat-flim-fret-analysis-workflow-plan.md``
+    for the contract.
+    """
+
+    SUCCEEDED = "succeeded"
+    CANCELLED = "cancelled"
+    MISSING_LAYER = "missing_layer"
+    DATASET_OPEN_FAILED = "dataset_open_failed"
+    DONOR_REFERENCE_EMPTY = "donor_reference_empty"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class FlimFretPair:
+    """One donor / donor+acceptor pairing for the FLIM-FRET workflow.
+
+    Layer names are stored as strings and resolved against the live ``.h5``
+    each time the orchestrator runs — stale dropdown state is caught by the
+    per-pair revalidation pass.
+
+    Segmentation fields are ``None`` in whole-field mode. In single-cell mode
+    both must be set; ``FlimFretConfig.__post_init__`` enforces this.
+    """
+
+    name: str
+    donor_h5: Path
+    da_h5: Path
+    donor_mask: str
+    donor_phasor: str
+    donor_lifetime: str
+    da_mask: str
+    da_phasor: str
+    da_lifetime: str
+    donor_segmentation: str | None = None
+    da_segmentation: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.strip():
+            raise ValueError("FLIM-FRET pair name must be non-empty")
+        # Layer name fields are required (strings); empty rejected so a
+        # half-built FlimFretPair can't slip past dialog validation.
+        for field_name in (
+            "donor_mask",
+            "donor_phasor",
+            "donor_lifetime",
+            "da_mask",
+            "da_phasor",
+            "da_lifetime",
+        ):
+            value = getattr(self, field_name)
+            if not value:
+                raise ValueError(
+                    f"FLIM-FRET pair {self.name!r}: {field_name} must be non-empty"
+                )
+
+
+@dataclass(frozen=True)
+class FlimFretConfig:
+    """The FLIM-FRET workflow recipe. Frozen at Start.
+
+    ``pairs`` is a list of (donor, donor+acceptor) dataset pairings.
+    ``single_cell`` is a global toggle: when True every pair must carry both
+    segmentation fields. ``output_parent`` is the user-chosen parent folder;
+    the dialog creates a timestamped run folder beneath it via
+    ``workflows.artifacts.create_run_folder``.
+    """
+
+    pairs: list[FlimFretPair]
+    single_cell: bool
+    output_parent: Path
+
+    def __post_init__(self) -> None:
+        if not self.pairs:
+            raise ValueError("at least one FLIM-FRET pair is required")
+        names = [p.name for p in self.pairs]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"FLIM-FRET pair names must be unique: {names}"
+            )
+        for pair in self.pairs:
+            try:
+                same_path = pair.donor_h5.resolve() == pair.da_h5.resolve()
+            except OSError:
+                # resolve() can raise on missing files / loops; fall back
+                # to string compare so the invariant still fires.
+                same_path = str(pair.donor_h5) == str(pair.da_h5)
+            if same_path:
+                raise ValueError(
+                    f"FLIM-FRET pair {pair.name!r}: donor and DA must be "
+                    f"different .h5 files (both resolve to {pair.donor_h5})"
+                )
+            if self.single_cell:
+                if not pair.donor_segmentation:
+                    raise ValueError(
+                        f"FLIM-FRET pair {pair.name!r}: donor_segmentation "
+                        "is required when single_cell is True"
+                    )
+                if not pair.da_segmentation:
+                    raise ValueError(
+                        f"FLIM-FRET pair {pair.name!r}: da_segmentation "
+                        "is required when single_cell is True"
+                    )
+
+
+@dataclass(frozen=True)
+class FlimFretPairResult:
+    """One pair's outcome from the FLIM-FRET orchestrator.
+
+    ``rows`` are the dict payloads that the dialog assembles into the
+    combined CSV. ``status`` is the canonical FlimFretStatus value.
+    """
+
+    pair: FlimFretPair
+    status: FlimFretStatus
+    reason: str | None
+    rows: list[dict[str, Any]]
+    n_pixels_donor: int
+    n_cells_donor_reference: int
+    n_da_cells_skipped: int
+
+
+@dataclass(frozen=True)
+class FlimFretReport:
+    """Aggregated FLIM-FRET run outcome.
+
+    ``run_folder`` is set by the dialog after it materializes the folder
+    via ``create_run_folder``; the orchestrator itself leaves it ``None``.
+    """
+
+    results: list[FlimFretPairResult]
+    run_folder: Path | None = None
+
+
 @dataclass
 class RunMetadata:
     """The runtime instance. Separate from WorkflowConfig (the recipe).
