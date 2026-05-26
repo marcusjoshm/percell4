@@ -323,13 +323,15 @@ def segment_one(
             f"Cellpose failed: {type(e).__name__}: {e}",
         )
 
-    if int(labels.max()) == 0:
-        return (
-            labels,
-            DatasetFailure.SEGMENTATION_EMPTY,
-            "Cellpose + postprocess removed all cells",
-        )
-
+    # Empty Cellpose results used to short-circuit here with
+    # ``SEGMENTATION_EMPTY``, which recorded a per-dataset failure and
+    # routed the dataset around every later phase — including
+    # interactive seg QC, leaving the user with no way to draw cells
+    # manually. Now we always persist the (possibly all-zero) labels so
+    # the QC phase has a layer to load and the user can draw cells in
+    # napari directly. Cellpose finding nothing on a particular
+    # channel/diameter combination is a routine condition (especially
+    # on dim or unusual data); the workflow has to recover from it.
     try:
         store.write_labels(seg_name, labels)
     except Exception as e:
@@ -340,7 +342,14 @@ def segment_one(
             f"write /labels/{seg_name} failed: {e}",
         )
 
-    return labels, None, f"{int(labels.max())} cells after postprocess"
+    n_cells = int(labels.max())
+    if n_cells == 0:
+        return (
+            labels,
+            None,
+            "Cellpose found 0 cells — draw labels manually in QC",
+        )
+    return labels, None, f"{n_cells} cells after postprocess"
 
 
 # ── Tracking (time-lapse): link cells across timepoints ────────────────

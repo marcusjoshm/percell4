@@ -122,13 +122,44 @@ def test_segment_one_writes_cellpose_qc(fixture_store):
         fixture_store, cfg, cellpose_model=model, channel_idx=0
     )
     # With tiny synthetic squares and tiny diameter, Cellpose may or may
-    # not find them; we only check that the helper doesn't crash and
-    # that the failure mode is either None or SEGMENTATION_EMPTY.
-    assert failure in (None, DatasetFailure.SEGMENTATION_EMPTY)
-    if failure is None:
-        assert labels.max() > 0
-        # Verify the labels were persisted
-        assert "cellpose_qc" in fixture_store.list_labels()
+    # not find them. Either way the dataset is no longer marked failed;
+    # an empty result is now a recoverable case that writes empty
+    # labels for downstream interactive QC drawing.
+    assert failure is None
+    assert "cellpose_qc" in fixture_store.list_labels()
+
+
+def test_segment_one_empty_cellpose_writes_empty_labels_and_succeeds(
+    fixture_store_50px, monkeypatch
+):
+    """Cellpose finding 0 cells is no longer a failure.
+
+    Previously this returned ``DatasetFailure.SEGMENTATION_EMPTY``,
+    which routed the dataset around every downstream phase including
+    interactive seg QC — leaving the user with no way to draw cells
+    manually. Now segment_one writes an all-zeros ``/labels/<seg_name>``
+    and returns no failure so the QC step can pick it up.
+    """
+    from percell4.workflows import phases
+
+    monkeypatch.setattr(
+        phases, "run_cellpose", lambda *a, **kw: np.zeros((50, 50), dtype=np.int32)
+    )
+    cfg = CellposeSettings(min_size=5)
+
+    labels, failure, msg = segment_one(fixture_store_50px, cfg)
+
+    assert failure is None, f"empty cellpose should not record a failure (got {failure})"
+    assert labels.shape == (50, 50)
+    assert int(labels.max()) == 0
+    # Empty layer was persisted so the QC phase has something to load.
+    assert "cellpose_qc" in fixture_store_50px.list_labels()
+    persisted = fixture_store_50px.read_labels("cellpose_qc")
+    assert persisted.shape == (50, 50)
+    assert int(persisted.max()) == 0
+    # Message mentions manual drawing so the run-log line is actionable.
+    assert "0 cells" in msg
+    assert "manual" in msg.lower() or "draw" in msg.lower()
 
 
 def test_segment_one_handles_read_error(tmp_path):
