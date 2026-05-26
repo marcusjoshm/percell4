@@ -705,6 +705,9 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 on_complete=_wrapped_complete,
                 channel_idx=seg_ch,
                 seg_name=self._seg_name_for(entry),
+                cellpose_settings=self._config.cellpose,
+                edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
             )
             self._active_qc_controller = controller
             self._log(phase="seg_qc", dataset=entry.name, event="opened")

@@ -37,12 +37,14 @@ import numpy as np
 from qtpy.QtCore import QObject, Qt, QTimer
 from qtpy.QtGui import QKeySequence, QShortcut
 from qtpy.QtWidgets import (
+    QComboBox,
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -85,6 +87,9 @@ class SegmentationQCController(QObject):
         on_complete: Callable[[PhaseResult], None],
         channel_idx: int = 0,
         seg_name: str = "cellpose_qc",
+        cellpose_settings=None,
+        edge_mode=None,
+        edge_margin_px: int = 0,
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -94,6 +99,14 @@ class SegmentationQCController(QObject):
         self._on_complete = on_complete
         self._channel_idx = channel_idx
         self._seg_name = seg_name
+        # CellposeSettings + edge_mode are used by the in-QC Re-run
+        # group to seed defaults that match the workflow's main run.
+        # Optional so existing test fixtures + the legacy non-runner
+        # invocation path keep working with sensible CellposeSettings()
+        # defaults.
+        self._cellpose_settings = cellpose_settings
+        self._edge_mode = edge_mode
+        self._edge_margin_px = edge_margin_px
 
         # Loaded per-dataset state
         self._store: DatasetStore | None = None
@@ -112,6 +125,28 @@ class SegmentationQCController(QObject):
         # Visibility save/restore for napari layers that were open before
         # the QC window took over.
         self._hidden_layers: dict[str, bool] = {}
+
+        # ── Re-run Cellpose group (U2) ─────────────────────────────
+        # Widgets and worker state for the in-QC Cellpose re-run flow.
+        # All None until the QC window is built.
+        self._rerun_group: QGroupBox | None = None
+        self._rerun_toggle_btn: QPushButton | None = None
+        self._rerun_diameter: QSpinBox | None = None
+        self._rerun_channel: QComboBox | None = None
+        self._rerun_flow: QDoubleSpinBox | None = None
+        self._rerun_cellprob: QDoubleSpinBox | None = None
+        self._rerun_model: QComboBox | None = None
+        self._rerun_min_size: QSpinBox | None = None
+        self._rerun_button: QPushButton | None = None
+        # Worker + progress dialog references; replaced on each Re-run
+        # so a stale worker can't accidentally signal a torn-down
+        # controller.
+        self._rerun_worker = None
+        self._rerun_progress: QProgressDialog | None = None
+        # Cached Cellpose model reused across Re-runs to avoid the
+        # multi-second construction cost on every iteration. Lazy:
+        # built on the first Re-run if not already provided.
+        self._cellpose_model_cached = None
 
         # Coalesced refresh (signal coalescing per
         # docs/solutions/ui-bugs/percell4-phases-0-6-napari-qt-learnings.md)
@@ -231,6 +266,7 @@ class SegmentationQCController(QObject):
 
         layout.addWidget(self._build_edit_group())
         layout.addWidget(self._build_cleanup_group())
+        layout.addWidget(self._build_rerun_group())
         layout.addStretch()
         layout.addWidget(self._build_nav_bar())
 
@@ -316,6 +352,289 @@ class SegmentationQCController(QObject):
         layout.addWidget(self._cleanup_status_label)
 
         return box
+
+    def _build_rerun_group(self) -> QGroupBox:
+        """Re-run Cellpose group (U2).
+
+        Collapsible. Knobs are seeded from ``self._cellpose_settings``
+        (the workflow's CellposeSettings) plus the dataset's channel
+        names. Clicking Re-run spawns a Worker(QThread) — pattern
+        mirrors ``gui/segmentation_panel.py:_on_run_cellpose``. On
+        completion, replaces the in-QC labels layer (no merge, no
+        store write — Accept still owns persistence).
+        """
+        from percell4.workflows.models import CellposeSettings
+
+        cfg = self._cellpose_settings or CellposeSettings()
+
+        # Plain (non-checkable) QGroupBox + an in-header toggle button.
+        # QGroupBox.setCheckable(True) propagates its checked-state to
+        # children's enabled-state, which fights with our worker-driven
+        # button enable/disable cycle. Manual toggle keeps the
+        # button.setEnabled lifecycle clean.
+        box = QGroupBox("Re-run Cellpose")
+
+        outer = QVBoxLayout(box)
+        toggle_btn = QPushButton("▶ Show settings")
+        toggle_btn.setStyleSheet("text-align: left;")
+        toggle_btn.setCheckable(True)
+        outer.addWidget(toggle_btn)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(body)
+
+        body.setVisible(False)
+
+        def _on_toggle(checked: bool) -> None:
+            body.setVisible(checked)
+            toggle_btn.setText("▼ Hide settings" if checked else "▶ Show settings")
+
+        toggle_btn.toggled.connect(_on_toggle)
+        self._rerun_toggle_btn = toggle_btn
+
+        # Channel — seeded from the controller's current channel_idx.
+        ch_row = QHBoxLayout()
+        ch_row.addWidget(QLabel("Channel:"))
+        self._rerun_channel = QComboBox()
+        ch_names = list(getattr(self._entry, "channel_names", []) or [])
+        if not ch_names:
+            # Fall back to whatever the store says when entry didn't
+            # carry names (legacy single-cell test fixtures).
+            try:
+                ch_names = [str(n) for n in self._store.metadata.get("channel_names", [])]
+            except Exception:
+                ch_names = []
+        if not ch_names:
+            ch_names = [f"ch{i}" for i in range(max(1, self._channel_idx + 1))]
+        self._rerun_channel.addItems(ch_names)
+        if 0 <= self._channel_idx < len(ch_names):
+            self._rerun_channel.setCurrentIndex(self._channel_idx)
+        ch_row.addWidget(self._rerun_channel)
+        ch_row.addStretch()
+        body_layout.addLayout(ch_row)
+
+        # Diameter
+        diam_row = QHBoxLayout()
+        diam_row.addWidget(QLabel("Diameter (px):"))
+        self._rerun_diameter = QSpinBox()
+        self._rerun_diameter.setRange(0, 2000)
+        self._rerun_diameter.setSpecialValueText("Auto")
+        self._rerun_diameter.setValue(int(cfg.diameter))
+        diam_row.addWidget(self._rerun_diameter)
+        diam_row.addStretch()
+        body_layout.addLayout(diam_row)
+
+        # Flow threshold
+        flow_row = QHBoxLayout()
+        flow_row.addWidget(QLabel("Flow threshold:"))
+        self._rerun_flow = QDoubleSpinBox()
+        self._rerun_flow.setRange(0.0, 3.0)
+        self._rerun_flow.setSingleStep(0.05)
+        self._rerun_flow.setDecimals(2)
+        self._rerun_flow.setValue(float(cfg.flow_threshold))
+        flow_row.addWidget(self._rerun_flow)
+        flow_row.addStretch()
+        body_layout.addLayout(flow_row)
+
+        # Cellprob threshold
+        cp_row = QHBoxLayout()
+        cp_row.addWidget(QLabel("Cellprob threshold:"))
+        self._rerun_cellprob = QDoubleSpinBox()
+        self._rerun_cellprob.setRange(-6.0, 6.0)
+        self._rerun_cellprob.setSingleStep(0.1)
+        self._rerun_cellprob.setDecimals(2)
+        self._rerun_cellprob.setValue(float(cfg.cellprob_threshold))
+        cp_row.addWidget(self._rerun_cellprob)
+        cp_row.addStretch()
+        body_layout.addLayout(cp_row)
+
+        # Model
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model:"))
+        self._rerun_model = QComboBox()
+        self._rerun_model.addItems(["cpsam", "cyto3", "cyto2", "cyto", "nuclei"])
+        idx = self._rerun_model.findText(cfg.model)
+        if idx >= 0:
+            self._rerun_model.setCurrentIndex(idx)
+        model_row.addWidget(self._rerun_model)
+        model_row.addStretch()
+        body_layout.addLayout(model_row)
+
+        # Min cell size
+        min_row = QHBoxLayout()
+        min_row.addWidget(QLabel("Min cell size (px):"))
+        self._rerun_min_size = QSpinBox()
+        self._rerun_min_size.setRange(0, 10000)
+        self._rerun_min_size.setValue(int(cfg.min_size))
+        min_row.addWidget(self._rerun_min_size)
+        min_row.addStretch()
+        body_layout.addLayout(min_row)
+
+        # Re-run button
+        self._rerun_button = QPushButton("▶ Re-run")
+        self._rerun_button.setToolTip(
+            "Re-runs Cellpose with these settings and REPLACES the current "
+            "labels in the QC viewer. Accept still owns the on-disk write."
+        )
+        self._rerun_button.clicked.connect(self._on_rerun_clicked)
+        body_layout.addWidget(self._rerun_button)
+
+        self._rerun_group = box
+        return box
+
+    def _cellpose_input_image(self) -> np.ndarray:
+        """Return the image to feed Cellpose for an in-QC Re-run.
+
+        Today this returns the raw segmentation channel (or the
+        current single-frame view for time-lapse). In U4 it switches
+        to the napari channel layer's current ``.data``, which lets
+        the Modify Channel group's clipped/stretched preview flow
+        through naturally.
+        """
+        if self._intensity is None:
+            raise RuntimeError("intensity not loaded; QC window not started")
+        return np.asarray(self._intensity)
+
+    def _on_rerun_clicked(self) -> None:
+        if self._finished or self._rerun_button is None:
+            return
+        if self._intensity is None or self._store is None:
+            return
+
+        from percell4.adapters.cellpose import (
+            build_cellpose_model,
+            run_cellpose,
+        )
+        from percell4.gui.workers import Worker
+
+        # Snapshot the in-flight kwargs so a mid-flight UI tweak can't
+        # corrupt the in-flight Cellpose call. The user can edit and
+        # press Re-run again — that spawns a new worker.
+        diameter = self._rerun_diameter.value()
+        diameter_arg = diameter if diameter > 0 else None
+        flow = float(self._rerun_flow.value())
+        cellprob = float(self._rerun_cellprob.value())
+        model_type = self._rerun_model.currentText()
+        min_size = int(self._rerun_min_size.value())
+        # Channel switch: if the user picked a different channel here
+        # than the one originally loaded, re-read from the store.
+        new_ch_idx = self._rerun_channel.currentIndex()
+        if new_ch_idx != self._channel_idx and new_ch_idx >= 0:
+            try:
+                channel_image = self._store.read_channel("intensity", new_ch_idx)
+            except (KeyError, IndexError, ValueError) as e:
+                self._set_rerun_status(f"channel read failed: {e}")
+                return
+        else:
+            channel_image = self._cellpose_input_image()
+
+        gpu = bool(self._cellpose_settings.gpu) if self._cellpose_settings else True
+
+        # Lazy-build the Cellpose model on first Re-run and reuse it.
+        if self._cellpose_model_cached is None:
+            try:
+                self._cellpose_model_cached = build_cellpose_model(
+                    model_type=model_type, gpu=gpu,
+                )
+            except Exception as e:
+                logger.exception("build_cellpose_model failed in QC Re-run")
+                self._set_rerun_status(f"model build failed: {e}")
+                return
+
+        self._rerun_button.setEnabled(False)
+        progress = QProgressDialog(
+            "Running Cellpose…", "Cancel", 0, 0, self._window,
+        )
+        progress.setWindowTitle("Re-run Cellpose")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        self._rerun_progress = progress
+
+        worker = Worker(
+            run_cellpose,
+            channel_image,
+            model_type=model_type,
+            diameter=diameter_arg,
+            gpu=gpu,
+            flow_threshold=flow,
+            cellprob_threshold=cellprob,
+            min_size=min_size,
+            model=self._cellpose_model_cached,
+        )
+        worker.finished.connect(self._on_rerun_finished)
+        worker.error.connect(self._on_rerun_error)
+        # If the user cancels via the progress dialog, just hide it —
+        # Cellpose itself won't honor a cancel and forcibly killing
+        # the QThread risks corrupting torch state. The worker will
+        # finish naturally and its result will simply be ignored if
+        # we're torn down by then.
+        progress.canceled.connect(lambda: progress.close())
+        self._rerun_worker = worker
+        # On channel switch, remember the new active idx so Accept
+        # persists labels against the right channel association.
+        if new_ch_idx >= 0:
+            self._channel_idx = new_ch_idx
+        worker.start()
+
+    def _on_rerun_finished(self, new_labels) -> None:
+        if self._finished:
+            return
+        try:
+            if self._rerun_progress is not None:
+                try:
+                    self._rerun_progress.close()
+                except Exception:
+                    pass
+                self._rerun_progress = None
+
+            labels_arr = np.asarray(new_labels, dtype=np.int32)
+
+            # Replace the in-QC labels layer (always replace, never merge).
+            try:
+                layer = self._labels_layer()
+                if layer is not None:
+                    layer.data = labels_arr
+                self._labels = labels_arr
+            except Exception as e:
+                logger.exception("Re-run finished but label replace failed")
+                self._set_rerun_status(f"replace failed: {e}")
+            else:
+                n_cells = int(labels_arr.max())
+                self._set_rerun_status(
+                    f"Re-run found {n_cells} cells (replaced in viewer)"
+                )
+        finally:
+            # Button re-enable must always happen so a stuck slot
+            # doesn't leave the UI permanently locked. Same shape as
+            # _on_rerun_error's recovery path.
+            if self._rerun_button is not None:
+                self._rerun_button.setEnabled(True)
+
+    def _on_rerun_error(self, err) -> None:
+        if self._finished:
+            return
+        if self._rerun_progress is not None:
+            try:
+                self._rerun_progress.close()
+            except Exception:
+                pass
+            self._rerun_progress = None
+        msg = getattr(err, "message", None) or str(err)
+        self._set_rerun_status(f"Re-run failed: {msg}")
+        if self._rerun_button is not None:
+            self._rerun_button.setEnabled(True)
+
+    def _set_rerun_status(self, text: str) -> None:
+        """Surface a Re-run status message via the cleanup status label
+        (shared real estate to avoid a separate dock widget for this).
+        Best-effort: silently drops the message if the label hasn't been
+        built yet (e.g., during early start failures).
+        """
+        if self._cleanup_status_label is not None:
+            self._cleanup_status_label.setText(text)
 
     def _build_nav_bar(self) -> QWidget:
         row_widget = QWidget()
