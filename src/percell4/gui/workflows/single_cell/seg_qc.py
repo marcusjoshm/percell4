@@ -193,6 +193,10 @@ class SegmentationQCController(QObject):
         self._modify_hi_spin: QDoubleSpinBox | None = None
         self._modify_sat_spin: QDoubleSpinBox | None = None
         self._modify_auto_btn: QPushButton | None = None
+        # Second Re-run entry point — toggled in lockstep with the
+        # Re-run Cellpose group's button so concurrent worker spawns
+        # are impossible regardless of which button the user clicks.
+        self._modify_rerun_button: QPushButton | None = None
         # Snapshot of viewer.layers[_LAYER_IMAGE].data at expand-time.
         # None when the group is collapsed.
         self._modify_original_intensity: np.ndarray | None = None
@@ -619,6 +623,8 @@ class SegmentationQCController(QObject):
                 return
 
         self._rerun_button.setEnabled(False)
+        if self._modify_rerun_button is not None:
+            self._modify_rerun_button.setEnabled(False)
         progress = QProgressDialog(
             "Running Cellpose…", "Cancel", 0, 0, self._window,
         )
@@ -687,6 +693,8 @@ class SegmentationQCController(QObject):
             # _on_rerun_error's recovery path.
             if self._rerun_button is not None:
                 self._rerun_button.setEnabled(True)
+            if self._modify_rerun_button is not None:
+                self._modify_rerun_button.setEnabled(True)
 
     def _on_rerun_error(self, err) -> None:
         if self._finished:
@@ -701,6 +709,8 @@ class SegmentationQCController(QObject):
         self._set_rerun_status(f"Re-run failed: {msg}")
         if self._rerun_button is not None:
             self._rerun_button.setEnabled(True)
+        if self._modify_rerun_button is not None:
+            self._modify_rerun_button.setEnabled(True)
 
     def _set_rerun_status(self, text: str) -> None:
         """Surface a Re-run status message via the cleanup status label
@@ -784,6 +794,19 @@ class SegmentationQCController(QObject):
         sat_row.addWidget(self._modify_auto_btn)
         sat_row.addStretch()
         body_layout.addLayout(sat_row)
+
+        # Re-run Cellpose against the currently-displayed channel (the
+        # modified preview while this group is expanded). Same handler
+        # as the Re-run Cellpose group's button — knob values are read
+        # from that group's widgets at click time.
+        self._modify_rerun_button = QPushButton("▶ Run Cellpose")
+        self._modify_rerun_button.setToolTip(
+            "Re-run Cellpose against the modified channel preview. "
+            "Uses the parameters set in the Re-run Cellpose group "
+            "(diameter, model, thresholds, channel, min size)."
+        )
+        self._modify_rerun_button.clicked.connect(self._on_rerun_clicked)
+        body_layout.addWidget(self._modify_rerun_button)
 
         toggle_btn.toggled.connect(self._on_modify_toggled)
         self._modify_group = box
