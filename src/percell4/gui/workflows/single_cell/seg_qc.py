@@ -546,12 +546,20 @@ class SegmentationQCController(QObject):
     def _cellpose_input_image(self) -> np.ndarray:
         """Return the image to feed Cellpose for an in-QC Re-run.
 
-        Today this returns the raw segmentation channel (or the
-        current single-frame view for time-lapse). In U4 it switches
-        to the napari channel layer's current ``.data``, which lets
-        the Modify Channel group's clipped/stretched preview flow
-        through naturally.
+        Reads from the napari channel layer's ``.data``, which is the
+        same buffer the user sees in the viewer. When the Modify
+        Channel group (U3) is active, that buffer is the clipped +
+        stretched preview; when collapsed, it's the original raw
+        channel. The Re-run pipeline doesn't need to know about the
+        LUT state — single source of truth via the layer.
+
+        Falls back to ``self._intensity`` when the napari layer
+        doesn't exist yet (defensive — start() always installs it
+        before the Re-run button can be reached).
         """
+        viewer = self._viewer_win.viewer if self._viewer_win is not None else None
+        if viewer is not None and _LAYER_IMAGE in viewer.layers:
+            return np.asarray(viewer.layers[_LAYER_IMAGE].data)
         if self._intensity is None:
             raise RuntimeError("intensity not loaded; QC window not started")
         return np.asarray(self._intensity)
