@@ -162,16 +162,23 @@ class SegmentationQCController(QObject):
             )
             return
 
-        if self._labels is None or int(self._labels.max()) == 0:
-            # Cellpose returned no cells for this dataset. The runner
-            # already recorded the failure; auto-accept and advance.
+        if self._labels is None:
+            # No /labels/<seg_name> on disk at all — this is an upstream
+            # state error, not a recoverable empty-Cellpose result.
+            # segment_one is supposed to persist labels (possibly empty)
+            # before this controller is invoked.
             self._finish(
                 PhaseResult(
-                    success=True,
-                    message="no cells to QC (auto-accept)",
+                    success=False,
+                    message=f"no /labels/{self._seg_name} found on disk",
                 )
             )
             return
+
+        # Empty Cellpose results (labels.max() == 0) used to auto-skip
+        # here. They now fall through to the normal load+show path so
+        # the user can draw / re-run / modify channel inside the QC
+        # window to recover.
 
         self._hide_existing_layers()
         self._load_into_viewer()
@@ -208,6 +215,19 @@ class SegmentationQCController(QObject):
         self._nav_dataset_label = QLabel(self._entry.name)
         self._nav_dataset_label.setStyleSheet("color: #4ea8de; font-weight: bold;")
         layout.addWidget(self._nav_dataset_label)
+
+        # Empty-Cellpose recovery hint — visible only when this dataset
+        # entered QC with zero cells. The Re-run and Modify Channel
+        # affordances mentioned here are added in U2/U3 of the plan.
+        if self._labels is not None and int(self._labels.max()) == 0:
+            hint = QLabel(
+                "Cellpose found 0 cells on this dataset. "
+                "Draw labels with the napari tools, re-run Cellpose with "
+                "different settings, or modify the channel to recover."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: #f0b020; font-style: italic;")
+            layout.addWidget(hint)
 
         layout.addWidget(self._build_edit_group())
         layout.addWidget(self._build_cleanup_group())
