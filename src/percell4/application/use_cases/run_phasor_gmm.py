@@ -119,6 +119,7 @@ class RunPhasorGMM:
             gmm_eigenstructure,
             gmm_fit_phasor,
             gmm_to_phasor_roi_geometry,
+            single_component_fit_phasor,
             universal_circle_gs,
         )
         from percell4.domain.flim.phasor_display import compute_valid_phasor_pixels
@@ -228,14 +229,21 @@ class RunPhasorGMM:
         s_valid = s.ravel()[valid].astype(np.float64)
         intensity_valid = intensity.ravel()[valid].astype(np.float64)
 
-        # ── Fit GMM ──────────────────────────────────────────────
-        fit = gmm_fit_phasor(
-            g_valid, s_valid, intensity_valid,
-            n_components=n_components,
-            criterion=criterion,
-            n_min=2,
-            n_max=n_max,
-        )
+        # ── Fit ──────────────────────────────────────────────────
+        # n=1 is a closed-form intensity-weighted mean/covariance — no EM,
+        # no subsampling, no criterion. Anything else goes through the
+        # multi-component GMM path (fixed n if n_components is set,
+        # BIC/AIC sweep when n_components is None).
+        if n_components == 1:
+            fit = single_component_fit_phasor(g_valid, s_valid, intensity_valid)
+        else:
+            fit = gmm_fit_phasor(
+                g_valid, s_valid, intensity_valid,
+                n_components=n_components,
+                criterion=criterion,
+                n_min=2,
+                n_max=n_max,
+            )
 
         # ── Map components → PhasorROIGeometry ───────────────────
         geometries: list[PhasorROIGeometry] = []

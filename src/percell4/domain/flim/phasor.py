@@ -491,6 +491,58 @@ def gmm_to_phasor_roi_geometry(
     return center, radii, angle_deg
 
 
+def single_component_fit_phasor(
+    g: NDArray[np.floating],
+    s: NDArray[np.floating],
+    intensity: NDArray[np.floating],
+) -> GMMFitResult:
+    """Closed-form intensity-weighted mean and covariance.
+
+    For n=1, EM is unnecessary — the maximum-likelihood Gaussian over
+    weighted samples has the analytic form
+
+        mu = sum(w_i x_i) / sum(w_i)
+        Sigma = sum(w_i (x_i - mu)(x_i - mu)^T) / sum(w_i)
+
+    Computing it directly over all valid pixels avoids both the EM cost
+    and the ``replace=False, p=p`` sampling bias used in ``gmm_fit_phasor``.
+    Returns a ``GMMFitResult`` shaped identically to a 1-component GMM fit
+    so the use case can treat both paths uniformly.
+
+    Falls back to uniform weighting when ``intensity.sum() == 0``.
+    """
+    g = np.asarray(g, dtype=np.float64)
+    s = np.asarray(s, dtype=np.float64)
+    intensity = np.asarray(intensity, dtype=np.float64)
+    if g.shape != s.shape or g.shape != intensity.shape:
+        raise ValueError("g, s, intensity must share shape")
+    if g.size == 0:
+        raise ValueError("Cannot fit single component on empty input")
+
+    w = intensity if intensity.sum() > 0 else np.ones_like(intensity)
+    w_sum = w.sum()
+    mean_g = float((w * g).sum() / w_sum)
+    mean_s = float((w * s).sum() / w_sum)
+
+    dg = g - mean_g
+    ds = s - mean_s
+    cov_gg = float((w * dg * dg).sum() / w_sum)
+    cov_ss = float((w * ds * ds).sum() / w_sum)
+    cov_gs = float((w * dg * ds).sum() / w_sum)
+
+    means = np.array([[mean_g, mean_s]], dtype=np.float64)
+    covariances = np.array(
+        [[[cov_gg, cov_gs], [cov_gs, cov_ss]]], dtype=np.float64
+    )
+    return GMMFitResult(
+        means=means,
+        covariances=covariances,
+        chosen_n=1,
+        criterion_value=None,
+        sampled_pixels=int(g.size),
+    )
+
+
 def gmm_fit_phasor(
     g: NDArray[np.floating],
     s: NDArray[np.floating],
