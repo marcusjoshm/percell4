@@ -162,6 +162,55 @@ def test_segment_one_empty_cellpose_writes_empty_labels_and_succeeds(
     assert "manual" in msg.lower() or "draw" in msg.lower()
 
 
+def test_segment_one_applies_saturation_lut_when_pct_positive(
+    fixture_store_50px, monkeypatch
+):
+    """segment_one preprocesses the seg channel with the saturation LUT
+    when CellposeSettings.saturation_pct > 0.
+
+    The captured array passed to run_cellpose is the apply_saturation_lut
+    output, not the raw store channel.
+    """
+    from percell4.domain.segmentation.preprocess import apply_saturation_lut
+    from percell4.workflows import phases
+
+    captured: dict = {}
+
+    def fake_run(plane, *a, **kw):  # noqa: ARG001
+        captured["plane"] = np.asarray(plane, copy=True)
+        return _fake_cellpose_labels_with_edges()
+
+    monkeypatch.setattr(phases, "run_cellpose", fake_run)
+    cfg = CellposeSettings(min_size=5, saturation_pct=1.0)
+
+    segment_one(fixture_store_50px, cfg)
+
+    raw = fixture_store_50px.read_channel("intensity", 0)
+    expected = apply_saturation_lut(raw, 1.0)
+    assert np.array_equal(captured["plane"], expected)
+
+
+def test_segment_one_skips_lut_when_saturation_pct_zero(
+    fixture_store_50px, monkeypatch
+):
+    """saturation_pct == 0 → segment_one passes the raw channel."""
+    from percell4.workflows import phases
+
+    captured: dict = {}
+
+    def fake_run(plane, *a, **kw):  # noqa: ARG001
+        captured["plane"] = np.asarray(plane, copy=True)
+        return _fake_cellpose_labels_with_edges()
+
+    monkeypatch.setattr(phases, "run_cellpose", fake_run)
+    cfg = CellposeSettings(min_size=5, saturation_pct=0.0)
+
+    segment_one(fixture_store_50px, cfg)
+
+    raw = fixture_store_50px.read_channel("intensity", 0)
+    assert np.array_equal(captured["plane"], raw)
+
+
 def test_segment_one_handles_read_error(tmp_path):
     """An empty h5 (no /intensity) should return SEGMENTATION_ERROR."""
     store = DatasetStore(tmp_path / "empty.h5")

@@ -59,6 +59,7 @@ from percell4.domain.segmentation.postprocess import (
     filter_small_cells,
     relabel_sequential,
 )
+from percell4.domain.segmentation.preprocess import apply_lut
 from percell4.store import DatasetStore
 from percell4.workflows.models import WorkflowDatasetEntry
 
@@ -68,34 +69,10 @@ logger = logging.getLogger(__name__)
 _LAYER_IMAGE = "_workflow_seg_qc_image"
 _LAYER_LABELS = "_workflow_seg_qc_labels"
 
-# Modify Channel: minimum separation between lo and hi (in source units).
-# 1 unit for uint16-quantized microscopy data; spinboxes also enforce
-# this via setMinimum/setMaximum cross-binding.
+# Minimum separation between lo and hi (in source units), enforced by
+# the spinbox snap-no-cross logic. Mirrors the same epsilon the domain
+# preprocess module uses internally.
 _LUT_EPSILON = 1.0
-
-
-def _apply_lut(channel: np.ndarray, lo: float, hi: float) -> np.ndarray:
-    """Clip channel to [lo, hi] and linearly stretch to its dtype's range.
-
-    Pure-numpy preprocessor for Cellpose's segmentation input — equivalent
-    to ImageJ's "Apply LUT" with the brightness/contrast min/max set
-    to (lo, hi). When lo >= hi (degenerate range, e.g. all-zero image),
-    returns the channel unchanged so the preview never produces NaN /
-    divide-by-zero artifacts.
-
-    Output dtype matches the input. For integer dtypes the stretched
-    range fills [0, dtype_max]; for float dtypes the output is in
-    [0.0, 1.0].
-    """
-    if hi - lo < _LUT_EPSILON:
-        return channel
-    clipped = np.clip(channel, lo, hi).astype(np.float64)
-    normalized = (clipped - lo) / (hi - lo)  # [0, 1]
-    if np.issubdtype(channel.dtype, np.integer):
-        info = np.iinfo(channel.dtype)
-        scaled = normalized * float(info.max)
-        return scaled.astype(channel.dtype, copy=False)
-    return normalized.astype(channel.dtype, copy=False)
 _LAYER_CLEANUP_PREVIEW = "_workflow_seg_qc_cleanup_preview"
 
 
@@ -1001,7 +978,7 @@ class SegmentationQCController(QObject):
         # Apply LUT to the snapshotted channel, not to the layer's
         # current data — successive refreshes must compose against the
         # original or contrast accumulates.
-        modified = _apply_lut(self._modify_original_intensity, lo, hi)
+        modified = apply_lut(self._modify_original_intensity, lo, hi)
         viewer.layers[_LAYER_IMAGE].data = modified
 
     def _build_nav_bar(self) -> QWidget:

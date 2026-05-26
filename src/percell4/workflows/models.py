@@ -85,12 +85,23 @@ class CellposeSettings:
     flow_threshold: float = 0.4
     cellprob_threshold: float = 0.0
     min_size: int = 15
+    # ImageJ-style Enhance Contrast applied to the segmentation channel
+    # before Cellpose runs. Same math as the seg-QC Modify Channel
+    # group. 1.0% mirrors the QC default; 0.0 disables the pre-LUT.
+    # Strictly a Cellpose-input preprocessor — the on-disk /intensity
+    # is never modified.
+    saturation_pct: float = 1.0
 
     def __post_init__(self) -> None:
         if self.diameter < 0:
             raise ValueError("diameter must be >= 0 (0 = auto)")
         if self.min_size < 0:
             raise ValueError("min_size must be >= 0")
+        if not (0.0 <= self.saturation_pct <= 50.0):
+            raise ValueError(
+                "saturation_pct must be in [0, 50] "
+                f"(got {self.saturation_pct})"
+            )
 
 
 @dataclass(frozen=True)

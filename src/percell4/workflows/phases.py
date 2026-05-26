@@ -310,9 +310,22 @@ def segment_one(
 
     diameter = cfg.diameter if cfg.diameter > 0 else None
 
+    # Pre-Cellpose saturation LUT — same ImageJ-style Enhance Contrast
+    # operation the seg-QC Modify Channel group exposes interactively.
+    # 0 is a no-op so legacy runs and users who opt out get
+    # byte-identical Cellpose input. For time-lapse stacks the LUT is
+    # applied per-frame so the percentile reference is the frame's
+    # own intensity, not the whole stack's.
+    from percell4.domain.segmentation.preprocess import apply_saturation_lut
+
+    def _preprocess(plane: NDArray) -> NDArray:
+        if cfg.saturation_pct > 0.0:
+            return apply_saturation_lut(plane, cfg.saturation_pct)
+        return plane
+
     def _infer(plane: NDArray) -> NDArray:
         return run_cellpose(
-            plane,
+            _preprocess(plane),
             diameter=diameter,
             gpu=cfg.gpu,
             flow_threshold=cfg.flow_threshold,
@@ -325,6 +338,7 @@ def segment_one(
         if n_timepoints > 1:
             # Time-lapse: segment every frame independently (per-frame ids;
             # tracking unifies them later), reusing the hoisted model.
+            # _infer() handles the per-frame saturation LUT internally.
             frame_labels = [
                 _postprocess_labels(_infer(image[t]), cfg, edge_mode, edge_margin_px)
                 for t in range(n_timepoints)

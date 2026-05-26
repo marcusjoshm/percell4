@@ -466,6 +466,26 @@ class WorkflowConfigDialog(QDialog):
         self._cp_min_size.setValue(15)
         form.addRow("Min cell size (px):", self._cp_min_size)
 
+        # ImageJ-style Enhance Contrast applied to the segmentation
+        # channel before Cellpose runs. Same operation the seg-QC
+        # Modify Channel group exposes interactively. 1.0% mirrors
+        # the QC default; set to 0 to disable.
+        self._cp_saturation = QDoubleSpinBox()
+        self._cp_saturation.setRange(0.0, 50.0)
+        self._cp_saturation.setSingleStep(0.5)
+        self._cp_saturation.setDecimals(1)
+        self._cp_saturation.setValue(1.0)
+        self._cp_saturation.setSuffix(" %")
+        self._cp_saturation.setToolTip(
+            "Saturation % applied as an ImageJ-style Enhance Contrast "
+            "LUT to the segmentation channel before Cellpose runs. "
+            "1% saturates the brightest 1% of pixels to dtype-max so "
+            "Cellpose's percentile normalization isn't skewed by hot "
+            "pixels or speck outliers. Set to 0 to disable. The "
+            "on-disk /intensity is never modified."
+        )
+        form.addRow("Saturation:", self._cp_saturation)
+
         # Segmentation-layer name (was hardcoded as "cellpose_qc" before
         # this evolution; now configurable so a researcher can keep
         # multiple Cellpose parameterizations on the same .h5).
@@ -1721,6 +1741,7 @@ class WorkflowConfigDialog(QDialog):
                 flow_threshold=float(self._cp_flow.value()),
                 cellprob_threshold=float(self._cp_cellprob.value()),
                 min_size=int(self._cp_min_size.value()),
+                saturation_pct=float(self._cp_saturation.value()),
             )
         except ValueError as e:
             self._warn(f"Cellpose settings invalid: {e}")

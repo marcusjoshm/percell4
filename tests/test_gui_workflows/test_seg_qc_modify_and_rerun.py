@@ -19,10 +19,10 @@ import pytest
 from percell4.application.session import Session
 from percell4.gui.viewer import ViewerWindow
 from percell4.gui.workflows.base_runner import PhaseResult
+from percell4.domain.segmentation.preprocess import apply_lut as _apply_lut
 from percell4.gui.workflows.single_cell.seg_qc import (
     SegmentationQCController,
     _LAYER_IMAGE,
-    _apply_lut,
 )
 from percell4.model import CellDataModel
 from percell4.store import DatasetStore
