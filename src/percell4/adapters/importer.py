@@ -766,10 +766,19 @@ def _load_and_stitch(files: list, tile_config: TileConfig | None) -> np.ndarray:
             order=tile_config.order,
         )
 
-    # Multiple files but no tile config — just return the first
-    # (could be multiple z-slices grouped together)
-    data = read_tiff(str(files[0].path))
-    return data["array"]
+    # Multiple files but no tile_config and no recognized z-slice tokens
+    # (the z-slice branch in _assemble_plane runs first when z tokens
+    # are present). Silently returning files[0] used to land here and
+    # discard the rest, which silently truncated multi-tile datasets to
+    # a single tile. Raise instead so the caller has to be explicit.
+    names = ", ".join(f.path.name for f in files)
+    raise ValueError(
+        f"_load_and_stitch received {len(files)} files for one channel "
+        "but no tile_config and no z-slice tokens were detected. "
+        "Either configure tile stitching (TileConfig) for the importer "
+        "or check the filename token regex so z-slices are recognized. "
+        f"Files: {names}"
+    )
 
 
 def _tile_positions_from_config(

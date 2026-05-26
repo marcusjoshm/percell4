@@ -119,6 +119,24 @@ def compress_one(
                 name=entry_dict.get("name", ""),
             )
 
+    # Deserialize tile_config — preserves the stitching grid the user
+    # configured in the CompressDialog (rows × cols, traversal pattern,
+    # start corner). Without this, multi-tile datasets silently land in
+    # the .h5 with only the first tile's pixels — _load_and_stitch
+    # raises rather than dropping files once this key is missing AND
+    # multiple files target one channel.
+    tile_config: Any | None = None
+    tc_payload = plan.get("tile_config")
+    if tc_payload:
+        from percell4.domain.io.models import TileConfig
+
+        tile_config = TileConfig(
+            grid_rows=int(tc_payload.get("grid_rows", 1)),
+            grid_cols=int(tc_payload.get("grid_cols", 1)),
+            grid_type=str(tc_payload.get("grid_type", "row_by_row")),
+            order=str(tc_payload.get("order", "right_down")),
+        )
+
     # import_dataset accepts ``files=`` as either DiscoveredFile-like
     # objects or plain path strings — its scanner re-derives tokens
     # from filenames. Pass path strings directly so we don't need to
@@ -139,6 +157,7 @@ def compress_one(
             layer_assignments=layer_assignments,
             files=files_paths or None,
             creation_bin=creation_bin,
+            tile_config=tile_config,
         )
     except Exception as e:
         logger.exception("compress_one failed for %s", entry.name)

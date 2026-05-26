@@ -188,6 +188,50 @@ def _derive_tiff_pending_channel_names(
     return out
 
 
+def _build_compress_plan(
+    ds: Any,
+    gui_state: Any,
+    cfg: Any,
+    selected_token_ids: list[str],
+    layer_assignments_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Serialize a ``DatasetSpec`` + ``CompressConfig`` into a compress_plan dict.
+
+    The plan is the JSON-safe payload persisted into ``run_config.json``
+    and consumed by ``percell4.workflows.phases.compress_one``. Pulled
+    out of ``_add_tiff_via_compress_dialog`` so the construction is
+    unit-testable without instantiating the Qt dialog.
+
+    ``tile_config`` is taken from the per-dataset
+    ``DatasetGuiState.tile_config_override`` if present, otherwise from
+    the global ``CompressConfig.tile_config``. Omitted entirely when
+    neither is set. Forgetting this key was the bug that caused
+    multi-tile single-cell workflow runs to land in the .h5 with only
+    the first scene's pixels.
+    """
+    plan: dict[str, Any] = {
+        "source_dir": str(ds.source_dir) if ds.source_dir else "",
+        "files": [str(f.path) for f in ds.files],
+        "output_path": str(ds.output_path),
+        "z_project_method": cfg.z_project_method,
+        "selected_channels": list(selected_token_ids),
+        "layer_assignments": layer_assignments_payload,
+    }
+
+    tile_config = (
+        getattr(gui_state, "tile_config_override", None) if gui_state else None
+    ) or getattr(cfg, "tile_config", None)
+    if tile_config is not None:
+        plan["tile_config"] = {
+            "grid_rows": int(tile_config.grid_rows),
+            "grid_cols": int(tile_config.grid_cols),
+            "grid_type": str(tile_config.grid_type),
+            "order": str(tile_config.order),
+        }
+
+    return plan
+
+
 class _PendingDataset:
     """Lightweight record of one user-added dataset inside the dialog.
 
@@ -1042,14 +1086,13 @@ class WorkflowConfigDialog(QDialog):
                 source=DatasetSource.TIFF_PENDING,
                 h5_path=Path(ds.output_path),
                 channel_names=list(channel_names),
-                compress_plan={
-                    "source_dir": str(ds.source_dir) if ds.source_dir else "",
-                    "files": [str(f.path) for f in ds.files],
-                    "output_path": str(ds.output_path),
-                    "z_project_method": cfg.z_project_method,
-                    "selected_channels": selected_token_ids,
-                    "layer_assignments": layer_assignments_payload,
-                },
+                compress_plan=_build_compress_plan(
+                    ds=ds,
+                    gui_state=state,
+                    cfg=cfg,
+                    selected_token_ids=selected_token_ids,
+                    layer_assignments_payload=layer_assignments_payload,
+                ),
             )
             if self._add_pending(pd):
                 added += 1
