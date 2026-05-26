@@ -1,12 +1,14 @@
 """CLI adapter: batch compute phasor + apply wavelet across .h5 datasets.
 
 Headless front-end for
-:func:`percell4.application.use_cases.batch_compute_phasor`.
+:func:`percell4.application.use_cases.batch_compute_phasor` (and its
+inverse :func:`batch_remove_phasor`).
 
 Usage:
     python -m percell4.interfaces.cli.batch_phasor dish_1.h5 dish_2.h5
     python -m percell4.interfaces.cli.batch_phasor /path/to/scratch/ \\
         --filter-level 5 --overwrite
+    python -m percell4.interfaces.cli.batch_phasor /scratch/ --remove
 
 For each .h5 file (or every .h5 in a directory argument), the CLI runs
 ComputePhasor + ApplyWavelet on every channel under /decay/*, writing
@@ -15,6 +17,13 @@ Channels with an existing /phasor/<ch>/g are skipped unless --overwrite
 is set. Channels missing calibration (flim_cal_phase_<ch>,
 flim_cal_mod_<ch>, or flim_frequency_mhz) are skipped with a clear
 report line.
+
+The ``--remove`` flag flips the CLI into deletion mode: for each .h5,
+the entire ``/phasor/<ch>/`` group is removed for every channel under
+``/decay/*`` (sweeping g, s, g_filtered, s_filtered, lifetime_filtered
+together). Channels that have no phasor on disk are reported as
+skipped, not as failures. ``--remove`` is mutually exclusive with
+``--overwrite``.
 
 Exit codes:
     0 -- at least one channel was processed across the batch
@@ -37,6 +46,7 @@ import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
 from percell4.application.use_cases.batch_compute_phasor import (
     BatchPhasorItemResult,
     batch_compute_phasor,
+    batch_remove_phasor,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,22 +70,32 @@ def _resolve_paths(args: list[str]) -> list[Path]:
     return paths
 
 
-def _format_item_line(item: BatchPhasorItemResult) -> str:
-    """One-line summary for a single dataset result."""
+def _format_item_line(
+    item: BatchPhasorItemResult, *, mode: str = "compute"
+) -> str:
+    """One-line summary for a single dataset result.
+
+    ``mode`` swaps the verb in the count summary so removal runs read as
+    "N removed" instead of "N processed".
+    """
     n_processed = len(item.processed)
     n_skipped = len(item.skipped)
     n_errors = len(item.errors)
+    verb = "removed" if mode == "remove" else "processed"
     return (
         f"[{item.status}] {item.h5_path.name} -- "
-        f"{n_processed} processed, {n_skipped} skipped, {n_errors} errors"
+        f"{n_processed} {verb}, {n_skipped} skipped, {n_errors} errors"
     )
 
 
 def _print_item_status(
-    item: BatchPhasorItemResult, *, quiet: bool = False
+    item: BatchPhasorItemResult,
+    *,
+    quiet: bool = False,
+    mode: str = "compute",
 ) -> None:
     """Print one dataset's result to stdout."""
-    print(_format_item_line(item))
+    print(_format_item_line(item, mode=mode))
     if quiet:
         return
     # Indent per-channel skip + error details under the dataset header.
@@ -108,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             "  percell4-batch-phasor dish_1.h5 dish_2.h5\n"
             "  percell4-batch-phasor /scratch/dishes/ --filter-level 5\n"
             "  percell4-batch-phasor *.h5 --overwrite --quiet\n"
+            "  percell4-batch-phasor /scratch/dishes/ --remove\n"
         ),
     )
     parser.add_argument(
@@ -133,6 +154,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--remove",
+        action="store_true",
+        help=(
+            "Inverse mode: delete /phasor/<ch>/ (all of g, s, g_filtered, "
+            "s_filtered, lifetime_filtered) for every channel in each "
+            "dataset instead of computing. Mutually exclusive with "
+            "--overwrite. --filter-level is ignored when --remove is set."
+        ),
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help=(
@@ -154,7 +185,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s: %(message)s",
     )
 
-    if not (1 <= args.filter_level <= 9):
+    if args.remove and args.overwrite:
+        parser.error("--remove and --overwrite are mutually exclusive")
+
+    if not args.remove and not (1 <= args.filter_level <= 9):
+        # --filter-level is irrelevant for --remove, so only validate it
+        # for the compute path.
         parser.error(
             f"--filter-level must be in [1, 9], got {args.filter_level}"
         )
@@ -166,15 +202,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    def cb(item: BatchPhasorItemResult) -> None:
-        _print_item_status(item, quiet=args.quiet)
+    mode = "remove" if args.remove else "compute"
 
-    report = batch_compute_phasor(
-        paths,
-        filter_level=args.filter_level,
-        overwrite=args.overwrite,
-        progress_callback=cb,
-    )
+    def cb(item: BatchPhasorItemResult) -> None:
+        _print_item_status(item, quiet=args.quiet, mode=mode)
+
+    if args.remove:
+        report = batch_remove_phasor(paths, progress_callback=cb)
+    else:
+        report = batch_compute_phasor(
+            paths,
+            filter_level=args.filter_level,
+            overwrite=args.overwrite,
+            progress_callback=cb,
+        )
 
     print(
         f"\nTotals: {report.total_succeeded} succeeded, "
@@ -183,8 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{report.total_skipped} skipped"
     )
 
-    # Exit 0 if any progress was made (some channel processed somewhere),
-    # else 1.
+    # Exit 0 if any progress was made (some channel processed/removed
+    # somewhere), else 1.
     any_progress = any(item.processed for item in report.items)
     return 0 if any_progress else 1
 
