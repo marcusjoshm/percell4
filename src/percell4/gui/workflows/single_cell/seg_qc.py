@@ -66,6 +66,35 @@ logger = logging.getLogger(__name__)
 
 _LAYER_IMAGE = "_workflow_seg_qc_image"
 _LAYER_LABELS = "_workflow_seg_qc_labels"
+
+# Modify Channel: minimum separation between lo and hi (in source units).
+# 1 unit for uint16-quantized microscopy data; spinboxes also enforce
+# this via setMinimum/setMaximum cross-binding.
+_LUT_EPSILON = 1.0
+
+
+def _apply_lut(channel: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Clip channel to [lo, hi] and linearly stretch to its dtype's range.
+
+    Pure-numpy preprocessor for Cellpose's segmentation input — equivalent
+    to ImageJ's "Apply LUT" with the brightness/contrast min/max set
+    to (lo, hi). When lo >= hi (degenerate range, e.g. all-zero image),
+    returns the channel unchanged so the preview never produces NaN /
+    divide-by-zero artifacts.
+
+    Output dtype matches the input. For integer dtypes the stretched
+    range fills [0, dtype_max]; for float dtypes the output is in
+    [0.0, 1.0].
+    """
+    if hi - lo < _LUT_EPSILON:
+        return channel
+    clipped = np.clip(channel, lo, hi).astype(np.float64)
+    normalized = (clipped - lo) / (hi - lo)  # [0, 1]
+    if np.issubdtype(channel.dtype, np.integer):
+        info = np.iinfo(channel.dtype)
+        scaled = normalized * float(info.max)
+        return scaled.astype(channel.dtype, copy=False)
+    return normalized.astype(channel.dtype, copy=False)
 _LAYER_CLEANUP_PREVIEW = "_workflow_seg_qc_cleanup_preview"
 
 
@@ -147,6 +176,35 @@ class SegmentationQCController(QObject):
         # multi-second construction cost on every iteration. Lazy:
         # built on the first Re-run if not already provided.
         self._cellpose_model_cached = None
+
+        # ── Modify Channel group (U3) ──────────────────────────────
+        # In-memory clip-and-stretch preview of the segmentation
+        # channel. The on-disk /intensity is never touched; the
+        # original pixels are snapshotted into _modify_original_intensity
+        # when the group expands so collapse / Accept / Cancel can
+        # restore byte-identical pixels.
+        self._modify_group: QGroupBox | None = None
+        self._modify_toggle_btn: QPushButton | None = None
+        self._modify_body: QWidget | None = None
+        self._modify_hist_widget = None  # pyqtgraph PlotWidget, lazy
+        self._modify_region = None  # pg.LinearRegionItem
+        self._modify_lo_spin: QDoubleSpinBox | None = None
+        self._modify_hi_spin: QDoubleSpinBox | None = None
+        self._modify_sat_spin: QDoubleSpinBox | None = None
+        self._modify_auto_btn: QPushButton | None = None
+        # Snapshot of viewer.layers[_LAYER_IMAGE].data at expand-time.
+        # None when the group is collapsed.
+        self._modify_original_intensity: np.ndarray | None = None
+        # Two-way sync guards.
+        self._modify_setting_handles = False
+        self._modify_setting_spins = False
+        # Coalesced refresh: drag handles can emit hundreds of
+        # sigRegionChanged per second; throttle to one refresh per
+        # event-loop tick via QTimer.singleShot(0) gated on this flag.
+        self._modify_refresh_pending = False
+        # Set in _finish so a delayed singleShot fire after teardown
+        # is a no-op rather than touching a dead napari layer.
+        self._modify_torn_down = False
 
         # Coalesced refresh (signal coalescing per
         # docs/solutions/ui-bugs/percell4-phases-0-6-napari-qt-learnings.md)
@@ -267,6 +325,7 @@ class SegmentationQCController(QObject):
         layout.addWidget(self._build_edit_group())
         layout.addWidget(self._build_cleanup_group())
         layout.addWidget(self._build_rerun_group())
+        layout.addWidget(self._build_modify_channel_group())
         layout.addStretch()
         layout.addWidget(self._build_nav_bar())
 
@@ -636,6 +695,276 @@ class SegmentationQCController(QObject):
         if self._cleanup_status_label is not None:
             self._cleanup_status_label.setText(text)
 
+    # ── Modify Channel group (U3) ─────────────────────────────────
+
+    def _build_modify_channel_group(self) -> QGroupBox:
+        """Modify Channel group — clip-and-stretch LUT preview.
+
+        Collapsed by default. Expanding it snapshots the napari channel
+        layer's data, installs the histogram + handles widget, applies
+        the 1% saturation default, and starts rendering the clipped
+        preview into the napari viewer. Collapsing reverts pixel-for-
+        pixel from the snapshot.
+
+        The Cellpose Re-run group (U2) feeds Cellpose whatever is
+        currently displayed in the channel layer, so when this group
+        is active Cellpose receives the preview (U4 wiring).
+        """
+        box = QGroupBox("Modify Channel")
+
+        outer = QVBoxLayout(box)
+        toggle_btn = QPushButton("▶ Show LUT controls")
+        toggle_btn.setStyleSheet("text-align: left;")
+        toggle_btn.setCheckable(True)
+        outer.addWidget(toggle_btn)
+        self._modify_toggle_btn = toggle_btn
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(body)
+        body.setVisible(False)
+        self._modify_body = body
+
+        # Histogram placeholder — the actual PlotWidget is built lazily
+        # on first expand so app startup doesn't pay the pyqtgraph cost.
+        self._modify_hist_container = QWidget()
+        QVBoxLayout(self._modify_hist_container).setContentsMargins(0, 0, 0, 0)
+        body_layout.addWidget(self._modify_hist_container)
+
+        # Lo / Hi numeric inputs (two-way linked with the LinearRegionItem).
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("Lo:"))
+        self._modify_lo_spin = QDoubleSpinBox()
+        self._modify_lo_spin.setRange(-1e9, 1e9)
+        self._modify_lo_spin.setDecimals(2)
+        self._modify_lo_spin.valueChanged.connect(self._on_modify_spin_changed)
+        range_row.addWidget(self._modify_lo_spin)
+
+        range_row.addWidget(QLabel("Hi:"))
+        self._modify_hi_spin = QDoubleSpinBox()
+        self._modify_hi_spin.setRange(-1e9, 1e9)
+        self._modify_hi_spin.setDecimals(2)
+        self._modify_hi_spin.valueChanged.connect(self._on_modify_spin_changed)
+        range_row.addWidget(self._modify_hi_spin)
+        body_layout.addLayout(range_row)
+
+        # Saturation% + Auto button.
+        sat_row = QHBoxLayout()
+        sat_row.addWidget(QLabel("Saturation %:"))
+        self._modify_sat_spin = QDoubleSpinBox()
+        self._modify_sat_spin.setRange(0.0, 50.0)
+        self._modify_sat_spin.setSingleStep(0.5)
+        self._modify_sat_spin.setDecimals(2)
+        self._modify_sat_spin.setValue(1.0)
+        sat_row.addWidget(self._modify_sat_spin)
+
+        self._modify_auto_btn = QPushButton("Auto")
+        self._modify_auto_btn.setToolTip(
+            "Set hi = percentile(channel, 100 − sat%) and lo = channel.min(). "
+            "Default sat=1% mirrors ImageJ's Enhance Contrast."
+        )
+        self._modify_auto_btn.clicked.connect(self._on_modify_auto_clicked)
+        sat_row.addWidget(self._modify_auto_btn)
+        sat_row.addStretch()
+        body_layout.addLayout(sat_row)
+
+        toggle_btn.toggled.connect(self._on_modify_toggled)
+        self._modify_group = box
+        return box
+
+    def _on_modify_toggled(self, checked: bool) -> None:
+        if self._modify_body is None or self._modify_toggle_btn is None:
+            return
+        self._modify_body.setVisible(checked)
+        self._modify_toggle_btn.setText(
+            "▼ Hide LUT controls" if checked else "▶ Show LUT controls"
+        )
+        if checked:
+            self._modify_install_preview()
+        else:
+            self._modify_revert_preview()
+
+    def _modify_install_preview(self) -> None:
+        """Snapshot the channel layer's data, build the histogram, and
+        apply the default 1% saturation preview."""
+        if self._intensity is None:
+            return
+        viewer = self._viewer_win.viewer
+        if viewer is None or _LAYER_IMAGE not in viewer.layers:
+            return
+        # Snapshot once — collapsing reverts to this exact buffer.
+        # Copy so subsequent .data = arr swaps don't alias the snapshot.
+        self._modify_original_intensity = np.array(
+            viewer.layers[_LAYER_IMAGE].data, copy=True,
+        )
+        self._modify_build_histogram_lazy()
+        # Auto-apply the default saturation% on first expand so the
+        # user immediately sees a sensible preview rather than having
+        # to click Auto every time.
+        self._on_modify_auto_clicked()
+
+    def _modify_revert_preview(self) -> None:
+        viewer = self._viewer_win.viewer
+        if (
+            viewer is not None
+            and _LAYER_IMAGE in viewer.layers
+            and self._modify_original_intensity is not None
+        ):
+            viewer.layers[_LAYER_IMAGE].data = self._modify_original_intensity
+        self._modify_original_intensity = None
+
+    def _modify_build_histogram_lazy(self) -> None:
+        if self._modify_hist_widget is not None:
+            return
+        import pyqtgraph as pg
+
+        plot = pg.PlotWidget()
+        plot.setBackground("#1e1e1e")
+        plot.setMinimumHeight(120)
+        plot.setLabel("bottom", "Intensity")
+        plot.setLabel("left", "Pixel count")
+        plot.showGrid(x=False, y=False)
+
+        # Compute histogram from the original (snapshotted) channel.
+        # For (T, H, W) time-lapse views we summarize from the currently-
+        # displayed frame (first frame is a sensible default — full-stack
+        # summarization is open for U3 deferred-to-impl).
+        channel = self._modify_original_intensity
+        flat = channel.ravel() if channel.ndim == 2 else channel[0].ravel()
+        counts, edges = np.histogram(flat, bins=100)
+        bin_centers = (edges[:-1] + edges[1:]) / 2.0
+        bar = pg.BarGraphItem(
+            x=bin_centers,
+            height=counts,
+            width=(edges[1] - edges[0]) * 0.9,
+            brush="#4ea8de",
+        )
+        plot.addItem(bar)
+
+        ch_min = float(channel.min())
+        ch_max = float(channel.max())
+        region = pg.LinearRegionItem(
+            values=(ch_min, ch_max),
+            orientation="vertical",
+            brush=(78, 168, 222, 60),
+            movable=True,
+        )
+        region.setBounds((ch_min, ch_max))
+        region.sigRegionChanged.connect(self._on_modify_region_changed)
+        plot.addItem(region)
+
+        # Configure the numeric spinboxes' range to the channel's range.
+        if self._modify_lo_spin is not None:
+            self._modify_lo_spin.setRange(ch_min, ch_max)
+        if self._modify_hi_spin is not None:
+            self._modify_hi_spin.setRange(ch_min, ch_max)
+
+        self._modify_hist_container.layout().addWidget(plot)
+        self._modify_hist_widget = plot
+        self._modify_region = region
+
+    def _on_modify_region_changed(self) -> None:
+        """Region drag — schedule a coalesced preview refresh."""
+        if self._modify_region is None:
+            return
+        lo, hi = self._modify_region.getRegion()
+        # Push to spinboxes (guarded so they don't echo back).
+        self._modify_setting_spins = True
+        try:
+            if self._modify_lo_spin is not None:
+                self._modify_lo_spin.setValue(float(lo))
+            if self._modify_hi_spin is not None:
+                self._modify_hi_spin.setValue(float(hi))
+        finally:
+            self._modify_setting_spins = False
+        self._schedule_modify_preview_refresh()
+
+    def _on_modify_spin_changed(self) -> None:
+        """Spinbox edit — apply snap-no-cross then push to region."""
+        if self._modify_setting_spins:
+            return
+        if self._modify_lo_spin is None or self._modify_hi_spin is None:
+            return
+        lo = float(self._modify_lo_spin.value())
+        hi = float(self._modify_hi_spin.value())
+        # Snap-no-cross: clamp to enforce lo + epsilon <= hi.
+        if hi - lo < _LUT_EPSILON:
+            # Adjust whichever the user just touched least to keep the
+            # interaction predictable — we use the simple rule "clamp
+            # hi up to lo + epsilon".
+            hi = lo + _LUT_EPSILON
+            self._modify_setting_spins = True
+            try:
+                self._modify_hi_spin.setValue(hi)
+            finally:
+                self._modify_setting_spins = False
+        # Push to region.
+        if self._modify_region is not None:
+            self._modify_setting_handles = True
+            try:
+                self._modify_region.setRegion((lo, hi))
+            finally:
+                self._modify_setting_handles = False
+        self._schedule_modify_preview_refresh()
+
+    def _on_modify_auto_clicked(self) -> None:
+        """Recompute lo/hi from the channel and current Saturation %."""
+        if (
+            self._modify_original_intensity is None
+            or self._modify_sat_spin is None
+            or self._modify_lo_spin is None
+            or self._modify_hi_spin is None
+        ):
+            return
+        sat = float(self._modify_sat_spin.value())
+        channel = self._modify_original_intensity
+        flat = channel.ravel() if channel.ndim == 2 else channel[0].ravel()
+        lo = float(flat.min())
+        hi = float(np.percentile(flat, 100.0 - sat))
+        if hi - lo < _LUT_EPSILON:
+            hi = lo + _LUT_EPSILON
+        self._modify_setting_spins = True
+        try:
+            self._modify_lo_spin.setValue(lo)
+            self._modify_hi_spin.setValue(hi)
+        finally:
+            self._modify_setting_spins = False
+        if self._modify_region is not None:
+            self._modify_setting_handles = True
+            try:
+                self._modify_region.setRegion((lo, hi))
+            finally:
+                self._modify_setting_handles = False
+        # Apply immediately (skip the timer coalescer — Auto is a
+        # deliberate single-click action, not a drag storm).
+        self._modify_refresh_preview_now()
+
+    def _schedule_modify_preview_refresh(self) -> None:
+        if self._modify_refresh_pending or self._modify_torn_down:
+            return
+        self._modify_refresh_pending = True
+        QTimer.singleShot(0, self._modify_refresh_preview_now)
+
+    def _modify_refresh_preview_now(self) -> None:
+        self._modify_refresh_pending = False
+        if self._modify_torn_down:
+            return
+        if self._modify_original_intensity is None:
+            return
+        if self._modify_lo_spin is None or self._modify_hi_spin is None:
+            return
+        viewer = self._viewer_win.viewer
+        if viewer is None or _LAYER_IMAGE not in viewer.layers:
+            return
+        lo = float(self._modify_lo_spin.value())
+        hi = float(self._modify_hi_spin.value())
+        # Apply LUT to the snapshotted channel, not to the layer's
+        # current data — successive refreshes must compose against the
+        # original or contrast accumulates.
+        modified = _apply_lut(self._modify_original_intensity, lo, hi)
+        viewer.layers[_LAYER_IMAGE].data = modified
+
     def _build_nav_bar(self) -> QWidget:
         row_widget = QWidget()
         row = QHBoxLayout(row_widget)
@@ -998,6 +1327,15 @@ class SegmentationQCController(QObject):
         if self._finished:
             return
         self._finished = True
+
+        # Modify Channel teardown — flip torn-down BEFORE removing
+        # layers so any pending QTimer.singleShot fire becomes a no-op
+        # instead of touching a layer we're about to delete.
+        # Preview revert is unnecessary here since the layer itself is
+        # removed below, but we drop the snapshot reference to free
+        # the numpy buffer.
+        self._modify_torn_down = True
+        self._modify_original_intensity = None
 
         # Clean up ALL workflow-specific layers (the seg QC image, the
         # labels layer, and the cleanup-preview layer). These MUST be
