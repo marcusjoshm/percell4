@@ -46,6 +46,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -329,7 +330,14 @@ class SegmentationQCController(QObject):
         layout.addStretch()
         layout.addWidget(self._build_nav_bar())
 
-        window.setCentralWidget(central)
+        # Wrap the dock in a vertical-only scroll area so all groups
+        # stay reachable on shorter windows. Horizontal scroll is
+        # disabled — the dock width is a layout invariant.
+        scroll = QScrollArea()
+        scroll.setWidget(central)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        window.setCentralWidget(scroll)
 
         # Keyboard shortcuts on the window itself.
         accept_sc = QShortcut(QKeySequence("Ctrl+Return"), window)
