@@ -374,6 +374,20 @@ class LauncherWindow(QMainWindow):
         )
         layout.addWidget(self._btn_flim_fret_workflow)
 
+        self._btn_phasor_masks_workflow = QPushButton(
+            "Automated phasor-masks workflow"
+        )
+        self._btn_phasor_masks_workflow.setToolTip(
+            "Batch workflow: fit a single-cluster GMM ellipse on phasor "
+            "pixels above an intensity threshold, then apply it twice "
+            "(permissive + conservative intensity thresholds) to produce "
+            "two binary masks per channel, across N .h5 datasets."
+        )
+        self._btn_phasor_masks_workflow.clicked.connect(
+            self._on_open_phasor_masks_workflow
+        )
+        layout.addWidget(self._btn_phasor_masks_workflow)
+
         layout.addStretch()
         return panel
 
@@ -402,6 +416,37 @@ class LauncherWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"FLIM-FRET run complete — CSV at {run_folder}/"
                     "flim_fret_results.csv"
+                )
+        finally:
+            dialog.deleteLater()
+
+    def _on_open_phasor_masks_workflow(self) -> None:
+        """Open the Automated Phasor-Masks workflow dialog.
+
+        Reentrance-guarded against ``is_workflow_locked``. The dialog drives
+        its own ``QProgressDialog`` per-dataset loop on the main thread
+        (no ``BaseWorkflowRunner``), emits one conditional
+        ``session.refresh_resource_lists`` at end of run, and accepts on
+        completion. The button is an **Action** (no session mutation except
+        the one end-of-run refresh push).
+        """
+        if self.is_workflow_locked:
+            self.statusBar().showMessage(
+                "A workflow is already running — click Cancel to stop it first."
+            )
+            return
+
+        from percell4.gui.phasor_masks_dialog import PhasorMasksDialog
+
+        dialog = PhasorMasksDialog(parent=self)
+        try:
+            dialog.exec_()
+            report = dialog.last_report
+            if report is not None:
+                n = len(report.items)
+                self.statusBar().showMessage(
+                    f"Phasor-masks workflow complete — {n} dataset(s) "
+                    f"processed."
                 )
         finally:
             dialog.deleteLater()
