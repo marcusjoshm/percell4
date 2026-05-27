@@ -82,6 +82,7 @@ percell4-gui = "percell4.app:main"
 [project.scripts]
 percell4-batch = "percell4.interfaces.cli.batch_process:main"
 percell4-batch-rename = "percell4.interfaces.cli.batch_rename_resource:main"
+percell4-batch-delete = "percell4.interfaces.cli.batch_delete_resource:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
