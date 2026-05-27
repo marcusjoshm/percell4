@@ -734,3 +734,497 @@ def test_mask_name_collides_with_existing_channel(tmp_path: Path) -> None:
     # No mask was written for mNG.
     assert not _mask_exists(h5, "mNG_phasor_1")
     assert not _mask_exists(h5, "mNG_phasor_2")
+
+
+# ── Shared-ROI (U2): roi_sources kwarg ─────────────────────────────────
+
+
+def test_shared_roi_one_source_one_target(tmp_path: Path) -> None:
+    """``roi_sources={target: source}``: both succeed; target's mask
+    coverage using source's ROI differs materially from a self-fit
+    because the two datasets have distinct phasor distributions."""
+    h5_src = _make_h5(
+        tmp_path / "src.h5",
+        channels=["ch0"],
+        g_centers={"ch0": 0.5}, s_centers={"ch0": 0.3},
+        seed=11,
+    )
+    h5_tgt = _make_h5(
+        tmp_path / "tgt.h5",
+        channels=["ch0"],
+        g_centers={"ch0": 0.7}, s_centers={"ch0": 0.4},
+        seed=22,
+    )
+
+    # Run with shared ROI (target borrows source's fit).
+    report_shared = batch_fit_phasor_masks(
+        [h5_src, h5_tgt],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_tgt: h5_src},
+    )
+
+    assert len(report_shared.items) == 2
+    for item in report_shared.items:
+        assert item.status == "succeeded", item.errors
+        assert item.processed == ("ch0",)
+    # All four masks exist on disk.
+    for h5 in (h5_src, h5_tgt):
+        for suffix in ("_phasor_1", "_phasor_2"):
+            assert _mask_exists(h5, f"ch0{suffix}")
+
+    shared_target_mask = _read_mask(h5_tgt, "ch0_phasor_1")
+    shared_target_sum = int(shared_target_mask.sum())
+
+    # Rebuild target h5 fresh and run again WITHOUT shared ROI (self-fit).
+    h5_tgt_alone = _make_h5(
+        tmp_path / "tgt_alone.h5",
+        channels=["ch0"],
+        g_centers={"ch0": 0.7}, s_centers={"ch0": 0.4},
+        seed=22,
+    )
+    report_self = batch_fit_phasor_masks(
+        [h5_tgt_alone],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+    assert report_self.items[0].status == "succeeded"
+    self_target_mask = _read_mask(h5_tgt_alone, "ch0_phasor_1")
+    self_target_sum = int(self_target_mask.sum())
+
+    # Cache must actually be consulted: the source-ROI mask must differ
+    # materially from what the target would produce self-fitting.
+    assert shared_target_sum != self_target_sum, (
+        "shared-ROI target mask is identical to self-fit; "
+        "ROI cache was not consulted"
+    )
+
+
+def test_shared_roi_one_source_two_targets_fits_source_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``paths=[src, t1, t2]``, ``roi_sources={t1: src, t2: src}`` →
+    ``fit_phasor_ellipse`` is called exactly once per channel (the
+    source's); both targets and the source have masks on disk."""
+    h5_src = _make_h5(tmp_path / "src.h5", channels=["ch0", "ch1"])
+    h5_t1 = _make_h5(tmp_path / "t1.h5", channels=["ch0", "ch1"])
+    h5_t2 = _make_h5(tmp_path / "t2.h5", channels=["ch0", "ch1"])
+
+    from percell4.domain.segmentation import phasor_masks as pm_mod
+
+    call_log: list[tuple[float, float]] = []
+    real_fit = pm_mod.fit_phasor_ellipse
+
+    def counting_fit(g_map, s_map, intensity_map, *, t_fit):
+        call_log.append((float(np.nanmean(g_map)), float(np.nanmean(s_map))))
+        return real_fit(g_map, s_map, intensity_map, t_fit=t_fit)
+
+    monkeypatch.setattr(bfpm, "fit_phasor_ellipse", counting_fit)
+
+    report = batch_fit_phasor_masks(
+        [h5_src, h5_t1, h5_t2],
+        channels=["ch0", "ch1"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_t1: h5_src, h5_t2: h5_src},
+    )
+
+    assert len(report.items) == 3
+    for item in report.items:
+        assert item.status == "succeeded", item.errors
+    # Exactly N_channels fit calls (one per channel of the source).
+    assert len(call_log) == 2
+
+    # All three datasets carry their masks.
+    for h5 in (h5_src, h5_t1, h5_t2):
+        for ch in ("ch0", "ch1"):
+            assert _mask_exists(h5, f"{ch}_phasor_1")
+            assert _mask_exists(h5, f"{ch}_phasor_2")
+
+
+def test_shared_roi_mixed_batch_interleaved_order(tmp_path: Path) -> None:
+    """``paths=[s1, t1, s2, t2]``, ``roi_sources={t1: s1, t2: s2}`` →
+    progress callback fires in interleaved order [s1, t1, s2, t2]
+    (NOT [s1, s2, t1, t2])."""
+    h5_s1 = _make_h5(tmp_path / "s1.h5", channels=["ch0"])
+    h5_t1 = _make_h5(tmp_path / "t1.h5", channels=["ch0"])
+    h5_s2 = _make_h5(tmp_path / "s2.h5", channels=["ch0"])
+    h5_t2 = _make_h5(tmp_path / "t2.h5", channels=["ch0"])
+
+    seen: list[Path] = []
+    batch_fit_phasor_masks(
+        [h5_s1, h5_t1, h5_s2, h5_t2],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_t1: h5_s1, h5_t2: h5_s2},
+        progress_callback=lambda item: seen.append(item.h5_path),
+    )
+
+    assert seen == [h5_s1, h5_t1, h5_s2, h5_t2]
+
+
+def test_shared_roi_per_source_channel_partial(tmp_path: Path) -> None:
+    """``roi_sources={target: source}``, channels=[mNG, Halo]. Source's
+    mNG fits cleanly; source's Halo is degenerate. Expected:
+      * Source: partial, processed=(mNG,), errors={Halo: degenerate ...}.
+      * Target: partial, processed=(mNG,), errors={Halo: <ROI-source-failed>}.
+    Target's mNG masks exist; target's Halo masks do not."""
+    shape = (10, 10)
+
+    def _build_mixed_h5(path: Path, seed: int) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rng = np.random.default_rng(seed=seed)
+        with h5py.File(path, "w") as f:
+            meta = f.create_group("metadata")
+            meta.attrs["channel_names"] = ["mNG", "Halo"]
+            meta.attrs["flim_frequency_mhz"] = 80.0
+            for ch in ("mNG", "Halo"):
+                meta.attrs[f"flim_cal_phase_{ch}"] = 0.0
+                meta.attrs[f"flim_cal_mod_{ch}"] = 1.0
+            decay_grp = f.create_group("decay")
+            # mNG: well-formed (uniform intensity 100).
+            decay_grp.create_dataset(
+                "mNG",
+                data=_build_decay_for_phasor(shape, total_intensity=100.0),
+            )
+            # Halo: degenerate — only one pixel has intensity above t_fit.
+            halo_decay = np.zeros((10, 10, 8), dtype=np.float32)
+            halo_decay[3, 3, :] = 100.0 / 8
+            decay_grp.create_dataset("Halo", data=halo_decay)
+            ph = f.create_group("phasor")
+            # mNG: well-formed Gaussian phasor blob.
+            mng_grp = ph.create_group("mNG")
+            mng_grp.create_dataset(
+                "g",
+                data=rng.normal(0.5, 0.01, size=shape).astype(np.float32),
+            )
+            mng_grp.create_dataset(
+                "s",
+                data=rng.normal(0.3, 0.01, size=shape).astype(np.float32),
+            )
+            # Halo: NaN everywhere except (3,3) — single-pixel fit subset.
+            halo_grp = ph.create_group("Halo")
+            nan_g = np.full(shape, np.nan, dtype=np.float32)
+            nan_s = np.full(shape, np.nan, dtype=np.float32)
+            nan_g[3, 3] = 0.5
+            nan_s[3, 3] = 0.3
+            halo_grp.create_dataset("g", data=nan_g)
+            halo_grp.create_dataset("s", data=nan_s)
+        return path
+
+    h5_src = _build_mixed_h5(tmp_path / "src.h5", seed=33)
+    h5_tgt = _build_mixed_h5(tmp_path / "tgt.h5", seed=44)
+
+    report = batch_fit_phasor_masks(
+        [h5_src, h5_tgt],
+        channels=["mNG", "Halo"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_tgt: h5_src},
+    )
+
+    assert len(report.items) == 2
+    src_item, tgt_item = report.items[0], report.items[1]
+
+    # Source: partial — mNG processed, Halo errored (degenerate).
+    assert src_item.h5_path == h5_src
+    assert src_item.status == "partial"
+    assert src_item.processed == ("mNG",)
+    assert "Halo" in src_item.errors
+    assert "degenerate" in src_item.errors["Halo"]
+
+    # Target: partial — mNG processed (cache hit), Halo errored (cache miss).
+    assert tgt_item.h5_path == h5_tgt
+    assert tgt_item.status == "partial"
+    assert tgt_item.processed == ("mNG",)
+    assert "Halo" in tgt_item.errors
+    # Source-failed message mentions the source path.
+    assert "src.h5" in tgt_item.errors["Halo"]
+    assert "ROI source" in tgt_item.errors["Halo"]
+
+    # Disk state: target's mNG masks exist; target's Halo masks do NOT.
+    assert _mask_exists(h5_tgt, "mNG_phasor_1")
+    assert _mask_exists(h5_tgt, "mNG_phasor_2")
+    assert not _mask_exists(h5_tgt, "Halo_phasor_1")
+    assert not _mask_exists(h5_tgt, "Halo_phasor_2")
+
+
+def test_shared_roi_source_fit_fails_on_only_channel(tmp_path: Path) -> None:
+    """Source's only requested channel degenerate → source ``failed``;
+    target also ``failed`` because every channel falls through to the
+    cache-miss path."""
+    shape = (10, 10)
+
+    def _build_degen_h5(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as f:
+            meta = f.create_group("metadata")
+            meta.attrs["channel_names"] = ["mNG"]
+            meta.attrs["flim_frequency_mhz"] = 80.0
+            meta.attrs["flim_cal_phase_mNG"] = 0.0
+            meta.attrs["flim_cal_mod_mNG"] = 1.0
+            decay_grp = f.create_group("decay")
+            # Single pixel above t_fit → degenerate.
+            degen_decay = np.zeros((10, 10, 8), dtype=np.float32)
+            degen_decay[3, 3, :] = 100.0 / 8
+            decay_grp.create_dataset("mNG", data=degen_decay)
+            ph = f.create_group("phasor")
+            mng_grp = ph.create_group("mNG")
+            nan_g = np.full(shape, np.nan, dtype=np.float32)
+            nan_s = np.full(shape, np.nan, dtype=np.float32)
+            nan_g[3, 3] = 0.5
+            nan_s[3, 3] = 0.3
+            mng_grp.create_dataset("g", data=nan_g)
+            mng_grp.create_dataset("s", data=nan_s)
+        return path
+
+    h5_src = _build_degen_h5(tmp_path / "src.h5")
+    h5_tgt = _build_degen_h5(tmp_path / "tgt.h5")
+
+    report = batch_fit_phasor_masks(
+        [h5_src, h5_tgt],
+        channels=["mNG"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_tgt: h5_src},
+    )
+
+    src_item, tgt_item = report.items[0], report.items[1]
+    # Source: zero processed → failed.
+    assert src_item.status == "failed"
+    assert src_item.processed == ()
+    assert "mNG" in src_item.errors
+    # Target: zero processed → failed; mNG errors with source-failed message.
+    assert tgt_item.status == "failed"
+    assert tgt_item.processed == ()
+    assert "mNG" in tgt_item.errors
+    assert "src.h5" in tgt_item.errors["mNG"]
+
+
+def test_shared_roi_source_not_in_paths_raises(tmp_path: Path) -> None:
+    """A SOURCE not in ``paths`` → ``ValueError`` before any I/O. Error
+    names the missing source path."""
+    h5_tgt = _make_h5(tmp_path / "tgt.h5", channels=["ch0"])
+    h5_missing = tmp_path / "missing.h5"  # not created, not in paths
+
+    with pytest.raises(ValueError, match=r"missing\.h5"):
+        batch_fit_phasor_masks(
+            [h5_tgt],
+            channels=["ch0"],
+            t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+            suffix_a="_phasor_1", suffix_b="_phasor_2",
+            roi_sources={h5_tgt: h5_missing},
+        )
+
+    # No mask was written — validation short-circuited the call.
+    assert not _mask_exists(h5_tgt, "ch0_phasor_1")
+
+
+def test_shared_roi_target_not_in_paths_raises(tmp_path: Path) -> None:
+    """A TARGET key not in ``paths`` → ``ValueError`` naming the missing
+    target path."""
+    h5_src = _make_h5(tmp_path / "src.h5", channels=["ch0"])
+    h5_missing = tmp_path / "ghost_target.h5"  # not in paths
+
+    with pytest.raises(ValueError, match=r"ghost_target\.h5"):
+        batch_fit_phasor_masks(
+            [h5_src],
+            channels=["ch0"],
+            t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+            suffix_a="_phasor_1", suffix_b="_phasor_2",
+            roi_sources={h5_missing: h5_src},
+        )
+
+
+def test_shared_roi_chain_rejected(tmp_path: Path) -> None:
+    """``{a: b, b: c}``: ``b`` is both a target and a source → chain
+    detection raises ``ValueError``."""
+    h5_a = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+    h5_b = _make_h5(tmp_path / "b.h5", channels=["ch0"])
+    h5_c = _make_h5(tmp_path / "c.h5", channels=["ch0"])
+
+    with pytest.raises(ValueError, match=r"chain"):
+        batch_fit_phasor_masks(
+            [h5_a, h5_b, h5_c],
+            channels=["ch0"],
+            t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+            suffix_a="_phasor_1", suffix_b="_phasor_2",
+            roi_sources={h5_a: h5_b, h5_b: h5_c},
+        )
+
+
+def test_shared_roi_self_reference_normalized_to_self_fit(
+    tmp_path: Path,
+) -> None:
+    """``roi_sources={a: a}`` → silently treated as ``{a: None}``
+    (self-fitting). No ``ValueError``; the dataset processes normally."""
+    h5_a = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+
+    report = batch_fit_phasor_masks(
+        [h5_a],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_a: h5_a},
+    )
+
+    assert len(report.items) == 1
+    assert report.items[0].status == "succeeded"
+    assert report.items[0].processed == ("ch0",)
+    assert _mask_exists(h5_a, "ch0_phasor_1")
+    assert _mask_exists(h5_a, "ch0_phasor_2")
+
+
+def test_shared_roi_cancel_mid_source_group(tmp_path: Path) -> None:
+    """``paths=[s1, t1, s2, t2]``, ``roi_sources={t1: s1, t2: s2}``.
+    cancel_check returns True after t1 has been processed; the loop
+    breaks before s2 starts. Report contains items for [s1, t1] only."""
+    h5_s1 = _make_h5(tmp_path / "s1.h5", channels=["ch0"])
+    h5_t1 = _make_h5(tmp_path / "t1.h5", channels=["ch0"])
+    h5_s2 = _make_h5(tmp_path / "s2.h5", channels=["ch0"])
+    h5_t2 = _make_h5(tmp_path / "t2.h5", channels=["ch0"])
+
+    seen: list[Path] = []
+
+    def cb(item):
+        seen.append(item.h5_path)
+
+    cancel_state = {"fire": False}
+
+    def cancel():
+        return cancel_state["fire"]
+
+    def cb_with_cancel(item):
+        seen.append(item.h5_path)
+        if item.h5_path == h5_t1:
+            cancel_state["fire"] = True
+
+    report = batch_fit_phasor_masks(
+        [h5_s1, h5_t1, h5_s2, h5_t2],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_t1: h5_s1, h5_t2: h5_s2},
+        progress_callback=cb_with_cancel,
+        cancel_check=cancel,
+    )
+
+    # Only s1 and t1 made it.
+    assert seen == [h5_s1, h5_t1]
+    assert [item.h5_path for item in report.items] == [h5_s1, h5_t1]
+    # s2 and t2 did NOT produce masks.
+    assert not _mask_exists(h5_s2, "ch0_phasor_1")
+    assert not _mask_exists(h5_t2, "ch0_phasor_1")
+
+
+def test_shared_roi_cancel_between_source_groups(tmp_path: Path) -> None:
+    """Cancel fires after both s1 and t1 are done, before s2 starts.
+    Report contains [s1, t1]."""
+    h5_s1 = _make_h5(tmp_path / "s1.h5", channels=["ch0"])
+    h5_t1 = _make_h5(tmp_path / "t1.h5", channels=["ch0"])
+    h5_s2 = _make_h5(tmp_path / "s2.h5", channels=["ch0"])
+    h5_t2 = _make_h5(tmp_path / "t2.h5", channels=["ch0"])
+
+    cancel_after_t1 = {"flag": False}
+
+    def cb(item):
+        if item.h5_path == h5_t1:
+            cancel_after_t1["flag"] = True
+
+    def cancel():
+        return cancel_after_t1["flag"]
+
+    report = batch_fit_phasor_masks(
+        [h5_s1, h5_t1, h5_s2, h5_t2],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_t1: h5_s1, h5_t2: h5_s2},
+        progress_callback=cb,
+        cancel_check=cancel,
+    )
+
+    assert [item.h5_path for item in report.items] == [h5_s1, h5_t1]
+    assert not _mask_exists(h5_s2, "ch0_phasor_1")
+    assert not _mask_exists(h5_t2, "ch0_phasor_1")
+
+
+def test_shared_roi_path_normalization(tmp_path: Path) -> None:
+    """``paths=[Path('a.h5')]`` (relative-ish) and a ``roi_sources``
+    key whose form differs (resolved absolute) but resolves to the same
+    canonical path → no ``ValueError`` for target-not-in-paths; the
+    dataset processes as self-fitting."""
+    h5_a_rel = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+
+    # Construct an alternative form pointing at the same file. Path.resolve()
+    # collapses both to the same canonical absolute path.
+    h5_a_resolved = h5_a_rel.resolve()
+    assert h5_a_resolved == h5_a_rel.resolve()
+
+    # roi_sources uses self-reference (which after normalization collapses
+    # to None). The key path is `h5_a_resolved` while the input list has
+    # `h5_a_rel` — both must resolve to the same canonical path so this
+    # call should succeed, not raise.
+    report = batch_fit_phasor_masks(
+        [h5_a_rel],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_a_resolved: h5_a_resolved},
+    )
+
+    assert len(report.items) == 1
+    assert report.items[0].status == "succeeded"
+
+
+def test_shared_roi_channels_frozen_at_call_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fit_phasor_ellipse`` is called with the channels that were
+    passed at call time and only those — the use case does not re-read
+    or mutate its ``channels`` argument mid-run."""
+    h5_src = _make_h5(tmp_path / "src.h5", channels=["mNG", "Halo"])
+    h5_tgt = _make_h5(tmp_path / "tgt.h5", channels=["mNG", "Halo"])
+
+    fit_calls: list[str] = []
+    from percell4.domain.segmentation import phasor_masks as pm_mod
+
+    real_fit = pm_mod.fit_phasor_ellipse
+
+    # We cannot directly get the channel from the kwargs/args of the
+    # raw fit call. Instead patch the use-case-side helper that resolves
+    # which channel is currently being processed: wrap the read_array
+    # accessor on DatasetStore to log channel reads, OR patch the fit
+    # function and observe its argument intensities (which are unique
+    # per-channel in this fixture). Simpler: monkeypatch
+    # ``apply_ellipse_masks`` and observe the call sequence — but the
+    # cleanest pin is to wrap ``fit_phasor_ellipse`` and assert it was
+    # only ever called on the source for the channels we requested.
+
+    requested_channels = ["mNG"]
+
+    def watched_fit(g_map, s_map, intensity_map, *, t_fit):
+        # Distinguish channels by mean of g_map — the helper builds
+        # different phasor distributions in _make_h5 only when given
+        # custom centers, but the default values are the same per channel.
+        # So we just record that a fit happened.
+        fit_calls.append("fit")
+        return real_fit(g_map, s_map, intensity_map, t_fit=t_fit)
+
+    monkeypatch.setattr(bfpm, "fit_phasor_ellipse", watched_fit)
+
+    batch_fit_phasor_masks(
+        [h5_src, h5_tgt],
+        channels=requested_channels,
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={h5_tgt: h5_src},
+    )
+
+    # Only mNG was requested → exactly one fit call (the source's mNG).
+    # If the use case "re-read" channels mid-run and added Halo, this
+    # would be 2.
+    assert len(fit_calls) == 1
