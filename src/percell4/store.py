@@ -854,6 +854,46 @@ class DatasetStore:
 
         return len(layers)
 
+    def delete_channel(self, name: str) -> bool:
+        """Remove every per-channel surface for ``name``.
+
+        Symmetric pair to :meth:`rename_channel`. Sweeps all four
+        per-channel surfaces in one ``h5py.File(..., "a")`` open:
+
+        - ``/decay/<name>`` group (if present)
+        - ``/phasor/<name>`` group (if present)
+        - ``name`` entry in ``metadata.channel_names`` (if present)
+        - ``flim_cal_phase_<name>`` and ``flim_cal_mod_<name>`` attrs
+          on ``/metadata`` (if present)
+
+        Returns ``True`` if anything was actually removed on disk,
+        ``False`` if the channel was already absent everywhere
+        (mirrors :meth:`delete_item`'s contract). Callers that need a
+        "must have existed" semantic can branch on the return value.
+        """
+        deleted_any = False
+        with h5py.File(self.path, "a") as f:
+            for prefix in ("decay", "phasor"):
+                p = f"{prefix}/{name}"
+                if p in f:
+                    del f[p]
+                    deleted_any = True
+            if "metadata" in f:
+                attrs = f["metadata"].attrs
+                names = list(attrs.get("channel_names", []))
+                if name in names:
+                    names.remove(name)
+                    attrs["channel_names"] = names
+                    deleted_any = True
+                # Per-channel FLIM calibration attrs are removed regardless
+                # of whether they contributed to deleted_any — they're
+                # bookkeeping that should follow the channel out.
+                for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
+                    key = f"{key_prefix}{name}"
+                    if key in attrs:
+                        del attrs[key]
+        return deleted_any
+
     def rename_channel(self, old_name: str, new_name: str) -> None:
         """Rename a channel across all per-channel paths and metadata attrs.
 
