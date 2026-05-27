@@ -22,6 +22,8 @@ import pytest
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QApplication,
+    QComboBox,
+    QLabel,
     QListWidgetItem,
     QMessageBox,
     QProgressDialog,
@@ -358,6 +360,7 @@ def _stub_orchestrator(items: list[BatchPhasorItemResult]):
         suffix_a,
         suffix_b,
         ensure_phasor=True,
+        roi_sources=None,
         progress_callback=None,
         cancel_check=None,
     ):
@@ -458,6 +461,7 @@ def test_run_cancel_breaks_loop(qtbot, tmp_path, monkeypatch):
         suffix_a,
         suffix_b,
         ensure_phasor=True,
+        roi_sources=None,
         progress_callback=None,
         cancel_check=None,
     ):
@@ -691,3 +695,531 @@ def test_handler_updates_status_bar_with_report(qtbot, tmp_path):
     msg = win.statusBar().currentMessage()
     assert "Phasor-masks workflow complete" in msg
     assert "1 dataset" in msg
+
+
+# ── ROI source dropdown: state + cascade ─────────────────────
+
+
+def _select_combo_userdata(combo: QComboBox, userdata):
+    """Locate the index whose `itemData` matches `userdata` and fire the
+    user-interaction signal via ``activated[int].emit``.
+
+    Mirrors a real user clicking the combo and picking that item — the
+    canonical way to drive ``QComboBox`` in a test without programmatic
+    ``setCurrentIndex`` (which bypasses the wiring per the
+    qt-wire-user-edit-signals learning).
+    """
+    for i in range(combo.count()):
+        if combo.itemData(i) == userdata:
+            combo.setCurrentIndex(i)
+            combo.activated[int].emit(i)
+            return i
+    raise AssertionError(
+        f"no item with userData={userdata!r} in combo "
+        f"(have {[combo.itemData(i) for i in range(combo.count())]})"
+    )
+
+
+def test_default_state_two_datasets_each_offer_the_other(qtbot, tmp_path):
+    """Two datasets queued → each row's combo shows
+    ``fit own GMM`` (selected) plus the other dataset's basename as the
+    only alternative source. Neither row has a non-None roi_source.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    p2 = _make_h5(tmp_path / "AsTreated_a.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2])
+
+    # Default: both rows self-fit.
+    assert dlg._pending_datasets[0].roi_source is None
+    assert dlg._pending_datasets[1].roi_source is None
+    assert dlg._pending_datasets[0].fell_back is False
+    assert dlg._pending_datasets[1].fell_back is False
+
+    c0 = dlg._row_combo(0)
+    c1 = dlg._row_combo(1)
+    assert c0 is not None and c1 is not None
+    # 2 items each: "fit own GMM" + the other dataset.
+    assert c0.count() == 2
+    assert c1.count() == 2
+    assert c0.itemData(0) is None
+    assert c0.itemData(1) == p2.resolve()
+    assert c1.itemData(0) is None
+    assert c1.itemData(1) == p1.resolve()
+    # Selected item is "fit own GMM".
+    assert c0.currentIndex() == 0
+    assert c1.currentIndex() == 0
+
+
+def test_assign_source_via_user_interaction(qtbot, tmp_path):
+    """User picks AsTreated_a's combo and switches to untreated_a.
+    The dialog updates ``_PendingDataset.roi_source``, and untreated_a's
+    combo no longer offers AsTreated_a (which is no longer self-fitting).
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    p2 = _make_h5(tmp_path / "AsTreated_a.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2])
+
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    # Drive a real user-interaction signal on the combo.
+    _select_combo_userdata(c1, p1.resolve())
+
+    assert dlg._pending_datasets[1].roi_source == p1.resolve()
+    # untreated_a's combo: only "fit own GMM" — AsTreated_a is no longer
+    # self-fitting so it's not offered.
+    c0 = dlg._row_combo(0)
+    assert c0 is not None
+    assert c0.count() == 1
+    assert c0.itemData(0) is None
+
+
+def test_change_source_back_to_self_fitting(qtbot, tmp_path):
+    """Assign, then re-pick `fit own GMM`. The previously-assigned row
+    becomes self-fitting again and reappears as a candidate on the other
+    row's dropdown.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    p2 = _make_h5(tmp_path / "AsTreated_a.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2])
+
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    _select_combo_userdata(c1, p1.resolve())
+    assert dlg._pending_datasets[1].roi_source == p1.resolve()
+
+    # Pick "fit own GMM" again.
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    _select_combo_userdata(c1, None)
+
+    assert dlg._pending_datasets[1].roi_source is None
+    c0 = dlg._row_combo(0)
+    assert c0 is not None
+    # AsTreated_a is once again a candidate source.
+    assert any(c0.itemData(i) == p2.resolve() for i in range(c0.count()))
+
+
+def test_persistent_fell_back_disables_start_until_acknowledged(
+    qtbot, tmp_path
+):
+    """Load-bearing UX test.
+
+    3 datasets [untreated_a, AsTreated_a, AsTreated_c]. AsTreated_a is
+    assigned to untreated_a. User reassigns untreated_a → AsTreated_c.
+    AsTreated_a is auto-flagged ``fell_back = True`` with prev_source =
+    untreated_a, the dialog's status label fires once mentioning both
+    names, and Start is disabled until the user clicks AsTreated_a's
+    combo to acknowledge.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    p2 = _make_h5(tmp_path / "AsTreated_a.h5", channel_names=["mNG"])
+    p3 = _make_h5(tmp_path / "AsTreated_c.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2, p3])
+    _check_first_channel(dlg)
+
+    # AsTreated_a (row 1) → untreated_a.
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    _select_combo_userdata(c1, p1.resolve())
+    assert dlg._pending_datasets[1].roi_source == p1.resolve()
+    assert dlg._start_btn.isEnabled() is True
+
+    # untreated_a (row 0) → AsTreated_c.
+    c0 = dlg._row_combo(0)
+    assert c0 is not None
+    _select_combo_userdata(c0, p3.resolve())
+
+    # AsTreated_a fell back.
+    pa = dlg._pending_datasets[1]
+    assert pa.fell_back is True
+    assert pa.roi_source is None
+    assert pa._previous_roi_source == p1.resolve()
+
+    # Combo's first-item label mentions "was: ... fell back".
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    label_text = c1.itemText(0)
+    assert "was:" in label_text
+    assert "untreated_a" in label_text
+    assert "fell back" in label_text.lower()
+
+    # Status label fired once naming both rows.
+    assert dlg._status_label is not None
+    status = dlg._status_label.text()
+    assert "AsTreated_a" in status
+    assert "untreated_a" in status
+
+    # Start disabled with tooltip.
+    assert dlg._start_btn.isEnabled() is False
+    assert "Acknowledge" in dlg._start_btn.toolTip()
+
+    # User clicks AsTreated_a's combo, picks "fit own GMM" → ack.
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    _select_combo_userdata(c1, None)
+
+    pa = dlg._pending_datasets[1]
+    assert pa.fell_back is False
+    assert pa._previous_roi_source is None
+
+    # Combo label is plain again.
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    assert c1.itemText(0) == "fit own GMM"
+
+    # Start re-enabled.
+    assert dlg._start_btn.isEnabled() is True
+
+
+def test_remove_source_row_flags_dependent_fell_back(qtbot, tmp_path):
+    """untreated_a is the source for AsTreated_a. User clicks ×
+    on UNTREATED_A's row. AsTreated_a is fell_back, status label uses
+    "removed" wording, Start disabled.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    p2 = _make_h5(tmp_path / "AsTreated_a.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2])
+    _check_first_channel(dlg)
+
+    # Assign AsTreated_a → untreated_a.
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+    _select_combo_userdata(c1, p1.resolve())
+    assert dlg._start_btn.isEnabled() is True
+
+    # × on untreated_a (row 0).
+    dlg._on_remove_row(0)
+
+    # AsTreated_a is now row 0, with fell_back set.
+    assert len(dlg._pending_datasets) == 1
+    pa = dlg._pending_datasets[0]
+    assert pa.h5_path == p2.resolve()
+    assert pa.fell_back is True
+    assert pa.roi_source is None
+    assert pa._previous_roi_source == p1.resolve()
+
+    # Status uses "removed" wording.
+    assert dlg._status_label is not None
+    status = dlg._status_label.text()
+    assert "removed" in status
+    assert "untreated_a" in status
+
+    # Start disabled.
+    assert dlg._start_btn.isEnabled() is False
+
+
+def test_multiple_dependents_fall_back_together(qtbot, tmp_path):
+    """untreated_a is the source for both AsTreated_a AND AsTreated_b.
+    User reassigns untreated_a to AsTreated_c. Both AsTreated_a and
+    AsTreated_b get ``fell_back = True``. Single status message names
+    both.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    p2 = _make_h5(tmp_path / "AsTreated_a.h5", channel_names=["mNG"])
+    p3 = _make_h5(tmp_path / "AsTreated_b.h5", channel_names=["mNG"])
+    p4 = _make_h5(tmp_path / "AsTreated_c.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2, p3, p4])
+    _check_first_channel(dlg)
+
+    # Assign AsTreated_a + AsTreated_b → untreated_a.
+    _select_combo_userdata(dlg._row_combo(1), p1.resolve())
+    _select_combo_userdata(dlg._row_combo(2), p1.resolve())
+
+    # Reassign untreated_a → AsTreated_c.
+    _select_combo_userdata(dlg._row_combo(0), p4.resolve())
+
+    pa = dlg._pending_datasets[1]
+    pb = dlg._pending_datasets[2]
+    assert pa.fell_back is True
+    assert pb.fell_back is True
+
+    # Single status message names both.
+    assert dlg._status_label is not None
+    status = dlg._status_label.text()
+    assert "AsTreated_a" in status
+    assert "AsTreated_b" in status
+    # Both names appear together separated by a comma (single message).
+    assert status.count(": fell back") == 1
+
+    assert dlg._start_btn.isEnabled() is False
+
+
+def test_channel_deselection_after_source_assignment_does_not_cascade(
+    qtbot, tmp_path, monkeypatch
+):
+    """Two datasets share [mNG, Halo]. Assign source on AsTreated_a.
+    Deselect Halo from the channel picker → roi_source on AsTreated_a is
+    unchanged. Start uses the post-deselection channels.
+    """
+    p1 = _make_h5(
+        tmp_path / "untreated_a.h5", channel_names=["mNG", "Halo"]
+    )
+    p2 = _make_h5(
+        tmp_path / "AsTreated_a.h5", channel_names=["mNG", "Halo"]
+    )
+    captured: dict[str, object] = {}
+
+    def stub(h5_paths, **kwargs):
+        captured["h5_paths"] = list(h5_paths)
+        captured["channels"] = tuple(kwargs.get("channels", ()))
+        captured["roi_sources"] = dict(kwargs.get("roi_sources") or {})
+        return BatchPhasorReport(items=())
+
+    monkeypatch.setattr(QMessageBox, "exec_", lambda self: 0)
+    dlg = PhasorMasksDialog(orchestrator=stub)
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2])
+    # Tick both channels first.
+    for i in range(dlg._channel_list.count()):
+        dlg._channel_list.item(i).setCheckState(Qt.Checked)
+
+    # Assign source on AsTreated_a (row 1).
+    _select_combo_userdata(dlg._row_combo(1), p1.resolve())
+    assert dlg._pending_datasets[1].roi_source == p1.resolve()
+
+    # Deselect Halo.
+    for i in range(dlg._channel_list.count()):
+        item = dlg._channel_list.item(i)
+        if item.text() == "Halo":
+            item.setCheckState(Qt.Unchecked)
+
+    # roi_source unchanged.
+    assert dlg._pending_datasets[1].roi_source == p1.resolve()
+    assert dlg._pending_datasets[1].fell_back is False
+
+    dlg._on_start_clicked()
+    assert captured.get("channels") == ("mNG",)
+
+
+def test_start_disabled_when_source_not_in_queue(qtbot, tmp_path):
+    """Defense-in-depth: directly mutate roi_source to a path not in the
+    queue. Start should be disabled.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1])
+    _check_first_channel(dlg)
+    assert dlg._start_btn.isEnabled() is True
+
+    # Directly mutate roi_source to a phantom path.
+    dlg._pending_datasets[0].roi_source = tmp_path / "missing.h5"
+    dlg._update_start_enabled()
+    assert dlg._start_btn.isEnabled() is False
+
+
+def test_combo_activated_signal_fires_on_user_interaction(qtbot, tmp_path):
+    """Confirm `activated` fires when emitted (the test driver) and that
+    programmatic ``setCurrentIndex`` alone does NOT trigger the cascade.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    p2 = _make_h5(tmp_path / "AsTreated_a.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1, p2])
+
+    c1 = dlg._row_combo(1)
+    assert c1 is not None
+
+    # Programmatic setCurrentIndex DOES NOT fire activated → cascade
+    # does not run, so the model is unchanged.
+    target_idx = None
+    for i in range(c1.count()):
+        if c1.itemData(i) == p1.resolve():
+            target_idx = i
+            break
+    assert target_idx is not None
+    c1.setCurrentIndex(target_idx)
+    # Model unchanged.
+    assert dlg._pending_datasets[1].roi_source is None
+
+    # Reset index to 0 to mimic a fresh state.
+    c1.setCurrentIndex(0)
+
+    # Now use waitSignal to confirm the activated signal really fires
+    # via our test driver, and the model updates.
+    with qtbot.waitSignal(c1.activated, timeout=1000):
+        _select_combo_userdata(c1, p1.resolve())
+    assert dlg._pending_datasets[1].roi_source == p1.resolve()
+
+
+def test_row_local_remove_button_removes_only_that_row(qtbot, tmp_path):
+    """Click × on row 2 of 4 → row 2 removed, rows 1/3/4 remain. The old
+    "Remove selected" bottom button is gone (no child QPushButton with
+    that label).
+    """
+    paths = [
+        _make_h5(tmp_path / f"d{i}.h5", channel_names=["mNG"])
+        for i in range(4)
+    ]
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths(paths)
+    assert len(dlg._pending_datasets) == 4
+
+    # Click × on row 1 (second row, 0-indexed).
+    btn = dlg._row_remove_button(1)
+    assert btn is not None
+    btn.click()
+
+    assert len(dlg._pending_datasets) == 3
+    remaining_paths = [pd.h5_path for pd in dlg._pending_datasets]
+    assert remaining_paths == [paths[0].resolve(), paths[2].resolve(), paths[3].resolve()]
+
+    # No QPushButton with text "Remove selected" anywhere in the dialog.
+    for child_btn in dlg.findChildren(QPushButton):
+        assert child_btn.text() != "Remove selected"
+
+
+def test_summary_main_text_includes_self_shared_counts(
+    qtbot, tmp_path, monkeypatch
+):
+    """Stub returns three succeeded items: s1 (self) + t1, t2 (shared).
+    Main text: "3 succeeded, 0 partial, 0 failed. 1 self-fitted, 2 used
+    shared ROI."
+    """
+    s1 = _make_h5(tmp_path / "s1.h5", channel_names=["mNG"])
+    t1 = _make_h5(tmp_path / "t1.h5", channel_names=["mNG"])
+    t2 = _make_h5(tmp_path / "t2.h5", channel_names=["mNG"])
+
+    items = [
+        BatchPhasorItemResult(h5_path=s1.resolve(), status="succeeded", processed=("mNG",)),
+        BatchPhasorItemResult(h5_path=t1.resolve(), status="succeeded", processed=("mNG",)),
+        BatchPhasorItemResult(h5_path=t2.resolve(), status="succeeded", processed=("mNG",)),
+    ]
+    captured: dict[str, str] = {}
+
+    def fake_exec(self):
+        captured["main"] = self.text()
+        captured["detail"] = self.detailedText()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec_", fake_exec)
+
+    dlg = PhasorMasksDialog(orchestrator=_stub_orchestrator(items))
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([s1, t1, t2])
+    _check_first_channel(dlg)
+
+    # Assign t1 and t2 → s1.
+    _select_combo_userdata(dlg._row_combo(1), s1.resolve())
+    _select_combo_userdata(dlg._row_combo(2), s1.resolve())
+
+    dlg._on_start_clicked()
+
+    main = captured.get("main", "")
+    assert "3 succeeded, 0 partial, 0 failed" in main
+    assert "1 self-fitted, 2 used shared ROI" in main
+
+    detail = captured.get("detail", "")
+    assert "[source: self]" in detail
+    assert "[source: s1.h5]" in detail
+
+
+def test_summary_detail_line_includes_source_tag(
+    qtbot, tmp_path, monkeypatch
+):
+    """Source's mNG processed + Halo failed. Target uses source → Halo
+    error message names source. Detail text contains both lines tagged
+    with their source.
+    """
+    s1 = _make_h5(tmp_path / "s1.h5", channel_names=["mNG", "Halo"])
+    t1 = _make_h5(tmp_path / "t1.h5", channel_names=["mNG", "Halo"])
+
+    items = [
+        BatchPhasorItemResult(
+            h5_path=s1.resolve(),
+            status="partial",
+            processed=("mNG",),
+            errors={"Halo": "degenerate fit (ellipse has zero area)"},
+        ),
+        BatchPhasorItemResult(
+            h5_path=t1.resolve(),
+            status="partial",
+            processed=("mNG",),
+            errors={"Halo": "ROI source s1.h5 fit failed: see source's item for details"},
+        ),
+    ]
+    captured: dict[str, str] = {}
+
+    def fake_exec(self):
+        captured["detail"] = self.detailedText()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec_", fake_exec)
+
+    dlg = PhasorMasksDialog(orchestrator=_stub_orchestrator(items))
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([s1, t1])
+    _check_first_channel(dlg)
+
+    _select_combo_userdata(dlg._row_combo(1), s1.resolve())
+
+    dlg._on_start_clicked()
+    detail = captured.get("detail", "")
+    assert "s1.h5 [source: self]" in detail
+    assert "t1.h5 [source: s1.h5]" in detail
+    # Both error lines are present.
+    assert "degenerate fit" in detail
+    assert "ROI source s1.h5 fit failed" in detail
+
+
+def test_start_passes_roi_sources_to_use_case(qtbot, tmp_path, monkeypatch):
+    """Click Start → capture the use-case call. ``roi_sources`` keys
+    cover every ``_PendingDataset.h5_path``; target rows map to source
+    paths; self-fitting rows map to None.
+    """
+    s1 = _make_h5(tmp_path / "s1.h5", channel_names=["mNG"])
+    t1 = _make_h5(tmp_path / "t1.h5", channel_names=["mNG"])
+    t2 = _make_h5(tmp_path / "t2.h5", channel_names=["mNG"])
+
+    captured: dict[str, object] = {}
+
+    def stub(h5_paths, **kwargs):
+        captured["roi_sources"] = dict(kwargs.get("roi_sources") or {})
+        return BatchPhasorReport(items=())
+
+    monkeypatch.setattr(QMessageBox, "exec_", lambda self: 0)
+    dlg = PhasorMasksDialog(orchestrator=stub)
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([s1, t1, t2])
+    _check_first_channel(dlg)
+
+    _select_combo_userdata(dlg._row_combo(1), s1.resolve())
+    _select_combo_userdata(dlg._row_combo(2), s1.resolve())
+
+    dlg._on_start_clicked()
+
+    roi = captured["roi_sources"]
+    assert isinstance(roi, dict)
+    assert roi == {
+        s1.resolve(): None,
+        t1.resolve(): s1.resolve(),
+        t2.resolve(): s1.resolve(),
+    }
+
+
+def test_row_path_label_tooltip_is_full_path(qtbot, tmp_path):
+    """Each row's path label has a tooltip equal to the full resolved
+    path. Label widget exists and label text matches the path string.
+    """
+    p1 = _make_h5(tmp_path / "untreated_a.h5", channel_names=["mNG"])
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p1])
+
+    label = dlg._row_path_label(0)
+    assert label is not None
+    assert label.toolTip() == str(p1.resolve())

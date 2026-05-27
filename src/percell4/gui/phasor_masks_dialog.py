@@ -35,9 +35,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import QSettings, QSignalBlocker, Qt
 from qtpy.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -93,11 +94,22 @@ class _PendingDataset:
     ``channel_names`` is the union of /metadata.channel_names; the picker
     independently intersects this with ``store.list_groups("decay")`` to
     arrive at the channels eligible for fitting.
+
+    ``roi_source`` is the resolved path of the dataset whose phasor ellipse
+    fit this dataset should reuse, or ``None`` to self-fit (the default).
+    ``fell_back`` is the "user must acknowledge" sentinel: ``True`` when a
+    prior `roi_source` assignment got auto-cleared because the source
+    disappeared or stopped self-fitting. It clears the moment the user
+    interacts with this row's combo. ``_previous_roi_source`` records the
+    previous (now-invalid) source so the warning label can name it.
     """
 
     h5_path: Path
     channel_names: list[str]
     decay_channels: list[str]
+    roi_source: Path | None = None
+    fell_back: bool = False
+    _previous_roi_source: Path | None = None
 
 
 def _normalize_channel_name(name: Any) -> str:
@@ -149,6 +161,7 @@ class PhasorMasksDialog(QDialog):
         self._dataset_list: QListWidget | None = None
         self._channel_list: QListWidget | None = None
         self._channel_status: QLabel | None = None
+        self._status_label: QLabel | None = None
         self._t_fit_spin: QDoubleSpinBox | None = None
         self._t_mask_a_spin: QDoubleSpinBox | None = None
         self._t_mask_b_spin: QDoubleSpinBox | None = None
@@ -158,6 +171,11 @@ class PhasorMasksDialog(QDialog):
         self._cancel_btn: QPushButton | None = None
         # Form controls that get bulk-disabled during the run.
         self._form_controls: list[QWidget] = []
+        # Tooltip applied to Start when disabled by the fell-back guard.
+        self._fell_back_disabled_tip = (
+            "Acknowledge the highlighted rows first — "
+            "click their ROI dropdown to clear the warning."
+        )
 
         self._build_ui()
         self._restore_qsettings()
@@ -196,6 +214,14 @@ class PhasorMasksDialog(QDialog):
 
         outer.addWidget(wrap_in_scroll(content), 1)
 
+        # Status surface for cascade messages ("X fell back to fit own
+        # GMM (Y removed)"). Sits between the scroll area and the
+        # button row so it's always visible without scrolling.
+        self._status_label = QLabel("")
+        self._status_label.setWordWrap(True)
+        self._status_label.setStyleSheet("color: #c0392b;")
+        outer.addWidget(self._status_label)
+
         # Pinned button row outside the scroll area.
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -217,7 +243,9 @@ class PhasorMasksDialog(QDialog):
         layout = QVBoxLayout(box)
 
         self._dataset_list = QListWidget()
-        self._dataset_list.setSelectionMode(QListWidget.ExtendedSelection)
+        # Selection mode irrelevant now that the bottom "Remove selected"
+        # button is gone — row-local × is the only Remove surface.
+        self._dataset_list.setSelectionMode(QListWidget.NoSelection)
         self._dataset_list.setMinimumHeight(120)
         layout.addWidget(self._dataset_list)
 
@@ -226,15 +254,12 @@ class PhasorMasksDialog(QDialog):
         add_files_btn.clicked.connect(self._on_add_h5_files)
         add_folder_btn = QPushButton("Add folder of .h5…")
         add_folder_btn.clicked.connect(self._on_add_h5_folder)
-        remove_btn = QPushButton("Remove selected")
-        remove_btn.clicked.connect(self._on_remove_selected)
         btn_row.addWidget(add_files_btn)
         btn_row.addWidget(add_folder_btn)
-        btn_row.addWidget(remove_btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-        self._form_controls.extend([add_files_btn, add_folder_btn, remove_btn])
+        self._form_controls.extend([add_files_btn, add_folder_btn])
         return box
 
     def _build_section_channels(self) -> QGroupBox:
@@ -344,6 +369,10 @@ class PhasorMasksDialog(QDialog):
         )
 
     def _save_qsettings(self) -> None:
+        # Note: per-row ``roi_source`` assignments are intentionally NOT
+        # persisted. Dataset paths change run-to-run, so persisted
+        # assignments would resolve to missing paths the next time the
+        # dialog opens. Only the global thresholds + suffixes carry over.
         qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
         assert self._t_fit_spin is not None
         assert self._t_mask_a_spin is not None
@@ -383,16 +412,25 @@ class PhasorMasksDialog(QDialog):
             return
         self._add_h5_paths(h5_files)
 
-    def _on_remove_selected(self) -> None:
-        assert self._dataset_list is not None
-        rows = sorted(
-            {self._dataset_list.row(it) for it in self._dataset_list.selectedItems()},
-            reverse=True,
+    def _on_remove_row(self, row_index: int) -> None:
+        """Row-local remove (per-row × button).
+
+        Replaces the old ``_on_remove_selected``. Captures the removed
+        path, drops it from ``_pending_datasets`` and the ``QListWidget``,
+        then runs the cascade: any other row whose ``roi_source`` pointed
+        at the removed path is flagged ``fell_back = True`` with a
+        "removed" status-bar message.
+        """
+        if not (0 <= row_index < len(self._pending_datasets)):
+            return
+        removed = self._pending_datasets[row_index]
+        removed_path = removed.h5_path
+        del self._pending_datasets[row_index]
+        self._cascade_after_change(
+            mutated_path=removed_path,
+            removed=True,
         )
-        for r in rows:
-            if 0 <= r < len(self._pending_datasets):
-                del self._pending_datasets[r]
-        self._refresh_dataset_list()
+        # Channel intersection may change when datasets leave the queue.
         self._refresh_channel_picker()
         self._update_start_enabled()
 
@@ -436,10 +474,302 @@ class PhasorMasksDialog(QDialog):
         self._update_start_enabled()
 
     def _refresh_dataset_list(self) -> None:
+        """Rebuild the dataset rows.
+
+        Each row is a custom ``QWidget`` with:
+          - Path ``QLabel`` (elided middle, stretch 1, tooltip = full path).
+          - ``QComboBox`` for ROI source (fixed 200 px).
+          - ``×`` ``QPushButton`` (fixed 24×24) calling ``_on_remove_row``.
+        The ``QListWidgetItem.text()`` is left empty — the visible path
+        text lives in the row widget's label.
+        """
         assert self._dataset_list is not None
         self._dataset_list.clear()
+        for row_index, pd in enumerate(self._pending_datasets):
+            item = QListWidgetItem(self._dataset_list)
+            row_widget = self._build_dataset_row_widget(pd, row_index)
+            item.setSizeHint(row_widget.sizeHint())
+            self._dataset_list.setItemWidget(item, row_widget)
+        self._refresh_roi_source_dropdowns()
+
+    def _build_dataset_row_widget(
+        self, pd: _PendingDataset, row_index: int
+    ) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(6)
+
+        path_label = QLabel(str(pd.h5_path))
+        path_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        path_label.setToolTip(str(pd.h5_path))
+        # Elide middle is set on QLabel via setTextFormat + a long-line
+        # trick; Qt's QLabel honors text elide only via QFontMetrics on
+        # the widget itself. We rely on the label's word-wrap-off + the
+        # parent layout's stretch to clip; the tooltip carries the full
+        # path.
+        path_label.setWordWrap(False)
+        path_label.setTextFormat(Qt.PlainText)
+        path_label.setMinimumWidth(0)
+        path_label.setSizePolicy(
+            path_label.sizePolicy().horizontalPolicy(),
+            path_label.sizePolicy().verticalPolicy(),
+        )
+        # Setting elide mode on a QLabel requires a custom paint event;
+        # we expose the full string via tooltip and let Qt clip the label
+        # natively when the column is narrow.
+        layout.addWidget(path_label, 1)
+
+        combo = QComboBox()
+        combo.setFixedWidth(200)
+        combo.setToolTip("ROI source for this dataset")
+        # ``activated`` (not ``currentIndexChanged``) fires on user
+        # interaction only, NOT on programmatic ``setCurrentIndex`` —
+        # which is exactly what we need so the rebuild doesn't recurse.
+        combo.activated[int].connect(
+            lambda _idx, r=row_index: self._on_roi_source_changed(r)
+        )
+        layout.addWidget(combo)
+
+        remove_btn = QPushButton("×")
+        remove_btn.setFixedSize(24, 24)
+        remove_btn.setToolTip("Remove this dataset from the queue")
+        remove_btn.clicked.connect(
+            lambda _checked=False, r=row_index: self._on_remove_row(r)
+        )
+        layout.addWidget(remove_btn)
+
+        return widget
+
+    # ── Row widget access ────────────────────────────────
+
+    def _row_combo(self, row_index: int) -> QComboBox | None:
+        """Return the ``QComboBox`` for a given row, or None."""
+        assert self._dataset_list is not None
+        if not (0 <= row_index < self._dataset_list.count()):
+            return None
+        item = self._dataset_list.item(row_index)
+        widget = self._dataset_list.itemWidget(item)
+        if widget is None:
+            return None
+        for combo in widget.findChildren(QComboBox):
+            return combo
+        return None
+
+    def _row_path_label(self, row_index: int) -> QLabel | None:
+        assert self._dataset_list is not None
+        if not (0 <= row_index < self._dataset_list.count()):
+            return None
+        item = self._dataset_list.item(row_index)
+        widget = self._dataset_list.itemWidget(item)
+        if widget is None:
+            return None
+        for lbl in widget.findChildren(QLabel):
+            return lbl
+        return None
+
+    def _row_remove_button(self, row_index: int) -> QPushButton | None:
+        assert self._dataset_list is not None
+        if not (0 <= row_index < self._dataset_list.count()):
+            return None
+        item = self._dataset_list.item(row_index)
+        widget = self._dataset_list.itemWidget(item)
+        if widget is None:
+            return None
+        for btn in widget.findChildren(QPushButton):
+            return btn
+        return None
+
+    # ── ROI source dropdown ──────────────────────────────
+
+    def _compute_dropdown_labels(self) -> dict[Path, str]:
+        """Disambiguate dataset basenames by including parent dir when
+        two queued datasets share a filename.
+        """
+        names: dict[Path, str] = {}
+        seen: dict[str, list[Path]] = {}
         for pd in self._pending_datasets:
-            QListWidgetItem(str(pd.h5_path), self._dataset_list)
+            seen.setdefault(pd.h5_path.name, []).append(pd.h5_path)
+        for pd in self._pending_datasets:
+            collisions = seen.get(pd.h5_path.name, [])
+            if len(collisions) > 1:
+                # `<parent_dirname>/<filename>`
+                names[pd.h5_path] = f"{pd.h5_path.parent.name}/{pd.h5_path.name}"
+            else:
+                names[pd.h5_path] = pd.h5_path.name
+        return names
+
+    def _refresh_roi_source_dropdowns(self) -> None:
+        """Rebuild every row's combo from current ``_pending_datasets`` state.
+
+        First item: ``"fit own GMM"`` (userData=None). For rows with
+        ``fell_back == True`` the label becomes
+        ``"fit own GMM (was: <prev>, fell back)"`` and the combo gets a
+        warning-color stylesheet.
+
+        Then: each OTHER dataset where ``roi_source is None`` AND
+        ``not fell_back``, labelled by filename (or "subdir/filename" if
+        ambiguous), userData = full resolved path.
+
+        Selected item: the row's current ``roi_source`` (or "fit own GMM"
+        when ``None``).
+
+        Uses ``QSignalBlocker`` so the rebuild's programmatic
+        ``setCurrentIndex`` cannot trigger the cascade (defense in depth
+        — ``activated`` doesn't fire on programmatic changes, but a
+        belt-and-braces block keeps any custom item insertions safe).
+        """
+        assert self._dataset_list is not None
+        labels = self._compute_dropdown_labels()
+        for r, pd in enumerate(self._pending_datasets):
+            combo = self._row_combo(r)
+            if combo is None:
+                continue
+            with QSignalBlocker(combo):
+                combo.clear()
+                # First item: "fit own GMM" (with optional fell-back
+                # decoration).
+                if pd.fell_back and pd._previous_roi_source is not None:
+                    label_first = (
+                        f"fit own GMM (was: {pd._previous_roi_source.name}, "
+                        f"fell back)"
+                    )
+                else:
+                    label_first = "fit own GMM"
+                combo.addItem(label_first, userData=None)
+
+                # Candidate sources: other rows that self-fit AND aren't
+                # themselves flagged fell_back.
+                for other in self._pending_datasets:
+                    if other.h5_path == pd.h5_path:
+                        continue
+                    if other.roi_source is not None:
+                        continue
+                    if other.fell_back:
+                        continue
+                    combo.addItem(labels[other.h5_path], userData=other.h5_path)
+
+                # Restore selection: walk userData looking for a match.
+                selected_index = 0
+                if pd.roi_source is not None:
+                    for i in range(combo.count()):
+                        if combo.itemData(i) == pd.roi_source:
+                            selected_index = i
+                            break
+                combo.setCurrentIndex(selected_index)
+
+                # Warning styling on the combo when fell-back is active.
+                if pd.fell_back:
+                    combo.setStyleSheet("color: #c0392b;")
+                else:
+                    combo.setStyleSheet("")
+
+    def _on_roi_source_changed(self, row_index: int) -> None:
+        """User-driven combo change handler.
+
+        Wired to ``QComboBox.activated[int]`` so it fires only on user
+        interaction. Updates this row's ``roi_source``, clears its
+        ``fell_back`` flag, then runs the cascade.
+        """
+        if not (0 <= row_index < len(self._pending_datasets)):
+            return
+        combo = self._row_combo(row_index)
+        if combo is None:
+            return
+        pd = self._pending_datasets[row_index]
+        new_source: Path | None = combo.currentData()
+        # Self-reference would be invalid; defensively normalize.
+        if new_source == pd.h5_path:
+            new_source = None
+        pd.roi_source = new_source
+        # User interacted with this row → fell_back is acknowledged.
+        pd.fell_back = False
+        pd._previous_roi_source = None
+        self._cascade_after_change(
+            mutated_path=pd.h5_path,
+            removed=False,
+        )
+        self._update_start_enabled()
+
+    def _cascade_after_change(
+        self,
+        *,
+        mutated_path: Path,
+        removed: bool,
+    ) -> None:
+        """Run the dependent-fallback cascade after a row change/removal.
+
+        Identifies every OTHER row whose ``roi_source`` now points at a
+        non-self-fitting path (because the source got reassigned or
+        removed), flags those as ``fell_back = True`` (with their prior
+        source preserved in ``_previous_roi_source``), then rebuilds
+        every row's combo to reflect the new state.
+
+        Emits a single status-bar message naming all affected rows.
+        """
+        # Compute the set of self-fitting paths AFTER the change.
+        self_fitting: set[Path] = {
+            pd.h5_path
+            for pd in self._pending_datasets
+            if pd.roi_source is None
+        }
+
+        affected: list[_PendingDataset] = []
+        for pd in self._pending_datasets:
+            if pd.roi_source is None:
+                continue
+            if pd.roi_source not in self_fitting:
+                pd._previous_roi_source = pd.roi_source
+                pd.roi_source = None
+                pd.fell_back = True
+                affected.append(pd)
+
+        # The dataset list itself may have shrunk (removal); rebuild rows
+        # so the per-row widgets line up with the model.
+        if removed:
+            self._rebuild_rows_only()
+        else:
+            self._refresh_roi_source_dropdowns()
+
+        if affected:
+            names = ", ".join(pd.h5_path.name for pd in affected)
+            mutated_name = mutated_path.name
+            if removed:
+                msg = (
+                    f"{names}: fell back to fit own GMM "
+                    f"({mutated_name} was removed)"
+                )
+            else:
+                msg = (
+                    f"{names}: fell back to fit own GMM "
+                    f"({mutated_name} is no longer self-fitting)"
+                )
+            self._show_status_message(msg)
+
+    def _rebuild_rows_only(self) -> None:
+        """Rebuild the list widget items in place (used after row removal).
+
+        Distinct from ``_refresh_dataset_list`` only in that the caller
+        chain already ran the cascade; we just need rows + dropdowns to
+        line up with the current ``_pending_datasets`` ordering.
+        """
+        # `_refresh_dataset_list` happens to do exactly this — clear and
+        # rebuild from `_pending_datasets`, then refresh dropdowns.
+        self._refresh_dataset_list()
+
+    def _show_status_message(self, msg: str) -> None:
+        """Surface a transient status message inside the dialog.
+
+        Uses the dialog's own ``_status_label`` (a QLabel sitting
+        between the scroll area and the button row). Always-visible
+        until the next message or until cleared by a user interaction.
+        """
+        if self._status_label is not None:
+            self._status_label.setText(msg)
+
+    def _clear_status_message(self) -> None:
+        if self._status_label is not None:
+            self._status_label.setText("")
 
     # ── Channel picker refresh ───────────────────────────
 
@@ -582,14 +912,45 @@ class PhasorMasksDialog(QDialog):
         assert self._suffix_b_edit is not None
         suffix_a = self._suffix_a_edit.text()
         suffix_b = self._suffix_b_edit.text()
+
+        # Defense-in-depth: every non-None roi_source must point at a
+        # dataset still in the queue AND that dataset must itself
+        # self-fit (roi_source is None). The cascade should guarantee
+        # this; the rule fires only when state was mutated directly.
+        in_queue: dict[Path, _PendingDataset] = {
+            pd.h5_path: pd for pd in self._pending_datasets
+        }
+        sources_valid = True
+        for pd in self._pending_datasets:
+            if pd.roi_source is None:
+                continue
+            target = in_queue.get(pd.roi_source)
+            if target is None or target.roi_source is not None:
+                sources_valid = False
+                break
+
+        # No row may have fell_back == True.
+        any_fell_back = any(pd.fell_back for pd in self._pending_datasets)
+
         enabled = (
             bool(self._pending_datasets)
             and bool(self._selected_channels())
             and bool(suffix_a)
             and bool(suffix_b)
             and suffix_a != suffix_b
+            and sources_valid
+            and not any_fell_back
         )
         self._start_btn.setEnabled(enabled)
+        if any_fell_back:
+            self._start_btn.setToolTip(self._fell_back_disabled_tip)
+        else:
+            # Restore the default Start tooltip (set in _build_ui).
+            self._start_btn.setToolTip(
+                "Phasor maps cached from prior runs are reused as-is. To "
+                "recompute, run `python -m percell4.interfaces.cli.batch_phasor "
+                "--overwrite` first."
+            )
 
     # ── Run mechanics ────────────────────────────────────
 
@@ -612,6 +973,11 @@ class PhasorMasksDialog(QDialog):
         t_mask_b = float(self._t_mask_b_spin.value())
         suffix_a = self._suffix_a_edit.text()
         suffix_b = self._suffix_b_edit.text()
+        # `pd.h5_path` is already resolved (existing dialog behavior);
+        # values are either None (self-fitting) or a resolved Path.
+        roi_sources: dict[Path, Path | None] = {
+            pd.h5_path: pd.roi_source for pd in self._pending_datasets
+        }
 
         # Disable the form controls during the run; the QProgressDialog has
         # its own Cancel button.
@@ -676,6 +1042,7 @@ class PhasorMasksDialog(QDialog):
                 suffix_a=suffix_a,
                 suffix_b=suffix_b,
                 ensure_phasor=True,
+                roi_sources=roi_sources,
                 progress_callback=progress_cb,
                 cancel_check=cancel_check,
             )
@@ -708,7 +1075,7 @@ class PhasorMasksDialog(QDialog):
         self._maybe_refresh_session(dataset_paths)
 
         # Summary message box (icon depends on outcome).
-        self._show_summary(report, overwrites, cancelled)
+        self._show_summary(report, overwrites, cancelled, roi_sources)
 
         # Accept on completion — failures are reported, not abortive.
         self.accept()
@@ -768,6 +1135,7 @@ class PhasorMasksDialog(QDialog):
         report: BatchPhasorReport,
         overwrites: list[tuple[Path, str]],
         cancelled: bool,
+        roi_sources: dict[Path, Path | None] | None = None,
     ) -> None:
         n_total = len(report.items)
         n_succeeded = sum(1 for it in report.items if it.status == "succeeded")
@@ -777,21 +1145,39 @@ class PhasorMasksDialog(QDialog):
             1 for it in report.items if it.status == "skipped_no_changes"
         )
 
+        if roi_sources is None:
+            roi_sources = {}
+        n_self = sum(
+            1 for it in report.items
+            if roi_sources.get(it.h5_path) is None
+        )
+        n_shared = sum(
+            1 for it in report.items
+            if roi_sources.get(it.h5_path) is not None
+        )
+
         if cancelled:
             text = (
                 f"Cancelled after {n_total} dataset(s): {n_succeeded} "
-                f"succeeded, {n_partial} partial, {n_failed} failed."
+                f"succeeded, {n_partial} partial, {n_failed} failed. "
+                f"{n_self} self-fitted, {n_shared} used shared ROI."
             )
         else:
             text = (
                 f"Processed {n_total} dataset(s): {n_succeeded} succeeded, "
-                f"{n_partial} partial, {n_failed} failed."
+                f"{n_partial} partial, {n_failed} failed. "
+                f"{n_self} self-fitted, {n_shared} used shared ROI."
             )
 
         # Detailed text: per-dataset breakdown + overwrite list.
         detail_lines: list[str] = []
         for it in report.items:
-            line = f"{it.h5_path.name}: {it.status}"
+            src = roi_sources.get(it.h5_path)
+            if src is None:
+                tag = "[source: self]"
+            else:
+                tag = f"[source: {src.name}]"
+            line = f"{it.h5_path.name} {tag}: {it.status}"
             if it.processed:
                 line += f" — processed: {', '.join(it.processed)}"
             if it.skipped:
