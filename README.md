@@ -14,7 +14,14 @@
 
 - [Workflow Protocol](#workflow-protocol)
   - [Step-by-step protocol](#step-by-step-protocol)
-- [Batch TIFF Export (CLI)](#batch-tiff-export-cli)
+- [Command-line Tools](#command-line-tools)
+  - [`percell4-batch` — headless compress + segment + track](#percell4-batch--headless-compress--segment--track)
+  - [`percell4-batch-export` — TIFF export](#percell4-batch-export--tiff-export)
+  - [`percell4-batch-phasor` — compute phasor + wavelet filter](#percell4-batch-phasor--compute-phasor--wavelet-filter)
+  - [`percell4-batch-phasor-masks` — fit GMM ellipse + write dual-threshold masks](#percell4-batch-phasor-masks--fit-gmm-ellipse--write-dual-threshold-masks)
+  - [`percell4-batch-whole-field` — whole-field segmentation](#percell4-batch-whole-field--whole-field-segmentation)
+  - [`percell4-batch-rename` — rename a resource across datasets](#percell4-batch-rename--rename-a-resource-across-datasets)
+  - [`percell4-batch-delete` — delete resources across datasets](#percell4-batch-delete--delete-resources-across-datasets)
 - [Tech Stack](#tech-stack)
 - [Features](#features)
 - [Installation](#installation)
@@ -139,15 +146,55 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 
 ---
 
-## Batch TIFF Export (CLI)
+## Command-line Tools
 
-Export dataset layers as TIFFs across one or more `.h5` files without opening the GUI. From the activated environment:
+PerCell4 ships several headless CLI tools for batch operations across `.h5` datasets. All of them install on `PATH` from `pip install -e .` (except `percell4-batch-export`, which is `python -m`-only — see below) and share these conventions:
+
+- **Positional `paths`** accept one or more `.h5` files or directories. Directories are globbed non-recursively for `*.h5`.
+- **`--dry-run`** (where supported) classifies each dataset as a live run would but does not mutate files. Use it on destructive operations to audit what will change.
+- **`--quiet`** suppresses per-item detail lines. The per-dataset summary and final totals always print.
+- **`--verbose` / `-v`** enables DEBUG logging.
+- **Exit codes:** `0` if at least one dataset made progress, `1` if every dataset was skipped or failed, `2` on argparse / validation failure (no I/O performed).
+- **GUI files first.** Close any open PerCell4 GUI session against the target files before running — the batch tools write to the same `.h5` files the GUI reads.
+
+### `percell4-batch` — headless compress + segment + track
+
+End-to-end headless pipeline for multi-timepoint TIFF source directories. Compresses each source into one `.h5`, runs Cellpose on every timepoint, and tracks cells across time (unless `--no-track`). Designed for overnight batch runs on a remote workstation.
 
 ```bash
-python -m percell4.interfaces.cli.batch_export INPUTS --output-dir DIR [options]
+percell4-batch SOURCES --output-dir DIR [options]
 ```
 
-`INPUTS` is one or more `.h5` files, or directories containing `.h5` files (directories are globbed non-recursively for `*.h5`). For each dataset it writes one TIFF per intensity channel, per `/labels/<name>`, and per `/masks/<name>` into `--output-dir` using a flat `<h5_stem>_<layer>.tif` layout. Existing files with matching names are overwritten — point `--output-dir` at a fresh directory to preserve prior runs. Phasor, lifetime, and decay arrays are not exported.
+| Option | Purpose |
+|---|---|
+| `sources` | One or more dataset TIFF source directories (positional, required). |
+| `--output-dir OUTPUT_DIR` | Directory for the output `.h5` files. Each `<source_dirname>.h5` lands here. **Required.** |
+| `--seg-channel SEG_CHANNEL` | Channel name to segment. Default: first channel. Matched against `--channel-names` when given. |
+| `--channel-names CHANNEL_NAMES` | Comma-separated names to rename the imported channels, in order (e.g. `'DAPI,GFP,RFP'`). Must match the imported channel count. |
+| `--seg-name SEG_NAME` | Name for the segmentation layer. Default: `cellpose_<n_cells>`. |
+| `--cellpose-model CELLPOSE_MODEL` | Cellpose model type. Default: `cyto3`. |
+| `--cellpose-diameter CELLPOSE_DIAMETER` | Cell diameter in pixels. Default: auto. |
+| `--gpu` | Use GPU for Cellpose (requires the `gpu` extra and a working CUDA driver). |
+| `--no-track` | Skip tracking even for time-lapse datasets. |
+| `--quiet` | Suppress per-dataset progress lines. |
+| `--verbose`, `-v` | Enable debug logging. |
+
+Examples:
+
+```bash
+percell4-batch /scratch/tiffs/dish_1/ /scratch/tiffs/dish_2/ --output-dir /scratch/h5/
+percell4-batch /scratch/tiffs/timelapse_a/ --output-dir /scratch/h5/ --gpu --cellpose-diameter 240
+```
+
+### `percell4-batch-export` — TIFF export
+
+Export dataset layers as TIFFs across one or more `.h5` files. **Module-only** — not registered on `PATH`; invoke as `python -m`. The GUI equivalent lives at `I/O` → **Export Images**.
+
+```bash
+python -m percell4.interfaces.cli.batch_export PATHS --output-dir DIR [options]
+```
+
+For each dataset, writes one TIFF per intensity channel, per `/labels/<name>`, and per `/masks/<name>` into `--output-dir` using a flat `<h5_stem>_<layer>.tif` layout. Existing files with matching names are overwritten — point `--output-dir` at a fresh directory to preserve prior runs. Phasor, lifetime, and decay arrays are NOT exported.
 
 | Option | Purpose |
 |---|---|
@@ -166,7 +213,159 @@ python -m percell4.interfaces.cli.batch_export dish_1.h5 dish_2.h5 --output-dir 
 python -m percell4.interfaces.cli.batch_export /scratch/dishes/ --output-dir ~/exports/ --view-bin 4
 ```
 
-The GUI equivalent lives at `I/O` → **Export Images**; the workflow protocol section above explains when to reach for which.
+### `percell4-batch-phasor` — compute phasor + wavelet filter
+
+For every channel under `/decay/*`, computes the phasor `(g, s)` maps and applies the wavelet filter, writing `/phasor/<ch>/g`, `/s`, `g_filtered`, `s_filtered`, and `lifetime_filtered`. Channels with an existing `/phasor/<ch>/g` are skipped unless `--overwrite`. Channels missing calibration (`flim_cal_phase_<ch>`, `flim_cal_mod_<ch>`, `flim_frequency_mhz`) are skipped with a clear report line.
+
+```bash
+percell4-batch-phasor PATHS [options]
+```
+
+| Option | Purpose |
+|---|---|
+| `paths` | One or more `.h5` files, or directories containing `.h5` files. |
+| `--filter-level FILTER_LEVEL` | Wavelet filter level (1..9). Default: `9`. |
+| `--overwrite` | Recompute channels even when `/phasor/<ch>/g` already exists. Default: skip. |
+| `--remove` | Inverse mode: delete `/phasor/<ch>/` (all of g, s, g_filtered, s_filtered, lifetime_filtered) for every channel in each dataset instead of computing. Mutually exclusive with `--overwrite`. `--filter-level` is ignored when `--remove` is set. |
+| `--quiet` | Suppress per-channel skip / error detail lines. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+percell4-batch-phasor dish_1.h5 dish_2.h5
+percell4-batch-phasor /scratch/dishes/ --filter-level 5
+percell4-batch-phasor *.h5 --overwrite --quiet
+percell4-batch-phasor /scratch/dishes/ --remove
+```
+
+### `percell4-batch-phasor-masks` — fit GMM ellipse + write dual-threshold masks
+
+For each requested channel of each dataset, fits a single-cluster GMM ellipse on the phasor cloud above `--t-fit`, then writes two intensity-thresholded ellipse-membership masks (`--t-mask-a → suffix-a`, `--t-mask-b → suffix-b`). Reads unfiltered `/phasor/<ch>/g` and `/s` — wavelet-filtered maps are never used here, matching the manual recipe. When a dataset lacks pre-computed phasor maps, they are computed on the fly using the same primitives `percell4-batch-phasor` uses.
+
+Up-front validation: every requested channel must be present in every dataset; suffixes must be non-empty and must differ; no mask name may collide with an existing channel name in any dataset. Validation failures exit `2` without performing any I/O.
+
+```bash
+percell4-batch-phasor-masks PATHS --channels CHANNELS [options]
+```
+
+| Option | Purpose |
+|---|---|
+| `paths` | One or more `.h5` files, or directories containing `.h5` files. |
+| `--channels CHANNELS [CHANNELS ...]` | One or more channel names to fit. Every channel must be present (in both `metadata.channel_names` and `/decay/`) in every input dataset. **Required.** |
+| `--t-fit T_FIT` | Intensity threshold defining the GMM fit subset. Default: `10.0`. |
+| `--t-mask-a T_MASK_A` | Intensity threshold applied to mask-a after the ellipse-membership step. Default: `0.0`. |
+| `--t-mask-b T_MASK_B` | Intensity threshold applied to mask-b after the ellipse-membership step. Default: `5.0`. |
+| `--suffix-a SUFFIX_A` | Suffix appended to each channel name for mask-a. Default: `_phasor_1`. |
+| `--suffix-b SUFFIX_B` | Suffix appended to each channel name for mask-b. Default: `_phasor_5`. |
+| `--roi-source TARGET=SOURCE` | Use `SOURCE`'s fitted ROI for `TARGET`. Repeat the flag for multiple targets. `SOURCE` must itself be self-fitting (not appear as a target in any other `--roi-source`). Treatment-group comparisons (e.g. Untreated → As-treated) use this to share a single ROI across the cohort. |
+| `--dry-run` | Print the planned operations and exit 0 without performing any phasor / mask I/O. |
+| `--quiet` | Suppress per-channel skip / error detail lines. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+# Self-fit ellipse per dataset, default thresholds + suffixes
+percell4-batch-phasor-masks dish_1.h5 dish_2.h5 --channels mNG mScarlet
+
+# Shared ROI across a treatment cohort
+percell4-batch-phasor-masks untreated_a.h5 AsTreated_a.h5 AsTreated_b.h5 \
+    --channels mNG \
+    --roi-source AsTreated_a.h5=untreated_a.h5 \
+    --roi-source AsTreated_b.h5=untreated_a.h5
+
+# Audit a planned run without writing
+percell4-batch-phasor-masks /scratch/dishes/ --channels mNG --t-fit 20.0 --dry-run
+```
+
+### `percell4-batch-whole-field` — whole-field segmentation
+
+Creates `/labels/whole_field` (a 2D `int32` array, every pixel = 1) in each input dataset. Useful as a baseline gating layer for whole-field measurements or as a default segmentation before per-cell Cellpose runs. Shape is taken from `/metadata.native_shape`, falling back to the first `/decay/<channel>` if absent. Pre-existing `/labels/whole_field` is silently overwritten.
+
+```bash
+percell4-batch-whole-field PATHS [options]
+```
+
+| Option | Purpose |
+|---|---|
+| `paths` | One or more `.h5` files, or directories containing `.h5` files. |
+| `--dry-run` | Classify each dataset as succeeded / failed exactly as a live run would, but do not mutate any file. |
+| `--quiet` | Suppress per-resource detail lines. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+percell4-batch-whole-field dish_1.h5 dish_2.h5
+percell4-batch-whole-field /scratch/dishes/ --dry-run
+```
+
+### `percell4-batch-rename` — rename a resource across datasets
+
+Renames `(kind, old_name) → new_name` in each input `.h5`. Datasets that don't have the source name are reported as skipped, not failed. Datasets where the target name already exists are recorded as per-dataset errors — the batch continues to the next file.
+
+Channel renames go through `DatasetStore.rename_channel`, which moves `/decay/<name>`, `/phasor/<name>`, and updates `/metadata.channel_names` plus the per-channel FLIM calibration attrs together. Masks and segmentations go through `DatasetStore.rename_item` against `/masks/<name>` and `/labels/<name>` respectively.
+
+```bash
+percell4-batch-rename PATHS --kind {channel,mask,segmentation} --from-name OLD --to-name NEW [options]
+```
+
+| Option | Purpose |
+|---|---|
+| `paths` | One or more `.h5` files, or directories containing `.h5` files. |
+| `--kind {channel,mask,segmentation}` | Resource kind to rename. **Required.** |
+| `--from-name FROM_NAME` | Current name of the resource in each `.h5`. **Required.** |
+| `--to-name TO_NAME` | New name to rename the resource to. **Required.** |
+| `--dry-run` | Classify each dataset as succeeded / skipped / failed exactly as a live run would, but do not mutate any file. |
+| `--quiet` | Suppress per-resource skip / error detail lines. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+percell4-batch-rename dish_1.h5 dish_2.h5 \
+    --kind channel --from-name mScar --to-name mScarlet
+percell4-batch-rename /scratch/dishes/ \
+    --kind mask --from-name thresh_old --to-name thresh_new
+percell4-batch-rename *.h5 \
+    --kind segmentation --from-name cellpose_qc \
+    --to-name cp_mask --dry-run
+```
+
+### `percell4-batch-delete` — delete resources across datasets
+
+Deletes either a single named resource (`--name`) or every resource of the given kind (`--all`) in each input `.h5`. The two flags are mutually exclusive and exactly one is required. Datasets that don't have the resource are reported as skipped, not failed.
+
+Channel deletes go through `DatasetStore.delete_channel`, which removes `/decay/<name>`, `/phasor/<name>`, the `channel_names` metadata entry, and the per-channel FLIM calibration attrs together. Masks and segmentations go through `DatasetStore.delete_item`. Use `--dry-run` first on destructive operations to audit what would change.
+
+```bash
+percell4-batch-delete PATHS --kind {channel,mask,segmentation} (--name NAME | --all) [options]
+```
+
+| Option | Purpose |
+|---|---|
+| `paths` | One or more `.h5` files, or directories containing `.h5` files. |
+| `--kind {channel,mask,segmentation}` | Resource kind to delete. **Required.** |
+| `--name NAME` | Name of the resource to delete in each `.h5`. Mutually exclusive with `--all`. |
+| `--all` | Delete every resource of the given `--kind` found in each `.h5`. Channels are enumerated from `metadata.channel_names`; masks from `/masks/*`; segmentations from `/labels/*`. Mutually exclusive with `--name`. Combine with `--dry-run` to audit which resources will be removed before running. |
+| `--dry-run` | Classify each dataset as succeeded / skipped / failed exactly as a live run would, but do not mutate any file. |
+| `--quiet` | Suppress per-resource skip / error detail lines. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+# Delete one named resource per dataset
+percell4-batch-delete dish_1.h5 dish_2.h5 \
+    --kind segmentation --name cellpose_qc
+percell4-batch-delete /scratch/dishes/ \
+    --kind mask --name thresh_488 --dry-run
+
+# Delete EVERY resource of a kind
+percell4-batch-delete /scratch/dishes/ --kind mask --all --dry-run
+percell4-batch-delete *.h5 --kind channel --all
+```
 
 ---
 
@@ -196,7 +395,7 @@ Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `fli
 - **Batch workflows.** End-to-end single-cell pipeline, batch TIFF compression, dataset-wide spatial binning, batch TCSPC append.
 - **Dilute-phase mask generation.** Adaptive per-dataset round loop layered on top of grouped thresholding for phase-separated biology.
 - **Image and measurement export.** TIFF (GUI dialog or CLI), CSV/XLSX, parquet. Round-trips pixel-size metadata.
-- **Headless CLI.** Batch TIFF export and (where applicable) workflow tooling that runs without a display — see [Batch TIFF Export (CLI)](#batch-tiff-export-cli).
+- **Headless CLI.** Batch TIFF export, phasor compute, GMM ellipse fitting, whole-field segmentation, and resource rename/delete tooling that runs without a display — see [Command-line Tools](#command-line-tools).
 - **Dataset lifecycle.** Import, append, resume, close — with `run_state.json` for crash- and pause-tolerant workflows.
 
 ---
