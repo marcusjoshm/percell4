@@ -54,7 +54,7 @@ from percell4.application.use_cases.batch_fit_phasor_masks import (
     batch_fit_phasor_masks,
 )
 from percell4.interfaces.cli._batch_report import (
-    print_item_status,
+    format_item_line,
     resolve_paths,
 )
 
@@ -162,7 +162,89 @@ def _validate(
     return None
 
 
+# ── --roi-source parsing ──────────────────────────────────────────────
+
+
+def _parse_roi_sources(
+    raw_values: list[str],
+    *,
+    paths: list[Path],
+) -> tuple[dict[Path, Path | None] | None, str | None]:
+    """Parse ``--roi-source TARGET=SOURCE`` values into a roi_sources dict.
+
+    Returns ``(roi_sources, None)`` on success; ``(None, error)`` on
+    validation failure. ``paths`` must already be resolved.
+
+    Behavior:
+      * Every TARGET must be in ``paths`` after resolving.
+      * Every SOURCE must be in ``paths`` after resolving.
+      * Self-references (TARGET == SOURCE) are silently normalized to a
+        self-fitting entry (no chained mapping recorded).
+      * No SOURCE may appear as a TARGET in another mapping (chain
+        rejection): sources must be self-fitting.
+
+    The returned dict has one entry per positional path; values are
+    ``None`` (self-fitting) or a resolved ``Path`` to a source dataset.
+    """
+    roi_sources: dict[Path, Path | None] = {p: None for p in paths}
+    parsed: list[tuple[Path, Path]] = []
+
+    for raw in raw_values:
+        if "=" not in raw:
+            return None, (
+                f"invalid --roi-source: expected TARGET=SOURCE, "
+                f"got {raw!r}"
+            )
+        target_str, _, source_str = raw.partition("=")
+        if target_str == "" or source_str == "":
+            return None, (
+                f"invalid --roi-source: expected TARGET=SOURCE, "
+                f"got {raw!r}"
+            )
+        target = Path(target_str).resolve()
+        source = Path(source_str).resolve()
+
+        if target not in roi_sources:
+            return None, (
+                f"--roi-source target not in paths: {target}"
+            )
+        if source not in roi_sources:
+            return None, (
+                f"--roi-source source not in paths: {source}"
+            )
+
+        # Self-reference: silently normalize to no-entry. The default
+        # value (None) already in roi_sources is correct.
+        if target == source:
+            continue
+
+        parsed.append((target, source))
+
+    # Chain rejection: no SOURCE may also be a TARGET.
+    target_set = {t for (t, _) in parsed}
+    source_set = {s for (_, s) in parsed}
+    chains = target_set & source_set
+    if chains:
+        culprit = sorted(chains)[0]
+        return None, (
+            f"chain detected: {culprit} is both a target and a source "
+            f"— sources must be self-fitting"
+        )
+
+    for target, source in parsed:
+        roi_sources[target] = source
+
+    return roi_sources, None
+
+
 # ── Dry-run printer ───────────────────────────────────────────────────
+
+
+def _source_tag(source: Path | None) -> str:
+    """Return the ``[source: ...]`` tag for one dataset."""
+    if source is None:
+        return "[source: self]"
+    return f"[source: {source.name}]"
 
 
 def _print_dry_run_plan(
@@ -174,17 +256,22 @@ def _print_dry_run_plan(
     t_mask_b: float,
     suffix_a: str,
     suffix_b: str,
+    roi_sources: dict[Path, Path | None],
 ) -> None:
     """Print the planned operations a real run would perform."""
     print(
         f"Would process {len(paths)} datasets × {len(channels)} "
-        f"channels with "
+        f"channel(s) with "
         f"t_fit={t_fit}, t_mask_a={t_mask_a}, t_mask_b={t_mask_b}, "
-        f"suffix_a={suffix_a!r}, suffix_b={suffix_b!r}"
+        f"suffix_a={suffix_a!r}, suffix_b={suffix_b!r}:"
     )
     print(f"Channels: {', '.join(channels)}")
     for p in paths:
-        print(f"  {p.name}: would write {len(channels) * 2} masks")
+        tag = _source_tag(roi_sources.get(p))
+        print(
+            f"  {p.name}  {tag} "
+            f"-- would write {len(channels) * 2} masks"
+        )
 
 
 # ── Main entry point ──────────────────────────────────────────────────
@@ -286,6 +373,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--roi-source",
+        action="append",
+        metavar="TARGET=SOURCE",
+        default=[],
+        help=(
+            "Use SOURCE's fitted ROI for TARGET. Repeat the flag for "
+            "multiple targets. SOURCE must itself be self-fitting."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -321,6 +418,11 @@ def main(argv: list[str] | None = None) -> int:
             "error: no .h5 files matched the given paths", file=sys.stderr,
         )
         return 1
+    # Local path normalization — `_batch_report.resolve_paths` does not
+    # call `.resolve()` (other batch CLIs don't need absolute keys). We
+    # need resolved paths here so `--roi-source` halves can match the
+    # positional list regardless of cwd / relative argv.
+    paths = [p.resolve() for p in paths]
 
     # Up-front validation runs even in --dry-run so users find problems
     # before the dry-run plan is printed.
@@ -334,6 +436,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
+    roi_sources, roi_err = _parse_roi_sources(
+        list(args.roi_source), paths=paths,
+    )
+    if roi_err is not None:
+        print(f"error: {roi_err}", file=sys.stderr)
+        return 2
+    assert roi_sources is not None  # narrow for type checkers
+
     if args.dry_run:
         _print_dry_run_plan(
             paths=paths,
@@ -343,11 +453,24 @@ def main(argv: list[str] | None = None) -> int:
             t_mask_b=args.t_mask_b,
             suffix_a=args.suffix_a,
             suffix_b=args.suffix_b,
+            roi_sources=roi_sources,
         )
         return 0
 
     def cb(item: BatchPhasorItemResult) -> None:
-        print_item_status(item, quiet=args.quiet, verb="processed")
+        # Local wrapper around the shared formatter: we append the
+        # `[source: ...]` tag here so `_batch_report` stays unchanged.
+        line = format_item_line(item, verb="processed")
+        src = roi_sources.get(item.h5_path.resolve())
+        print(f"{line}  {_source_tag(src)}")
+        if args.quiet:
+            return
+        if getattr(item, "error", None):
+            print(f"    error: {item.error}")
+        for channel, reason in item.skipped.items():
+            print(f"    {channel} skipped: {reason}")
+        for channel, msg in item.errors.items():
+            print(f"    {channel} error: {msg}")
 
     report = batch_fit_phasor_masks(
         paths,
@@ -358,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         suffix_a=args.suffix_a,
         suffix_b=args.suffix_b,
         ensure_phasor=True,
+        roi_sources=roi_sources,
         progress_callback=cb,
     )
 
@@ -367,6 +491,9 @@ def main(argv: list[str] | None = None) -> int:
         f"{report.total_failed} failed, "
         f"{report.total_skipped} skipped"
     )
+    n_self = sum(1 for v in roi_sources.values() if v is None)
+    n_shared = sum(1 for v in roi_sources.values() if v is not None)
+    print(f"{n_self} self-fitted, {n_shared} used shared ROI.")
 
     any_progress = any(item.processed for item in report.items)
     return 0 if any_progress else 1

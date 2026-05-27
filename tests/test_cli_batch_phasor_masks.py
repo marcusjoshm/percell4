@@ -94,6 +94,7 @@ def stub_use_case(monkeypatch):
         suffix_a,
         suffix_b,
         ensure_phasor=True,
+        roi_sources=None,
         progress_callback=None,
         cancel_check=None,
     ):
@@ -109,6 +110,9 @@ def stub_use_case(monkeypatch):
         calls["suffix_a"] = suffix_a
         calls["suffix_b"] = suffix_b
         calls["ensure_phasor"] = ensure_phasor
+        calls["roi_sources"] = (
+            dict(roi_sources) if roi_sources is not None else None
+        )
         # Fire a fake "succeeded" item for each path.
         items = []
         for p in paths:
@@ -521,3 +525,395 @@ def test_cli_gui_parity(tmp_path):
             assert np.array_equal(cli_arr, gui_arr), (
                 f"CLI/GUI parity violation on {name}"
             )
+
+
+# ── --roi-source flag: happy paths ────────────────────────────────────
+
+
+def test_roi_source_single_target_resolves(tmp_path, stub_use_case):
+    """--roi-source target.h5=source.h5 → resolved keys + complete dict."""
+    source = _make_h5(tmp_path / "source.h5", channels=["ch0"])
+    target = _make_h5(tmp_path / "target.h5", channels=["ch0"])
+
+    exit_code = cli.main([
+        str(source), str(target),
+        "--channels", "ch0",
+        "--roi-source", f"{target}={source}",
+    ])
+
+    assert exit_code == 0
+    captured = stub_use_case["roi_sources"]
+    assert captured is not None
+    # Keys are resolved paths.
+    assert source.resolve() in captured
+    assert target.resolve() in captured
+    # Target maps to resolved source; source maps to None (self-fitting).
+    assert captured[target.resolve()] == source.resolve()
+    assert captured[source.resolve()] is None
+    # Dict is complete: every positional path is present.
+    assert set(captured.keys()) == {source.resolve(), target.resolve()}
+
+
+def test_roi_source_two_targets_one_source(tmp_path, stub_use_case):
+    """Two --roi-source flags pointing at the same source."""
+    source = _make_h5(tmp_path / "source.h5", channels=["ch0"])
+    t1 = _make_h5(tmp_path / "t1.h5", channels=["ch0"])
+    t2 = _make_h5(tmp_path / "t2.h5", channels=["ch0"])
+
+    exit_code = cli.main([
+        str(source), str(t1), str(t2),
+        "--channels", "ch0",
+        "--roi-source", f"{t1}={source}",
+        "--roi-source", f"{t2}={source}",
+    ])
+
+    assert exit_code == 0
+    captured = stub_use_case["roi_sources"]
+    assert captured[t1.resolve()] == source.resolve()
+    assert captured[t2.resolve()] == source.resolve()
+    assert captured[source.resolve()] is None
+
+
+def test_roi_source_relative_paths_resolve(tmp_path, stub_use_case, monkeypatch):
+    """Run from a directory containing .h5 files; positional args are basenames.
+
+    Both halves of --roi-source resolve to absolute paths and validation passes.
+    """
+    source = _make_h5(tmp_path / "untreated_a.h5", channels=["ch0"])
+    target = _make_h5(tmp_path / "AsTreated_a.h5", channels=["ch0"])
+
+    monkeypatch.chdir(tmp_path)
+    exit_code = cli.main([
+        "untreated_a.h5", "AsTreated_a.h5",
+        "--channels", "ch0",
+        "--roi-source", "AsTreated_a.h5=untreated_a.h5",
+    ])
+
+    assert exit_code == 0
+    captured = stub_use_case["roi_sources"]
+    # Resolved absolute keys.
+    assert target.resolve() in captured
+    assert source.resolve() in captured
+    assert captured[target.resolve()] == source.resolve()
+    assert captured[source.resolve()] is None
+
+
+# ── --roi-source flag: validation rejections ──────────────────────────
+
+
+def test_roi_source_malformed_value_rejected(tmp_path, capsys):
+    """--roi-source foo (no '=') → exit 2, stderr names the value."""
+    h5 = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+    exit_code = cli.main([
+        str(h5),
+        "--channels", "ch0",
+        "--roi-source", "foo",
+    ])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "--roi-source" in err
+    assert "foo" in err
+
+
+def test_roi_source_empty_target_rejected(tmp_path, capsys):
+    """--roi-source =source.h5 → exit 2."""
+    source = _make_h5(tmp_path / "source.h5", channels=["ch0"])
+    exit_code = cli.main([
+        str(source),
+        "--channels", "ch0",
+        "--roi-source", f"={source}",
+    ])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "--roi-source" in err
+
+
+def test_roi_source_empty_source_rejected(tmp_path, capsys):
+    """--roi-source target.h5= → exit 2."""
+    target = _make_h5(tmp_path / "target.h5", channels=["ch0"])
+    exit_code = cli.main([
+        str(target),
+        "--channels", "ch0",
+        "--roi-source", f"{target}=",
+    ])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "--roi-source" in err
+
+
+def test_roi_source_target_not_in_paths_rejected(tmp_path, capsys):
+    """TARGET not in positional paths → exit 2, message names the missing path."""
+    source = _make_h5(tmp_path / "source.h5", channels=["ch0"])
+    missing = tmp_path / "missing.h5"
+    exit_code = cli.main([
+        str(source),
+        "--channels", "ch0",
+        "--roi-source", f"{missing}={source}",
+    ])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "missing.h5" in err
+
+
+def test_roi_source_source_not_in_paths_rejected(tmp_path, capsys):
+    """SOURCE not in positional paths → exit 2, message names the missing path."""
+    target = _make_h5(tmp_path / "target.h5", channels=["ch0"])
+    missing = tmp_path / "missing.h5"
+    exit_code = cli.main([
+        str(target),
+        "--channels", "ch0",
+        "--roi-source", f"{target}={missing}",
+    ])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "missing.h5" in err
+
+
+def test_roi_source_chain_rejected(tmp_path, capsys):
+    """Chain: a→b and b→c → exit 2, message mentions b is both source and target."""
+    a = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+    b = _make_h5(tmp_path / "b.h5", channels=["ch0"])
+    c = _make_h5(tmp_path / "c.h5", channels=["ch0"])
+    exit_code = cli.main([
+        str(a), str(b), str(c),
+        "--channels", "ch0",
+        "--roi-source", f"{a}={b}",
+        "--roi-source", f"{b}={c}",
+    ])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "chain" in err.lower()
+    assert "b.h5" in err
+
+
+def test_roi_source_self_reference_normalized(tmp_path, stub_use_case):
+    """--roi-source a.h5=a.h5 → no error, equivalent to omitting the flag."""
+    a = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+    exit_code = cli.main([
+        str(a),
+        "--channels", "ch0",
+        "--roi-source", f"{a}={a}",
+    ])
+    assert exit_code == 0
+    captured = stub_use_case["roi_sources"]
+    # Self-reference is normalized — a.h5 maps to None, not to itself.
+    assert captured[a.resolve()] is None
+
+
+# ── Dry-run output for --roi-source ───────────────────────────────────
+
+
+def test_dry_run_prints_source_tags(tmp_path, monkeypatch, capsys):
+    """--dry-run --roi-source target=source prints both tagged lines."""
+    source = _make_h5(tmp_path / "source.h5", channels=["ch0"])
+    target = _make_h5(tmp_path / "target.h5", channels=["ch0"])
+
+    called = {"n": 0}
+
+    def fake_run(*args, **kwargs):
+        called["n"] += 1
+        raise AssertionError("dry-run must not call the use case")
+
+    monkeypatch.setattr(cli, "batch_fit_phasor_masks", fake_run)
+
+    exit_code = cli.main([
+        str(source), str(target),
+        "--channels", "ch0",
+        "--roi-source", f"{target}={source}",
+        "--dry-run",
+    ])
+
+    assert exit_code == 0
+    assert called["n"] == 0
+    out = capsys.readouterr().out
+    # source.h5 is self-fitting; target.h5 uses source.h5.
+    assert "source.h5" in out
+    assert "[source: self]" in out
+    assert f"[source: {source.name}]" in out
+    # target.h5 line appears in the plan.
+    assert "target.h5" in out
+
+
+# ── Real-run stdout tagging ───────────────────────────────────────────
+
+
+def test_real_run_stdout_has_source_tags(tmp_path, monkeypatch, capsys):
+    """Each per-item stdout line carries its [source: ...] tag."""
+    source = _make_h5(tmp_path / "source.h5", channels=["ch0"])
+    target = _make_h5(tmp_path / "target.h5", channels=["ch0"])
+
+    from percell4.application.use_cases.batch_compute_phasor import (
+        BatchPhasorItemResult,
+        BatchPhasorReport,
+    )
+
+    def fake_run(paths, *, progress_callback=None, **kw):
+        items = []
+        for p in paths:
+            item = BatchPhasorItemResult(
+                h5_path=Path(p),
+                status="succeeded",
+                processed=("ch0",),
+            )
+            items.append(item)
+            if progress_callback is not None:
+                progress_callback(item)
+        return BatchPhasorReport(items=tuple(items))
+
+    monkeypatch.setattr(cli, "batch_fit_phasor_masks", fake_run)
+
+    exit_code = cli.main([
+        str(source), str(target),
+        "--channels", "ch0",
+        "--roi-source", f"{target}={source}",
+    ])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    # Source line: self; target line: source.h5.
+    assert "[source: self]" in out
+    assert f"[source: {source.name}]" in out
+
+
+def test_final_summary_line(tmp_path, monkeypatch, capsys):
+    """End-of-run summary contains 'N self-fitted, N used shared ROI.'"""
+    source = _make_h5(tmp_path / "source.h5", channels=["ch0"])
+    t1 = _make_h5(tmp_path / "t1.h5", channels=["ch0"])
+    t2 = _make_h5(tmp_path / "t2.h5", channels=["ch0"])
+
+    from percell4.application.use_cases.batch_compute_phasor import (
+        BatchPhasorItemResult,
+        BatchPhasorReport,
+    )
+
+    def fake_run(paths, *, progress_callback=None, **kw):
+        items = tuple(
+            BatchPhasorItemResult(
+                h5_path=Path(p),
+                status="succeeded",
+                processed=("ch0",),
+            )
+            for p in paths
+        )
+        for item in items:
+            if progress_callback is not None:
+                progress_callback(item)
+        return BatchPhasorReport(items=items)
+
+    monkeypatch.setattr(cli, "batch_fit_phasor_masks", fake_run)
+
+    exit_code = cli.main([
+        str(source), str(t1), str(t2),
+        "--channels", "ch0",
+        "--roi-source", f"{t1}={source}",
+        "--roi-source", f"{t2}={source}",
+    ])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "1 self-fitted, 2 used shared ROI." in out
+
+
+# ── (CLI, GUI) parity with --roi-source ────────────────────────────────
+
+
+def test_cli_gui_parity_with_roi_source(tmp_path):
+    """(CLI, GUI) parity for the one-source-one-target case.
+
+    Drive the same operation through the CLI and directly through
+    ``batch_fit_phasor_masks`` (which is what the dialog does at
+    ``_on_start_clicked``). Assert the on-disk masks are byte-equal.
+    """
+    from percell4.application.use_cases.batch_fit_phasor_masks import (
+        batch_fit_phasor_masks,
+    )
+
+    # Two pairs of fixtures (same content per pair).
+    src_cli = _make_h5(tmp_path / "src_cli.h5", channels=["ch0"], seed=42)
+    tgt_cli = _make_h5(tmp_path / "tgt_cli.h5", channels=["ch0"], seed=99)
+    src_gui = _make_h5(tmp_path / "src_gui.h5", channels=["ch0"], seed=42)
+    tgt_gui = _make_h5(tmp_path / "tgt_gui.h5", channels=["ch0"], seed=99)
+
+    # CLI run.
+    exit_code = cli.main([
+        str(src_cli), str(tgt_cli),
+        "--channels", "ch0",
+        "--t-fit", "10.0",
+        "--t-mask-a", "0.0",
+        "--t-mask-b", "5.0",
+        "--suffix-a", "_phasor_1",
+        "--suffix-b", "_phasor_5",
+        "--roi-source", f"{tgt_cli}={src_cli}",
+    ])
+    assert exit_code == 0
+
+    # Direct ("GUI") run — same kwargs the dialog builds in _on_start_clicked.
+    roi_sources_gui = {
+        src_gui.resolve(): None,
+        tgt_gui.resolve(): src_gui.resolve(),
+    }
+    report = batch_fit_phasor_masks(
+        [src_gui, tgt_gui],
+        channels=["ch0"],
+        t_fit=10.0,
+        t_mask_a=0.0,
+        t_mask_b=5.0,
+        suffix_a="_phasor_1",
+        suffix_b="_phasor_5",
+        ensure_phasor=True,
+        roi_sources=roi_sources_gui,
+    )
+    statuses = {it.h5_path.resolve(): it.status for it in report.items}
+    assert statuses[src_gui.resolve()] == "succeeded"
+    assert statuses[tgt_gui.resolve()] == "succeeded"
+
+    # Byte-for-byte parity on every produced mask.
+    with h5py.File(src_cli, "r") as fc, h5py.File(src_gui, "r") as fg:
+        for name in ("ch0_phasor_1", "ch0_phasor_5"):
+            assert np.array_equal(
+                fc[f"masks/{name}"][()],
+                fg[f"masks/{name}"][()],
+            ), f"CLI/GUI parity violation on src/{name}"
+    with h5py.File(tgt_cli, "r") as fc, h5py.File(tgt_gui, "r") as fg:
+        for name in ("ch0_phasor_1", "ch0_phasor_5"):
+            assert np.array_equal(
+                fc[f"masks/{name}"][()],
+                fg[f"masks/{name}"][()],
+            ), f"CLI/GUI parity violation on tgt/{name}"
+
+
+# ── _batch_report.format_item_line signature regression ────────────────
+
+
+def test_batch_report_format_item_line_signature_unchanged():
+    """Snapshot test: the shared helper signature must not change.
+
+    U4 deliberately wraps `_batch_report.print_item_status` locally
+    instead of modifying the shared helper. If a future regression adds
+    a kwarg like ``extra_suffix=`` to ``format_item_line``, this test
+    catches it.
+    """
+    import inspect
+
+    from percell4.interfaces.cli._batch_report import (
+        format_item_line,
+        print_item_status,
+    )
+
+    sig = inspect.signature(format_item_line)
+    params = list(sig.parameters.values())
+    # exactly 2 params: item (positional), verb (kw-only with default "processed").
+    assert [p.name for p in params] == ["item", "verb"]
+    assert params[0].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert params[1].kind == inspect.Parameter.KEYWORD_ONLY
+    assert params[1].default == "processed"
+
+    # print_item_status: item (positional), quiet (kw-only, default False),
+    # verb (kw-only, default "processed").
+    sig2 = inspect.signature(print_item_status)
+    params2 = list(sig2.parameters.values())
+    assert [p.name for p in params2] == ["item", "quiet", "verb"]
+    assert params2[1].kind == inspect.Parameter.KEYWORD_ONLY
+    assert params2[1].default is False
+    assert params2[2].kind == inspect.Parameter.KEYWORD_ONLY
+    assert params2[2].default == "processed"
