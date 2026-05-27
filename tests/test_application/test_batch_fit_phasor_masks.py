@@ -167,22 +167,12 @@ def test_two_datasets_two_channels_succeed(tmp_path: Path) -> None:
             assert _mask_exists(h5, f"{ch}_phasor_2")
 
 
-def test_prefers_filtered_over_unfiltered(tmp_path: Path) -> None:
-    """When both ``g``/``s`` and ``g_filtered``/``s_filtered`` exist, the
-    use case must use the filtered pair. Verified by planting clearly
-    distinct centers in the two pairs and checking the fitted ellipse
-    lands on the filtered center, not the unfiltered one."""
-    # Filtered phasor at center (0.7, 0.5); unfiltered at (0.2, 0.1).
-    # The mask geometry differs strongly enough that whichever pair
-    # was used determines a measurable signature: where in (g, s)
-    # the ellipse center lands. We can't read geometry from disk, so
-    # instead: make the unfiltered pair WAY outside the [0, 1] phasor
-    # cloud (so if it were used we'd get a different mask cardinality)
-    # by giving them very different sigma. Cleaner test: build phasor
-    # so the unfiltered version is uniformly NaN. If the use case used
-    # the unfiltered, single_component_fit_phasor would raise (no finite
-    # pixels) and the channel would land in `errors`. If it used the
-    # filtered (well-formed), it succeeds.
+def test_uses_unfiltered_g_s_even_when_filtered_is_present(tmp_path: Path) -> None:
+    """The manual recipe is explicit: unfiltered phasor for both fit AND
+    masks. Even when ``g_filtered`` / ``s_filtered`` are on disk, the use
+    case must read the unfiltered pair. Verified by making the filtered
+    pair uniformly NaN (which would crash any fit) and the unfiltered
+    pair well-formed — the call succeeds iff unfiltered was used."""
     h5 = tmp_path / "ds.h5"
     h5.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(h5, "w") as f:
@@ -198,16 +188,16 @@ def test_prefers_filtered_over_unfiltered(tmp_path: Path) -> None:
         )
         ph = f.create_group("phasor")
         ch_grp = ph.create_group("ch0")
-        # Unfiltered: all NaN — would crash any fit.
-        nan_arr = np.full((10, 10), np.nan, dtype=np.float32)
-        ch_grp.create_dataset("g", data=nan_arr)
-        ch_grp.create_dataset("s", data=nan_arr)
-        # Filtered: well-formed Gaussian blob.
+        # Unfiltered: well-formed Gaussian blob.
         rng = np.random.default_rng(seed=7)
-        g_f = rng.normal(0.5, 0.01, size=(10, 10)).astype(np.float32)
-        s_f = rng.normal(0.3, 0.01, size=(10, 10)).astype(np.float32)
-        ch_grp.create_dataset("g_filtered", data=g_f)
-        ch_grp.create_dataset("s_filtered", data=s_f)
+        g_u = rng.normal(0.5, 0.01, size=(10, 10)).astype(np.float32)
+        s_u = rng.normal(0.3, 0.01, size=(10, 10)).astype(np.float32)
+        ch_grp.create_dataset("g", data=g_u)
+        ch_grp.create_dataset("s", data=s_u)
+        # Filtered: all NaN — would crash any fit that used it.
+        nan_arr = np.full((10, 10), np.nan, dtype=np.float32)
+        ch_grp.create_dataset("g_filtered", data=nan_arr)
+        ch_grp.create_dataset("s_filtered", data=nan_arr)
 
     report = batch_fit_phasor_masks(
         [h5],
@@ -221,13 +211,15 @@ def test_prefers_filtered_over_unfiltered(tmp_path: Path) -> None:
 
     item = report.items[0]
     assert item.status == "succeeded", (
-        f"expected filtered to be used, got errors={item.errors}"
+        f"expected unfiltered to be used, got errors={item.errors}"
     )
     assert item.processed == ("ch0",)
 
 
-def test_falls_back_to_unfiltered_when_no_filtered(tmp_path: Path) -> None:
-    """Only ``g`` / ``s`` on disk → fall-back path produces masks."""
+def test_reads_unfiltered_g_s_when_only_unfiltered_present(tmp_path: Path) -> None:
+    """Only ``g`` / ``s`` on disk → use case reads them directly and
+    produces masks. No fallback machinery: the unfiltered pair is the
+    one and only source."""
     h5 = _make_h5(
         tmp_path / "ds.h5",
         channels=["ch0"],

@@ -10,13 +10,17 @@ For each input ``.h5``, this module:
    create a mask whose name would shadow an existing channel) and the
    presence check (channel must be in ``metadata.channel_names`` AND
    have ``/decay/<ch>`` on disk).
-3. Resolves the phasor source: prefers
-   ``/phasor/<ch>/g_filtered`` + ``s_filtered``, falls back to
-   ``/phasor/<ch>/g`` + ``s``. When neither is present and
+3. Reads the **unfiltered** phasor maps from ``/phasor/<ch>/g`` +
+   ``/phasor/<ch>/s``. This matches the manual phasor-mask recipe
+   captured in the workflow's brainstorm: "Start with an unfiltered
+   phasor … apply the ROI as Mask". When the maps are absent and
    ``ensure_phasor=True`` (the default), computes them on the fly via
-   :class:`ComputePhasor` + :class:`ApplyWavelet`. When neither is
-   present and ``ensure_phasor=False``, skips the channel with a
-   structured reason.
+   :class:`ComputePhasor`. When absent and ``ensure_phasor=False``,
+   skips the channel with a structured reason. The wavelet-filtered
+   pair (``g_filtered`` / ``s_filtered``) is **never** used here even
+   when present on disk — the workflow's masks must reflect the raw
+   phasor distribution so the dim/noisy regions stay noisy in the
+   permissive mask instead of getting smoothed into filled blobs.
 4. Derives ``intensity_map = decay.sum(axis=-1)`` (the FLIM
    cross-layer-alignment rule lives at the call site, as called out in
    ``docs/solutions/logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md``).
@@ -51,7 +55,6 @@ import numpy as np
 
 from percell4.adapters.hdf5_store import Hdf5DatasetRepository
 from percell4.application.session import Session
-from percell4.application.use_cases.apply_wavelet import ApplyWavelet
 from percell4.application.use_cases.batch_compute_phasor import (
     BatchPhasorItemResult,
     BatchPhasorReport,
@@ -78,17 +81,8 @@ def _has_path(h5_path: Path, hdf5_path: str) -> bool:
         return False
 
 
-def _filtered_phasor_available(h5_path: Path, channel: str) -> bool:
-    """``g_filtered`` AND ``s_filtered`` both on disk for ``channel``."""
-    with h5py.File(h5_path, "r") as f:
-        return (
-            f"phasor/{channel}/g_filtered" in f
-            and f"phasor/{channel}/s_filtered" in f
-        )
-
-
 def _unfiltered_phasor_available(h5_path: Path, channel: str) -> bool:
-    """``g`` AND ``s`` both on disk for ``channel``."""
+    """``g`` AND ``s`` (unfiltered) both on disk for ``channel``."""
     with h5py.File(h5_path, "r") as f:
         return (
             f"phasor/{channel}/g" in f
@@ -235,10 +229,9 @@ def _process_one_dataset(
     skipped: dict[str, str] = {}
     errors: dict[str, str] = {}
 
-    # Lazily build the on-the-fly compute use cases — only matter when
+    # Lazily build the on-the-fly compute use case — only matters when
     # ``ensure_phasor`` is True AND at least one channel lacks phasor.
     phasor_uc: ComputePhasor | None = None
-    wavelet_uc: ApplyWavelet | None = None
 
     try:
         for channel in channels:
@@ -263,48 +256,32 @@ def _process_one_dataset(
                 skipped[channel] = "channel not present"
                 continue
 
-            # ── Resolve phasor source: prefer filtered, then unfiltered. ──
-            has_filtered = _filtered_phasor_available(h5_path, channel)
-            has_unfiltered = _unfiltered_phasor_available(h5_path, channel)
-
-            if not has_filtered and not has_unfiltered:
+            # ── Resolve phasor source: unfiltered g/s only. ──
+            # The manual recipe in the workflow's brainstorm is explicit
+            # about using the unfiltered phasor for both the GMM fit and
+            # the mask application. We never read the wavelet-filtered
+            # pair here even when it's on disk.
+            if not _unfiltered_phasor_available(h5_path, channel):
                 if not ensure_phasor:
                     skipped[channel] = "phasor not computed"
                     continue
-                # Compute on the fly. Build the use cases the first
-                # time we need them — keeps the common path (phasor
-                # already on disk) free of needless construction.
+                # Compute on the fly. Build the use case the first time
+                # we need it — keeps the common path (phasor already on
+                # disk) free of needless construction. The wavelet step
+                # is intentionally NOT invoked: the workflow reads
+                # unfiltered g/s.
                 if phasor_uc is None:
                     phasor_uc = ComputePhasor(repo, session)
-                    wavelet_uc = ApplyWavelet(repo, session)
                 try:
                     phasor_uc.execute(channel=channel, harmonic=1, view_bin=1)
                 except Exception as exc:  # noqa: BLE001 — per-channel isolation
                     errors[channel] = f"compute_phasor: {exc}"
                     continue
-                try:
-                    assert wavelet_uc is not None
-                    wavelet_uc.execute(
-                        channel=channel, filter_level=9, view_bin=1,
-                    )
-                    has_filtered = True
-                except Exception as exc:  # noqa: BLE001 — per-channel isolation
-                    # /phasor/<ch>/{g, s} landed but g_filtered didn't.
-                    # We can still proceed with the unfiltered pair.
-                    logger.debug(
-                        "apply_wavelet failed for %s/%s; falling back to unfiltered",
-                        h5_path, channel, exc_info=True,
-                    )
-                    has_unfiltered = True
 
             # ── Read phasor + decay. ──
             try:
-                if has_filtered:
-                    g_map = store.read_array(f"phasor/{channel}/g_filtered")
-                    s_map = store.read_array(f"phasor/{channel}/s_filtered")
-                else:
-                    g_map = store.read_array(f"phasor/{channel}/g")
-                    s_map = store.read_array(f"phasor/{channel}/s")
+                g_map = store.read_array(f"phasor/{channel}/g")
+                s_map = store.read_array(f"phasor/{channel}/s")
                 decay = store.read_decay(channel)
             except Exception as exc:  # noqa: BLE001
                 errors[channel] = f"read failed: {exc}"
