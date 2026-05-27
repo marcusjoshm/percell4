@@ -29,7 +29,10 @@ def stub_use_case(monkeypatch):
     """Capture args the CLI passes to batch_delete_resource."""
     calls: dict = {}
 
-    def fake_run(paths, *, kind, name, dry_run=False, progress_callback=None):
+    def fake_run(
+        paths, *, kind, name=None, all_resources=False,
+        dry_run=False, progress_callback=None,
+    ):
         from percell4.application.use_cases.batch_rename_resource import (
             BatchOperationReport,
             BatchOperationItemResult,
@@ -37,11 +40,13 @@ def stub_use_case(monkeypatch):
         calls["paths"] = list(paths)
         calls["kind"] = kind
         calls["name"] = name
+        calls["all_resources"] = all_resources
         calls["dry_run"] = dry_run
         items = []
         for p in paths:
+            processed = (name,) if name is not None else ("placeholder",)
             item = BatchOperationItemResult(
-                h5_path=Path(p), status="succeeded", processed=(name,),
+                h5_path=Path(p), status="succeeded", processed=processed,
             )
             items.append(item)
             if progress_callback is not None:
@@ -175,3 +180,75 @@ def test_end_to_end_delete_against_real_h5(tmp_path):
         assert "decay/ch0" not in f
         names = list(f["metadata"].attrs["channel_names"])
         assert names == []
+
+
+# ── --all flag ─────────────────────────────────────────────────────────
+
+
+def test_cli_all_flag_propagates(tmp_path, stub_use_case):
+    """``--all`` reaches the use case as ``all_resources=True`` and
+    ``name=None``."""
+    h5 = _make_h5_with_channel(tmp_path / "ds.h5")
+
+    exit_code = cli.main([str(h5), "--kind", "mask", "--all"])
+
+    assert exit_code == 0
+    assert stub_use_case["kind"] == "mask"
+    assert stub_use_case["name"] is None
+    assert stub_use_case["all_resources"] is True
+
+
+def test_cli_name_and_all_mutually_exclusive(tmp_path):
+    """``--name`` and ``--all`` together → argparse rejects."""
+    h5 = _make_h5_with_channel(tmp_path / "ds.h5")
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            str(h5), "--kind", "mask", "--name", "thresh", "--all",
+        ])
+    assert exc.value.code != 0
+
+
+def test_cli_requires_name_or_all(tmp_path):
+    """Neither ``--name`` nor ``--all`` → argparse rejects."""
+    h5 = _make_h5_with_channel(tmp_path / "ds.h5")
+    with pytest.raises(SystemExit) as exc:
+        cli.main([str(h5), "--kind", "channel"])
+    assert exc.value.code != 0
+
+
+def test_cli_help_lists_all_flag(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    out = capsys.readouterr().out
+    assert "--all" in out
+
+
+def test_cli_all_dry_run_flag_propagates(tmp_path, stub_use_case):
+    h5 = _make_h5_with_channel(tmp_path / "ds.h5")
+    cli.main([str(h5), "--kind", "segmentation", "--all", "--dry-run"])
+    assert stub_use_case["all_resources"] is True
+    assert stub_use_case["dry_run"] is True
+
+
+def test_end_to_end_all_channels_against_real_h5(tmp_path):
+    """End-to-end: 2 channels on disk, ``--all`` removes both."""
+    h5 = tmp_path / "ds.h5"
+    h5.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(h5, "w") as f:
+        meta = f.create_group("metadata")
+        meta.attrs["channel_names"] = ["ch0", "ch1"]
+        meta.attrs["flim_frequency_mhz"] = 80.0
+        for ch in ("ch0", "ch1"):
+            meta.attrs[f"flim_cal_phase_{ch}"] = 0.0
+            meta.attrs[f"flim_cal_mod_{ch}"] = 1.0
+        decay = f.create_group("decay")
+        for ch in ("ch0", "ch1"):
+            decay.create_dataset(ch, data=np.zeros((4, 4, 8), dtype=np.float32))
+
+    exit_code = cli.main([str(h5), "--kind", "channel", "--all"])
+
+    assert exit_code == 0
+    with h5py.File(h5, "r") as f:
+        assert list(f["metadata"].attrs["channel_names"]) == []
+        assert "decay/ch0" not in f
+        assert "decay/ch1" not in f

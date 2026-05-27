@@ -239,3 +239,115 @@ def test_invalid_kind_raises_value_error(tmp_path):
         batch_delete_resource(
             [a], kind="bogus", name="ch0",  # type: ignore[arg-type]
         )
+
+
+def test_neither_name_nor_all_raises_value_error(tmp_path):
+    """Caller must specify exactly one of ``name`` or ``all_resources``."""
+    a = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+    with pytest.raises(ValueError, match=r"name.*all_resources|all_resources.*name"):
+        batch_delete_resource([a], kind="channel")  # type: ignore[call-arg]
+
+
+def test_both_name_and_all_raises_value_error(tmp_path):
+    """Both ``name`` and ``all_resources`` together is rejected."""
+    a = _make_h5(tmp_path / "a.h5", channels=["ch0"])
+    with pytest.raises(ValueError, match=r"name.*all_resources|all_resources.*name"):
+        batch_delete_resource(
+            [a], kind="channel", name="ch0", all_resources=True,
+        )
+
+
+# ── --all behavior ──────────────────────────────────────────────────────
+
+
+def test_all_channels_deletes_every_channel(tmp_path):
+    """``all_resources=True`` for channels removes every entry in
+    ``channel_names`` plus its ``/decay/<name>`` and per-channel FLIM
+    calibration attrs."""
+    a = _make_h5(tmp_path / "a.h5", channels=["ch0", "ch1", "ch2"])
+
+    report = batch_delete_resource([a], kind="channel", all_resources=True)
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert set(item.processed) == {"ch0", "ch1", "ch2"}
+    with h5py.File(a, "r") as f:
+        assert list(f["metadata"].attrs["channel_names"]) == []
+        assert "decay/ch0" not in f
+        assert "decay/ch1" not in f
+        assert "decay/ch2" not in f
+        attrs = dict(f["metadata"].attrs)
+        for ch in ("ch0", "ch1", "ch2"):
+            assert f"flim_cal_phase_{ch}" not in attrs
+            assert f"flim_cal_mod_{ch}" not in attrs
+
+
+def test_all_masks_deletes_every_mask(tmp_path):
+    a = _make_h5(tmp_path / "a.h5", masks=["m0", "m1", "m2"])
+
+    report = batch_delete_resource([a], kind="mask", all_resources=True)
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert set(item.processed) == {"m0", "m1", "m2"}
+    with h5py.File(a, "r") as f:
+        assert "masks/m0" not in f
+        assert "masks/m1" not in f
+        assert "masks/m2" not in f
+
+
+def test_all_segmentations_deletes_every_label(tmp_path):
+    a = _make_h5(tmp_path / "a.h5", segs=["cp_mask", "manual_qc"])
+
+    report = batch_delete_resource(
+        [a], kind="segmentation", all_resources=True,
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert set(item.processed) == {"cp_mask", "manual_qc"}
+    with h5py.File(a, "r") as f:
+        assert "labels/cp_mask" not in f
+        assert "labels/manual_qc" not in f
+
+
+def test_all_on_dataset_with_no_resources_is_skipped(tmp_path):
+    """A dataset with zero resources of the given kind → skipped, not failed."""
+    a = _make_h5(tmp_path / "a.h5", channels=["ch0"])  # no masks
+
+    report = batch_delete_resource([a], kind="mask", all_resources=True)
+
+    item = report.items[0]
+    assert item.status == "skipped_no_changes"
+    assert item.processed == ()
+
+
+def test_all_dry_run_does_not_mutate(tmp_path):
+    a = _make_h5(tmp_path / "a.h5", masks=["m0", "m1"])
+
+    report = batch_delete_resource(
+        [a], kind="mask", all_resources=True, dry_run=True,
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert set(item.processed) == {"m0", "m1"}
+    # On-disk state unchanged.
+    with h5py.File(a, "r") as f:
+        assert "masks/m0" in f
+        assert "masks/m1" in f
+
+
+def test_all_across_two_files_aggregates(tmp_path):
+    a = _make_h5(tmp_path / "a.h5", masks=["m0", "m1"])
+    b = _make_h5(tmp_path / "b.h5", masks=["other"])
+
+    report = batch_delete_resource(
+        [a, b], kind="mask", all_resources=True,
+    )
+
+    a_item, b_item = report.items
+    assert a_item.status == "succeeded"
+    assert set(a_item.processed) == {"m0", "m1"}
+    assert b_item.status == "succeeded"
+    assert b_item.processed == ("other",)

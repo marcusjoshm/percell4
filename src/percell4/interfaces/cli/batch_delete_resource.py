@@ -1,18 +1,28 @@
-"""CLI adapter: delete one (kind, name) across .h5 datasets.
+"""CLI adapter: delete resources across .h5 datasets.
 
 Headless front-end for
 :func:`percell4.application.use_cases.batch_delete_resource.batch_delete_resource`.
 
 Usage:
+    # Delete one named resource per dataset.
     python -m percell4.interfaces.cli.batch_delete_resource dish_1.h5 dish_2.h5 \\
         --kind segmentation --name cellpose_qc
     python -m percell4.interfaces.cli.batch_delete_resource /scratch/dishes/ \\
         --kind mask --name thresh_488 --dry-run
 
+    # Delete EVERY resource of a kind in each dataset.
+    python -m percell4.interfaces.cli.batch_delete_resource /scratch/dishes/ \\
+        --kind mask --all --dry-run
+    python -m percell4.interfaces.cli.batch_delete_resource dish_1.h5 \\
+        --kind channel --all
+
 For each input .h5 (or every .h5 in a directory argument), the CLI
-deletes one ``(kind, name)`` pair. Datasets that don't have the
-resource are reported as skipped, not as failures. ``--dry-run``
-classifies exactly as a live run would but does not mutate any file.
+either deletes one ``(kind, name)`` pair (``--name``) or every
+resource of ``--kind`` present in that file (``--all``). The two
+flags are mutually exclusive; one is required. Datasets that don't
+have the resource (or any resources of the kind for ``--all``) are
+reported as skipped, not as failures. ``--dry-run`` classifies
+exactly as a live run would but does not mutate any file.
 
 Channels go through DatasetStore.delete_channel, which removes
 /decay/<name>, /phasor/<name>, the channel_names metadata entry, and
@@ -99,10 +109,21 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Resource kind to delete.",
     )
-    parser.add_argument(
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
         "--name",
-        required=True,
         help="Name of the resource to delete in each .h5.",
+    )
+    target_group.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Delete every resource of the given --kind found in each "
+            ".h5. Channels are enumerated from metadata.channel_names; "
+            "masks from /masks/*; segmentations from /labels/*. "
+            "Mutually exclusive with --name. Combine with --dry-run "
+            "to audit which resources will be removed before running."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -148,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         paths,
         kind=args.kind,
         name=args.name,
+        all_resources=args.all,
         dry_run=args.dry_run,
         progress_callback=cb,
     )
