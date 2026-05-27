@@ -25,7 +25,11 @@ import numpy as np
 import pytest
 
 from percell4.domain.segmentation.phasor_masks import (
+    PhasorEllipseFit,
+    PhasorEllipseMasks,
     PhasorEllipseMasksResult,
+    apply_ellipse_masks,
+    fit_phasor_ellipse,
     fit_phasor_ellipse_and_apply_masks,
 )
 
@@ -326,3 +330,241 @@ def test_pure_domain_no_forbidden_imports():
                   "from percell4.application.session",
                   "import percell4.application.session"):
         assert token not in text, f"forbidden import found: {token}"
+
+
+# ── new public function: fit_phasor_ellipse ─────────────────────────────
+
+
+def test_fit_phasor_ellipse_returns_phasorellipsefit_with_expected_fields():
+    """fit_phasor_ellipse returns a PhasorEllipseFit with center near the
+    seeded mean, positive radii, and sampled_pixels > 0 (not zero)."""
+    rng = np.random.default_rng(seed=10)
+    shape = (40, 40)
+    true_center = (0.5, 0.3)
+    g_map, s_map = _gaussian_blob(shape, true_center, (0.02, 0.02), rng)
+    intensity = np.full(shape, 100.0, dtype=np.float32)
+
+    fit = fit_phasor_ellipse(g_map, s_map, intensity, t_fit=10.0)
+
+    assert isinstance(fit, PhasorEllipseFit)
+    # Field-by-field assertion.
+    cx, cy = fit.center
+    assert abs(cx - true_center[0]) < 0.01
+    assert abs(cy - true_center[1]) < 0.01
+    assert fit.radii[0] > 0
+    assert fit.radii[1] > 0
+    assert isinstance(fit.angle_deg, float)
+    assert fit.sampled_pixels > 0
+    # All pixels are above t_fit at flat intensity 100 → sampled_pixels
+    # equals the pixel count.
+    assert fit.sampled_pixels == shape[0] * shape[1]
+
+
+def test_fit_phasor_ellipse_single_pixel_raises_degeneracy_guard():
+    """Single pixel above t_fit → ValueError with the documented msg."""
+    shape = (10, 10)
+    g_map = np.full(shape, np.nan, dtype=np.float32)
+    s_map = np.full(shape, np.nan, dtype=np.float32)
+    intensity = np.zeros(shape, dtype=np.float32)
+
+    g_map[3, 3] = 0.5
+    s_map[3, 3] = 0.3
+    intensity[3, 3] = 100.0
+
+    with pytest.raises(ValueError, match="degenerate fit \\(ellipse has zero area\\)"):
+        fit_phasor_ellipse(g_map, s_map, intensity, t_fit=10.0)
+
+
+def test_fit_phasor_ellipse_empty_subset_raises_value_error():
+    """All pixels below t_fit → ValueError propagated from
+    single_component_fit_phasor's empty-input check."""
+    rng = np.random.default_rng(seed=11)
+    shape = (10, 10)
+    g_map, s_map = _gaussian_blob(shape, (0.5, 0.3), (0.02, 0.02), rng)
+    intensity = np.zeros(shape, dtype=np.float32)
+
+    with pytest.raises(ValueError):
+        fit_phasor_ellipse(g_map, s_map, intensity, t_fit=10.0)
+
+
+# ── new public function: apply_ellipse_masks ────────────────────────────
+
+
+def test_apply_ellipse_masks_returns_two_field_dataclass():
+    """Hand-construct a PhasorEllipseFit + synthetic phasor + intensity.
+    Result is PhasorEllipseMasks(mask_a, mask_b); mask_a > mask_b when
+    t_mask_a < t_mask_b; no geometry / sampled_pixels fields."""
+    rng = np.random.default_rng(seed=12)
+    shape = (30, 30)
+    g_map, s_map = _gaussian_blob(shape, (0.5, 0.3), (0.02, 0.02), rng)
+    intensity = rng.uniform(0.0, 100.0, size=shape).astype(np.float32)
+
+    # Hand-construct a fit by picking field values directly.
+    fit = PhasorEllipseFit(
+        center=(0.5, 0.3),
+        radii=(0.05, 0.05),
+        angle_deg=0.0,
+        sampled_pixels=900,
+    )
+
+    masks = apply_ellipse_masks(
+        g_map, s_map, intensity, fit,
+        t_mask_a=10.0,
+        t_mask_b=50.0,
+    )
+
+    assert isinstance(masks, PhasorEllipseMasks)
+    # Pin the field surface: only mask_a and mask_b.
+    assert not hasattr(masks, "geometry")
+    assert not hasattr(masks, "sampled_pixels")
+
+    # t_mask_a < t_mask_b → mask_a has >= coverage than mask_b.
+    assert int(masks.mask_a.sum()) >= int(masks.mask_b.sum())
+    # And materially > 0 at this configuration.
+    assert int(masks.mask_a.sum()) > 0
+
+
+def test_apply_ellipse_masks_cross_dataset_uses_supplied_fit():
+    """Fit on distribution A (center near 0.3, 0.5), apply against
+    distribution B (center near 0.7, 0.4). B's resulting mask is sparse
+    because most of B's pixels lie outside A's ellipse."""
+    rng = np.random.default_rng(seed=13)
+    shape = (40, 40)
+
+    # Distribution A — fit on this one.
+    g_a, s_a = _gaussian_blob(shape, (0.3, 0.5), (0.01, 0.01), rng)
+    intensity_a = np.full(shape, 100.0, dtype=np.float32)
+    fit = fit_phasor_ellipse(g_a, s_a, intensity_a, t_fit=10.0)
+    # Sanity: the fit centers on A.
+    assert abs(fit.center[0] - 0.3) < 0.02
+    assert abs(fit.center[1] - 0.5) < 0.02
+
+    # Distribution B — apply against this one. Far from A.
+    g_b, s_b = _gaussian_blob(shape, (0.7, 0.4), (0.01, 0.01), rng)
+    intensity_b = np.full(shape, 100.0, dtype=np.float32)
+
+    masks_b = apply_ellipse_masks(
+        g_b, s_b, intensity_b, fit,
+        t_mask_a=0.0,
+        t_mask_b=0.0,
+    )
+
+    # B's mask using A's ellipse should be sparse — most of B's pixels
+    # lie outside A's small ellipse centered at (0.3, 0.5).
+    total = shape[0] * shape[1]
+    assert int(masks_b.mask_a.sum()) < total * 0.05
+    assert int(masks_b.mask_b.sum()) < total * 0.05
+
+
+def test_apply_ellipse_masks_t_mask_a_zero_no_intensity_filter():
+    """t_mask_a == 0 → mask_a equals the ellipse-only mask (no intensity
+    filter at the bottom)."""
+    from percell4.domain.flim.phasor import phasor_roi_to_mask
+
+    rng = np.random.default_rng(seed=14)
+    shape = (30, 30)
+    g_map, s_map = _gaussian_blob(shape, (0.5, 0.3), (0.02, 0.02), rng)
+    intensity = rng.uniform(0.0, 50.0, size=shape).astype(np.float32)
+
+    fit = PhasorEllipseFit(
+        center=(0.5, 0.3),
+        radii=(0.05, 0.05),
+        angle_deg=0.0,
+        sampled_pixels=500,
+    )
+
+    masks = apply_ellipse_masks(
+        g_map, s_map, intensity, fit,
+        t_mask_a=0.0,
+        t_mask_b=10.0,
+    )
+
+    ellipse_only = phasor_roi_to_mask(
+        g_map, s_map,
+        center=fit.center,
+        radii=fit.radii,
+        angle_rad=np.radians(fit.angle_deg),
+    )
+    np.testing.assert_array_equal(masks.mask_a.astype(bool), ellipse_only)
+
+
+def test_apply_ellipse_masks_nan_pixels_excluded():
+    """NaN pixels in g/s are excluded from both output masks regardless
+    of the supplied fit."""
+    rng = np.random.default_rng(seed=15)
+    shape = (20, 20)
+    g_map, s_map = _gaussian_blob(shape, (0.5, 0.3), (0.02, 0.02), rng)
+    intensity = np.full(shape, 100.0, dtype=np.float32)
+
+    # Punch a 5x5 hole of NaN in the middle.
+    g_map[5:10, 5:10] = np.nan
+    s_map[5:10, 5:10] = np.nan
+
+    fit = PhasorEllipseFit(
+        center=(0.5, 0.3),
+        radii=(0.1, 0.1),
+        angle_deg=0.0,
+        sampled_pixels=400,
+    )
+
+    masks = apply_ellipse_masks(
+        g_map, s_map, intensity, fit,
+        t_mask_a=0.0,
+        t_mask_b=50.0,
+    )
+
+    # NaN regions are zero in both masks.
+    assert int(masks.mask_a[5:10, 5:10].sum()) == 0
+    assert int(masks.mask_b[5:10, 5:10].sum()) == 0
+
+
+# ── integration ──────────────────────────────────────────────────────────
+
+
+def test_facade_composition_matches_standalone_calls():
+    """fit_phasor_ellipse_and_apply_masks returns PhasorEllipseMasksResult
+    whose geometry/sampled_pixels match the underlying fit and whose
+    mask_a/mask_b match what standalone apply_ellipse_masks produces."""
+    rng = np.random.default_rng(seed=16)
+    shape = (40, 40)
+    g_map, s_map = _gaussian_blob(shape, (0.5, 0.3), (0.02, 0.02), rng)
+    intensity = np.full(shape, 100.0, dtype=np.float32)
+
+    facade_result = fit_phasor_ellipse_and_apply_masks(
+        g_map, s_map, intensity,
+        t_fit=10.0,
+        t_mask_a=0.0,
+        t_mask_b=20.0,
+    )
+
+    fit = fit_phasor_ellipse(g_map, s_map, intensity, t_fit=10.0)
+    masks = apply_ellipse_masks(
+        g_map, s_map, intensity, fit,
+        t_mask_a=0.0,
+        t_mask_b=20.0,
+    )
+
+    assert isinstance(facade_result, PhasorEllipseMasksResult)
+    # geometry tuple = (center, radii, angle_deg).
+    assert facade_result.geometry == (fit.center, fit.radii, fit.angle_deg)
+    assert facade_result.sampled_pixels == fit.sampled_pixels
+    np.testing.assert_array_equal(facade_result.mask_a, masks.mask_a)
+    np.testing.assert_array_equal(facade_result.mask_b, masks.mask_b)
+
+
+def test_phasor_ellipse_fit_is_hashable_by_equality():
+    """PhasorEllipseFit must support value-equality so two fits with the
+    same field values compare equal — needed for U2's per-source cache."""
+    fit1 = PhasorEllipseFit(
+        center=(0.5, 0.3),
+        radii=(0.05, 0.05),
+        angle_deg=0.0,
+        sampled_pixels=900,
+    )
+    fit2 = PhasorEllipseFit(
+        center=(0.5, 0.3),
+        radii=(0.05, 0.05),
+        angle_deg=0.0,
+        sampled_pixels=900,
+    )
+    assert fit1 == fit2
