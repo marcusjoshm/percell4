@@ -148,7 +148,7 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 
 ## Command-line Tools
 
-PerCell4 ships several headless CLI tools for batch operations across `.h5` datasets. All of them install on `PATH` from `pip install -e .` (except `percell4-batch-export`, which is `python -m`-only — see below) and share these conventions:
+PerCell4 ships several headless CLI tools for batch operations across `.h5` datasets. All of them install on `PATH` from `pip install -e .` and share these conventions:
 
 - **Positional `paths`** accept one or more `.h5` files or directories. Directories are globbed non-recursively for `*.h5`.
 - **`--dry-run`** (where supported) classifies each dataset as a live run would but does not mutate files. Use it on destructive operations to audit what will change.
@@ -188,10 +188,10 @@ percell4-batch /scratch/tiffs/timelapse_a/ --output-dir /scratch/h5/ --gpu --cel
 
 ### `percell4-batch-export` — TIFF export
 
-Export dataset layers as TIFFs across one or more `.h5` files. **Module-only** — not registered on `PATH`; invoke as `python -m`. The GUI equivalent lives at `I/O` → **Export Images**.
+Export dataset layers as TIFFs across one or more `.h5` files. The GUI equivalent lives at `I/O` → **Export Images**.
 
 ```bash
-python -m percell4.interfaces.cli.batch_export PATHS --output-dir DIR [options]
+percell4-batch-export PATHS --output-dir DIR [options]
 ```
 
 For each dataset, writes one TIFF per intensity channel, per `/labels/<name>`, and per `/masks/<name>` into `--output-dir` using a flat `<h5_stem>_<layer>.tif` layout. Existing files with matching names are overwritten — point `--output-dir` at a fresh directory to preserve prior runs. Phasor, lifetime, and decay arrays are NOT exported.
@@ -207,10 +207,10 @@ Examples:
 
 ```bash
 # Native-resolution export of two datasets
-python -m percell4.interfaces.cli.batch_export dish_1.h5 dish_2.h5 --output-dir /tmp/exports
+percell4-batch-export dish_1.h5 dish_2.h5 --output-dir /tmp/exports
 
 # Every .h5 in a directory, downsampled to match the GUI's view-bin 4 lens
-python -m percell4.interfaces.cli.batch_export /scratch/dishes/ --output-dir ~/exports/ --view-bin 4
+percell4-batch-export /scratch/dishes/ --output-dir ~/exports/ --view-bin 4
 ```
 
 ### `percell4-batch-phasor` — compute phasor + wavelet filter
@@ -475,7 +475,7 @@ percell4-gui
 python main.py
 ```
 
-**Headless / SSH use.** The batch-export CLI (`python -m percell4.interfaces.cli.batch_export ...`) runs without any display. To launch the GUI over SSH you need X11 forwarding (`ssh -X` or `-Y`) or a virtual framebuffer (`xvfb-run -- percell4-gui`). For other distros, use your package manager's equivalents for `python3.12-venv` and the `libxcb-*` libraries; the rest of the flow is identical.
+**Headless / SSH use.** All `percell4-batch*` CLIs run without any display. To launch the GUI over SSH you need X11 forwarding (`ssh -X` or `-Y`) or a virtual framebuffer (`xvfb-run -- percell4-gui`). For other distros, use your package manager's equivalents for `python3.12-venv` and the `libxcb-*` libraries; the rest of the flow is identical.
 
 ### Windows
 
