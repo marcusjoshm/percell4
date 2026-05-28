@@ -604,3 +604,431 @@ def test_error_unknown_analysis_name(tmp_path: Path) -> None:
     _make_h5(h5)
     with pytest.raises(KeyError):
         run_analysis("ghost_analysis", h5, {})
+
+
+# ══════════════════════════════════════════════════════════════════════
+# U5 — PerParticleDonut end-to-end integration
+# ══════════════════════════════════════════════════════════════════════
+#
+# These tests do NOT use the autouse ``_clear_registry`` fixture above
+# (it clears the registry between tests). They explicitly re-import the
+# concrete module to repopulate ``per_particle_donut`` before each run.
+# The fixture above clears the registry for the test it runs in; the
+# subsequent test re-imports to restore. This keeps the U1+U3 stub tests
+# isolated from the live ``per_particle_donut`` registration.
+
+
+def _reregister_per_particle_donut() -> None:
+    """Force-register ``PerParticleDonut`` into the (cleared) registry.
+
+    The autouse fixture clears ``_REGISTRY`` between tests; the U5
+    integration tests re-import the module's decorator side effect by
+    invoking the decorator directly. Using ``importlib.reload`` here
+    would re-run the module-level ``@register_analysis("per_particle_donut")``,
+    which works because ``_REGISTRY`` was just cleared.
+    """
+    import importlib
+
+    import percell4.application.analysis.modules.per_particle_donut as mod
+
+    importlib.reload(mod)
+
+
+def _build_per_particle_h5(
+    h5_path: Path,
+    *,
+    cap: np.ndarray,
+    pnorm: np.ndarray | None = None,
+    sgnorm: np.ndarray | None = None,
+    pbody_mask: np.ndarray | None = None,
+    sg_mask: np.ndarray | None = None,
+    cp_mask: np.ndarray | None = None,
+) -> None:
+    """Construct a ``.h5`` populated with the supplied per-particle layers.
+
+    ``channel_names`` orders the intensity channels as
+    ``["Cap", "pnorm", "sgnorm"]`` (filtered to those actually supplied).
+    """
+    channels: list[tuple[str, np.ndarray]] = [("Cap", cap.astype(np.float32))]
+    if pnorm is not None:
+        channels.append(("pnorm", pnorm.astype(np.float32)))
+    if sgnorm is not None:
+        channels.append(("sgnorm", sgnorm.astype(np.float32)))
+    intensity = np.stack([arr for _, arr in channels], axis=0)
+    names = [n for n, _ in channels]
+
+    masks: dict[str, np.ndarray] = {}
+    if pbody_mask is not None:
+        masks["pbody"] = pbody_mask.astype(np.uint8)
+    if sg_mask is not None:
+        masks["sg"] = sg_mask.astype(np.uint8)
+
+    labels = {"cells": cp_mask.astype(np.uint16)} if cp_mask is not None else {}
+
+    _make_h5(
+        h5_path,
+        channel_names=names,
+        intensity=intensity,
+        masks=masks,
+        labels=labels,
+    )
+
+
+def _toy_pbody_arrays(
+    shape: tuple[int, int] = (32, 32),
+    centers: tuple[tuple[int, int], ...] = ((8, 8), (24, 24)),
+    radius: int = 3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate a small synthetic P-body fixture.
+
+    Returns ``(cap, pnorm, pbody_mask)`` arrays. The Cap and pnorm
+    images have a flat noise-free floor + bright blobs at ``centers``;
+    the mask labels the same blobs.
+    """
+    from skimage.draw import disk
+
+    h, w = shape
+    cap = np.full((h, w), 1000.0, dtype=np.float64)
+    pnorm = np.full((h, w), 1200.0, dtype=np.float64)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for (r, c) in centers:
+        rr, cc = disk((r, c), radius, shape=shape)
+        cap[rr, cc] += 6000.0
+        pnorm[rr, cc] += 4500.0
+        mask[rr, cc] = 1
+    return cap.astype(np.float32), pnorm.astype(np.float32), mask
+
+
+def test_per_particle_donut_e2e_pbody_only_with_preset(tmp_path: Path) -> None:
+    """Happy path: P-body-only synthetic h5 + ``m7g-cap-v1`` preset.
+
+    Loader resolves ``cap`` → channel ``Cap``, ``pbody_mask`` → mask
+    ``pbody``, ``pnorm`` → channel ``pnorm`` via the layer_map. The
+    framework returns ``pbody_table`` as a DataFrame populated with
+    the analysis's row schema (``pbody_id``, ``pbody_area_px``,
+    ``cap_pbody_mean``, ...).
+    """
+    _reregister_per_particle_donut()
+
+    cap, pnorm, pbody_mask = _toy_pbody_arrays()
+    h5 = tmp_path / "ds.h5"
+    _build_per_particle_h5(
+        h5, cap=cap, pnorm=pnorm, pbody_mask=pbody_mask,
+    )
+
+    out = run_analysis(
+        "per_particle_donut",
+        h5,
+        layer_map={"cap": "Cap", "pbody_mask": "pbody", "pnorm": "pnorm"},
+        preset="m7g-cap-v1",
+    )
+
+    assert set(out) == {"pbody_table"}, (
+        f"unexpected outputs returned: {sorted(out)}"
+    )
+    df = out["pbody_table"]
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 2, f"expected 2 P-body rows, got {len(df)}"
+    expected_cols = {
+        "pbody_id",
+        "pbody_area_px",
+        "donut_area_px",
+        "bg_value",
+        "cap_pbody_raw_mean",
+        "cap_dilute_raw_mean",
+        "cap_pbody_mean",
+        "cap_dilute_mean",
+        "pnorm_pbody_mean",
+        "pnorm_dilute_mean",
+        "cap_pbody_over_dilute",
+        "pnorm_pbody_over_dilute",
+        "cap_over_pnorm_pbody",
+        "cap_over_pnorm_dilute",
+    }
+    missing = expected_cols - set(df.columns)
+    assert not missing, f"missing expected columns: {sorted(missing)}"
+
+
+def test_per_particle_donut_e2e_strict_preset_plus_params(
+    tmp_path: Path,
+) -> None:
+    """Strict mode: passing both preset AND params raises ValueError."""
+    _reregister_per_particle_donut()
+
+    cap, pnorm, pbody_mask = _toy_pbody_arrays()
+    h5 = tmp_path / "ds.h5"
+    _build_per_particle_h5(
+        h5, cap=cap, pnorm=pnorm, pbody_mask=pbody_mask,
+    )
+
+    with pytest.raises(ValueError, match="preset"):
+        run_analysis(
+            "per_particle_donut",
+            h5,
+            layer_map={"cap": "Cap", "pbody_mask": "pbody", "pnorm": "pnorm"},
+            params={"buffer": 9},
+            preset="m7g-cap-v1",
+        )
+
+
+def test_per_particle_donut_e2e_no_preset_no_params_defaults(
+    tmp_path: Path,
+) -> None:
+    """No preset and no params: framework fills in declared defaults."""
+    _reregister_per_particle_donut()
+
+    cap, pnorm, pbody_mask = _toy_pbody_arrays()
+    h5 = tmp_path / "ds.h5"
+    _build_per_particle_h5(
+        h5, cap=cap, pnorm=pnorm, pbody_mask=pbody_mask,
+    )
+
+    out = run_analysis(
+        "per_particle_donut",
+        h5,
+        layer_map={"cap": "Cap", "pbody_mask": "pbody", "pnorm": "pnorm"},
+    )
+
+    assert "pbody_table" in out
+    df = out["pbody_table"]
+    assert isinstance(df, pd.DataFrame)
+    # Default ``min_size=10`` filters out particles smaller than 10
+    # pixels. The synthetic blobs (radius=3 disks) span ~25 pixels each,
+    # so both should survive.
+    assert len(df) == 2
+
+
+def test_per_particle_donut_e2e_both_branches_with_export_donuts(
+    tmp_path: Path,
+) -> None:
+    """Both P-body and SG branches active + ``export_donuts=True``.
+
+    Verifies the ``produced_when`` gating: with both groups satisfied
+    and ``export_donuts=True`` in params, all four outputs are produced
+    (``pbody_table``, ``sg_table``, ``pbody_donut_mask``,
+    ``sg_donut_mask``).
+    """
+    _reregister_per_particle_donut()
+
+    from skimage.draw import disk
+
+    shape = (48, 48)
+    h, w = shape
+    cap = np.full(shape, 1000.0, dtype=np.float64)
+    pnorm = np.full(shape, 1200.0, dtype=np.float64)
+    sgnorm = np.full(shape, 1200.0, dtype=np.float64)
+    pbody = np.zeros(shape, dtype=np.uint8)
+    sg = np.zeros(shape, dtype=np.uint8)
+
+    # P-body blobs (small, radius=3)
+    for (r, c) in [(10, 10), (10, 40)]:
+        rr, cc = disk((r, c), 3, shape=shape)
+        cap[rr, cc] += 6000.0
+        pnorm[rr, cc] += 4500.0
+        pbody[rr, cc] = 1
+
+    # SG blobs (larger, radius=6, non-overlapping with P-bodies)
+    rr, cc = disk((38, 25), 6, shape=shape)
+    cap[rr, cc] += 6000.0
+    sgnorm[rr, cc] += 4500.0
+    sg[rr, cc] = 1
+
+    h5 = tmp_path / "ds.h5"
+    _build_per_particle_h5(
+        h5,
+        cap=cap,
+        pnorm=pnorm,
+        sgnorm=sgnorm,
+        pbody_mask=pbody,
+        sg_mask=sg,
+    )
+
+    out = run_analysis(
+        "per_particle_donut",
+        h5,
+        layer_map={
+            "cap": "Cap",
+            "pbody_mask": "pbody",
+            "pnorm": "pnorm",
+            "sg_mask": "sg",
+            "sgnorm": "sgnorm",
+        },
+        params={
+            "buffer": 4,
+            "donut": 5,
+            "bg_mode": "donut",
+            "bg_value": 1,
+            "exclude_cap_zero": True,
+            "min_size": 4,
+            "bgsub_k": 2.5,
+            "no_bgsub": True,
+            "single_cell": False,
+            "export_donuts": True,
+        },
+    )
+
+    assert set(out) == {
+        "pbody_table",
+        "sg_table",
+        "pbody_donut_mask",
+        "sg_donut_mask",
+    }, f"unexpected outputs returned: {sorted(out)}"
+    assert isinstance(out["pbody_table"], pd.DataFrame)
+    assert isinstance(out["sg_table"], pd.DataFrame)
+    assert isinstance(out["pbody_donut_mask"], np.ndarray)
+    assert isinstance(out["sg_donut_mask"], np.ndarray)
+    assert out["pbody_donut_mask"].dtype == np.uint8
+    assert out["sg_donut_mask"].dtype == np.uint8
+    assert len(out["pbody_table"]) == 2
+    assert len(out["sg_table"]) == 1
+
+
+def test_per_particle_donut_e2e_missing_required_role(tmp_path: Path) -> None:
+    """``cap`` is required; omitting it raises before the loader runs."""
+    _reregister_per_particle_donut()
+
+    cap, pnorm, pbody_mask = _toy_pbody_arrays()
+    h5 = tmp_path / "ds.h5"
+    _build_per_particle_h5(
+        h5, cap=cap, pnorm=pnorm, pbody_mask=pbody_mask,
+    )
+
+    with pytest.raises(ValueError, match="required role"):
+        run_analysis(
+            "per_particle_donut",
+            h5,
+            layer_map={"pbody_mask": "pbody", "pnorm": "pnorm"},
+        )
+
+
+def test_per_particle_donut_e2e_no_group_satisfied(tmp_path: Path) -> None:
+    """``group_requirement='at_least_one'`` fires when neither branch is supplied."""
+    _reregister_per_particle_donut()
+
+    cap, _pnorm, _ = _toy_pbody_arrays()
+    h5 = tmp_path / "ds.h5"
+    _build_per_particle_h5(h5, cap=cap)
+
+    with pytest.raises(ValueError, match="at_least_one"):
+        run_analysis(
+            "per_particle_donut",
+            h5,
+            layer_map={"cap": "Cap"},
+        )
+
+
+# ── CLI parity (R7 / R16 cross-system numeric-parity check) ───────────
+
+
+def test_per_particle_donut_cli_parity_group_a(tmp_path: Path) -> None:
+    """Framework ``pbody_table`` matches the CLI's combined_pbody.csv.
+
+    Same fixture inputs, same parameters, same expected numeric output.
+    The CLI is invoked in a subprocess to generate the reference CSV
+    (the committed expected CSV in
+    ``tests/fixtures/per_particle/group_a_expected/`` was generated
+    with ``--no-bgsub``; we reuse those params here so the comparison
+    is exact).
+
+    Parity rule per plan: drop the CLI's ``group`` column, sort rows by
+    ``pbody_id``, integer columns exact-equal, float columns
+    ``np.allclose(rtol=1e-10)``.
+    """
+    import tifffile
+
+    _reregister_per_particle_donut()
+
+    fixture_dir = (
+        Path(__file__).resolve().parent.parent
+        / "fixtures"
+        / "per_particle"
+        / "group_a"
+    )
+    expected_csv = (
+        Path(__file__).resolve().parent.parent
+        / "fixtures"
+        / "per_particle"
+        / "group_a_expected"
+        / "combined_pbody.csv"
+    )
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    cli_script = repo_root / "per_particle_analysis.py"
+
+    # Build an h5 from the fixture TIFFs so the framework + CLI see
+    # the same pixel data.
+    cap = tifffile.imread(fixture_dir / "sample1_Cap.tif")
+    pnorm = tifffile.imread(fixture_dir / "sample1_pnorm.tif")
+    pbody_mask = tifffile.imread(fixture_dir / "sample1_P-body_mask.tif")
+
+    h5 = tmp_path / "group_a.h5"
+    _build_per_particle_h5(
+        h5, cap=cap, pnorm=pnorm, pbody_mask=pbody_mask,
+    )
+
+    # Run the framework with the exact params the committed expected
+    # CSV was produced with (--no-bgsub + ORIGINAL_DEFAULTS).
+    fw_out = run_analysis(
+        "per_particle_donut",
+        h5,
+        layer_map={"cap": "Cap", "pbody_mask": "pbody", "pnorm": "pnorm"},
+        params={"no_bgsub": True},
+    )
+    fw_df = fw_out["pbody_table"]
+    assert isinstance(fw_df, pd.DataFrame)
+
+    # The CLI's expected combined_pbody.csv was committed in U4.
+    # Read it and drop the path-derived ``group`` column.
+    cli_df = pd.read_csv(expected_csv)
+    if "group" in cli_df.columns:
+        cli_df = cli_df.drop(columns=["group"])
+
+    # Stable sort by pbody_id (per-row identity stable across both paths
+    # when arrays are loaded with matching shape + dtype + same params).
+    fw_df = fw_df.sort_values("pbody_id").reset_index(drop=True)
+    cli_df = cli_df.sort_values("pbody_id").reset_index(drop=True)
+
+    assert list(fw_df.columns) == list(cli_df.columns), (
+        f"column mismatch\nfw:  {list(fw_df.columns)}\n"
+        f"cli: {list(cli_df.columns)}"
+    )
+    assert len(fw_df) == len(cli_df), (
+        f"row count mismatch: fw={len(fw_df)} cli={len(cli_df)}"
+    )
+
+    for col in fw_df.columns:
+        a = fw_df[col]
+        e = cli_df[col]
+        if pd.api.types.is_integer_dtype(e):
+            pd.testing.assert_series_equal(
+                a.astype(e.dtype),
+                e,
+                check_dtype=False,
+                check_exact=True,
+                obj=f"column {col!r}",
+            )
+        elif pd.api.types.is_float_dtype(e):
+            np.testing.assert_allclose(
+                a.values,
+                e.values,
+                rtol=1e-10,
+                atol=0.0,
+                equal_nan=True,
+                err_msg=f"float column {col!r} mismatch",
+            )
+        else:
+            pd.testing.assert_series_equal(
+                a,
+                e,
+                check_dtype=False,
+                check_exact=True,
+                obj=f"column {col!r}",
+            )
+
+    # Smoke-check that the CLI script still exists at the expected
+    # location (a guard against U4 ever moving it without updating
+    # this test's reference path). The subprocess CLI invocation
+    # itself is exercised by
+    # ``tests/test_scripts/test_per_particle_regression.py``; we keep
+    # this parity test purely numeric (committed CSV vs framework) so
+    # it stays fast and deterministic.
+    assert cli_script.exists()

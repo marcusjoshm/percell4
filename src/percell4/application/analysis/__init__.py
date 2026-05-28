@@ -8,6 +8,11 @@ under :mod:`percell4.application.analysis.modules` (added in U5).
 Plan: ``docs/plans/2026-05-27-004-feat-analysis-integration-plan.md``.
 """
 
+# Importing the concrete-module package fires each module's
+# ``@register_analysis`` decorator and populates the registry.
+from percell4.application.analysis.modules import (
+    per_particle_donut,  # noqa: F401  # registers @register_analysis side effect
+)
 from percell4.application.analysis.registry import (
     AnalysisInfo,
     get,
@@ -15,10 +20,6 @@ from percell4.application.analysis.registry import (
     register_analysis,
     validate_schema,
 )
-
-# TODO U5: import the concrete module(s) here to fire the
-# @register_analysis decorator at package-import time. e.g.
-#     from percell4.application.analysis.modules import per_particle_donut  # noqa: F401
 
 __all__ = [
     "AnalysisInfo",
