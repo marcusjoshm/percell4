@@ -315,16 +315,75 @@ class LauncherWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setAlignment(Qt.AlignTop)
         layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
 
         layout.addWidget(theme.section_label("Scripts"))
 
-        btn_run = QPushButton("Run Script...")
-        btn_run.clicked.connect(self._on_run_script)
-        layout.addWidget(btn_run)
+        # Importing the analysis package fires every module's
+        # @register_analysis side effect. Importing the dialog module
+        # late-binds PerParticleDonut.dialog_class = PerParticleDonutDialog
+        # so the click handler can read it generically below.
+        from percell4.application.analysis import list_analyses
+        from percell4.gui import per_particle_donut_dialog  # noqa: F401
 
-        layout.addWidget(self._placeholder("Macro System"))
+        entries = list_analyses()
+        if not entries:
+            layout.addWidget(QLabel("No analyses registered."))
+            layout.addStretch()
+            return panel
+
+        for info in entries:
+            btn = QPushButton(info.display_name)
+            if info.description:
+                btn.setToolTip(info.description)
+            btn.clicked.connect(
+                lambda _checked=False, name=info.name: self._on_open_analysis(name)
+            )
+            layout.addWidget(btn)
+
         layout.addStretch()
         return panel
+
+    def _on_open_analysis(self, analysis_name: str) -> None:
+        """Open the dialog registered with ``analysis_name``.
+
+        Reentrance-guarded against ``is_workflow_locked``. The analysis
+        class declares its own ``dialog_class`` (set externally by the
+        GUI-layer module). On accept, ``last_run_folder`` is read from the
+        dialog and surfaced in the status bar.
+        """
+        if self.is_workflow_locked:
+            self.statusBar().showMessage(
+                "A workflow is already running — click Cancel to stop it first."
+            )
+            return
+
+        from percell4.application.analysis import get as registry_get
+        from percell4.gui import per_particle_donut_dialog  # noqa: F401
+
+        try:
+            cls = registry_get(analysis_name)
+        except KeyError:
+            self.statusBar().showMessage(
+                f"Analysis {analysis_name!r} is not registered."
+            )
+            return
+        if cls.dialog_class is None:
+            self.statusBar().showMessage(
+                f"{cls.display_name} has no dialog yet."
+            )
+            return
+
+        dialog = cls.dialog_class(parent=self)
+        try:
+            dialog.exec_()
+            run_folder = getattr(dialog, "last_run_folder", None)
+            if run_folder is not None:
+                self.statusBar().showMessage(
+                    f"Analysis run complete — output at {run_folder}"
+                )
+        finally:
+            dialog.deleteLater()
 
     def _create_workflows_panel(self) -> QWidget:
         panel = QWidget()
@@ -1508,13 +1567,6 @@ class LauncherWindow(QMainWindow):
     # ── Analysis + FLIM handlers moved to task panels ──────
     # See: interfaces/gui/task_panels/analysis_panel.py
     # See: interfaces/gui/task_panels/flim_panel.py
-
-    def _on_run_script(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Python Script", "", "Python Files (*.py);;All Files (*)"
-        )
-        if path:
-            self.statusBar().showMessage(f"Run script: {path} — not yet implemented")
 
     def _on_export_csv(self) -> None:
         if self.data_model.df.empty:
