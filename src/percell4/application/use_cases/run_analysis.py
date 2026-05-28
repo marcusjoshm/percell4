@@ -30,6 +30,8 @@ Plan: ``docs/plans/2026-05-27-004-feat-analysis-integration-plan.md``.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +56,9 @@ def run_analysis(
     layer_map: dict[str, str],
     params: dict[str, Any] | None = None,
     preset: str | None = None,
+    *,
+    log: Callable[[str], None] | None = None,
+    set_label: str | None = None,
 ) -> dict[str, Any]:
     """Execute a single registered analysis against one ``.h5`` file.
 
@@ -75,6 +80,14 @@ def run_analysis(
         params come verbatim from ``cls.presets[preset]``, with any
         unspecified parameters filled in from their declared
         ``default``.
+    log:
+        Optional progress sink (e.g. ``print``) forwarded to the
+        analysis's ``run()``. When ``None`` (the default) the run is
+        silent. Analyses that emit progress stream human-readable lines
+        through it as they run.
+    set_label:
+        Name used for the dataset in progress lines. Defaults to the
+        ``.h5`` file stem when ``None``.
 
     Returns
     -------
@@ -147,8 +160,16 @@ def run_analysis(
     # 8. Load arrays.
     arrays = load_layers(h5_path, layer_map, roles_dict)
 
-    # 9. Run.
-    outputs = cls().run(arrays, resolved)
+    # 9. Run. Pass the optional progress kwargs only when this analysis's
+    # ``run()`` actually accepts them — the base contract lets a subclass
+    # that emits no progress keep the plain ``(inputs, params)`` signature.
+    run_callable = cls().run
+    run_kwargs = _accepted_progress_kwargs(
+        run_callable,
+        log=log,
+        set_label=h5_path.stem if set_label is None else set_label,
+    )
+    outputs = run_callable(arrays, resolved, **run_kwargs)
 
     # 10. Compute the produced set.
     produced = {
@@ -193,6 +214,39 @@ def run_analysis(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+
+def _accepted_progress_kwargs(
+    run_callable: Callable[..., Any],
+    *,
+    log: Callable[[str], None] | None,
+    set_label: str,
+) -> dict[str, Any]:
+    """Return the subset of ``{log, set_label}`` that ``run_callable`` accepts.
+
+    The :class:`Analysis` base declares ``log`` / ``set_label`` as
+    keyword-only progress parameters, but documents that a subclass that
+    emits no progress may omit them. Passing them unconditionally would
+    raise ``TypeError`` against such a ``run()``; so we inspect the
+    signature and forward each only when it is named explicitly or the
+    callee declares ``**kwargs``.
+    """
+    try:
+        params = inspect.signature(run_callable).parameters
+    except (TypeError, ValueError):
+        # Builtins / C callables without a signature — assume the strict
+        # 2-arg contract and forward nothing.
+        return {}
+
+    accepts_var_kw = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    kwargs: dict[str, Any] = {}
+    if accepts_var_kw or "log" in params:
+        kwargs["log"] = log
+    if accepts_var_kw or "set_label" in params:
+        kwargs["set_label"] = set_label
+    return kwargs
 
 
 def _collect_roles(cls: type[Analysis]) -> dict[str, ImageRole]:

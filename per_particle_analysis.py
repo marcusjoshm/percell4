@@ -348,8 +348,6 @@ def main():
         sgnorm_img = tifffile.imread(channels['sgnorm']) if has_sg else None
         cp_mask_img = tifffile.imread(channels['cp_mask']) if args.single_cell else None
 
-        print(f"Analyzing image set: {group_key}")
-
         result = run_one_image_set(
             cap=cap_img,
             pbody_mask=pbody_mask_img, pnorm=pnorm_img,
@@ -362,6 +360,7 @@ def main():
             bgsub_k=args.bgsub_k, no_bgsub=args.no_bgsub,
             single_cell=args.single_cell,
             export_donuts=args.export_donuts,
+            set_label=group_key, log=print,
         )
 
         # ---- Write optional donut TIFFs ----

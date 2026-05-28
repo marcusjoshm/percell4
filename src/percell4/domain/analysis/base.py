@@ -13,6 +13,7 @@ layer assigns it externally (see plan U7).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, ClassVar, Literal
 
 from numpy.typing import NDArray
@@ -72,6 +73,9 @@ class Analysis:
         self,
         inputs: dict[str, NDArray],
         params: dict[str, Any],
+        *,
+        log: Callable[[str], None] | None = None,
+        set_label: str = "",
     ) -> dict[str, Any]:
         """Pure analysis logic.
 
@@ -81,6 +85,14 @@ class Analysis:
         explicit). Returns a dict keyed by declared output name; only
         outputs whose ``produced_when`` predicate evaluated to True are
         expected.
+
+        ``log`` is an optional progress sink (e.g. ``print``). When
+        ``None`` (the default) the run is silent; when provided, the
+        analysis may stream human-readable progress lines through it.
+        ``set_label`` names the dataset/image set being processed and is
+        used only in those progress lines. Both are keyword-only so a
+        subclass that does not emit progress can simply omit them from
+        its override signature.
         """
         raise NotImplementedError(
             f"{type(self).__name__}.run() is not implemented; subclasses "

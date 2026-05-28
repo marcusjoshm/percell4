@@ -53,6 +53,7 @@ def batch_run_analysis(
     preset: str | None = None,
     progress_callback: Callable[[BatchAnalysisItemResult, int, int], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> BatchAnalysisReport:
     """Run ``analysis_name`` over each path in ``h5_paths`` with isolation.
 
@@ -64,6 +65,11 @@ def batch_run_analysis(
     Returns a :class:`BatchAnalysisReport` and persists a run folder
     under ``output_parent``. The folder always exists on a successful
     return — even if every item failed.
+
+    ``log`` is an optional progress sink (e.g. ``print``). When
+    provided, a per-dataset banner is emitted and the same per-step
+    progress the CLI streams is forwarded from each analysis's
+    ``run()``. When ``None`` (the default) the batch is silent.
     """
     if not h5_paths:
         raise ValueError("batch_run_analysis requires at least one h5_path")
@@ -102,6 +108,10 @@ def batch_run_analysis(
 
         layer_maps_per_dataset[path.stem] = dict(layer_map)
 
+        if log is not None:
+            log(f"\n=== {analysis_name}: {path.stem} "
+                f"({idx + 1}/{len(h5_paths)}) ===")
+
         try:
             outputs = run_analysis(
                 analysis_name,
@@ -109,6 +119,8 @@ def batch_run_analysis(
                 layer_map,
                 params=params,
                 preset=preset,
+                log=log,
+                set_label=path.stem,
             )
         except Exception as exc:
             item = BatchAnalysisItemResult(

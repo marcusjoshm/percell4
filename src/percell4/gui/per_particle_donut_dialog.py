@@ -671,6 +671,7 @@ class PerParticleDonutDialog(QDialog):
                 preset=preset,
                 progress_callback=on_progress,
                 cancel_check=cancel_check,
+                log=print,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("per-particle donut analysis raised")

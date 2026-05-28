@@ -24,7 +24,7 @@ References:
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -38,7 +38,8 @@ from skimage import measure
 # ---------------------------------------------------------------------------
 
 
-def _estimate_bg_hwhm(flat: np.ndarray, k_sigma: float
+def _estimate_bg_hwhm(flat: np.ndarray, k_sigma: float,
+                      log: Callable[[str], None] | None = None
                       ) -> tuple[float, float, float]:
     """Fallback background estimator for low-signal images.
 
@@ -62,10 +63,14 @@ def _estimate_bg_hwhm(flat: np.ndarray, k_sigma: float
 
     mu = mode_val
     threshold = mu + k_sigma * sigma
+    if log is not None:
+        log(f"  [bg-fallback HWHM] mode={mu:.1f}, sigma={sigma:.1f}, "
+            f"threshold={threshold:.1f}")
     return threshold, mu, sigma
 
 
-def estimate_bg_threshold(cap_img: np.ndarray, k_sigma: float = 2.5
+def estimate_bg_threshold(cap_img: np.ndarray, k_sigma: float = 2.5,
+                          log: Callable[[str], None] | None = None
                           ) -> tuple[float, float, float]:
     """Estimate a background threshold by fitting a Gaussian to the
     background peak of the Cap image.
@@ -81,7 +86,7 @@ def estimate_bg_threshold(cap_img: np.ndarray, k_sigma: float = 2.5
         bins = np.arange(0, np.percentile(flat, 75), 5)
 
     if len(bins) < 3:
-        return _estimate_bg_hwhm(flat, k_sigma)
+        return _estimate_bg_hwhm(flat, k_sigma, log)
 
     hist, edges = np.histogram(flat, bins=bins)
     centers = (edges[:-1] + edges[1:]) / 2
@@ -95,7 +100,7 @@ def estimate_bg_threshold(cap_img: np.ndarray, k_sigma: float = 2.5
 
     fit_range = centers <= mode_val * 2.5
     if np.sum(fit_range) < 4:
-        return _estimate_bg_hwhm(flat, k_sigma)
+        return _estimate_bg_hwhm(flat, k_sigma, log)
 
     try:
         popt, _ = curve_fit(
@@ -104,7 +109,7 @@ def estimate_bg_threshold(cap_img: np.ndarray, k_sigma: float = 2.5
             maxfev=10000,
         )
     except (TypeError, RuntimeError):
-        return _estimate_bg_hwhm(flat, k_sigma)
+        return _estimate_bg_hwhm(flat, k_sigma, log)
 
     mu, sigma = popt[1], abs(popt[2])
     threshold = mu + k_sigma * sigma
@@ -121,7 +126,8 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
                     bg_mode: str, flat_bg_value: int, min_size: int,
                     exclude_cap_zero: bool = True,
                     region_label: str = 'pbody', norm_label: str = 'pnorm',
-                    capture_donut_mask: bool = False
+                    capture_donut_mask: bool = False,
+                    log: Callable[[str], None] | None = None
                     ) -> dict[str, Any]:
     """Analyze one set of regions (P-bodies or SGs) and return per-particle
     measurements plus, optionally, the union donut mask.
@@ -167,6 +173,16 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
         region_ids = np.array(
             [rid for rid in region_ids if props_by_id[rid].area > min_size]
         )
+
+    if log is not None:
+        if bg_mode == 'flat':
+            bg_label_str = f"flat={flat_bg_value}"
+        elif bg_mode == 'donut-mean':
+            bg_label_str = "donut-mean-estimated"
+        else:
+            bg_label_str = "donut-median-estimated"
+        log(f"  Found {len(region_ids)} {region_label}s > {min_size} px "
+            f"(bg: {bg_label_str})")
 
     h, w = mask_img.shape
     pad = buffer_px + donut_px + 1
@@ -482,6 +498,8 @@ def run_one_image_set(
     no_bgsub: bool,
     single_cell: bool,
     export_donuts: bool,
+    set_label: str = "",
+    log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run the donut-background-subtraction analysis on one image set.
 
@@ -505,6 +523,15 @@ def run_one_image_set(
     buffer, donut, bg_mode, bg_value, exclude_cap_zero, min_size,
     bgsub_k, no_bgsub, single_cell, export_donuts
         See the CLI's argparse help; semantics are preserved verbatim.
+    set_label : str
+        Name of the image set, used only in progress messages (the
+        ``{group_key}`` in the original CLI output). Ignored when
+        ``log`` is ``None``.
+    log : callable | None
+        Optional sink for streaming progress lines (e.g. ``print``).
+        When ``None`` (the default, and the framework path) the function
+        is silent and side-effect-free. When provided, it receives the
+        same per-step messages the original CLI streamed as it ran.
 
     Returns
     -------
@@ -533,7 +560,14 @@ def run_one_image_set(
     # Float-coerce + global Cap background subtraction (NaN-mask low signal).
     cap_img = cap.astype(np.float64, copy=True)
     if not no_bgsub:
-        bg_thresh, _, _ = estimate_bg_threshold(cap_img, bgsub_k)
+        bg_thresh, bg_mu, bg_sig = estimate_bg_threshold(cap_img, bgsub_k, log)
+        if log is not None:
+            n_masked = int(np.sum(cap_img < bg_thresh))
+            pct_masked = n_masked / cap_img.size * 100
+            log(f"  Background subtraction for {set_label}: "
+                f"mu={bg_mu:.1f}, sigma={bg_sig:.1f}, "
+                f"threshold={bg_thresh:.0f} (mu+{bgsub_k}*sigma), "
+                f"{n_masked} px ({pct_masked:.1f}%) set to NaN")
         cap_img[cap_img < bg_thresh] = np.nan
 
     pbody_rows: list[dict[str, Any]] | None = None
@@ -543,6 +577,8 @@ def run_one_image_set(
 
     # --- SG analysis (uses bg-subtracted Cap, no SG exclusion) ---
     if has_sg:
+        if log is not None:
+            log(f"Analyzing SGs: {set_label}")
         sgnorm_img = sgnorm.astype(np.float64, copy=False)
         sg_result = analyze_regions(
             mask_img=sg_mask, cap_img=cap_img, norm_img=sgnorm_img,
@@ -550,7 +586,7 @@ def run_one_image_set(
             flat_bg_value=bg_value, min_size=min_size,
             exclude_cap_zero=exclude_cap_zero,
             region_label='sg', norm_label='sgnorm',
-            capture_donut_mask=export_donuts,
+            capture_donut_mask=export_donuts, log=log,
         )
         sg_particle_rows = sg_result["rows"]
         if export_donuts:
@@ -564,6 +600,8 @@ def run_one_image_set(
                 sg_particle_rows, particle_to_cell, cp_mask,
                 'sg', 'sgnorm',
             )
+            if log is not None:
+                log(f"  Single-cell SG: {len(sg_rows)} cells aggregated")
         else:
             sg_rows = sg_particle_rows
 
@@ -573,6 +611,12 @@ def run_one_image_set(
         if has_sg:
             sg_inside = sg_mask > 0
             cap_for_pbody[sg_inside] = np.nan
+            if log is not None:
+                n_excluded = int(sg_inside.sum())
+                log(f"Analyzing P-bodies (SG-excluded): {set_label} "
+                    f"({n_excluded} Cap pixels inside SG_mask set to NaN)")
+        elif log is not None:
+            log(f"Analyzing P-bodies: {set_label}")
 
         pnorm_img = pnorm.astype(np.float64, copy=False)
         pbody_result = analyze_regions(
@@ -581,7 +625,7 @@ def run_one_image_set(
             flat_bg_value=bg_value, min_size=min_size,
             exclude_cap_zero=exclude_cap_zero,
             region_label='pbody', norm_label='pnorm',
-            capture_donut_mask=export_donuts,
+            capture_donut_mask=export_donuts, log=log,
         )
         pbody_particle_rows = pbody_result["rows"]
         if export_donuts:
@@ -595,6 +639,9 @@ def run_one_image_set(
                 pbody_particle_rows, particle_to_cell, cp_mask,
                 'pbody', 'pnorm',
             )
+            if log is not None:
+                log(f"  Single-cell P-body: {len(pbody_rows)} cells "
+                    f"aggregated")
         else:
             pbody_rows = pbody_particle_rows
 

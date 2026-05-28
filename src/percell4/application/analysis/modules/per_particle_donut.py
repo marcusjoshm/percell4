@@ -15,6 +15,7 @@ unit U5.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -245,6 +246,9 @@ class PerParticleDonut(Analysis):
         self,
         inputs: dict[str, NDArray],
         params: dict[str, Any],
+        *,
+        log: Callable[[str], None] | None = None,
+        set_label: str = "",
     ) -> dict[str, Any]:
         """Dispatch to :func:`run_one_image_set` and pack the result.
 
@@ -252,6 +256,11 @@ class PerParticleDonut(Analysis):
         the layer map (required + supplied optional + supplied group
         roles). Optional/group roles are passed through ``inputs.get``
         so an absent role becomes ``None`` for the pure function.
+
+        ``log`` and ``set_label`` are forwarded to the pure core so the
+        same per-step progress the CLI streams (background subtraction,
+        per-branch particle counts, single-cell aggregation) is emitted
+        when a sink is supplied. They default to silent.
         """
         result = run_one_image_set(
             cap=inputs["cap"],
@@ -260,6 +269,8 @@ class PerParticleDonut(Analysis):
             sg_mask=inputs.get("sg_mask"),
             sgnorm=inputs.get("sgnorm"),
             cp_mask=inputs.get("cp_mask"),
+            set_label=set_label,
+            log=log,
             **params,
         )
 
