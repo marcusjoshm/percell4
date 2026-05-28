@@ -10,6 +10,11 @@ Modes (determined automatically per image set by available files):
                   P-body analysis first excludes Cap pixels inside SG_mask
                   (set to NaN) because P-bodies embedded in stress granules
                   cannot be reliably quantified.
+
+This CLI is the thin I/O wrapper around the pure analysis core at
+``percell4.domain.analysis._impl.per_particle_donut.run_one_image_set``.
+The framework's registered ``PerParticleDonut`` analysis (U5) calls
+the same pure core; both paths share one source of truth for the math.
 """
 from __future__ import annotations
 
@@ -25,98 +30,20 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 import tifffile
-from scipy.ndimage import distance_transform_edt
-from scipy.optimize import curve_fit
-from skimage import measure
+
+# Make sure the percell4 package is importable when invoking the script
+# from the repo root without an editable install.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.join(_REPO_ROOT, "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+from percell4.domain.analysis._impl.per_particle_donut import (  # noqa: E402
+    run_one_image_set,
+)
 
 
 CHANNELS = ['P-body_mask', 'SG_mask', 'Cap', 'pnorm', 'sgnorm', 'cp_mask']
-
-
-def _estimate_bg_hwhm(flat, k_sigma):
-    """Fallback background estimator for low-signal images.
-
-    Uses unit-width histogram bins to find the mode, then derives sigma from
-    the half-width at half-maximum (HWHM) of the background peak.
-    """
-    upper = max(np.percentile(flat, 75), 20)
-    hist, edges = np.histogram(flat, bins=np.arange(0, upper + 1, 1))
-    centers = (edges[:-1] + edges[1:]) / 2
-
-    mode_idx = np.argmax(hist)
-    mode_val = centers[mode_idx]
-    half_max = hist[mode_idx] / 2.0
-
-    # Walk right from mode until histogram drops below half-max
-    right_side = hist[mode_idx:]
-    hwhm_idx = np.argmax(right_side < half_max)
-    if hwhm_idx == 0:
-        # Never dropped below half-max; use distance to end
-        hwhm_idx = len(right_side) - 1
-    # HWHM -> sigma:  FWHM = 2.355*sigma, so HWHM = 1.177*sigma
-    sigma = hwhm_idx / 1.177
-
-    mu = mode_val
-    threshold = mu + k_sigma * sigma
-    print(f"  [bg-fallback HWHM] mode={mu:.1f}, sigma={sigma:.1f}, "
-          f"threshold={threshold:.1f}")
-    return threshold, mu, sigma
-
-
-def estimate_bg_threshold(cap_img, k_sigma=2.5):
-    """Estimate a background threshold by fitting a Gaussian to the background peak.
-
-    Builds a histogram of the Cap image, finds the mode (background peak),
-    fits a Gaussian to the low-intensity population, and returns mu + k*sigma
-    as the threshold. Pixels below this are considered background (nucleus,
-    cell borders, outside cell).
-
-    Falls back to a HWHM-based estimator when the image is too low-signal
-    for reliable Gaussian fitting.
-
-    Returns
-    -------
-    threshold : float
-        The estimated background threshold.
-    mu : float
-        Center of the fitted Gaussian.
-    sigma : float
-        Width of the fitted Gaussian.
-    """
-    flat = cap_img[~np.isnan(cap_img)]
-    bins = np.arange(0, np.percentile(flat, 50), 5)
-    if len(bins) < 10:
-        bins = np.arange(0, np.percentile(flat, 75), 5)
-
-    # Not enough bins for a meaningful histogram — go straight to fallback
-    if len(bins) < 3:
-        return _estimate_bg_hwhm(flat, k_sigma)
-
-    hist, edges = np.histogram(flat, bins=bins)
-    centers = (edges[:-1] + edges[1:]) / 2
-
-    mode_idx = np.argmax(hist)
-    mode_val = centers[mode_idx]
-
-    def _gaussian(x, amp, mu, sigma):
-        return amp * np.exp(-(x - mu) ** 2 / (2 * sigma ** 2))
-
-    fit_range = centers <= mode_val * 2.5
-    if np.sum(fit_range) < 4:
-        return _estimate_bg_hwhm(flat, k_sigma)
-
-    try:
-        popt, _ = curve_fit(
-            _gaussian, centers[fit_range], hist[fit_range],
-            p0=[hist[mode_idx], mode_val, mode_val * 0.5],
-            maxfev=10000,
-        )
-    except (TypeError, RuntimeError):
-        return _estimate_bg_hwhm(flat, k_sigma)
-
-    mu, sigma = popt[1], abs(popt[2])
-    threshold = mu + k_sigma * sigma
-    return threshold, mu, sigma
 
 
 def parse_filename(filepath):
@@ -145,286 +72,13 @@ def group_image_sets(data_dir):
     return groups
 
 
-def analyze_regions(mask_path, cap_img, norm_img, buffer_px, donut_px,
-                    bg_mode, flat_bg_value, min_size,
-                    exclude_cap_zero=True, region_label='pbody', norm_label='pnorm',
-                    export_donut_path=None):
-    """Analyze one set of regions (P-bodies or SGs) and return per-particle measurements.
+def _walk_groups_from_dir(data_dir):
+    """Discover image sets by directory/file conventions.
 
-    Parameters
-    ----------
-    mask_path : str
-        Path to the binary mask TIFF (P-body_mask or SG_mask).
-    cap_img : ndarray
-        Cap intensity image (float64), potentially with NaN exclusions already applied.
-    norm_img : ndarray
-        Normalization channel image (float64) — pnorm or sgnorm.
-    region_label : str
-        Label for output columns — 'pbody' or 'sg'.
-    norm_label : str
-        Label for normalization channel in output columns — 'pnorm' or 'sgnorm'.
+    Thin wrapper over ``group_image_sets`` that returns a plain dict so
+    callers don't have to depend on the ``defaultdict`` import.
     """
-    mask_img = tifffile.imread(mask_path)
-
-    # Label individual regions
-    binary_mask = mask_img > 0
-    label_mask = measure.label(binary_mask)
-    region_ids = np.unique(label_mask)
-    region_ids = region_ids[region_ids != 0]
-
-    # Precompute regionprops for bounding boxes and sizes
-    props = measure.regionprops(label_mask)
-    props_by_id = {p.label: p for p in props}
-
-    # Filter by size
-    if min_size > 0:
-        region_ids = np.array([rid for rid in region_ids if props_by_id[rid].area > min_size])
-
-    if bg_mode == 'flat':
-        bg_label_str = f"flat={flat_bg_value}"
-    elif bg_mode == 'donut-mean':
-        bg_label_str = "donut-mean-estimated"
-    else:
-        bg_label_str = "donut-median-estimated"
-    print(f"  Found {len(region_ids)} {region_label}s > {min_size} px "
-          f"(bg: {bg_label_str})")
-
-    h, w = mask_img.shape
-    pad = buffer_px + donut_px + 1
-
-    # Accumulate donut masks for export
-    if export_donut_path is not None:
-        donut_export = np.zeros((h, w), dtype=np.uint8)
-
-    results = []
-    for region_id in region_ids:
-        # Crop to bounding box + padding for speed
-        bbox = props_by_id[region_id].bbox
-        r0 = max(bbox[0] - pad, 0)
-        c0 = max(bbox[1] - pad, 0)
-        r1 = min(bbox[2] + pad, h)
-        c1 = min(bbox[3] + pad, w)
-
-        crop_label = label_mask[r0:r1, c0:c1]
-        crop_binary = binary_mask[r0:r1, c0:c1]
-        crop_region = crop_label == region_id
-
-        # Distance transform on small crop
-        dist_from_this = distance_transform_edt(~crop_region)
-        in_donut_range = (dist_from_this > buffer_px) & (dist_from_this <= buffer_px + donut_px)
-        crop_donut = in_donut_range & ~crop_binary
-
-        # Map back to full-image coordinates
-        region_mask = label_mask == region_id
-        donut_mask = np.zeros_like(binary_mask)
-        donut_mask[r0:r1, c0:c1] = crop_donut
-
-        if donut_mask.sum() == 0:
-            continue
-
-        if export_donut_path is not None:
-            donut_export[donut_mask] = 255
-
-        cap_donut_raw = cap_img[donut_mask]
-
-        # Determine bg value (optionally exclude zeros for estimation only)
-        cap_donut_for_bg = cap_donut_raw[~np.isnan(cap_donut_raw)]
-        if exclude_cap_zero and len(cap_donut_for_bg) > 0:
-            nonzero = cap_donut_for_bg[cap_donut_for_bg != 0]
-            if len(nonzero) > 0:
-                cap_donut_for_bg = nonzero
-        if len(cap_donut_for_bg) == 0:
-            cap_donut_for_bg = cap_donut_raw[~np.isnan(cap_donut_raw)]
-        if len(cap_donut_for_bg) == 0:
-            continue
-
-        if bg_mode == 'donut':
-            bg_value = int(np.round(np.median(cap_donut_for_bg)))
-        elif bg_mode == 'donut-mean':
-            bg_value = int(np.round(np.mean(cap_donut_for_bg)))
-        else:
-            bg_value = flat_bg_value
-
-        # Background-subtracted Cap (capped at zero)
-        cap_region_sub = np.maximum(cap_img[region_mask] - bg_value, 0)
-        cap_donut_sub = np.maximum(cap_donut_raw - bg_value, 0)
-
-        # Preserve NaN from exclusion masking
-        cap_region_raw = cap_img[region_mask]
-        cap_region_sub[np.isnan(cap_region_raw)] = np.nan
-        cap_donut_sub[np.isnan(cap_donut_raw)] = np.nan
-
-        # Raw (pre-subtraction) means and integrated intensities
-        cap_region_raw_mean = np.nanmean(cap_region_raw) if np.any(~np.isnan(cap_region_raw)) else np.nan
-        cap_donut_raw_mean = np.nanmean(cap_donut_raw) if np.any(~np.isnan(cap_donut_raw)) else np.nan
-        cap_region_raw_integ = np.nansum(cap_region_raw) if np.any(~np.isnan(cap_region_raw)) else np.nan
-        cap_donut_raw_integ = np.nansum(cap_donut_raw) if np.any(~np.isnan(cap_donut_raw)) else np.nan
-
-        cap_region_mean = np.nanmean(cap_region_sub) if np.any(~np.isnan(cap_region_sub)) else np.nan
-        cap_donut_mean = np.nanmean(cap_donut_sub) if np.any(~np.isnan(cap_donut_sub)) else np.nan
-        cap_region_integ = np.nansum(cap_region_sub) if np.any(~np.isnan(cap_region_sub)) else np.nan
-        cap_donut_integ = np.nansum(cap_donut_sub) if np.any(~np.isnan(cap_donut_sub)) else np.nan
-        norm_region_mean = np.mean(norm_img[region_mask]) if region_mask.sum() > 0 else np.nan
-        norm_donut_mean = np.mean(norm_img[donut_mask]) if donut_mask.sum() > 0 else np.nan
-        norm_region_integ = np.sum(norm_img[region_mask]) if region_mask.sum() > 0 else np.nan
-        norm_donut_integ = np.sum(norm_img[donut_mask]) if donut_mask.sum() > 0 else np.nan
-
-        # Ratios (safe division)
-        def _ratio(a, b):
-            return a / b if (b and not np.isnan(a) and not np.isnan(b) and b != 0) else np.nan
-
-        rl = region_label  # shorthand for column names
-        nl = norm_label
-        results.append({
-            f'{rl}_id': int(region_id),
-            f'{rl}_area_px': int(region_mask.sum()),
-            'donut_area_px': int(donut_mask.sum()),
-            'bg_value': bg_value,
-            f'cap_{rl}_raw_mean': cap_region_raw_mean,
-            'cap_dilute_raw_mean': cap_donut_raw_mean,
-            f'cap_{rl}_raw_integ': cap_region_raw_integ,
-            'cap_dilute_raw_integ': cap_donut_raw_integ,
-            f'cap_{rl}_mean': cap_region_mean,
-            'cap_dilute_mean': cap_donut_mean,
-            f'cap_{rl}_integ': cap_region_integ,
-            'cap_dilute_integ': cap_donut_integ,
-            f'{nl}_{rl}_mean': norm_region_mean,
-            f'{nl}_dilute_mean': norm_donut_mean,
-            f'{nl}_{rl}_integ': norm_region_integ,
-            f'{nl}_dilute_integ': norm_donut_integ,
-            f'cap_{rl}_over_dilute': _ratio(cap_region_mean, cap_donut_mean),
-            f'{nl}_{rl}_over_dilute': _ratio(norm_region_mean, norm_donut_mean),
-            f'cap_over_{nl}_{rl}': _ratio(cap_region_mean, norm_region_mean),
-            f'cap_over_{nl}_dilute': _ratio(cap_donut_mean, norm_donut_mean),
-        })
-
-    if export_donut_path is not None:
-        tifffile.imwrite(export_donut_path, donut_export)
-        print(f"  Donut mask exported to {export_donut_path}")
-
-    return results
-
-
-def assign_particles_to_cells(mask_path, cp_mask_img, min_size):
-    """Return dict mapping particle label ID -> cell ID (majority of pixels)."""
-    mask_img = tifffile.imread(mask_path)
-    label_mask = measure.label(mask_img > 0)
-    props = measure.regionprops(label_mask)
-
-    mapping = {}
-    for p in props:
-        if min_size > 0 and p.area <= min_size:
-            continue
-        particle_pixels = label_mask == p.label
-        cell_values = cp_mask_img[particle_pixels]
-        cell_values = cell_values[cell_values != 0]
-        if len(cell_values) == 0:
-            continue
-        mapping[p.label] = int(np.bincount(cell_values).argmax())
-    return mapping
-
-
-def aggregate_by_cell(particle_results, particle_to_cell, cp_mask_img,
-                      region_label, norm_label):
-    """Aggregate per-particle results into per-cell rows.
-
-    Particles are grouped by assigned cell ID. Means are area-weighted,
-    integrated intensities are summed, and ratios are recomputed from
-    the aggregated means. Cells with no particles get NaN for all metrics.
-    """
-    rl = region_label
-    nl = norm_label
-
-    # Group particles by cell
-    cell_particles = defaultdict(list)
-    for result in particle_results:
-        pid = result[f'{rl}_id']
-        if pid in particle_to_cell:
-            cell_particles[particle_to_cell[pid]].append(result)
-
-    all_cell_ids = np.unique(cp_mask_img)
-    all_cell_ids = all_cell_ids[all_cell_ids != 0]
-
-    metric_cols = [
-        f'cap_{rl}_raw_mean', 'cap_dilute_raw_mean',
-        f'cap_{rl}_raw_integ', 'cap_dilute_raw_integ',
-        f'cap_{rl}_mean', 'cap_dilute_mean',
-        f'cap_{rl}_integ', 'cap_dilute_integ',
-        f'{nl}_{rl}_mean', f'{nl}_dilute_mean',
-        f'{nl}_{rl}_integ', f'{nl}_dilute_integ',
-        f'cap_{rl}_over_dilute', f'{nl}_{rl}_over_dilute',
-        f'cap_over_{nl}_{rl}', f'cap_over_{nl}_dilute',
-    ]
-
-    aggregated = []
-    for cell_id in all_cell_ids:
-        cell_id = int(cell_id)
-        cell_area = int((cp_mask_img == cell_id).sum())
-        particles = cell_particles.get(cell_id, [])
-
-        if not particles:
-            row = {
-                'cell_id': cell_id,
-                'cell_area_px': cell_area,
-                f'n_{rl}s': 0,
-                f'total_{rl}_area_px': 0,
-                'total_donut_area_px': 0,
-                'mean_bg_value': np.nan,
-            }
-            for col in metric_cols:
-                row[col] = np.nan
-            aggregated.append(row)
-            continue
-
-        df_p = pd.DataFrame(particles)
-        total_region_area = df_p[f'{rl}_area_px'].sum()
-        total_donut_area = df_p['donut_area_px'].sum()
-
-        def _weighted_mean(col, weights_col):
-            weights = df_p[weights_col].values.astype(float)
-            values = df_p[col].values.astype(float)
-            valid = ~(np.isnan(values) | np.isnan(weights)) & (weights > 0)
-            if not np.any(valid):
-                return np.nan
-            return float((values[valid] * weights[valid]).sum() / weights[valid].sum())
-
-        def _ratio(a, b):
-            if pd.notna(a) and pd.notna(b) and b != 0:
-                return a / b
-            return np.nan
-
-        row = {
-            'cell_id': cell_id,
-            'cell_area_px': cell_area,
-            f'n_{rl}s': len(particles),
-            f'total_{rl}_area_px': int(total_region_area),
-            'total_donut_area_px': int(total_donut_area),
-            'mean_bg_value': float(df_p['bg_value'].mean()),
-            # Area-weighted means
-            f'cap_{rl}_raw_mean': _weighted_mean(f'cap_{rl}_raw_mean', f'{rl}_area_px'),
-            'cap_dilute_raw_mean': _weighted_mean('cap_dilute_raw_mean', 'donut_area_px'),
-            f'cap_{rl}_mean': _weighted_mean(f'cap_{rl}_mean', f'{rl}_area_px'),
-            'cap_dilute_mean': _weighted_mean('cap_dilute_mean', 'donut_area_px'),
-            f'{nl}_{rl}_mean': _weighted_mean(f'{nl}_{rl}_mean', f'{rl}_area_px'),
-            f'{nl}_dilute_mean': _weighted_mean(f'{nl}_dilute_mean', 'donut_area_px'),
-            # Summed integrated intensities
-            f'cap_{rl}_raw_integ': float(df_p[f'cap_{rl}_raw_integ'].sum()),
-            'cap_dilute_raw_integ': float(df_p['cap_dilute_raw_integ'].sum()),
-            f'cap_{rl}_integ': float(df_p[f'cap_{rl}_integ'].sum()),
-            'cap_dilute_integ': float(df_p['cap_dilute_integ'].sum()),
-            f'{nl}_{rl}_integ': float(df_p[f'{nl}_{rl}_integ'].sum()),
-            f'{nl}_dilute_integ': float(df_p[f'{nl}_dilute_integ'].sum()),
-        }
-
-        # Recompute ratios from aggregated means
-        row[f'cap_{rl}_over_dilute'] = _ratio(row[f'cap_{rl}_mean'], row['cap_dilute_mean'])
-        row[f'{nl}_{rl}_over_dilute'] = _ratio(row[f'{nl}_{rl}_mean'], row[f'{nl}_dilute_mean'])
-        row[f'cap_over_{nl}_{rl}'] = _ratio(row[f'cap_{rl}_mean'], row[f'{nl}_{rl}_mean'])
-        row[f'cap_over_{nl}_dilute'] = _ratio(row['cap_dilute_mean'], row[f'{nl}_dilute_mean'])
-
-        aggregated.append(row)
-
-    return aggregated
+    return dict(group_image_sets(data_dir))
 
 
 def save_results(all_results, output_path, region_label, norm_label):
@@ -652,7 +306,7 @@ def main():
         if args.output_pbody is None or args.output_sg is None:
             parser.error('--output-pbody and --output-sg are both required when not using --preset')
 
-    groups = group_image_sets(args.data_dir)
+    groups = _walk_groups_from_dir(args.data_dir)
     if not groups:
         print(f"No image sets found in {args.data_dir}")
         return
@@ -686,85 +340,54 @@ def main():
             print(f"Skipping {group_key}: --single-cell requires cp_mask file but none found")
             continue
 
-        cap_img = tifffile.imread(channels['Cap']).astype(np.float64)
-
-        # Load cp_mask once per group if in single-cell mode
+        # ---- Read input TIFFs ----
+        cap_img = tifffile.imread(channels['Cap'])
+        pbody_mask_img = tifffile.imread(channels['P-body_mask']) if has_pbody else None
+        pnorm_img = tifffile.imread(channels['pnorm']) if has_pbody else None
+        sg_mask_img = tifffile.imread(channels['SG_mask']) if has_sg else None
+        sgnorm_img = tifffile.imread(channels['sgnorm']) if has_sg else None
         cp_mask_img = tifffile.imread(channels['cp_mask']) if args.single_cell else None
 
-        # --- Background subtraction: NaN out low-signal pixels ---
-        if not args.no_bgsub:
-            bg_thresh, bg_mu, bg_sig = estimate_bg_threshold(cap_img, args.bgsub_k)
-            n_masked = int(np.sum(cap_img < bg_thresh))
-            pct_masked = n_masked / cap_img.size * 100
-            print(f"  Background subtraction for {group_key}: "
-                  f"mu={bg_mu:.1f}, sigma={bg_sig:.1f}, "
-                  f"threshold={bg_thresh:.0f} (mu+{args.bgsub_k}*sigma), "
-                  f"{n_masked} px ({pct_masked:.1f}%) set to NaN")
-            cap_img[cap_img < bg_thresh] = np.nan
+        print(f"Analyzing image set: {group_key}")
 
-        # --- SG analysis (uses bg-subtracted Cap, no SG exclusion) ---
-        if has_sg:
-            print(f"Analyzing SGs: {group_key}")
-            sgnorm_img = tifffile.imread(channels['sgnorm']).astype(np.float64)
-            sg_donut_path = os.path.join(args.data_dir, f'{group_key}_sg_donut_mask.tif') if args.export_donuts else None
-            results = analyze_regions(
-                channels['SG_mask'], cap_img, sgnorm_img,
-                args.buffer, args.donut, args.bg_mode, args.bg_value,
-                args.min_size, args.exclude_cap_zero,
-                region_label='sg', norm_label='sgnorm',
-                export_donut_path=sg_donut_path,
-            )
-            for r in results:
+        result = run_one_image_set(
+            cap=cap_img,
+            pbody_mask=pbody_mask_img, pnorm=pnorm_img,
+            sg_mask=sg_mask_img, sgnorm=sgnorm_img,
+            cp_mask=cp_mask_img,
+            buffer=args.buffer, donut=args.donut,
+            bg_mode=args.bg_mode, bg_value=args.bg_value,
+            exclude_cap_zero=args.exclude_cap_zero,
+            min_size=args.min_size,
+            bgsub_k=args.bgsub_k, no_bgsub=args.no_bgsub,
+            single_cell=args.single_cell,
+            export_donuts=args.export_donuts,
+        )
+
+        # ---- Write optional donut TIFFs ----
+        if args.export_donuts:
+            if has_pbody and result["pbody_donut_mask"] is not None:
+                out_path = os.path.join(
+                    args.data_dir, f'{group_key}_pbody_donut_mask.tif'
+                )
+                tifffile.imwrite(out_path, result["pbody_donut_mask"])
+                print(f"  Donut mask exported to {out_path}")
+            if has_sg and result["sg_donut_mask"] is not None:
+                out_path = os.path.join(
+                    args.data_dir, f'{group_key}_sg_donut_mask.tif'
+                )
+                tifffile.imwrite(out_path, result["sg_donut_mask"])
+                print(f"  Donut mask exported to {out_path}")
+
+        # ---- Attach group_key and accumulate ----
+        if result["pbody_rows"] is not None:
+            for r in result["pbody_rows"]:
                 r['group'] = group_key
-
-            if args.single_cell:
-                particle_to_cell = assign_particles_to_cells(
-                    channels['SG_mask'], cp_mask_img, args.min_size)
-                cell_results = aggregate_by_cell(
-                    results, particle_to_cell, cp_mask_img, 'sg', 'sgnorm')
-                for r in cell_results:
-                    r['group'] = group_key
-                sg_results.extend(cell_results)
-                print(f"  Single-cell SG: {len(cell_results)} cells aggregated")
-            else:
-                sg_results.extend(results)
-
-        # --- P-body analysis (SG exclusion first, then uses bg-subtracted Cap) ---
-        if has_pbody:
-            cap_for_pbody = cap_img.copy()
-            if has_sg:
-                sg_mask_img = tifffile.imread(channels['SG_mask'])
-                sg_inside = sg_mask_img > 0
-                n_excluded = int(sg_inside.sum())
-                cap_for_pbody[sg_inside] = np.nan
-                print(f"Analyzing P-bodies (SG-excluded): {group_key} "
-                      f"({n_excluded} Cap pixels inside SG_mask set to NaN)")
-            else:
-                print(f"Analyzing P-bodies: {group_key}")
-
-            pnorm_img = tifffile.imread(channels['pnorm']).astype(np.float64)
-            pbody_donut_path = os.path.join(args.data_dir, f'{group_key}_pbody_donut_mask.tif') if args.export_donuts else None
-            results = analyze_regions(
-                channels['P-body_mask'], cap_for_pbody, pnorm_img,
-                args.buffer, args.donut, args.bg_mode, args.bg_value,
-                args.min_size, args.exclude_cap_zero,
-                region_label='pbody', norm_label='pnorm',
-                export_donut_path=pbody_donut_path,
-            )
-            for r in results:
+            pbody_results.extend(result["pbody_rows"])
+        if result["sg_rows"] is not None:
+            for r in result["sg_rows"]:
                 r['group'] = group_key
-
-            if args.single_cell:
-                particle_to_cell = assign_particles_to_cells(
-                    channels['P-body_mask'], cp_mask_img, args.min_size)
-                cell_results = aggregate_by_cell(
-                    results, particle_to_cell, cp_mask_img, 'pbody', 'pnorm')
-                for r in cell_results:
-                    r['group'] = group_key
-                pbody_results.extend(cell_results)
-                print(f"  Single-cell P-body: {len(cell_results)} cells aggregated")
-            else:
-                pbody_results.extend(results)
+            sg_results.extend(result["sg_rows"])
 
     # --- Save results ---
     if args.single_cell:
