@@ -20,9 +20,17 @@ from percell4.application.analysis.registry import (
     register_analysis,
     validate_schema,
 )
+from percell4.application.analysis.types import (
+    BatchAnalysisItemResult,
+    BatchAnalysisReport,
+)
+from percell4.application.use_cases.run_analysis_batch import batch_run_analysis
 
 __all__ = [
     "AnalysisInfo",
+    "BatchAnalysisItemResult",
+    "BatchAnalysisReport",
+    "batch_run_analysis",
     "get",
     "list_analyses",
     "register_analysis",

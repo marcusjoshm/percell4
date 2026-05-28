@@ -137,7 +137,7 @@ def run_analysis(
     )
 
     # 6. Resolve params (strict — no overrides on top of a preset).
-    resolved = _resolve_params(analysis_name, cls, params, preset)
+    resolved = resolve_params(analysis_name, cls, params, preset)
 
     # 7. Check BoolParam.requires gating.
     _check_bool_requires(
@@ -252,7 +252,7 @@ def _check_group_requirement(
         )
 
 
-def _resolve_params(
+def resolve_params(
     analysis_name: str,
     cls: type[Analysis],
     params: dict[str, Any] | None,
