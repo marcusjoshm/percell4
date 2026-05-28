@@ -75,13 +75,7 @@ class AnalysisPanel(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        title = QLabel("Analysis")
-        title.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; padding-bottom: 4px;"
-            f" border-bottom: 1px solid {theme.BORDER};"
-        )
-        layout.addWidget(title)
+        layout.addWidget(theme.section_label("Analysis"))
 
         # ── Cell Filter group ──
         filter_group = QGroupBox("Cell Filter")

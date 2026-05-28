@@ -99,13 +99,7 @@ class SegmentationPanel(QWidget):
 
         from percell4.gui import theme
 
-        title = QLabel("Segmentation")
-        title.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; padding-bottom: 4px;"
-            f" border-bottom: 1px solid {theme.BORDER};"
-        )
-        layout.addWidget(title)
+        layout.addWidget(theme.section_label("Segmentation"))
 
         # ── Cellpose section ──────────────────────────────────
         cp_group = QGroupBox("Cellpose")
