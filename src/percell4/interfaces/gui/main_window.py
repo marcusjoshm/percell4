@@ -265,7 +265,7 @@ class LauncherWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(self._section_label("Viewer"))
+        layout.addWidget(theme.section_label("Viewer"))
 
         btn_open = QPushButton("Open Viewer")
         btn_open.clicked.connect(lambda: self._show_window("viewer"))
@@ -316,7 +316,7 @@ class LauncherWindow(QMainWindow):
         layout.setAlignment(Qt.AlignTop)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        layout.addWidget(self._section_label("Scripts"))
+        layout.addWidget(theme.section_label("Scripts"))
 
         btn_run = QPushButton("Run Script...")
         btn_run.clicked.connect(self._on_run_script)
@@ -333,7 +333,7 @@ class LauncherWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(self._section_label("Workflows"))
+        layout.addWidget(theme.section_label("Workflows"))
 
         self._btn_single_cell_workflow = QPushButton(
             "Single-cell thresholding analysis workflow"
@@ -807,17 +807,6 @@ class LauncherWindow(QMainWindow):
             f" QScrollArea > QWidget > QWidget {{ background-color: {theme.BACKGROUND_DEEP}; }}"
         )
         return scroll
-
-    @staticmethod
-    def _section_label(text: str) -> QLabel:
-        from percell4.gui import theme
-
-        label = QLabel(text)
-        label.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; border: none; background: transparent;"
-        )
-        return label
 
     @staticmethod
     def _placeholder(text: str) -> QLabel:

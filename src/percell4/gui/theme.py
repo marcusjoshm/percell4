@@ -269,3 +269,23 @@ def apply_theme(app) -> None:
     """Apply Fusion style and dark theme to the QApplication."""
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLESHEET)
+
+
+# ── Themed widget factories ────────────────────────────────────────
+
+
+def section_label(text: str):
+    """Return a panel-title ``QLabel`` styled to the launcher convention.
+
+    Bold white text, 18 px, ``border: none``, ``margin-bottom: 12px``.
+    Used by every top-of-panel header across the launcher's tabbed
+    surface so the styling lives in one place.
+    """
+    from qtpy.QtWidgets import QLabel  # lazy import — keeps theme.py Qt-free at module load
+
+    label = QLabel(text)
+    label.setStyleSheet(
+        f"font-size: 18px; font-weight: bold; color: {TEXT_BRIGHT};"
+        f" margin-bottom: 12px; border: none; background: transparent;"
+    )
+    return label
