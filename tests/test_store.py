@@ -576,6 +576,25 @@ def test_write_read_time_stacked_labels(store):
     assert frame2[1, 1] == 5
 
 
+def test_read_labels_2d_broadcasts_across_timepoints(store):
+    """A 2D (time-invariant) label on a time-lapse dataset reads the same
+    (H,W) frame for every timepoint instead of raising.
+
+    Whole-field gates (one 2D label covering every frame) are constant in
+    time; per-timepoint phases must be able to read them for any t.
+    """
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    flat = np.ones((8, 8), dtype=np.int32)  # whole-field gate
+    store.write_labels("whole_field", flat)
+
+    # Stored shape stays 2D — it is genuinely time-invariant, not a stack.
+    assert store.read_labels("whole_field").shape == (8, 8)
+    for t in range(3):
+        frame = store.read_labels("whole_field", timepoint=t)
+        assert frame.shape == (8, 8)
+        np.testing.assert_array_equal(frame, flat)
+
+
 def test_write_time_stacked_mask(store):
     """(T,H,W) masks round-trip; per-frame read works."""
     _make_timelapse_store(store, t=2, h=8, w=8)

@@ -195,17 +195,31 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
         Skips single-timepoint datasets and datasets whose effective
         segmentation is already a tracked layer (auto-detected by U13).
+        Also skips a 2D (time-invariant) segmentation — e.g. a whole-field
+        gate from ``percell4-batch-whole-field``: a single 2D label has no
+        per-frame evolution to track, and ``track_one`` would reject it as
+        "not a (T, H, W) stack". Per-frame phases broadcast it instead.
         """
-        if self._seg_name_for(entry).endswith("_tracked"):
+        seg_name = self._seg_name_for(entry)
+        if seg_name.endswith("_tracked"):
             return False
         try:
-            n_timepoints = int(
-                DatasetStore(entry.h5_path).metadata.get("n_timepoints", 1) or 1
-            )
+            store = DatasetStore(entry.h5_path)
+            n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
         except Exception:
             logger.exception("could not read n_timepoints for %s", entry.name)
             return False
-        return n_timepoints > 1
+        if n_timepoints <= 1:
+            return False
+        try:
+            if len(store.labels_shape(seg_name)) == 2:
+                return False
+        except Exception:
+            logger.exception(
+                "could not read labels_shape for %s/%s", entry.name, seg_name
+            )
+            # Fall through: let the track phase surface the real error.
+        return True
 
     # ── Phase generator ───────────────────────────────────────
 

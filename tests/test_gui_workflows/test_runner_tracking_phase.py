@@ -87,6 +87,26 @@ def test_single_timepoint_dataset_not_tracked(qtbot, tmp_path):
     assert "track" not in by_ds["ST"]
 
 
+def test_timelapse_whole_field_2d_seg_skips_track(qtbot, tmp_path):
+    """A 2D whole-field gate on a time-lapse dataset is time-invariant.
+
+    It is auto-selected (Cellpose skipped) and must NOT be tracked: a 2D
+    label has no per-frame evolution to track, and ``track_one`` would
+    reject it ("is 2D, not a (T, H, W) stack"). Downstream per-frame phases
+    broadcast the 2D label instead.
+    """
+    p = tmp_path / "WF.h5"
+    whole = np.ones((12, 12), dtype=np.int32)
+    _store(p, n_timepoints=3, labels={"whole_field": whole})
+    runner = _runner([_entry("WF", p)], tmp_path)
+
+    by_ds = _phases_by_dataset(runner)
+
+    assert "segment" not in by_ds.get("WF", [])
+    assert "track" not in by_ds.get("WF", [])
+    assert runner._effective_seg["WF"] == "whole_field"
+
+
 def test_already_tracked_dataset_skips_segment_and_track(qtbot, tmp_path):
     p = tmp_path / "TR.h5"
     cell = np.zeros((3, 12, 12), dtype=np.int32)

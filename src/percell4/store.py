@@ -412,6 +412,41 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
+    def _is_2d_array(self, hdf5_path: str) -> bool:
+        """True when ``hdf5_path`` holds a 2D dataset. Reads shape metadata
+        only — no array data is loaded. Raises ``KeyError`` when the path is
+        missing or is a group.
+        """
+        f = self._open_read()
+        try:
+            if hdf5_path not in f:
+                raise KeyError(f"Dataset not found: {hdf5_path}")
+            obj = f[hdf5_path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{hdf5_path} is a group, not a dataset")
+            return obj.ndim == 2
+        finally:
+            self._close_if_not_session(f)
+
+    def labels_shape(self, name: str) -> tuple[int, ...]:
+        """Return the on-disk shape of ``/labels/<name>`` without loading data.
+
+        Lets callers distinguish a 2D (time-invariant) label from a
+        ``(T, H, W)`` stack cheaply — e.g. the workflow's tracking gate,
+        which must not try to track a 2D whole-field segmentation.
+        """
+        f = self._open_read()
+        try:
+            path = f"labels/{name}"
+            if path not in f:
+                raise KeyError(f"Dataset not found: {path}")
+            obj = f[path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{path} is a group, not a dataset")
+            return tuple(int(x) for x in obj.shape)
+        finally:
+            self._close_if_not_session(f)
+
     # ── DataFrame operations ──────────────────────────────────
 
     def write_dataframe(self, hdf5_path: str, df: pd.DataFrame) -> int:
@@ -525,12 +560,20 @@ class DatasetStore:
         is given, returns only that frame of a time-stacked ``(T, H, W)``
         labels resource (``(H, W)``); leave it ``None`` to read the whole
         array (the full stack for time-lapse, or the 2D array otherwise).
+
+        A 2D label on a time-lapse dataset is *time-invariant* (e.g. a
+        whole-field gate written by ``percell4-batch-whole-field``): a
+        per-timepoint read broadcasts it, returning the same ``(H, W)``
+        frame for every ``timepoint``. Without this, per-frame phases
+        (threshold / measure) would hit ``read_array_frame``'s
+        "not time-stacked" guard for any ``timepoint != 0``.
         """
+        path = f"labels/{name}"
         if timepoint is None:
-            return self.read_array(f"labels/{name}", view_bin=view_bin)
-        return self.read_array_frame(
-            f"labels/{name}", timepoint, view_bin=view_bin
-        )
+            return self.read_array(path, view_bin=view_bin)
+        if self._is_2d_array(path):
+            return self.read_array(path, view_bin=view_bin)
+        return self.read_array_frame(path, timepoint, view_bin=view_bin)
 
     def list_labels(self) -> list[str]:
         """List all label set names under /labels/."""
