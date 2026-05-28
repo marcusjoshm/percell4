@@ -1,8 +1,9 @@
 ---
 title: Analysis Integration — registered analyses + first migration
 type: feat
-status: active
+status: completed
 date: 2026-05-27
+completed: 2026-05-28
 origin: docs/brainstorms/2026-05-27-analysis-integration-requirements.md
 ---
 
