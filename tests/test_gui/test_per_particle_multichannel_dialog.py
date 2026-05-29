@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from qtpy.QtCore import Qt, QSettings
+from qtpy.QtCore import QSettings, Qt
 
 from percell4.application.analysis import (
     BatchAnalysisItemResult,
@@ -286,7 +286,7 @@ def test_cell_mean_checkbox_collected_when_checked(qtbot, tmp_path):
     )
 
 
-def test_cell_mean_checkbox_signal_path_via_setCheckState(qtbot, tmp_path):
+def test_cell_mean_checkbox_signal_path_via_set_check_state(qtbot, tmp_path):
     """qt-wire-user-edit-signals: toggling via setCheckState (the signal path
     a real click takes) flows through to collected params — guards against an
     unwired widget that only works for programmatic reads."""

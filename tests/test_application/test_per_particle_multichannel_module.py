@@ -11,9 +11,8 @@ import pandas as pd
 import pytest
 import tifffile
 
-from percell4.application.analysis import batch_run_analysis
+from percell4.application.analysis import batch_run_analysis, list_analyses
 from percell4.application.analysis import get as registry_get
-from percell4.application.analysis import list_analyses
 from percell4.application.analysis import registry as registry_mod
 from percell4.application.use_cases.run_analysis import run_analysis
 from percell4.store import DatasetStore
