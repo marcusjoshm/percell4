@@ -11,24 +11,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+from datetime import UTC
+
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QApplication,
-    QCheckBox,
-    QComboBox,
     QDialog,
-    QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QStackedWidget,
     QStatusBar,
     QVBoxLayout,
@@ -324,7 +319,10 @@ class LauncherWindow(QMainWindow):
         # late-binds PerParticleDonut.dialog_class = PerParticleDonutDialog
         # so the click handler can read it generically below.
         from percell4.application.analysis import list_analyses
-        from percell4.gui import per_particle_donut_dialog  # noqa: F401
+        from percell4.gui import (  # noqa: F401
+            per_particle_donut_dialog,
+            per_particle_multichannel_dialog,
+        )
 
         entries = list_analyses()
         if not entries:
@@ -359,7 +357,10 @@ class LauncherWindow(QMainWindow):
             return
 
         from percell4.application.analysis import get as registry_get
-        from percell4.gui import per_particle_donut_dialog  # noqa: F401
+        from percell4.gui import (  # noqa: F401
+            per_particle_donut_dialog,
+            per_particle_multichannel_dialog,
+        )
 
         try:
             cls = registry_get(analysis_name)
@@ -880,10 +881,10 @@ class LauncherWindow(QMainWindow):
     def _get_or_create_window(self, key: str) -> QWidget:
         """Get an existing window or create it on demand."""
         if key not in self._windows:
+            from percell4.gui.viewer import ViewerWindow
             from percell4.interfaces.gui.peer_views.cell_table import CellTableWindow
             from percell4.interfaces.gui.peer_views.data_plot import DataPlotWindow
             from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
-            from percell4.gui.viewer import ViewerWindow
 
             session = self.data_model.session
             factories = {
@@ -994,7 +995,7 @@ class LauncherWindow(QMainWindow):
     def _run_batch_compress(self, config, datasets) -> None:
         """Compress one or more datasets with a progress dialog."""
         from qtpy.QtCore import Qt
-        from qtpy.QtWidgets import QApplication, QMessageBox, QProgressDialog
+        from qtpy.QtWidgets import QMessageBox, QProgressDialog
 
         from percell4.adapters.importer import import_dataset
 
@@ -1223,8 +1224,8 @@ class LauncherWindow(QMainWindow):
             self._data_panel.refresh_management_combos()
 
     def _on_close_dataset(self) -> None:
-        from percell4.application.use_cases.close_dataset import CloseDataset
         from percell4.adapters.napari_viewer import NapariViewerAdapter
+        from percell4.application.use_cases.close_dataset import CloseDataset
 
         viewer_win = self._windows.get("viewer")
 
@@ -1287,7 +1288,7 @@ class LauncherWindow(QMainWindow):
                     return np.asarray(layer.data, dtype=np.int32)
 
         # Fallback: find a segmentation labels layer (skip mask layers)
-        from percell4.gui.viewer import PERCELL_TYPE_KEY, LAYER_TYPE_MASK
+        from percell4.gui.viewer import LAYER_TYPE_MASK, PERCELL_TYPE_KEY
         for layer in viewer_win._viewer.layers:
             if not isinstance(layer, napari.layers.Labels):
                 continue
@@ -1491,7 +1492,7 @@ class LauncherWindow(QMainWindow):
         ``(name, binary)``; if the coupling becomes a problem, extend
         the payload with a filter-state dict.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from percell4.store import (
             PHASOR_MASK_ATTR_ACTIVE_CHANNEL,
@@ -1522,7 +1523,7 @@ class LauncherWindow(QMainWindow):
         phasor_win = self._windows.get("phasor_plot")
         attrs: dict[str, object] = {
             PHASOR_MASK_ATTR_CAPTURE_ISO: (
-                datetime.now(timezone.utc)
+                datetime.now(UTC)
                 .replace(tzinfo=None)
                 .isoformat()
                 + "Z"
