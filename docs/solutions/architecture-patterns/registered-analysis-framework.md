@@ -1,10 +1,12 @@
 ---
 title: "Adding a registered analysis: pure core + module + CLI + dialog"
 date: 2026-05-28
+last_updated: 2026-05-28
 category: architecture-patterns
 module: percell4.application.analysis
 problem_type: architecture_pattern
-component: analysis_framework
+component: tooling
+severity: medium
 canonical_source: src/percell4/application/analysis/modules/per_particle_donut.py
 applies_to:
   - "src/percell4/application/analysis/**/*.py"
@@ -49,6 +51,12 @@ Worked examples: `per_particle_donut` (the reference), `per_particle_multichanne
    `Analysis` subclass (`application/analysis/modules/<name>.py`, wraps it for
    the framework). They cannot diverge numerically because they call the same
    function. Mutating inputs (e.g. background subtraction) must copy first.
+   Reuse `_impl/_shared.py` helpers (labeling, donut geometry,
+   `assign_particles_to_cells`, `weighted_mean`, `nan_safe_ratio`) **only when
+   behavior is identical** — `whole_field_intensity` keeps its own
+   `np.unique`+`argmax`+skip-0 particle assignment verbatim because its
+   tie-break/background-majority handling differs from the shared bincount
+   version; forcing the shared helper would silently change its numbers.
 
 2. **Numeric parity is pinned by a characterization fixture, built BEFORE the
    refactor.** Generate expected CSVs from the *unmodified* original CLI,
