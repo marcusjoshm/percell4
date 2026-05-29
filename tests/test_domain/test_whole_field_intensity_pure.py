@@ -1,0 +1,185 @@
+"""Unit tests for the whole_field_intensity pure core (U6)."""
+from __future__ import annotations
+
+import numpy as np
+
+from percell4.domain.analysis._impl.whole_field_intensity import (
+    compute_bg_value,
+    parse_bg_mode,
+    run_one_image_set,
+)
+
+H = W = 48
+
+
+def _block(r0, r1, c0, c1):
+    m = np.zeros((H, W), np.uint8)
+    m[r0:r1, c0:c1] = 1
+    return m
+
+
+def _field():
+    dilute = _block(4, 44, 4, 44)
+    pbody = np.zeros((H, W), np.uint8)
+    pbody[8:12, 8:12] = 1
+    pbody[30:34, 30:34] = 1
+    dcp2 = _block(10, 30, 10, 30)
+    dcp2_2 = _block(14, 20, 14, 20)
+    interaction = _block(8, 32, 8, 32)
+    interaction_2 = _block(15, 19, 15, 19)
+    cp = np.zeros((H, W), np.int32)
+    cp[4:24, 4:44] = 1
+    cp[24:44, 4:44] = 2
+    mng = np.full((H, W), 50.0, np.float32)
+    mng[dcp2 > 0] = 400.0
+    mng[dcp2_2 > 0] = 900.0
+    halo = np.full((H, W), 30.0, np.float32)
+    halo[interaction > 0] = 300.0
+    halo[interaction_2 > 0] = 700.0
+    return dict(pbody=pbody, dilute=dilute, dcp2=dcp2, dcp2_2=dcp2_2,
+                interaction=interaction, interaction_2=interaction_2,
+                cp=cp, mng=mng, halo=halo)
+
+
+# ── parse_bg_mode / compute_bg_value rounding ─────────────────────
+
+
+def test_parse_bg_mode_keyword_and_int():
+    assert parse_bg_mode("mean") == "mean"
+    assert parse_bg_mode("mng-nan-mode") == "mng-nan-mode"
+    assert parse_bg_mode("7") == 7
+    assert isinstance(parse_bg_mode("7"), int)
+
+
+def test_compute_bg_manual_is_unrounded_including_zero():
+    img = np.full((8, 8), 3.5, np.float64)
+    mask = np.ones((8, 8), bool)
+    # Manual integer path returns the value verbatim — including 0.
+    assert compute_bg_value(img, mask, 0) == 0
+    assert compute_bg_value(img, mask, 5) == 5
+
+
+def test_compute_bg_keyword_modes_round_up():
+    img = np.array([[10.0, 20.0, 30.0, 41.0]], np.float64)
+    mask = np.ones((1, 4), bool)
+    # mean = 25.25 -> ceil 26; median = 25.0 -> ceil 25.
+    assert compute_bg_value(img, mask, "mean") == 26
+    assert compute_bg_value(img, mask, "median") == 25
+
+
+# ── two-region whole field ────────────────────────────────────────
+
+
+def test_two_region_whole_field():
+    f = _field()
+    res = run_one_image_set(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"],
+        halo=f["halo"], mng=f["mng"],
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2,
+    )
+    rows = res["rows"]
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["pbody_area_px"] == 32  # two 16px blobs
+    for col in ("mNG_pbody_mean", "mNG_dilute_mean", "halo_pbody_mean",
+                "mng_bg_value", "halo_bg_value"):
+        assert col in r
+    assert r["mng_bg_value"] == 0 and r["halo_bg_value"] == 0
+
+
+# ── three-region (v4 / v5) ─────────────────────────────────────────
+
+
+def test_three_region_v4_columns():
+    f = _field()
+    res = run_one_image_set(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"],
+        halo=f["halo"], mng=f["mng"],
+        dcp2_mask=f["dcp2"], interaction_mask=f["interaction"],
+        dcp2_mask_2=f["dcp2_2"], interaction_mask_2=f["interaction_2"],
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2,
+        mng_filter_mode="NaN", flim_filter_mode="zero",
+        compute_percent=True, intermediate_assemblies=True,
+    )
+    r = res["rows"][0]
+    for col in ("intermediate_area_px", "mNG_intermediate_mean",
+                "halo_intermediate_mean", "pct_halo_in_mNG_intermediate"):
+        assert col in r
+    assert r["intermediate_area_px"] == 36  # 6x6 inner Dcp2
+
+
+def test_v4_v5_differ_only_in_halo_means():
+    f = _field()
+    common = dict(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"], halo=f["halo"],
+        mng=f["mng"], dcp2_mask=f["dcp2"], interaction_mask=f["interaction"],
+        dcp2_mask_2=f["dcp2_2"], interaction_mask_2=f["interaction_2"],
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2,
+        mng_filter_mode="NaN", flim_filter_mode="zero",
+        intermediate_assemblies=True,
+    )
+    v4 = run_one_image_set(**common, intermediate_zero_fill=False)["rows"][0]
+    v5 = run_one_image_set(**common, intermediate_zero_fill=True)["rows"][0]
+    # mNG areas/means identical; halo means differ (zero-fill drags down).
+    assert v4["mNG_pbody_mean"] == v5["mNG_pbody_mean"]
+    assert v4["intermediate_area_px"] == v5["intermediate_area_px"]
+
+
+# ── single-cell ────────────────────────────────────────────────────
+
+
+def test_single_cell_two_region_rows():
+    f = _field()
+    res = run_one_image_set(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"],
+        halo=f["halo"], mng=f["mng"], cp_mask=f["cp"],
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2, single_cell=True,
+    )
+    rows = res["rows"]
+    assert len(rows) == 2  # two cells
+    for r in rows:
+        assert "cell_id" in r and "particle_count" in r
+        assert "mNG_cell_mean" in r
+
+
+def test_single_cell_without_cp_mask_falls_through_to_whole_field():
+    """Faithful to the original: single_cell without cp_mask silently does the
+    whole-field path (one row, no cell_id). The CLI's _check_channels and the
+    framework's BoolParam.requires=('cp_mask',) are what reject this upstream."""
+    f = _field()
+    res = run_one_image_set(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"],
+        halo=f["halo"], mng=f["mng"], cp_mask=None,
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2, single_cell=True,
+    )
+    assert len(res["rows"]) == 1
+    assert "cell_id" not in res["rows"][0]
+
+
+# ── halo_bg_override + does not mutate caller arrays ──────────────
+
+
+def test_halo_bg_override_used_verbatim():
+    f = _field()
+    res = run_one_image_set(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"],
+        halo=f["halo"], mng=f["mng"],
+        mng_bg_mode=0, halo_bg_mode="median", min_size=2,
+        halo_bg_override=42,
+    )
+    assert res["rows"][0]["halo_bg_value"] == 42
+
+
+def test_input_arrays_not_mutated():
+    f = _field()
+    halo_before = f["halo"].copy()
+    mng_before = f["mng"].copy()
+    run_one_image_set(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"],
+        halo=f["halo"], mng=f["mng"],
+        dcp2_mask=f["dcp2"], interaction_mask=f["interaction"],
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2,
+        mng_filter_mode="NaN", flim_filter_mode="zero",
+    )
+    np.testing.assert_array_equal(f["halo"], halo_before)
+    np.testing.assert_array_equal(f["mng"], mng_before)
