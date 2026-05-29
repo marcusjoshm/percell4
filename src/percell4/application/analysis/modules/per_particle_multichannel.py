@@ -303,6 +303,17 @@ class PerParticleMultichannel(Analysis):
             # reindex (not df[order]): NaN-fills the contract columns for an
             # empty (no-particle) frame instead of raising, and drops the
             # core's *_integ columns that aren't in the target order.
+            # Guard: when the frame is non-empty, every target column must
+            # already exist — otherwise the core stopped emitting an
+            # expected column and reindex would silently NaN-fill it. Fail
+            # loud instead of shipping a silently-corrupt CSV.
+            if len(df):
+                missing = [c for c in order if c not in df.columns]
+                if missing:
+                    raise ValueError(
+                        "per_particle_multichannel: expected particle_table "
+                        f"columns missing from core output: {missing}"
+                    )
             out["particle_table"] = df.reindex(columns=order)
         if result["cell_rows"] is not None:
             out["cell_table"] = pd.DataFrame(result["cell_rows"])
