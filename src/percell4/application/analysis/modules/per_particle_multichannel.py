@@ -43,6 +43,12 @@ from percell4.domain.analysis._impl.per_particle_multichannel import (
 # optional.
 _MAX_CHANNELS = 8
 _CHANNEL_ROLES = [f"channel_{i}" for i in range(1, _MAX_CHANNELS + 1)]
+# Per-slot "add a whole-cell mean column" toggles. The dialog renders these
+# as a checkbox on each channel row (U5) rather than in the generic param
+# form, so it filters them out by this key set.
+_CELL_MEAN_PARAM_KEYS = frozenset(
+    f"channel_{i}_cell_mean" for i in range(1, _MAX_CHANNELS + 1)
+)
 
 
 # ── produced_when callables (module-level so they're easy to find) ────
@@ -58,6 +64,35 @@ def _cell_table_produced(g: GroupState, params: dict[str, Any]) -> bool:
 
 def _donut_produced(g: GroupState, params: dict[str, Any]) -> bool:
     return bool(params["export_donuts"])
+
+
+def _particle_column_order(
+    *,
+    analyzed: list[str],
+    cell_mean_channels: list[str],
+    has_cp: bool,
+) -> list[str]:
+    """Exact particle_table column order, matching the original make_csv.py.
+
+    ``group`` is prepended later by the batch runner, so it is absent here.
+    ``analyzed`` and ``cell_mean_channels`` are expected pre-sorted by the
+    caller; the cell-mean infixes are therefore a subsequence of the
+    analyzed infixes. The list is built only from these known channel
+    names — never by parsing existing column strings — so a channel named
+    e.g. ``cell`` cannot corrupt the ordering.
+    """
+    order: list[str] = ["particle_id"]
+    if has_cp:
+        order.append("cell_id")
+    order += [f"cell_{ch}_mean" for ch in cell_mean_channels]
+    order += ["particle_area_px", "donut_area_px"]
+    for ch in analyzed:
+        order += [
+            f"condensed_{ch}_mean",
+            f"dilute_{ch}_mean",
+            f"{ch}_condensed_over_dilute",
+        ]
+    return order
 
 
 # ── Class ─────────────────────────────────────────────────────────────
@@ -81,13 +116,21 @@ class PerParticleMultichannel(Analysis):
     # ── Identity ──────────────────────────────────────────────────
     name = "per_particle_multichannel"
     display_name = "Per-particle multi-channel intensity"
-    version = "1.0.0"
+    # 1.1.0: particle_table reshaped to the exact original-script column
+    # order (no *_integ), gained optional per-particle cell_<ch>_mean
+    # columns, and renamed its CSV id column to "group".
+    version = "1.1.0"
     description = (
         "Single-image-set per-particle condensed-vs-dilute (donut) "
         "quantification across up to eight measurement channels, with no "
         "background subtraction. Optional single-cell aggregation adds "
         "whole-cell intensity statistics."
     )
+
+    # CSV identity column named "group" (= .h5 filename stem) to match the
+    # original make_csv.py output. Applies to every table this analysis
+    # emits (particle_table and, in single-cell mode, cell_table).
+    dataset_column_label = "group"
 
     # ── Inputs ────────────────────────────────────────────────────
     # channel_1 required + channel_2..8 optional (no group). Modeling the
@@ -150,6 +193,20 @@ class PerParticleMultichannel(Analysis):
             desc="Export a binary union donut mask for overlay "
             "visualization.",
         ),
+        # Per-slot "add cell_<layer>_mean" toggles. Deliberately NO
+        # requires=("cp_mask",): a True flag without a cp_mask would make
+        # the runner raise and fail the whole dataset. Instead run() drops
+        # cell-mean when no cp_mask is mapped; the dialog disables the
+        # checkboxes for UX only.
+        **{
+            f"channel_{i}_cell_mean": BoolParam(
+                default=False,
+                desc=f"Add a whole-cell-mean column (cell_<layer>_mean) for "
+                f"measurement channel {i}. Needs a cell-segmentation label "
+                f"image (cp_mask); ignored without one.",
+            )
+            for i in range(1, _MAX_CHANNELS + 1)
+        },
     }
     presets: dict[str, dict[str, Any]] = {}
 
@@ -199,6 +256,27 @@ class PerParticleMultichannel(Analysis):
             if role in inputs:
                 channels[names.get(role, role)] = inputs[role]
         channels = dict(sorted(channels.items()))
+        if not channels:
+            raise ValueError(
+                "per_particle_multichannel: at least one measurement "
+                "channel must be supplied"
+            )
+
+        has_cp = "cp_mask" in inputs
+        # Channels selected for a whole-cell-mean column — only when a
+        # cp_mask is mapped (no cp_mask → silently no cell-mean, never a
+        # raise; see the no-requires note on the parameters).
+        cell_mean_channels = (
+            sorted(
+                {
+                    names.get(role, role)
+                    for role in _CHANNEL_ROLES
+                    if role in inputs and params.get(f"{role}_cell_mean")
+                }
+            )
+            if has_cp
+            else []
+        )
 
         result = run_one_image_set(
             mask=inputs["mask"],
@@ -209,13 +287,23 @@ class PerParticleMultichannel(Analysis):
             min_size=params["min_size"],
             single_cell=params["single_cell"],
             export_donuts=params["export_donuts"],
+            cell_mean_channels=cell_mean_channels,
             set_label=set_label,
             log=log,
         )
 
         out: dict[str, Any] = {}
         if result["particle_rows"] is not None:
-            out["particle_table"] = pd.DataFrame(result["particle_rows"])
+            df = pd.DataFrame(result["particle_rows"])
+            order = _particle_column_order(
+                analyzed=list(channels.keys()),
+                cell_mean_channels=cell_mean_channels,
+                has_cp=has_cp,
+            )
+            # reindex (not df[order]): NaN-fills the contract columns for an
+            # empty (no-particle) frame instead of raising, and drops the
+            # core's *_integ columns that aren't in the target order.
+            out["particle_table"] = df.reindex(columns=order)
         if result["cell_rows"] is not None:
             out["cell_table"] = pd.DataFrame(result["cell_rows"])
         if result["donut_mask"] is not None:
