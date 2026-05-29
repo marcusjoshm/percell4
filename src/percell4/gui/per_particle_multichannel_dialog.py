@@ -24,6 +24,7 @@ from typing import Any
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -45,6 +46,7 @@ from percell4.application.analysis import (
     batch_run_analysis,
 )
 from percell4.application.analysis.modules.per_particle_multichannel import (
+    _CELL_MEAN_PARAM_KEYS,
     _MAX_CHANNELS,
     PerParticleMultichannel,
 )
@@ -92,8 +94,10 @@ class PerParticleMultichannelDialog(QDialog):
         # Widgets — set in _build_ui.
         self._dataset_list: QListWidget | None = None
         self._mask_combo: QComboBox | None = None
-        # Dynamic channel rows: each entry is (row_widget, combo, label).
-        self._channel_rows: list[tuple[QWidget, QComboBox, QLabel]] = []
+        # Dynamic channel rows: (row_widget, combo, label, cell_mean_check).
+        self._channel_rows: list[
+            tuple[QWidget, QComboBox, QLabel, QCheckBox]
+        ] = []
         self._channel_layout: QVBoxLayout | None = None
         self._add_channel_btn: QPushButton | None = None
         self._channel_status: QLabel | None = None
@@ -241,6 +245,10 @@ class PerParticleMultichannelDialog(QDialog):
 
         form = QFormLayout()
         for name, decl in PerParticleMultichannel.parameters.items():
+            # The per-channel cell-mean toggles render as a checkbox on each
+            # channel row, not here in the generic form.
+            if name in _CELL_MEAN_PARAM_KEYS:
+                continue
             widget, getter, setter = build_param_widget(decl, self)
             self._param_widgets[name] = widget
             self._param_getters[name] = getter
@@ -288,6 +296,12 @@ class PerParticleMultichannelDialog(QDialog):
         combo = QComboBox(self)
         combo.addItem(LAYER_SENTINEL)
         combo.activated.connect(lambda _i: self._refresh_state())
+        cell_mean_check = QCheckBox("cell mean", self)
+        cell_mean_check.setToolTip(
+            "Add a cell_<layer>_mean column for this channel "
+            "(needs a cell-segmentation label image)."
+        )
+        cell_mean_check.toggled.connect(lambda _c: self._refresh_state())
         remove_btn = QPushButton("✕", self)
         remove_btn.setFixedWidth(28)
         remove_btn.clicked.connect(
@@ -295,9 +309,10 @@ class PerParticleMultichannelDialog(QDialog):
         )
         row_layout.addWidget(label)
         row_layout.addWidget(combo, 1)
+        row_layout.addWidget(cell_mean_check)
         row_layout.addWidget(remove_btn)
         self._channel_layout.addWidget(row_widget)
-        self._channel_rows.append((row_widget, combo, label))
+        self._channel_rows.append((row_widget, combo, label, cell_mean_check))
         self._renumber_channel_rows()
         self._refresh_state()
 
@@ -305,7 +320,7 @@ class PerParticleMultichannelDialog(QDialog):
         # Always keep at least one channel slot (channel_1 is required).
         if len(self._channel_rows) <= 1:
             return
-        for i, (row_widget, c, _label) in enumerate(self._channel_rows):
+        for i, (row_widget, c, _label, _chk) in enumerate(self._channel_rows):
             if c is combo:
                 self._channel_rows.pop(i)
                 row_widget.setParent(None)
@@ -318,7 +333,9 @@ class PerParticleMultichannelDialog(QDialog):
         """Relabel rows Channel 1..N; disable the remove button when only one
         row remains so the user can't drop below the required channel_1."""
         only_one = len(self._channel_rows) <= 1
-        for i, (row_widget, _combo, label) in enumerate(self._channel_rows):
+        for i, (row_widget, _combo, label, _chk) in enumerate(
+            self._channel_rows
+        ):
             label.setText(f"Channel {i + 1}")
             btn = row_widget.findChild(QPushButton)
             if btn is not None:
@@ -416,7 +433,7 @@ class PerParticleMultichannelDialog(QDialog):
     def _refresh_combos(self, inventory: dict[str, list[str]]) -> None:
         if self._mask_combo is not None:
             populate_layer_combo(self._mask_combo, inventory["mask"])
-        for _row, combo, _label in self._channel_rows:
+        for _row, combo, _label, _chk in self._channel_rows:
             populate_layer_combo(combo, inventory["intensity"])
         if self._cp_mask_combo is not None:
             populate_layer_combo(self._cp_mask_combo, inventory["label"])
@@ -429,6 +446,23 @@ class PerParticleMultichannelDialog(QDialog):
         if self._channel_status is not None:
             self._channel_status.setText(
                 f"{len(self._channel_rows)}/{_MAX_CHANNELS} channels"
+            )
+        # Cell-mean checkboxes require a cp_mask. Gate for UX only —
+        # correctness does not depend on it (run() drops cell-mean without
+        # a cp_mask rather than failing).
+        has_cp = (
+            self._cp_mask_combo is not None
+            and self._cp_mask_combo.currentText() != LAYER_SENTINEL
+        )
+        for _row, _combo, _label, chk in self._channel_rows:
+            chk.setEnabled(has_cp)
+            if not has_cp and chk.isChecked():
+                chk.setChecked(False)
+            chk.setToolTip(
+                "Add a cell_<layer>_mean column for this channel."
+                if has_cp
+                else "Assign a cell-segmentation label image (cp_mask) "
+                "to enable a whole-cell mean."
             )
 
     def _refresh_requires_gating(self) -> None:
@@ -496,6 +530,16 @@ class PerParticleMultichannelDialog(QDialog):
         layer_map = self._resolve_layer_map()
         if "channel_1" not in layer_map:
             return "Assign at least one measurement channel."
+        # Duplicate-layer guard: the same layer mapped to two channel slots
+        # would silently collapse to one channel (the dict is keyed by layer
+        # name). Block Start rather than drop a channel.
+        chan_layers = [
+            layer_map[f"channel_{i + 1}"]
+            for i in range(len(self._channel_rows))
+            if f"channel_{i + 1}" in layer_map
+        ]
+        if len(chan_layers) != len(set(chan_layers)):
+            return "Each measurement channel must use a different layer."
         if not self._resolve_output_parent():
             return "Choose an output folder."
         return None
@@ -509,7 +553,7 @@ class PerParticleMultichannelDialog(QDialog):
             and self._mask_combo.currentText() != LAYER_SENTINEL
         ):
             out["mask"] = self._mask_combo.currentText()
-        for i, (_row, combo, _label) in enumerate(self._channel_rows):
+        for i, (_row, combo, _label, _chk) in enumerate(self._channel_rows):
             text = combo.currentText()
             if text and text != LAYER_SENTINEL:
                 out[f"channel_{i + 1}"] = text
@@ -520,7 +564,18 @@ class PerParticleMultichannelDialog(QDialog):
         return out
 
     def _collect_params(self) -> dict[str, Any]:
-        return {name: getter() for name, getter in self._param_getters.items()}
+        params = {
+            name: getter() for name, getter in self._param_getters.items()
+        }
+        # Per-row cell-mean flags, derived by LIVE enumeration so each row's
+        # checkbox stays paired with that row's layer combo after add/remove
+        # (the role number is positional, same as _resolve_layer_map). All
+        # eight declared bools are always present; absent slots are False.
+        for i in range(_MAX_CHANNELS):
+            params[f"channel_{i + 1}_cell_mean"] = False
+        for i, (_row, _combo, _label, chk) in enumerate(self._channel_rows):
+            params[f"channel_{i + 1}_cell_mean"] = chk.isChecked()
+        return params
 
     def _resolve_output_parent(self) -> Path | None:
         if self._output_parent_line is None:

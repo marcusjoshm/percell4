@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import Qt, QSettings
 
 from percell4.application.analysis import (
     BatchAnalysisItemResult,
@@ -236,3 +236,145 @@ def test_start_dispatches_with_channel_layer_map(qtbot, tmp_path):
     assert layer_map["channel_1"] == "mNG"
     assert layer_map["channel_2"] == "mTQ2"
     assert kwargs["preset"] is None
+
+
+# ── per-channel cell-mean checkbox (U4) ───────────────────────────
+
+
+def _cell_mean_layers(dlg: PerParticleMultichannelDialog) -> set[str]:
+    """The set of layer names currently selected for a whole-cell mean,
+    derived the same way run() does — pairing each row's combo with that
+    row's cell-mean flag by position."""
+    lm = dlg._resolve_layer_map()
+    params = dlg._collect_params()
+    return {
+        lm[f"channel_{i + 1}"]
+        for i in range(len(dlg._channel_rows))
+        if f"channel_{i + 1}" in lm and params[f"channel_{i + 1}_cell_mean"]
+    }
+
+
+def test_cell_mean_checkbox_excluded_from_generic_params_form(qtbot):
+    """The 8 channel_i_cell_mean bools render as per-row checkboxes, not in
+    the generic Parameters form."""
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    for key in dlg._param_widgets:
+        assert not key.endswith("_cell_mean")
+    # But they are still collected (defaulting False) so run() always sees them.
+    params = dlg._collect_params()
+    for i in range(1, _MAX_CHANNELS + 1):
+        assert params[f"channel_{i}_cell_mean"] is False
+
+
+def test_cell_mean_checkbox_collected_when_checked(qtbot, tmp_path):
+    """R4: checking a row's box sets that row's channel_i_cell_mean True."""
+    h5 = tmp_path / "ds.h5"
+    _build_full_h5(h5)
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._cp_mask_combo.setCurrentText("cells")  # enables the checkboxes
+    dlg._channel_rows[0][1].setCurrentText("mNG")
+    dlg._refresh_state()
+    dlg._channel_rows[0][3].setChecked(True)
+    params = dlg._collect_params()
+    assert params["channel_1_cell_mean"] is True
+    assert all(
+        params[f"channel_{i}_cell_mean"] is False
+        for i in range(2, _MAX_CHANNELS + 1)
+    )
+
+
+def test_cell_mean_checkbox_signal_path_via_setCheckState(qtbot, tmp_path):
+    """qt-wire-user-edit-signals: toggling via setCheckState (the signal path
+    a real click takes) flows through to collected params — guards against an
+    unwired widget that only works for programmatic reads."""
+    h5 = tmp_path / "ds.h5"
+    _build_full_h5(h5)
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._cp_mask_combo.setCurrentText("cells")
+    dlg._channel_rows[0][1].setCurrentText("mNG")
+    dlg._refresh_state()
+    dlg._channel_rows[0][3].setCheckState(Qt.Checked)
+    assert dlg._collect_params()["channel_1_cell_mean"] is True
+
+
+def test_cell_mean_checkbox_gated_on_cp_mask(qtbot, tmp_path):
+    """Without a cp_mask the checkboxes are disabled and report False."""
+    h5 = tmp_path / "ds.h5"
+    _build_full_h5(h5)
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._channel_rows[0][1].setCurrentText("mNG")
+    dlg._refresh_state()  # no cp_mask assigned
+    chk = dlg._channel_rows[0][3]
+    assert chk.isEnabled() is False
+    # Even if forced checked, the gating clears it on the next refresh.
+    chk.setChecked(True)
+    dlg._refresh_state()
+    assert chk.isChecked() is False
+    assert dlg._collect_params()["channel_1_cell_mean"] is False
+
+
+def test_cell_mean_checkbox_re_enabled_when_cp_mask_assigned(qtbot, tmp_path):
+    h5 = tmp_path / "ds.h5"
+    _build_full_h5(h5)
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._refresh_state()
+    assert dlg._channel_rows[0][3].isEnabled() is False
+    dlg._cp_mask_combo.setCurrentText("cells")
+    dlg._refresh_state()
+    assert dlg._channel_rows[0][3].isEnabled() is True
+
+
+def test_cell_mean_pairing_survives_middle_row_removal(qtbot, tmp_path):
+    """Correctness trap: after removing a middle channel row, the cell-mean
+    flag must stay paired with its layer (not its old slot index)."""
+    h5 = tmp_path / "ds.h5"
+    _build_full_h5(h5)
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._cp_mask_combo.setCurrentText("cells")
+    dlg._add_channel_row()
+    dlg._add_channel_row()  # three rows now
+    dlg._channel_rows[0][1].setCurrentText("mNG")
+    dlg._channel_rows[1][1].setCurrentText("mTQ2")
+    dlg._channel_rows[2][1].setCurrentText("CA-SiR")
+    dlg._refresh_state()
+    # Select cell-mean on the CA-SiR (third) row only.
+    dlg._channel_rows[2][3].setChecked(True)
+    assert _cell_mean_layers(dlg) == {"CA-SiR"}
+    # Remove the middle (mTQ2) row.
+    dlg._remove_channel_row(dlg._channel_rows[1][1])
+    # The cell-mean selection must still point at CA-SiR, now at slot 2.
+    assert _cell_mean_layers(dlg) == {"CA-SiR"}
+
+
+def test_duplicate_layer_disables_start(qtbot, tmp_path):
+    """Mapping the same layer to two channel rows disables Start rather than
+    silently collapsing to one channel."""
+    h5 = tmp_path / "ds.h5"
+    _build_full_h5(h5)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._mask_combo.setCurrentText("particles")
+    dlg._add_channel_row()
+    dlg._channel_rows[0][1].setCurrentText("mNG")
+    dlg._channel_rows[1][1].setCurrentText("mNG")  # duplicate
+    dlg._output_parent_line.setText(str(out_dir))
+    dlg._refresh_state()
+    assert dlg._start_btn.isEnabled() is False
+    # Fixing the duplicate re-enables Start.
+    dlg._channel_rows[1][1].setCurrentText("mTQ2")
+    dlg._refresh_state()
+    assert dlg._start_btn.isEnabled() is True
