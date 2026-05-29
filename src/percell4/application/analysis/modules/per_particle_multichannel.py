@@ -44,8 +44,8 @@ from percell4.domain.analysis._impl.per_particle_multichannel import (
 _MAX_CHANNELS = 8
 _CHANNEL_ROLES = [f"channel_{i}" for i in range(1, _MAX_CHANNELS + 1)]
 # Per-slot "add a whole-cell mean column" toggles. The dialog renders these
-# as a checkbox on each channel row (U5) rather than in the generic param
-# form, so it filters them out by this key set.
+# as a checkbox on each channel row rather than in the generic param form,
+# so it filters them out by this key set.
 _CELL_MEAN_PARAM_KEYS = frozenset(
     f"channel_{i}_cell_mean" for i in range(1, _MAX_CHANNELS + 1)
 )
