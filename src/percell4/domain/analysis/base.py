@@ -76,6 +76,7 @@ class Analysis:
         *,
         log: Callable[[str], None] | None = None,
         set_label: str = "",
+        layer_map: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Pure analysis logic.
 
@@ -90,9 +91,14 @@ class Analysis:
         ``None`` (the default) the run is silent; when provided, the
         analysis may stream human-readable progress lines through it.
         ``set_label`` names the dataset/image set being processed and is
-        used only in those progress lines. Both are keyword-only so a
-        subclass that does not emit progress can simply omit them from
-        its override signature.
+        used only in those progress lines. ``layer_map`` is the resolved
+        ``{role_name: on_disk_layer_name}`` mapping; the loader keys
+        ``inputs`` by role and discards the chosen layer names, so an
+        analysis that needs to name outputs after the user-chosen layer
+        (e.g. multichannel column headers) reads them from here. All
+        three are keyword-only so a subclass that needs none of them can
+        simply omit them from its override signature — the runner
+        forwards each only when the override declares it.
         """
         raise NotImplementedError(
             f"{type(self).__name__}.run() is not implemented; subclasses "

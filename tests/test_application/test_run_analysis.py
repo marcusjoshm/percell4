@@ -1032,3 +1032,60 @@ def test_per_particle_donut_cli_parity_group_a(tmp_path: Path) -> None:
     # this parity test purely numeric (committed CSV vs framework) so
     # it stays fast and deterministic.
     assert cli_script.exists()
+
+
+# ── layer_map threading (U2) ──────────────────────────────────────────
+
+
+def test_run_receives_layer_map_when_declared(tmp_path: Path) -> None:
+    """A run() that names ``layer_map`` receives the resolved role->layer map."""
+    captured: dict[str, dict[str, str] | None] = {}
+
+    @register_analysis("stub")
+    class Stub(Analysis):
+        name = "stub"
+        display_name = "Stub"
+        required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+        outputs = {"table": TableOutput()}
+
+        def run(self, inputs, params, *, layer_map=None):
+            captured["layer_map"] = layer_map
+            return {"table": pd.DataFrame({"n": [1]})}
+
+    h5 = tmp_path / "x.h5"
+    _make_h5(
+        h5,
+        channel_names=["Cap"],
+        intensity=np.full((1, 4, 4), 2.0, dtype=np.float32),
+    )
+
+    run_analysis("stub", h5, {"x": "Cap"})
+    assert captured["layer_map"] == {"x": "Cap"}
+
+
+def test_plain_run_signature_not_passed_layer_map(tmp_path: Path) -> None:
+    """A plain ``(inputs, params)`` run() still runs and is not passed layer_map.
+
+    Regression guard on ``_accepted_progress_kwargs``: forwarding
+    ``layer_map`` unconditionally would raise ``TypeError`` here.
+    """
+
+    @register_analysis("stub")
+    class Stub(Analysis):
+        name = "stub"
+        display_name = "Stub"
+        required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+        outputs = {"table": TableOutput()}
+
+        def run(self, inputs, params):
+            return {"table": pd.DataFrame({"n": [1]})}
+
+    h5 = tmp_path / "x.h5"
+    _make_h5(
+        h5,
+        channel_names=["Cap"],
+        intensity=np.full((1, 4, 4), 2.0, dtype=np.float32),
+    )
+
+    out = run_analysis("stub", h5, {"x": "Cap"})
+    assert "table" in out
