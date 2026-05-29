@@ -69,6 +69,14 @@ class Analysis:
     # ``cls.dialog_class(parent, ...)`` to open the dialog.
     dialog_class: ClassVar[type | None] = None
 
+    # ── CSV identity column ────────────────────────────────────────
+    # Name of the dataset-identity column the batch runner prepends to
+    # every ``TableOutput`` CSV (value = the ``.h5`` filename stem).
+    # Defaults to ``"dataset"``; an analysis may override it (e.g.
+    # ``"group"``) to match an external CSV schema. The runner reads
+    # this via ``getattr(cls, "dataset_column_label", "dataset")``.
+    dataset_column_label: ClassVar[str] = "dataset"
+
     def run(
         self,
         inputs: dict[str, NDArray],

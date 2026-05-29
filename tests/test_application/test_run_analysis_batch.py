@@ -343,6 +343,64 @@ def test_run_config_records_per_dataset_layer_map(tmp_path: Path) -> None:
     assert config["layer_map_per_dataset"] == {"a": _layer_map_pbody()}
 
 
+# ── dataset_column_label override (U1) ─────────────────────────────
+
+
+def test_dataset_column_label_defaults_to_dataset(tmp_path: Path) -> None:
+    """Default label is 'dataset' — the unchanged contract for all analyses."""
+    cap, pnorm, mask = _toy_pbody_arrays()
+    h5 = tmp_path / "a.h5"
+    _build_pbody_h5(h5, cap=cap, pnorm=pnorm, pbody_mask=mask)
+
+    report = batch_run_analysis(
+        "per_particle_donut",
+        [h5],
+        lambda _path: _layer_map_pbody(),
+        output_parent=tmp_path / "out",
+        preset="m7g-cap-v1",
+    )
+    combined = pd.read_csv(report.run_folder / "combined_pbody_table.csv")
+    assert combined.columns[0] == "dataset"
+    assert "group" not in combined.columns
+
+
+def test_dataset_column_label_override_renames_id_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An analysis overriding dataset_column_label gets that name as the id
+    column in both combined + per-dataset CSVs, and the per-dataset filename
+    stem is still derived correctly from the renamed column."""
+    monkeypatch.setattr(PerParticleDonut, "dataset_column_label", "group")
+
+    cap, pnorm, mask = _toy_pbody_arrays()
+    a = tmp_path / "a.h5"
+    b = tmp_path / "b.h5"
+    _build_pbody_h5(a, cap=cap, pnorm=pnorm, pbody_mask=mask)
+    _build_pbody_h5(b, cap=cap, pnorm=pnorm, pbody_mask=mask)
+
+    report = batch_run_analysis(
+        "per_particle_donut",
+        [a, b],
+        lambda _path: _layer_map_pbody(),
+        output_parent=tmp_path / "out",
+        preset="m7g-cap-v1",
+    )
+
+    combined = pd.read_csv(report.run_folder / "combined_pbody_table.csv")
+    assert combined.columns[0] == "group"
+    assert "dataset" not in combined.columns
+    assert set(combined["group"]) == {"a", "b"}
+
+    # Per-dataset filenames still use the .h5 stem (read from 'group').
+    assert (report.run_folder / "per_dataset" / "a_pbody_table.csv").exists()
+    assert (report.run_folder / "per_dataset" / "b_pbody_table.csv").exists()
+    per_a = pd.read_csv(
+        report.run_folder / "per_dataset" / "a_pbody_table.csv"
+    )
+    assert per_a.columns[0] == "group"
+    assert set(per_a["group"]) == {"a"}
+
+
 # ── Params override mode (no preset) ───────────────────────────────
 
 

@@ -150,7 +150,8 @@ def batch_run_analysis(
         if progress_callback is not None:
             progress_callback(item, idx, len(h5_paths))
 
-    _write_csvs(folder, table_accumulators)
+    dataset_label = getattr(cls, "dataset_column_label", "dataset")
+    _write_csvs(folder, table_accumulators, dataset_label)
 
     payload = _build_run_config_payload(
         analysis_name=analysis_name,
@@ -185,6 +186,7 @@ def _persist_outputs(
     produced: list[str] = []
     store: DatasetStore | None = None
     declared_outputs = cls.outputs
+    dataset_label = getattr(cls, "dataset_column_label", "dataset")
 
     for name, value in outputs.items():
         decl = declared_outputs[name]
@@ -202,7 +204,7 @@ def _persist_outputs(
             produced.append(name)
         elif isinstance(decl, TableOutput):
             df = value.copy()
-            df.insert(0, "dataset", h5_path.stem)
+            df.insert(0, dataset_label, h5_path.stem)
             table_accumulators.setdefault(name, []).append(df)
             produced.append(name)
         else:
@@ -215,8 +217,14 @@ def _persist_outputs(
 def _write_csvs(
     folder: Path,
     table_accumulators: dict[str, list[pd.DataFrame]],
+    dataset_label: str = "dataset",
 ) -> None:
-    """Write combined_<table>.csv + per_dataset/<stem>_<table>.csv files."""
+    """Write combined_<table>.csv + per_dataset/<stem>_<table>.csv files.
+
+    ``dataset_label`` is the name of the identity column the runner
+    prepended to each table (``Analysis.dataset_column_label``); the
+    per-dataset filename stem is read back from that column.
+    """
     per_dataset_dir = folder / "per_dataset"
     for table_name, dfs in table_accumulators.items():
         if not dfs:
@@ -224,7 +232,7 @@ def _write_csvs(
         combined = pd.concat(dfs, ignore_index=True)
         combined.to_csv(folder / f"combined_{table_name}.csv", index=False)
         for df in dfs:
-            stem = df["dataset"].iloc[0] if len(df) else "unknown"
+            stem = df[dataset_label].iloc[0] if len(df) else "unknown"
             df.to_csv(per_dataset_dir / f"{stem}_{table_name}.csv", index=False)
 
 
