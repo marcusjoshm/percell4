@@ -322,6 +322,7 @@ class LauncherWindow(QMainWindow):
         from percell4.gui import (  # noqa: F401
             per_particle_donut_dialog,
             per_particle_multichannel_dialog,
+            whole_field_intensity_dialog,
         )
 
         entries = list_analyses()
@@ -360,6 +361,7 @@ class LauncherWindow(QMainWindow):
         from percell4.gui import (  # noqa: F401
             per_particle_donut_dialog,
             per_particle_multichannel_dialog,
+            whole_field_intensity_dialog,
         )
 
         try:
