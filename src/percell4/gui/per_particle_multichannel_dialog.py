@@ -214,6 +214,15 @@ class PerParticleMultichannelDialog(QDialog):
         combo.activated.connect(lambda _i: self._refresh_state())
         layout.addLayout(row)
 
+        # Optional cp_mask — placed before the measurement channels because
+        # the per-channel "cell mean" checkboxes stay disabled until a
+        # cp_mask is assigned, so the user needs to set it first.
+        cp_role = PerParticleMultichannel.optional_inputs["cp_mask"]
+        cp_row, _, cp_combo = build_layer_combo("cp_mask", cp_role.desc, self)
+        cp_combo.activated.connect(lambda _i: self._refresh_state())
+        self._cp_mask_combo = cp_combo
+        layout.addLayout(cp_row)
+
         # Dynamic measurement-channel list (1–8).
         ch_box = QGroupBox(f"Measurement channels (1–{_MAX_CHANNELS})", self)
         ch_outer = QVBoxLayout(ch_box)
@@ -230,13 +239,6 @@ class PerParticleMultichannelDialog(QDialog):
         ctl_row.addStretch()
         ch_outer.addLayout(ctl_row)
         layout.addWidget(ch_box)
-
-        # Optional cp_mask.
-        cp_role = PerParticleMultichannel.optional_inputs["cp_mask"]
-        cp_row, _, cp_combo = build_layer_combo("cp_mask", cp_role.desc, self)
-        cp_combo.activated.connect(lambda _i: self._refresh_state())
-        self._cp_mask_combo = cp_combo
-        layout.addLayout(cp_row)
         return box
 
     def _build_section_params(self) -> QGroupBox:
