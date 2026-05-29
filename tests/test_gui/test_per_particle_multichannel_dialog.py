@@ -357,6 +357,34 @@ def test_cell_mean_pairing_survives_middle_row_removal(qtbot, tmp_path):
     assert _cell_mean_layers(dlg) == {"CA-SiR"}
 
 
+def test_removing_the_checked_row_leaves_no_stale_flag(qtbot, tmp_path):
+    """Removing the very row whose cell-mean box was checked must not leak a
+    stale True into the now-vacated positional slot (the reset-then-enumerate
+    in _collect_params guards this)."""
+    h5 = tmp_path / "ds.h5"
+    _build_full_h5(h5)
+    dlg = PerParticleMultichannelDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._cp_mask_combo.setCurrentText("cells")
+    dlg._add_channel_row()  # two rows
+    dlg._channel_rows[0][1].setCurrentText("mNG")
+    dlg._channel_rows[1][1].setCurrentText("mTQ2")
+    dlg._refresh_state()
+    # Check the cell-mean box on row 2 (mTQ2), then remove that same row.
+    dlg._channel_rows[1][3].setChecked(True)
+    assert _cell_mean_layers(dlg) == {"mTQ2"}
+    dlg._remove_channel_row(dlg._channel_rows[1][1])
+    # No layer is selected for cell-mean now, and channel_2_cell_mean must be
+    # False (the vacated slot is not left True).
+    assert _cell_mean_layers(dlg) == set()
+    params = dlg._collect_params()
+    assert all(
+        params[f"channel_{i}_cell_mean"] is False
+        for i in range(1, _MAX_CHANNELS + 1)
+    )
+
+
 def test_duplicate_layer_disables_start(qtbot, tmp_path):
     """Mapping the same layer to two channel rows disables Start rather than
     silently collapsing to one channel."""
