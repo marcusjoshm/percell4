@@ -135,6 +135,113 @@ def test_single_cell_requires_cp_mask():
         )
 
 
+# ── per-particle cell_<ch>_mean enrichment (U2) ───────────────────
+
+
+def _cp_two_cells(h=64, w=64) -> np.ndarray:
+    cp = np.zeros((h, w), np.int32)
+    cp[:32, :] = 1   # holds particle at rows 8:14
+    cp[32:, :] = 2   # holds particle at rows 40:45
+    return cp
+
+
+def test_cell_mean_channels_adds_only_requested_columns():
+    res = run_one_image_set(
+        mask=_mask_two_particles(),
+        channels={"mNG": _channel(), "CA-SiR": _channel(blob=300.0)},
+        cp_mask=_cp_two_cells(), single_cell=False, export_donuts=False,
+        cell_mean_channels=["mNG"], **DEFAULTS,
+    )
+    rows = res["particle_rows"]
+    assert len(rows) == 2  # one row per particle (R2)
+    for r in rows:
+        assert "cell_mNG_mean" in r
+        assert "cell_CA-SiR_mean" not in r
+
+
+def test_cell_mean_matches_cell_table_value():
+    """R3: per-particle cell_<ch>_mean == single-cell cell_table value."""
+    mask = _mask_two_particles()
+    chans = {"mNG": _channel()}
+    cp = _cp_two_cells()
+    pp = run_one_image_set(
+        mask=mask, channels=chans, cp_mask=cp, single_cell=False,
+        export_donuts=False, cell_mean_channels=["mNG"], **DEFAULTS,
+    )["particle_rows"]
+    sc = run_one_image_set(
+        mask=mask, channels=chans, cp_mask=cp, single_cell=True,
+        export_donuts=False, **DEFAULTS,
+    )["cell_rows"]
+    cell_table_mean = {c["cell_id"]: c["cell_mNG_mean"] for c in sc}
+    for r in pp:
+        if r["cell_id"] != 0:  # cell 0 has no cell_table row
+            assert r["cell_mNG_mean"] == pytest.approx(
+                cell_table_mean[r["cell_id"]]
+            )
+
+
+def test_cell_mean_channels_none_leaves_rows_unchanged():
+    res = run_one_image_set(
+        mask=_mask_two_particles(), channels={"mNG": _channel()},
+        cp_mask=_cp_two_cells(), single_cell=False, export_donuts=False,
+        cell_mean_channels=None, **DEFAULTS,
+    )
+    assert all("cell_mNG_mean" not in r for r in res["particle_rows"])
+    res_empty = run_one_image_set(
+        mask=_mask_two_particles(), channels={"mNG": _channel()},
+        cp_mask=_cp_two_cells(), single_cell=False, export_donuts=False,
+        cell_mean_channels=[], **DEFAULTS,
+    )
+    assert all("cell_mNG_mean" not in r for r in res_empty["particle_rows"])
+
+
+def test_cell_mean_channels_without_cp_mask_is_noop():
+    res = run_one_image_set(
+        mask=_mask_two_particles(), channels={"mNG": _channel()},
+        cp_mask=None, single_cell=False, export_donuts=False,
+        cell_mean_channels=["mNG"], **DEFAULTS,
+    )
+    assert all("cell_mNG_mean" not in r for r in res["particle_rows"])
+
+
+def test_cell_mean_unassigned_particle_is_nan():
+    cp = np.zeros((64, 64), np.int32)  # no cells → all particles cell_id 0
+    res = run_one_image_set(
+        mask=_mask_two_particles(), channels={"mNG": _channel()},
+        cp_mask=cp, single_cell=False, export_donuts=False,
+        cell_mean_channels=["mNG"], **DEFAULTS,
+    )
+    for r in res["particle_rows"]:
+        assert r["cell_id"] == 0
+        assert np.isnan(r["cell_mNG_mean"])
+
+
+def test_cell_mean_unknown_channel_skipped():
+    res = run_one_image_set(
+        mask=_mask_two_particles(), channels={"mNG": _channel()},
+        cp_mask=_cp_two_cells(), single_cell=False, export_donuts=False,
+        cell_mean_channels=["mNG", "does-not-exist"], **DEFAULTS,
+    )
+    rows = res["particle_rows"]
+    assert all("cell_mNG_mean" in r for r in rows)
+    assert all("cell_does-not-exist_mean" not in r for r in rows)
+
+
+def test_cell_mean_generalizes_to_arbitrary_channel_names():
+    """R6: nothing hardcodes the example channel names."""
+    res = run_one_image_set(
+        mask=_mask_two_particles(),
+        channels={"GFP": _channel(), "foo": _channel(blob=300.0)},
+        cp_mask=_cp_two_cells(), single_cell=False, export_donuts=False,
+        cell_mean_channels=["foo"], **DEFAULTS,
+    )
+    rows = res["particle_rows"]
+    for r in rows:
+        assert "cell_foo_mean" in r
+        assert "cell_GFP_mean" not in r
+        assert "condensed_GFP_mean" in r and "condensed_foo_mean" in r
+
+
 # ── edge cases ────────────────────────────────────────────────────
 
 

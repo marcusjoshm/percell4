@@ -248,6 +248,7 @@ def run_one_image_set(
     min_size: int,
     single_cell: bool,
     export_donuts: bool,
+    cell_mean_channels: list[str] | None = None,
     set_label: str = "",
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -273,6 +274,15 @@ def run_one_image_set(
         particles → 0).
     buffer, donut, min_size, single_cell, export_donuts
         See the CLI's argparse help; semantics preserved verbatim.
+    cell_mean_channels : list[str] | None
+        Channel names (keys of ``channels``) for which each particle row
+        gains a ``cell_<name>_mean`` column — the whole-cell mean of that
+        channel over the cell the particle is assigned to. No-op unless
+        ``cp_mask`` is supplied. A particle with ``cell_id == 0``
+        (unassigned) gets ``NaN``. The mean uses the same definition as
+        the single-cell ``cell_<name>_mean`` (``float(np.mean(...))`` over
+        the float64-coerced channel), so values match across both tables.
+        Names not present in ``channels`` are silently skipped.
 
     Returns
     -------
@@ -305,6 +315,29 @@ def run_one_image_set(
         particle_to_cell = assign_particles_to_cells(mask, cp_mask, min_size)
         for r in particle_rows:
             r['cell_id'] = particle_to_cell.get(r['particle_id'], 0)
+
+    # Per-particle whole-cell means for the requested channels. Joined by
+    # cell_id; uses the float64-coerced channel_images and the same mean
+    # definition as aggregate_by_cell so particle_table and cell_table
+    # agree. Only meaningful when a cp_mask was supplied. Shows up only in
+    # the per-particle output (in single_cell mode particle_rows are
+    # consumed by aggregate_by_cell, which ignores these extra keys).
+    if cp_mask is not None and cell_mean_channels:
+        requested = [ch for ch in cell_mean_channels if ch in channel_images]
+        cell_mean_cache: dict[tuple[str, int], float] = {}
+        for r in particle_rows:
+            cid = int(r['cell_id'])
+            for ch in requested:
+                key = (ch, cid)
+                if key not in cell_mean_cache:
+                    if cid == 0:
+                        cell_mean_cache[key] = np.nan
+                    else:
+                        pix = channel_images[ch][cp_mask == cid]
+                        cell_mean_cache[key] = (
+                            float(np.mean(pix)) if pix.size else np.nan
+                        )
+                r[f'cell_{ch}_mean'] = cell_mean_cache[key]
 
     if single_cell:
         cell_rows = aggregate_by_cell(
