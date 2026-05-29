@@ -281,11 +281,20 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 #     A stale segmentation_overrides entry naming a missing
                 #     layer raises here → skipped (rather than erroring
                 #     inside the controller).
+                #   - NOT a ``*_tracked`` layer — its label VALUES are track
+                #     ids tied to the ``/tracks/<seg>`` lineage table. The
+                #     raw-label QC tools renumber labels, which would
+                #     desync the lineage; ``_should_track`` guards the same
+                #     way. Skip QC for tracked layers.
                 # When any guard fails we fall through to today's behavior
                 # (skip seg-QC, go to thresholding). Cellpose-segmented-
                 # this-run datasets take the fresh path below, unaffected
                 # by this flag.
-                if self._interactive_qc and self._config.run_seg_qc_on_existing:
+                if (
+                    self._interactive_qc
+                    and self._config.run_seg_qc_on_existing
+                    and not existing.endswith("_tracked")
+                ):
                     try:
                         is_2d = len(
                             DatasetStore(entry.h5_path).labels_shape(existing)
