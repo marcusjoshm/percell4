@@ -736,3 +736,17 @@ def test_dialog_remains_scroll_wrap_compliant(dialog):
     # QScrollArea per wrap_in_scroll.
     scroll_areas = dialog.findChildren(QScrollArea)
     assert len(scroll_areas) >= 1
+
+
+def test_run_seg_qc_checkbox_default_checked(dialog, tmp_path):
+    cfg = _build_full_config(dialog, tmp_path)
+    assert cfg is not None
+    assert dialog._run_seg_qc.isChecked() is True
+    assert cfg.run_seg_qc_on_existing is True
+
+
+def test_run_seg_qc_checkbox_unchecked_flows_to_config(dialog, tmp_path):
+    dialog._run_seg_qc.setChecked(False)
+    cfg = _build_full_config(dialog, tmp_path)
+    assert cfg is not None
+    assert cfg.run_seg_qc_on_existing is False

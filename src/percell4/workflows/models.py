@@ -301,6 +301,16 @@ class WorkflowConfig:
     # particle summary columns to the measurements parquet and writes
     # a separate particles.parquet/csv with per-particle detail.
     particle_settings: ParticleSettings | None = None
+    # Whether datasets that arrive ALREADY segmented (e.g. from the
+    # percell4-batch CLI, or an explicit segmentation_overrides pick)
+    # run the interactive segmentation-QC step on their selected
+    # /labels layer before group thresholding. Defaults to True so a
+    # batch-produced segmentation gets a review pass by default; set
+    # False to use the existing labels as-is and go straight to
+    # thresholding. Gates ONLY the pre-segmented path — datasets
+    # segmented by Cellpose inside the workflow always run seg-QC under
+    # the runner's interactive_qc switch, independent of this flag.
+    run_seg_qc_on_existing: bool = True
 
     def __post_init__(self) -> None:
         if not self.datasets:

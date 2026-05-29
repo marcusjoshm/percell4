@@ -286,6 +286,7 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
             if cfg.particle_settings is not None
             else None
         ),
+        "run_seg_qc_on_existing": cfg.run_seg_qc_on_existing,
     }
 
 
@@ -319,6 +320,10 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
             _particle_from_dict(particle_blob)
             if particle_blob is not None
             else None
+        ),
+        # Absent in pre-feature run folders → default True (checked).
+        run_seg_qc_on_existing=bool(
+            data.get("run_seg_qc_on_existing", True)
         ),
     )
 

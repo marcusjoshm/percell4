@@ -575,6 +575,26 @@ class WorkflowConfigDialog(QDialog):
         note.setWordWrap(True)
         outer.addWidget(note)
 
+        # Opt-in QC for already-segmented datasets. When checked (default),
+        # each pre-segmented dataset opens its selected layer in the
+        # segmentation-QC editor before thresholding; when unchecked, the
+        # existing labels are used as-is. Read pull-style in
+        # _try_build_config (like the Cellpose "Use GPU" checkbox). Datasets
+        # segmented by Cellpose inside this run always run seg-QC regardless.
+        self._run_seg_qc = QCheckBox(
+            "Run segmentation QC on already-segmented datasets"
+        )
+        self._run_seg_qc.setChecked(True)
+        self._run_seg_qc.setToolTip(
+            "When checked, datasets that arrive already segmented (e.g. from "
+            "percell4-batch) open their selected segmentation layer in the QC "
+            "editor so you can review and correct it before thresholding. "
+            "Uncheck to trust the existing segmentation and go straight to "
+            "group thresholding. Datasets segmented by Cellpose during this "
+            "run always run seg-QC. Skipped for time-lapse datasets."
+        )
+        outer.addWidget(self._run_seg_qc)
+
         # Rebuilt by _refresh_segmentation_picker whenever the dataset queue
         # changes. Each row: dataset name -> combo of its /labels resources.
         self._seg_form_host = QWidget()
@@ -1804,6 +1824,7 @@ class WorkflowConfigDialog(QDialog):
                 cellpose_segmentation_name=self._cp_seg_name.text().strip()
                 or "cp_mask",
                 particle_settings=particle_settings,
+                run_seg_qc_on_existing=self._run_seg_qc.isChecked(),
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")
