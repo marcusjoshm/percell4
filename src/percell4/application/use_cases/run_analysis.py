@@ -168,6 +168,7 @@ def run_analysis(
         run_callable,
         log=log,
         set_label=h5_path.stem if set_label is None else set_label,
+        layer_map=layer_map,
     )
     outputs = run_callable(arrays, resolved, **run_kwargs)
 
@@ -221,15 +222,16 @@ def _accepted_progress_kwargs(
     *,
     log: Callable[[str], None] | None,
     set_label: str,
+    layer_map: dict[str, str],
 ) -> dict[str, Any]:
-    """Return the subset of ``{log, set_label}`` that ``run_callable`` accepts.
+    """Return the subset of ``{log, set_label, layer_map}`` ``run_callable`` accepts.
 
-    The :class:`Analysis` base declares ``log`` / ``set_label`` as
-    keyword-only progress parameters, but documents that a subclass that
-    emits no progress may omit them. Passing them unconditionally would
-    raise ``TypeError`` against such a ``run()``; so we inspect the
-    signature and forward each only when it is named explicitly or the
-    callee declares ``**kwargs``.
+    The :class:`Analysis` base declares ``log`` / ``set_label`` /
+    ``layer_map`` as keyword-only parameters, but documents that a
+    subclass that needs none of them may omit them. Passing them
+    unconditionally would raise ``TypeError`` against such a ``run()``;
+    so we inspect the signature and forward each only when it is named
+    explicitly or the callee declares ``**kwargs``.
     """
     try:
         params = inspect.signature(run_callable).parameters
@@ -246,6 +248,8 @@ def _accepted_progress_kwargs(
         kwargs["log"] = log
     if accepts_var_kw or "set_label" in params:
         kwargs["set_label"] = set_label
+    if accepts_var_kw or "layer_map" in params:
+        kwargs["layer_map"] = layer_map
     return kwargs
 
 

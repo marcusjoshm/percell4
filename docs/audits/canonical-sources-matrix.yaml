@@ -71,6 +71,15 @@ canonical_sources:
     applies_to:
       - src/percell4/adapters/importer.py
       - src/percell4/gui/workflows/single_cell/config_dialog.py
+  - slug: registered-analysis-framework
+    solution_doc: docs/solutions/architecture-patterns/registered-analysis-framework.md
+    canonical_file: src/percell4/application/analysis/modules/per_particle_donut.py
+    status: canonical_clean
+    applies_to:
+      - src/percell4/application/analysis/**/*.py
+      - src/percell4/domain/analysis/**/*.py
+      - src/percell4/application/use_cases/run_analysis*.py
+      - src/percell4/gui/analysis_widgets.py
 
 # ── T1 file scope ──────────────────────────────────────────────────────
 # R2 path corrections applied:

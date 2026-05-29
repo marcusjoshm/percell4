@@ -24,13 +24,30 @@ References:
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.ndimage import distance_transform_edt
 from scipy.optimize import curve_fit
-from skimage import measure
+
+from percell4.domain.analysis._impl._shared import (
+    assign_particles_to_cells,
+    label_and_filter,
+    nan_safe_ratio,
+    nanmean_or_nan,
+    nansum_or_nan,
+    region_and_donut_masks,
+    weighted_mean,
+)
+
+__all__ = [
+    "assign_particles_to_cells",
+    "estimate_bg_threshold",
+    "analyze_regions",
+    "aggregate_by_cell",
+    "run_one_image_set",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -161,18 +178,9 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
         prints) — distinct from ``len(rows)`` which excludes regions
         whose donut sum was zero (and hence skipped).
     """
-    binary_mask = mask_img > 0
-    label_mask = measure.label(binary_mask)
-    region_ids = np.unique(label_mask)
-    region_ids = region_ids[region_ids != 0]
-
-    props = measure.regionprops(label_mask)
-    props_by_id = {p.label: p for p in props}
-
-    if min_size > 0:
-        region_ids = np.array(
-            [rid for rid in region_ids if props_by_id[rid].area > min_size]
-        )
+    label_mask, binary_mask, region_ids, props_by_id = label_and_filter(
+        mask_img, min_size
+    )
 
     if log is not None:
         if bg_mode == 'flat':
@@ -185,7 +193,6 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
             f"(bg: {bg_label_str})")
 
     h, w = mask_img.shape
-    pad = buffer_px + donut_px + 1
 
     donut_export = (
         np.zeros((h, w), dtype=np.uint8) if capture_donut_mask else None
@@ -193,26 +200,10 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
 
     results: list[dict[str, Any]] = []
     for region_id in region_ids:
-        bbox = props_by_id[region_id].bbox
-        r0 = max(bbox[0] - pad, 0)
-        c0 = max(bbox[1] - pad, 0)
-        r1 = min(bbox[2] + pad, h)
-        c1 = min(bbox[3] + pad, w)
-
-        crop_label = label_mask[r0:r1, c0:c1]
-        crop_binary = binary_mask[r0:r1, c0:c1]
-        crop_region = crop_label == region_id
-
-        dist_from_this = distance_transform_edt(~crop_region)
-        in_donut_range = (
-            (dist_from_this > buffer_px)
-            & (dist_from_this <= buffer_px + donut_px)
+        region_mask, donut_mask = region_and_donut_masks(
+            label_mask, binary_mask, region_id, props_by_id,
+            buffer_px, donut_px,
         )
-        crop_donut = in_donut_range & ~crop_binary
-
-        region_mask = label_mask == region_id
-        donut_mask = np.zeros_like(binary_mask)
-        donut_mask[r0:r1, c0:c1] = crop_donut
 
         if donut_mask.sum() == 0:
             continue
@@ -246,39 +237,15 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
         cap_region_sub[np.isnan(cap_region_raw)] = np.nan
         cap_donut_sub[np.isnan(cap_donut_raw)] = np.nan
 
-        cap_region_raw_mean = (
-            np.nanmean(cap_region_raw) if np.any(~np.isnan(cap_region_raw))
-            else np.nan
-        )
-        cap_donut_raw_mean = (
-            np.nanmean(cap_donut_raw) if np.any(~np.isnan(cap_donut_raw))
-            else np.nan
-        )
-        cap_region_raw_integ = (
-            np.nansum(cap_region_raw) if np.any(~np.isnan(cap_region_raw))
-            else np.nan
-        )
-        cap_donut_raw_integ = (
-            np.nansum(cap_donut_raw) if np.any(~np.isnan(cap_donut_raw))
-            else np.nan
-        )
+        cap_region_raw_mean = nanmean_or_nan(cap_region_raw)
+        cap_donut_raw_mean = nanmean_or_nan(cap_donut_raw)
+        cap_region_raw_integ = nansum_or_nan(cap_region_raw)
+        cap_donut_raw_integ = nansum_or_nan(cap_donut_raw)
 
-        cap_region_mean = (
-            np.nanmean(cap_region_sub) if np.any(~np.isnan(cap_region_sub))
-            else np.nan
-        )
-        cap_donut_mean = (
-            np.nanmean(cap_donut_sub) if np.any(~np.isnan(cap_donut_sub))
-            else np.nan
-        )
-        cap_region_integ = (
-            np.nansum(cap_region_sub) if np.any(~np.isnan(cap_region_sub))
-            else np.nan
-        )
-        cap_donut_integ = (
-            np.nansum(cap_donut_sub) if np.any(~np.isnan(cap_donut_sub))
-            else np.nan
-        )
+        cap_region_mean = nanmean_or_nan(cap_region_sub)
+        cap_donut_mean = nanmean_or_nan(cap_donut_sub)
+        cap_region_integ = nansum_or_nan(cap_region_sub)
+        cap_donut_integ = nansum_or_nan(cap_donut_sub)
         norm_region_mean = (
             np.mean(norm_img[region_mask]) if region_mask.sum() > 0
             else np.nan
@@ -295,10 +262,6 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
             np.sum(norm_img[donut_mask]) if donut_mask.sum() > 0
             else np.nan
         )
-
-        def _ratio(a: float, b: float) -> float:
-            return (a / b if (b and not np.isnan(a) and not np.isnan(b)
-                              and b != 0) else np.nan)
 
         rl = region_label
         nl = norm_label
@@ -319,11 +282,14 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
             f'{nl}_dilute_mean': norm_donut_mean,
             f'{nl}_{rl}_integ': norm_region_integ,
             f'{nl}_dilute_integ': norm_donut_integ,
-            f'cap_{rl}_over_dilute': _ratio(cap_region_mean, cap_donut_mean),
-            f'{nl}_{rl}_over_dilute': _ratio(norm_region_mean,
-                                             norm_donut_mean),
-            f'cap_over_{nl}_{rl}': _ratio(cap_region_mean, norm_region_mean),
-            f'cap_over_{nl}_dilute': _ratio(cap_donut_mean, norm_donut_mean),
+            f'cap_{rl}_over_dilute': nan_safe_ratio(cap_region_mean,
+                                                    cap_donut_mean),
+            f'{nl}_{rl}_over_dilute': nan_safe_ratio(norm_region_mean,
+                                                     norm_donut_mean),
+            f'cap_over_{nl}_{rl}': nan_safe_ratio(cap_region_mean,
+                                                  norm_region_mean),
+            f'cap_over_{nl}_dilute': nan_safe_ratio(cap_donut_mean,
+                                                    norm_donut_mean),
         })
 
     return {
@@ -336,29 +302,6 @@ def analyze_regions(*, mask_img: np.ndarray, cap_img: np.ndarray,
 # ---------------------------------------------------------------------------
 # Single-cell aggregation
 # ---------------------------------------------------------------------------
-
-
-def assign_particles_to_cells(mask_img: np.ndarray, cp_mask_img: np.ndarray,
-                              min_size: int) -> dict[int, int]:
-    """Return dict mapping particle label ID → cell ID (majority of pixels).
-
-    Caller passes the binary particle mask array directly (no file I/O
-    inside).
-    """
-    label_mask = measure.label(mask_img > 0)
-    props = measure.regionprops(label_mask)
-
-    mapping: dict[int, int] = {}
-    for p in props:
-        if min_size > 0 and p.area <= min_size:
-            continue
-        particle_pixels = label_mask == p.label
-        cell_values = cp_mask_img[particle_pixels]
-        cell_values = cell_values[cell_values != 0]
-        if len(cell_values) == 0:
-            continue
-        mapping[p.label] = int(np.bincount(cell_values).argmax())
-    return mapping
 
 
 def aggregate_by_cell(particle_results: list[dict[str, Any]],
@@ -419,21 +362,6 @@ def aggregate_by_cell(particle_results: list[dict[str, Any]],
         total_region_area = df_p[f'{rl}_area_px'].sum()
         total_donut_area = df_p['donut_area_px'].sum()
 
-        def _weighted_mean(col: str, weights_col: str) -> float:
-            weights = df_p[weights_col].values.astype(float)
-            values = df_p[col].values.astype(float)
-            valid = ~(np.isnan(values) | np.isnan(weights)) & (weights > 0)
-            if not np.any(valid):
-                return np.nan
-            return float(
-                (values[valid] * weights[valid]).sum() / weights[valid].sum()
-            )
-
-        def _ratio(a: float, b: float) -> float:
-            if pd.notna(a) and pd.notna(b) and b != 0:
-                return a / b
-            return np.nan
-
         row = {
             'cell_id': cell_id,
             'cell_area_px': cell_area,
@@ -442,17 +370,17 @@ def aggregate_by_cell(particle_results: list[dict[str, Any]],
             'total_donut_area_px': int(total_donut_area),
             'mean_bg_value': float(df_p['bg_value'].mean()),
             f'cap_{rl}_raw_mean':
-                _weighted_mean(f'cap_{rl}_raw_mean', f'{rl}_area_px'),
+                weighted_mean(df_p, f'cap_{rl}_raw_mean', f'{rl}_area_px'),
             'cap_dilute_raw_mean':
-                _weighted_mean('cap_dilute_raw_mean', 'donut_area_px'),
+                weighted_mean(df_p, 'cap_dilute_raw_mean', 'donut_area_px'),
             f'cap_{rl}_mean':
-                _weighted_mean(f'cap_{rl}_mean', f'{rl}_area_px'),
+                weighted_mean(df_p, f'cap_{rl}_mean', f'{rl}_area_px'),
             'cap_dilute_mean':
-                _weighted_mean('cap_dilute_mean', 'donut_area_px'),
+                weighted_mean(df_p, 'cap_dilute_mean', 'donut_area_px'),
             f'{nl}_{rl}_mean':
-                _weighted_mean(f'{nl}_{rl}_mean', f'{rl}_area_px'),
+                weighted_mean(df_p, f'{nl}_{rl}_mean', f'{rl}_area_px'),
             f'{nl}_dilute_mean':
-                _weighted_mean(f'{nl}_dilute_mean', 'donut_area_px'),
+                weighted_mean(df_p, f'{nl}_dilute_mean', 'donut_area_px'),
             f'cap_{rl}_raw_integ': float(df_p[f'cap_{rl}_raw_integ'].sum()),
             'cap_dilute_raw_integ': float(df_p['cap_dilute_raw_integ'].sum()),
             f'cap_{rl}_integ': float(df_p[f'cap_{rl}_integ'].sum()),
@@ -461,14 +389,14 @@ def aggregate_by_cell(particle_results: list[dict[str, Any]],
             f'{nl}_dilute_integ': float(df_p[f'{nl}_dilute_integ'].sum()),
         }
 
-        row[f'cap_{rl}_over_dilute'] = _ratio(row[f'cap_{rl}_mean'],
-                                              row['cap_dilute_mean'])
-        row[f'{nl}_{rl}_over_dilute'] = _ratio(row[f'{nl}_{rl}_mean'],
-                                               row[f'{nl}_dilute_mean'])
-        row[f'cap_over_{nl}_{rl}'] = _ratio(row[f'cap_{rl}_mean'],
-                                            row[f'{nl}_{rl}_mean'])
-        row[f'cap_over_{nl}_dilute'] = _ratio(row['cap_dilute_mean'],
-                                              row[f'{nl}_dilute_mean'])
+        row[f'cap_{rl}_over_dilute'] = nan_safe_ratio(row[f'cap_{rl}_mean'],
+                                                      row['cap_dilute_mean'])
+        row[f'{nl}_{rl}_over_dilute'] = nan_safe_ratio(row[f'{nl}_{rl}_mean'],
+                                                       row[f'{nl}_dilute_mean'])
+        row[f'cap_over_{nl}_{rl}'] = nan_safe_ratio(row[f'cap_{rl}_mean'],
+                                                    row[f'{nl}_{rl}_mean'])
+        row[f'cap_over_{nl}_dilute'] = nan_safe_ratio(row['cap_dilute_mean'],
+                                                      row[f'{nl}_dilute_mean'])
 
         aggregated.append(row)
 
