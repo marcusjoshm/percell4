@@ -370,7 +370,12 @@ def test_dataset_column_label_override_renames_id_column(
     """An analysis overriding dataset_column_label gets that name as the id
     column in both combined + per-dataset CSVs, and the per-dataset filename
     stem is still derived correctly from the renamed column."""
-    monkeypatch.setattr(PerParticleDonut, "dataset_column_label", "group")
+    # Patch the class the registry actually hands to batch_run_analysis. The
+    # autouse _reregister fixture may have reloaded the module (when another
+    # test cleared the registry), making the imported PerParticleDonut a stale
+    # object distinct from the registered one — patch the live registered class.
+    cls = registry_mod.get("per_particle_donut")
+    monkeypatch.setattr(cls, "dataset_column_label", "group")
 
     cap, pnorm, mask = _toy_pbody_arrays()
     a = tmp_path / "a.h5"
