@@ -76,3 +76,24 @@ def test_per_particle_donut_all_presets_have_snapshots() -> None:
         f"  in-code only: {sorted(in_code_names - on_disk_names)}\n"
         f"  snapshot only: {sorted(on_disk_names - in_code_names)}"
     )
+
+
+# ── WholeFieldIntensity (U7) ──────────────────────────────────────
+
+
+def test_whole_field_intensity_presets_match_snapshot() -> None:
+    from percell4.application.analysis.modules.whole_field_intensity import (
+        WholeFieldIntensity,
+    )
+
+    snapshot = json.loads(
+        (SNAPSHOT_DIR / "whole_field_intensity.json").read_text()
+    )
+    assert set(WholeFieldIntensity.presets) == set(snapshot), (
+        "WholeFieldIntensity preset name set drifted from the snapshot."
+    )
+    for name, in_code in WholeFieldIntensity.presets.items():
+        assert in_code == snapshot[name], (
+            f"Preset {name!r} drift between in-code and snapshot.\n"
+            f"  in-code: {in_code}\n  snapshot: {snapshot[name]}"
+        )
