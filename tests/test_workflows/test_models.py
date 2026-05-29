@@ -421,3 +421,26 @@ def test_run_metadata_is_mutable_for_dilute_round_counts():
     )
     meta.per_dataset_dilute_round_counts["DS1"] = 3
     assert meta.per_dataset_dilute_round_counts == {"DS1": 3}
+
+
+def test_run_seg_qc_on_existing_defaults_true():
+    cfg = WorkflowConfig(
+        datasets=[_valid_entry()],
+        cellpose=CellposeSettings(),
+        thresholding_rounds=[_valid_round()],
+        selected_csv_columns=[],
+        output_parent=Path("/tmp/runs"),
+    )
+    assert cfg.run_seg_qc_on_existing is True
+
+
+def test_run_seg_qc_on_existing_explicit_false():
+    cfg = WorkflowConfig(
+        datasets=[_valid_entry()],
+        cellpose=CellposeSettings(),
+        thresholding_rounds=[_valid_round()],
+        selected_csv_columns=[],
+        output_parent=Path("/tmp/runs"),
+        run_seg_qc_on_existing=False,
+    )
+    assert cfg.run_seg_qc_on_existing is False

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -467,3 +468,21 @@ def test_post_evolution_round_trip_preserves_new_fields(tmp_path: Path) -> None:
     assert loaded_cfg.dilute_settings.algorithm is ThresholdAlgorithm.GMM
     assert loaded_cfg.dilute_settings.gmm_criterion is GmmCriterion.BIC
     assert loaded_meta.per_dataset_dilute_round_counts == {"DS1": 3, "DS2": 5}
+
+
+def test_run_seg_qc_on_existing_round_trips():
+    cfg = replace(_sample_config(), run_seg_qc_on_existing=False)
+    restored = config_from_dict(config_to_dict(cfg))
+    assert restored.run_seg_qc_on_existing is False
+
+
+def test_config_to_dict_includes_run_seg_qc():
+    assert config_to_dict(_sample_config())["run_seg_qc_on_existing"] is True
+
+
+def test_config_from_dict_defaults_run_seg_qc_true_when_absent():
+    # Pre-feature run folders have no run_seg_qc_on_existing key → True.
+    cfg = replace(_sample_config(), run_seg_qc_on_existing=False)
+    data = config_to_dict(cfg)
+    data.pop("run_seg_qc_on_existing", None)
+    assert config_from_dict(data).run_seg_qc_on_existing is True

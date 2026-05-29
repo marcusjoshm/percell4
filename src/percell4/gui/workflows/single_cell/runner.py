@@ -266,6 +266,57 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 existing = self._detect_existing_segmentation(entry)
             if existing is not None:
                 self._effective_seg[entry.name] = existing
+                # Optionally QC a pre-existing segmentation (produced by
+                # percell4-batch or picked via segmentation_overrides)
+                # before thresholding, instead of skipping straight to it.
+                # Gated to:
+                #   - interactive runs only (headless never yields QC);
+                #   - cfg.run_seg_qc_on_existing (the config-dialog
+                #     checkbox, default True);
+                #   - a layer that exists AND is 2D — a single
+                #     labels_shape() call establishes both. The editor
+                #     (SegmentationQCController) rejects non-2D labels, so a
+                #     (T, H, W) stack is skipped; but a 2D whole-field gate
+                #     on a time-lapse dataset is still QC-able and runs.
+                #     A stale segmentation_overrides entry naming a missing
+                #     layer raises here → skipped (rather than erroring
+                #     inside the controller).
+                #   - NOT a ``*_tracked`` layer — its label VALUES are track
+                #     ids tied to the ``/tracks/<seg>`` lineage table. The
+                #     raw-label QC tools renumber labels, which would
+                #     desync the lineage; ``_should_track`` guards the same
+                #     way. Skip QC for tracked layers.
+                # When any guard fails we fall through to today's behavior
+                # (skip seg-QC, go to thresholding). Cellpose-segmented-
+                # this-run datasets take the fresh path below, unaffected
+                # by this flag.
+                if (
+                    self._interactive_qc
+                    and self._config.run_seg_qc_on_existing
+                    and not existing.endswith("_tracked")
+                ):
+                    try:
+                        is_2d = len(
+                            DatasetStore(entry.h5_path).labels_shape(existing)
+                        ) == 2
+                    except Exception:
+                        logger.exception(
+                            "could not read labels_shape for %s/%s",
+                            entry.name,
+                            existing,
+                        )
+                        is_2d = False
+                    if is_2d:
+                        yield PhaseRequest(
+                            kind=PhaseKind.INTERACTIVE,
+                            phase_name="seg_qc",
+                            dataset_index=idx,
+                            dataset_total=len(active),
+                            dataset_name=entry.name,
+                            handler=self._make_seg_qc_handler(
+                                entry, idx, len(active)
+                            ),
+                        )
                 continue
 
             if self._interactive_qc:
