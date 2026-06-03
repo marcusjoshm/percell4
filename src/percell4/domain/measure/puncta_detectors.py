@@ -295,9 +295,7 @@ def _h_maxima(
     # nan_safe_gaussian_filter on a NaN-filled image is the plain Gaussian, but
     # routing through it keeps the NaN-safe discipline uniform across detectors
     # and tolerates a residual that still carries NaN.
-    prefiltered = np.asarray(
-        nan_safe_gaussian_filter(filled, sigma=prefilter_sigma), dtype=float
-    )
+    prefiltered = np.asarray(nan_safe_gaussian_filter(filled, sigma=prefilter_sigma), dtype=float)
     prefiltered = _fill_nan(prefiltered, fill=0.0)
 
     h = k * float(sigma)
@@ -328,6 +326,5 @@ DETECTORS: dict[str, Callable[..., np.ndarray]] = {
 # Drift guard: the registry keys are exactly the single-source-of-truth tuple
 # (which includes the atrous-wavelet stub registered above).
 assert set(DETECTORS) == set(DETECTOR_NAMES), (
-    "DETECTORS keys drifted from DETECTOR_NAMES: "
-    f"{set(DETECTORS) ^ set(DETECTOR_NAMES)}"
+    f"DETECTORS keys drifted from DETECTOR_NAMES: {set(DETECTORS) ^ set(DETECTOR_NAMES)}"
 )

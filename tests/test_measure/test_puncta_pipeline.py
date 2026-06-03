@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from percell4.domain.measure import puncta_pipeline
 from percell4.domain.measure.puncta_pipeline import (
@@ -158,9 +157,7 @@ def test_scale_range_defaults_to_prior_then_constant(monkeypatch):
 
     monkeypatch.setitem(puncta_pipeline.DETECTORS, "log", capturing)
     # No scale_range arg, no prior -> DEFAULT_SCALE_RANGE.
-    detect_two_pass(
-        img, gm, _log_settings(seed_detector_name="bg-k-sigma")
-    )
+    detect_two_pass(img, gm, _log_settings(seed_detector_name="bg-k-sigma"))
     assert (seen["min_sigma"], seen["max_sigma"]) == DEFAULT_SCALE_RANGE
 
     # Locked prior wins when no explicit scale_range is passed.
@@ -206,8 +203,7 @@ def test_under_capture_fallback_uses_robust_background(monkeypatch):
 
 
 def test_calibrate_cold_start_uses_default():
-    # No prior, enough seeds -> candidate range; no prior + too few -> default.
-    rng, _ = None, None
+    # No prior + no seeds -> the bootstrap default range.
     refined, clamped = calibrate_scale_range([], prior=None)
     assert refined == DEFAULT_SCALE_RANGE and clamped is False
 

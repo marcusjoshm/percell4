@@ -102,10 +102,7 @@ class CellposeSettings:
         if self.min_size < 0:
             raise ValueError("min_size must be >= 0")
         if not (0.0 <= self.saturation_pct <= 50.0):
-            raise ValueError(
-                "saturation_pct must be in [0, 50] "
-                f"(got {self.saturation_pct})"
-            )
+            raise ValueError(f"saturation_pct must be in [0, 50] (got {self.saturation_pct})")
 
 
 def _normalize_params(params: Any) -> tuple[tuple[str, Any], ...]:
@@ -124,8 +121,7 @@ def _normalize_params(params: Any) -> tuple[tuple[str, Any], ...]:
             raise ValueError(f"param key must be str, got {key!r}")
         if value is not None and not isinstance(value, (str, int, float, bool)):
             raise ValueError(
-                f"param value for {key!r} must be a JSON scalar, "
-                f"got {type(value).__name__}"
+                f"param value for {key!r} must be a JSON scalar, got {type(value).__name__}"
             )
         out.append((key, value))
     return tuple(sorted(out, key=lambda kv: kv[0]))
@@ -161,8 +157,7 @@ class PunctaDetectorSettings:
     def __post_init__(self) -> None:
         if self.detector_name not in DETECTOR_NAMES:
             raise ValueError(
-                f"detector_name must be one of {DETECTOR_NAMES}, "
-                f"got {self.detector_name!r}"
+                f"detector_name must be one of {DETECTOR_NAMES}, got {self.detector_name!r}"
             )
         if self.seed_detector_name not in DETECTOR_NAMES:
             raise ValueError(
@@ -180,12 +175,8 @@ class PunctaDetectorSettings:
             raise ValueError("max_spot_px must be >= min_spot_px")
         # Normalize params to canonical sorted tuples (hashable + stable
         # round-trip). Accept a dict or an iterable of pairs at construction.
-        object.__setattr__(
-            self, "detector_params", _normalize_params(self.detector_params)
-        )
-        object.__setattr__(
-            self, "seed_params", _normalize_params(self.seed_params)
-        )
+        object.__setattr__(self, "detector_params", _normalize_params(self.detector_params))
+        object.__setattr__(self, "seed_params", _normalize_params(self.seed_params))
         # Coerce a JSON-list scale prior back to a float tuple so the frozen
         # __eq__ / __hash__ are stable across a run_config.json round-trip.
         if self.spot_scale_prior is not None:
@@ -225,16 +216,12 @@ class ThresholdingRound:
 
     def __post_init__(self) -> None:
         if not _ROUND_NAME_RE.match(self.name):
-            raise ValueError(
-                "round name must match "
-                f"{_ROUND_NAME_RE.pattern}, got {self.name!r}"
-            )
+            raise ValueError(f"round name must match {_ROUND_NAME_RE.pattern}, got {self.name!r}")
         if not self.channel:
             raise ValueError("channel must be non-empty")
         if self.metric not in BUILTIN_METRICS:
             raise ValueError(
-                f"metric must be one of {sorted(BUILTIN_METRICS)}, "
-                f"got {self.metric!r}"
+                f"metric must be one of {sorted(BUILTIN_METRICS)}, got {self.metric!r}"
             )
         if self.gmm_max_components < 2:
             raise ValueError("gmm_max_components must be >= 2")
@@ -274,13 +261,9 @@ class ParticleSettings:
 
     def __post_init__(self) -> None:
         if self.min_area < 0:
-            raise ValueError(
-                f"min_area must be >= 0, got {self.min_area}"
-            )
+            raise ValueError(f"min_area must be >= 0, got {self.min_area}")
         if self.min_area_unit not in ("px", "um2"):
-            raise ValueError(
-                f"min_area_unit must be 'px' or 'um2', got {self.min_area_unit!r}"
-            )
+            raise ValueError(f"min_area_unit must be 'px' or 'um2', got {self.min_area_unit!r}")
 
 
 @dataclass(frozen=True)
@@ -319,15 +302,13 @@ class DiluteSettings:
     def __post_init__(self) -> None:
         if not _ROUND_NAME_RE.match(self.mask_name):
             raise ValueError(
-                "dilute mask_name must match "
-                f"{_ROUND_NAME_RE.pattern}, got {self.mask_name!r}"
+                f"dilute mask_name must match {_ROUND_NAME_RE.pattern}, got {self.mask_name!r}"
             )
         if not self.channel:
             raise ValueError("dilute channel must be non-empty")
         if self.metric not in BUILTIN_METRICS:
             raise ValueError(
-                f"dilute metric must be one of {sorted(BUILTIN_METRICS)}, "
-                f"got {self.metric!r}"
+                f"dilute metric must be one of {sorted(BUILTIN_METRICS)}, got {self.metric!r}"
             )
         if self.dilation_radius_px <= 0:
             raise ValueError("dilution_radius_px must be positive")
@@ -361,9 +342,7 @@ class WorkflowDatasetEntry:
         if not self.name:
             raise ValueError("dataset name must be non-empty")
         if self.source == DatasetSource.TIFF_PENDING and self.compress_plan is None:
-            raise ValueError(
-                "tiff_pending datasets require a compress_plan"
-            )
+            raise ValueError("tiff_pending datasets require a compress_plan")
 
 
 @dataclass(frozen=True)
@@ -425,9 +404,7 @@ class WorkflowConfig:
         if len(set(ds_names)) != len(ds_names):
             raise ValueError(f"dataset names must be unique: {ds_names}")
         if self.edge_margin_px < 0:
-            raise ValueError(
-                f"edge_margin_px must be >= 0, got {self.edge_margin_px}"
-            )
+            raise ValueError(f"edge_margin_px must be >= 0, got {self.edge_margin_px}")
         if not _ROUND_NAME_RE.match(self.cellpose_segmentation_name):
             raise ValueError(
                 "cellpose_segmentation_name must match "
@@ -505,9 +482,7 @@ class FlimFretPair:
         ):
             value = getattr(self, field_name)
             if not value:
-                raise ValueError(
-                    f"FLIM-FRET pair {self.name!r}: {field_name} must be non-empty"
-                )
+                raise ValueError(f"FLIM-FRET pair {self.name!r}: {field_name} must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -530,9 +505,7 @@ class FlimFretConfig:
             raise ValueError("at least one FLIM-FRET pair is required")
         names = [p.name for p in self.pairs]
         if len(set(names)) != len(names):
-            raise ValueError(
-                f"FLIM-FRET pair names must be unique: {names}"
-            )
+            raise ValueError(f"FLIM-FRET pair names must be unique: {names}")
         for pair in self.pairs:
             try:
                 same_path = pair.donor_h5.resolve() == pair.da_h5.resolve()

@@ -111,9 +111,7 @@ def _gaussian_peak(
     return BackgroundEstimate(residual, float(sigma), False)
 
 
-def _mad(
-    image: np.ndarray, group_mask: np.ndarray, seeds, params: dict
-) -> BackgroundEstimate:
+def _mad(image: np.ndarray, group_mask: np.ndarray, seeds, params: dict) -> BackgroundEstimate:
     """Median background, MAD-derived robust noise scale (1.4826 * MAD)."""
     vals = _finite_group_values(image, group_mask)
     if vals.size == 0:
@@ -177,8 +175,12 @@ def _donut_aggregate(
     ring_values: list[np.ndarray] = []
     for region_id in region_ids:
         _region_mask, donut_mask = region_and_donut_masks(
-            label_mask, binary_mask, int(region_id), props_by_id,
-            buffer_px, donut_px,
+            label_mask,
+            binary_mask,
+            int(region_id),
+            props_by_id,
+            buffer_px,
+            donut_px,
         )
         ring = image[donut_mask]
         ring = ring[np.isfinite(ring)]

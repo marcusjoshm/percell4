@@ -40,9 +40,7 @@ def _one_cell_labels():
 
 
 def _one_group():
-    return GroupingResult(
-        group_assignments=pd.Series({1: 1}), n_groups=1, group_means=[1.0]
-    )
+    return GroupingResult(group_assignments=pd.Series({1: 1}), n_groups=1, group_means=[1.0])
 
 
 def _make_field(name, spots, **kw):
@@ -143,9 +141,7 @@ def test_no_method_clears_precision_floor_keeps_qc():
 def test_tier_b_recall_floor_unreachable_keeps_qc():
     fields = [_make_field("f1", _SPOTS)]
     # A floor above 1.0 can never be met -> keep QC even with perfect detection.
-    report = run_validation(
-        fields, {"f1": _GT}, _qualifying_grid(), tier_b_recall=1.5
-    )
+    report = run_validation(fields, {"f1": _GT}, _qualifying_grid(), tier_b_recall=1.5)
     assert report.locked_settings is None
     assert report.keep_qc is True
     assert "Tier-B floor" in report.reason

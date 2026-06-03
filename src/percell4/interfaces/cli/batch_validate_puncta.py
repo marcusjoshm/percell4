@@ -48,9 +48,7 @@ def _settings_to_dict(settings) -> dict:
         "min_spot_px": settings.min_spot_px,
         "max_spot_px": settings.max_spot_px,
         "spot_scale_prior": (
-            list(settings.spot_scale_prior)
-            if settings.spot_scale_prior is not None
-            else None
+            list(settings.spot_scale_prior) if settings.spot_scale_prior is not None else None
         ),
     }
 
@@ -90,10 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--field-name",
         default=None,
-        help=(
-            "Tier-A field name this dataset corresponds to "
-            "(default: the dataset file stem)."
-        ),
+        help=("Tier-A field name this dataset corresponds to (default: the dataset file stem)."),
     )
     parser.add_argument(
         "--tier-b-mask",
@@ -161,9 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Write the locked PunctaDetectorSettings JSON here when locked.",
     )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable DEBUG logging."
-    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG logging.")
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -225,9 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             scale_range=(args.scale_min, args.scale_max),
             min_spot_px=args.min_spot_px,
         )
-        for det, bg, k, tol in itertools.product(
-            args.detectors, args.backgrounds, args.k, args.tol
-        )
+        for det, bg, k, tol in itertools.product(args.detectors, args.backgrounds, args.k, args.tol)
     ]
 
     report = run_validation(

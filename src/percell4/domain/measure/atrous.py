@@ -58,6 +58,5 @@ def atrous_wavelet(
     raises so no code silently selects an empty detector.
     """
     raise NotImplementedError(
-        "a-trous wavelet detector is not yet implemented; "
-        "see plan U9 (evidence-gated to Phase 3)"
+        "a-trous wavelet detector is not yet implemented; see plan U9 (evidence-gated to Phase 3)"
     )

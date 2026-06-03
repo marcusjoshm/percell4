@@ -181,9 +181,7 @@ def _puncta_to_dict(p: PunctaDetectorSettings) -> dict[str, Any]:
         "seed_params": dict(p.seed_params),
         "min_spot_px": p.min_spot_px,
         "max_spot_px": p.max_spot_px,
-        "spot_scale_prior": (
-            list(p.spot_scale_prior) if p.spot_scale_prior is not None else None
-        ),
+        "spot_scale_prior": (list(p.spot_scale_prior) if p.spot_scale_prior is not None else None),
     }
 
 
@@ -192,9 +190,7 @@ def _puncta_from_dict(d: dict[str, Any]) -> PunctaDetectorSettings:
     return PunctaDetectorSettings(
         detector_name=d.get("detector_name", "otsu"),
         seed_detector_name=d.get("seed_detector_name", "log"),
-        background_estimator_name=d.get(
-            "background_estimator_name", "gaussian-peak"
-        ),
+        background_estimator_name=d.get("background_estimator_name", "gaussian-peak"),
         detector_params=d.get("detector_params", {}),
         seed_params=d.get("seed_params", {}),
         min_spot_px=d.get("min_spot_px", 2),
@@ -316,15 +312,11 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
         "edge_mode": cfg.edge_mode.value,
         "edge_margin_px": cfg.edge_margin_px,
         "dilute_settings": (
-            _dilute_to_dict(cfg.dilute_settings)
-            if cfg.dilute_settings is not None
-            else None
+            _dilute_to_dict(cfg.dilute_settings) if cfg.dilute_settings is not None else None
         ),
         "cellpose_segmentation_name": cfg.cellpose_segmentation_name,
         "particle_settings": (
-            _particle_to_dict(cfg.particle_settings)
-            if cfg.particle_settings is not None
-            else None
+            _particle_to_dict(cfg.particle_settings) if cfg.particle_settings is not None else None
         ),
         "run_seg_qc_on_existing": cfg.run_seg_qc_on_existing,
     }
@@ -342,29 +334,19 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
     return WorkflowConfig(
         datasets=[_entry_from_dict(d) for d in data["datasets"]],
         cellpose=_cellpose_from_dict(data["cellpose"]),
-        thresholding_rounds=[
-            _round_from_dict(r) for r in data["thresholding_rounds"]
-        ],
+        thresholding_rounds=[_round_from_dict(r) for r in data["thresholding_rounds"]],
         selected_csv_columns=list(data["selected_csv_columns"]),
         output_parent=Path(data["output_parent"]),
         seg_channel_name=data.get("seg_channel_name", ""),
         edge_mode=EdgeMode(data.get("edge_mode", EdgeMode.EXCLUDE.value)),
         edge_margin_px=int(data.get("edge_margin_px", 0)),
-        dilute_settings=(
-            _dilute_from_dict(dilute_blob) if dilute_blob is not None else None
-        ),
-        cellpose_segmentation_name=data.get(
-            "cellpose_segmentation_name", "cellpose_qc"
-        ),
+        dilute_settings=(_dilute_from_dict(dilute_blob) if dilute_blob is not None else None),
+        cellpose_segmentation_name=data.get("cellpose_segmentation_name", "cellpose_qc"),
         particle_settings=(
-            _particle_from_dict(particle_blob)
-            if particle_blob is not None
-            else None
+            _particle_from_dict(particle_blob) if particle_blob is not None else None
         ),
         # Absent in pre-feature run folders → default True (checked).
-        run_seg_qc_on_existing=bool(
-            data.get("run_seg_qc_on_existing", True)
-        ),
+        run_seg_qc_on_existing=bool(data.get("run_seg_qc_on_existing", True)),
     )
 
 
@@ -415,15 +397,11 @@ def metadata_from_dict(data: dict[str, Any]) -> RunMetadata:
         run_folder=Path(data["run_folder"]),
         started_at=datetime.fromisoformat(data["started_at"]),
         finished_at=(
-            datetime.fromisoformat(data["finished_at"])
-            if data.get("finished_at")
-            else None
+            datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None
         ),
         intersected_channels=list(data.get("intersected_channels", [])),
         failures=[_failure_from_dict(f) for f in data.get("failures", [])],
-        per_dataset_dilute_round_counts=dict(
-            data.get("per_dataset_dilute_round_counts", {})
-        ),
+        per_dataset_dilute_round_counts=dict(data.get("per_dataset_dilute_round_counts", {})),
     )
 
 

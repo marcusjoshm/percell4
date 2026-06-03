@@ -181,9 +181,7 @@ def test_runner_happy_path_skipping_cellpose(qtbot, fake_host, tmp_path):
     assert loaded_meta.finished_at is not None
 
 
-def test_runner_produces_expected_artifacts_when_segment_succeeds(
-    qtbot, fake_host, tmp_path
-):
+def test_runner_produces_expected_artifacts_when_segment_succeeds(qtbot, fake_host, tmp_path):
     """With pre-written labels, Cellpose may produce empty segmentation.
 
     We patch segment_one to be a no-op that leaves the pre-written labels
@@ -212,6 +210,7 @@ def test_runner_produces_expected_artifacts_when_segment_succeeds(
         # The runner imports the symbol by name, so we also need to
         # patch the local binding it captured.
         import percell4.gui.workflows.single_cell.runner as runner_mod
+
         runner_mod.segment_one = _noop_segment
 
         runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
@@ -263,9 +262,7 @@ def test_runner_produces_expected_artifacts_when_segment_succeeds(
         store = DatasetStore(entry.h5_path)
         # list_groups on "" returns the root-level group names
         roots = store.list_groups("")
-        assert "measurements" not in roots, (
-            f"{entry.name} unexpectedly got a /measurements group"
-        )
+        assert "measurements" not in roots, f"{entry.name} unexpectedly got a /measurements group"
         # /masks/<round> and /groups/<round> WERE written
         assert "GFP_split" in store.list_masks()
 
@@ -276,9 +273,7 @@ def test_runner_produces_expected_artifacts_when_segment_succeeds(
     assert loaded_meta.failures == []
 
 
-def test_runner_headless_puncta_round_writes_binary_mask(
-    qtbot, fake_host, tmp_path
-):
+def test_runner_headless_puncta_round_writes_binary_mask(qtbot, fake_host, tmp_path):
     """A headless run (interactive_qc=False) with a puncta-mode round flows
     through _make_threshold_apply_headless_handler unchanged and writes a
     {0,1} uint8 mask end-to-end (plan U7)."""
@@ -321,9 +316,7 @@ def test_runner_headless_puncta_round_writes_binary_mask(
         import percell4.gui.workflows.single_cell.runner as runner_mod
 
         runner_mod.segment_one = _noop_segment
-        runner = SingleCellThresholdingRunner(
-            config=cfg, metadata=meta, interactive_qc=False
-        )
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
         events = []
         runner.workflow_event.connect(lambda e: events.append(e))
         runner.start(cfg, fake_host, meta)
@@ -343,9 +336,7 @@ def test_runner_headless_puncta_round_writes_binary_mask(
     assert set(np.unique(mask).tolist()) <= {0, 1}
 
 
-def test_runner_records_failure_and_continues_other_datasets(
-    qtbot, fake_host, tmp_path
-):
+def test_runner_records_failure_and_continues_other_datasets(qtbot, fake_host, tmp_path):
     """Per-dataset failure doesn't crash the run — other datasets proceed."""
     import percell4.gui.workflows.single_cell.runner as runner_mod
     import percell4.workflows.phases as phases
@@ -357,16 +348,19 @@ def test_runner_records_failure_and_continues_other_datasets(
     s1 = DatasetStore(p1)
     s1.create(metadata={"channel_names": ["GFP", "RFP"]})
     s1.write_array(
-        "intensity", np.zeros((2, 100, 100), dtype=np.float32),
+        "intensity",
+        np.zeros((2, 100, 100), dtype=np.float32),
         attrs={"dims": ["C", "H", "W"]},
     )
     p2 = tmp_path / "DS2.h5"
     _make_dataset(p2, "DS2")
     entries = [
-        WorkflowDatasetEntry(name="DS1", source=DatasetSource.H5_EXISTING,
-                             h5_path=p1, channel_names=["GFP", "RFP"]),
-        WorkflowDatasetEntry(name="DS2", source=DatasetSource.H5_EXISTING,
-                             h5_path=p2, channel_names=["GFP", "RFP"]),
+        WorkflowDatasetEntry(
+            name="DS1", source=DatasetSource.H5_EXISTING, h5_path=p1, channel_names=["GFP", "RFP"]
+        ),
+        WorkflowDatasetEntry(
+            name="DS2", source=DatasetSource.H5_EXISTING, h5_path=p2, channel_names=["GFP", "RFP"]
+        ),
     ]
     run_folder = create_run_folder(tmp_path / "runs")
     cfg = _make_config(entries, tmp_path / "runs")
@@ -401,8 +395,7 @@ def test_runner_records_failure_and_continues_other_datasets(
 
     # DS1 is in the failures list
     assert any(
-        rec.dataset_name == "DS1"
-        and rec.failure is DatasetFailure.SEGMENTATION_EMPTY
+        rec.dataset_name == "DS1" and rec.failure is DatasetFailure.SEGMENTATION_EMPTY
         for rec in meta.failures
     )
 
@@ -416,9 +409,7 @@ def test_runner_records_failure_and_continues_other_datasets(
 
     # run_config.json preserves the failure record
     _cfg, loaded_meta = read_run_config(run_folder)
-    assert any(
-        rec.dataset_name == "DS1" for rec in loaded_meta.failures
-    )
+    assert any(rec.dataset_name == "DS1" for rec in loaded_meta.failures)
 
 
 def test_runner_reentrance_guard(qtbot, fake_host, tmp_path):

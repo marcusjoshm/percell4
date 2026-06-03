@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from percell4.domain.measure.puncta_detectors import DETECTORS, DETECTOR_NAMES
+from percell4.domain.measure.puncta_detectors import DETECTOR_NAMES, DETECTORS
 
 # Detectors that take a real signal and are expected to fire on bright spots.
 # (``atrous-wavelet`` is a stub; tested separately for the raise.)
@@ -35,9 +35,9 @@ def _add_spot(img, y, x, amp, sigma):
 # spots (amp ~ 8-12) are the ones a global Otsu threshold drops.
 _MIXED_SPOTS = [
     (20, 20, 60.0, 2.0),
-    (20, 90, 12.0, 1.5),   # dim
+    (20, 90, 12.0, 1.5),  # dim
     (60, 45, 40.0, 3.0),
-    (95, 95, 8.0, 2.5),    # dim
+    (95, 95, 8.0, 2.5),  # dim
     (50, 105, 25.0, 2.0),
     (100, 30, 10.0, 1.5),  # dim
 ]
@@ -78,8 +78,7 @@ def test_registry_keys_match_names():
 
 
 def test_expected_keys_present():
-    expected = {"otsu", "bg-k-sigma", "white-tophat", "log", "dog", "h-maxima",
-                "atrous-wavelet"}
+    expected = {"otsu", "bg-k-sigma", "white-tophat", "log", "dog", "h-maxima", "atrous-wavelet"}
     assert set(DETECTORS) == expected
 
 
@@ -109,7 +108,7 @@ def test_otsu_misses_dim_spots_documents_the_win():
     otsu_recall = _recall(otsu_mask, _MIXED_SPOTS)
     log_recall = _recall(log_mask, _MIXED_SPOTS)
     assert otsu_recall < log_recall  # Otsu loses dim foci
-    assert otsu_recall < 0.9         # specifically misses at least one dim spot
+    assert otsu_recall < 0.9  # specifically misses at least one dim spot
 
 
 # ── bg-k-sigma: exactly residual > k*sigma within the group ───
@@ -199,13 +198,14 @@ def test_internal_nan_block_does_not_corrupt_detection(name):
     in-group pixels.
     """
     img = np.zeros((120, 120), dtype=float)
-    _add_spot(img, 30, 30, 60.0, 2.5)        # strong spot, well clear of the hole
+    _add_spot(img, 30, 30, 60.0, 2.5)  # strong spot, well clear of the hole
     gmask = np.ones(img.shape, dtype=bool)
 
     clean = DETECTORS[name](img, gmask, None, _BLOB_PARAMS)
+    assert clean[28:33, 28:33].any()  # spot detected without the hole
 
     holed = img.copy()
-    holed[80:95, 80:95] = np.nan            # NaN block far from the spot
+    holed[80:95, 80:95] = np.nan  # NaN block far from the spot
     holed_mask = DETECTORS[name](holed, gmask, None, _BLOB_PARAMS)
 
     # No detection inside or bleeding out of the NaN block (restricted to finite).
@@ -299,8 +299,8 @@ def test_output_restricted_to_group_and_finite(name):
     gmask[:, :60] = True  # left half only
     iso = _isolate(img, gmask)  # out-of-group → NaN
     mask = DETECTORS[name](iso, gmask, 1.0, _BLOB_PARAMS)
-    assert not mask[~gmask].any()                       # never out-of-group
-    assert not mask[~np.isfinite(iso)].any()            # never on a NaN pixel
+    assert not mask[~gmask].any()  # never out-of-group
+    assert not mask[~np.isfinite(iso)].any()  # never on a NaN pixel
 
 
 # ── np.isin(..., list(...))-derived group mask exercised (NumPy 2.x) ──
@@ -315,9 +315,9 @@ def test_isin_derived_group_mask_non_empty(name):
     """
     img = _mixed_residual()
     labels = np.zeros(img.shape, dtype=int)
-    labels[:, :70] = 1   # cell 1 covers the left columns
+    labels[:, :70] = 1  # cell 1 covers the left columns
     labels[:, 70:] = 2
-    gmask = np.isin(labels, list({1}))   # the list() wrap is load-bearing
+    gmask = np.isin(labels, list({1}))  # the list() wrap is load-bearing
     assert gmask.any()
     iso = _isolate(img, gmask)
     mask = DETECTORS[name](iso, gmask, None, _BLOB_PARAMS)

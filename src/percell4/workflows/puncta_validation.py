@@ -43,7 +43,6 @@ from percell4.domain.measure.puncta_scoring import (
     MatchCounts,
     accumulate,
     match_detections,
-    mask_to_centroids,
 )
 from percell4.workflows.models import (
     PunctaDetectorSettings,
@@ -71,7 +70,7 @@ class LabeledField:
     name: str
     image: NDArray
     labels: NDArray
-    grouping: "GroupingResult"
+    grouping: GroupingResult
 
 
 @dataclass(frozen=True)
@@ -164,9 +163,7 @@ def _score_grid_point(
     per_field: list[MatchCounts] = []
     for fld in fields:
         round_spec = _round_for(settings, fld)
-        mask, _gdf, err = _apply_threshold_frame(
-            fld.image, fld.labels, fld.grouping, round_spec
-        )
+        mask, _gdf, err = _apply_threshold_frame(fld.image, fld.labels, fld.grouping, round_spec)
         if err or mask is None:
             mask = np.zeros(fld.labels.shape, dtype=np.uint8)
         # close + label (closing merges fragments of one granule within scale).
@@ -283,13 +280,9 @@ def run_validation(
         top = ranked[0]
         reasons = []
         if top["precision"] < precision_floor:
-            reasons.append(
-                f"precision {top['precision']:.3f} < floor {precision_floor}"
-            )
+            reasons.append(f"precision {top['precision']:.3f} < floor {precision_floor}")
         if tier_b_recall is not None and top["recall"] < tier_b_recall:
-            reasons.append(
-                f"recall {top['recall']:.3f} < Tier-B floor {tier_b_recall:.3f}"
-            )
+            reasons.append(f"recall {top['recall']:.3f} < Tier-B floor {tier_b_recall:.3f}")
         if not top["stable"]:
             reasons.append("failed stability probe")
         why = "; ".join(reasons) or "no qualifying grid point"
@@ -332,16 +325,12 @@ def load_tier_a_csv(paths: list[str | Path]) -> dict[str, NDArray]:
 
     out: dict[str, NDArray] = {}
     for name, chunks in by_field.items():
-        out[name] = (
-            np.concatenate(chunks, axis=0)
-            if chunks
-            else np.empty((0, 2), dtype=np.float64)
-        )
+        out[name] = np.concatenate(chunks, axis=0) if chunks else np.empty((0, 2), dtype=np.float64)
     return out
 
 
 def load_tier_b_recall(
-    store: "DatasetStore",
+    store: DatasetStore,
     mask_name: str,
     gt_by_field: dict[str, NDArray],
     tol: float,
@@ -361,9 +350,7 @@ def load_tier_b_recall(
     mask = store.read_mask(mask_name)
     if field_name is None:
         if len(gt_by_field) != 1:
-            raise ValueError(
-                "field_name is required when gt_by_field has != 1 field"
-            )
+            raise ValueError("field_name is required when gt_by_field has != 1 field")
         field_name = next(iter(gt_by_field))
     gt = gt_by_field.get(field_name, np.empty((0, 2)))
 
@@ -380,7 +367,7 @@ def load_tier_b_recall(
 
 
 def load_fields_from_store(
-    store: "DatasetStore",
+    store: DatasetStore,
     round_spec: ThresholdingRound,
     *,
     field_name: str | None = None,

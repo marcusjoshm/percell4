@@ -105,9 +105,7 @@ def compute_seeds(
     boot_residual = _isolate(smoothed_image - mu_boot, group_label_mask)
     seed_detector = DETECTORS[settings.seed_detector_name]
     seed_params = _params_with_scale(settings.seed_params, scale_range)
-    seed_mask = seed_detector(
-        boot_residual, group_label_mask, sigma_boot, seed_params
-    )
+    seed_mask = seed_detector(boot_residual, group_label_mask, sigma_boot, seed_params)
     return label_and_filter(seed_mask, 0)
 
 
@@ -166,9 +164,7 @@ def calibrate_scale_range(
     return (refined_lo, refined_hi), clamped
 
 
-def _size_filter(
-    mask: np.ndarray, min_spot_px: int, max_spot_px: int | None
-) -> np.ndarray:
+def _size_filter(mask: np.ndarray, min_spot_px: int, max_spot_px: int | None) -> np.ndarray:
     """Drop connected components outside ``[min_spot_px, max_spot_px]`` area."""
     if min_spot_px <= 1 and max_spot_px is None:
         return mask
@@ -235,9 +231,7 @@ def detect_two_pass(
         smoothed_image, group_label_mask, seeds, bg_params
     )
     if est.is_empty and settings.background_estimator_name != "gaussian-peak":
-        est = BACKGROUND_ESTIMATORS["gaussian-peak"](
-            smoothed_image, group_label_mask, None, {}
-        )
+        est = BACKGROUND_ESTIMATORS["gaussian-peak"](smoothed_image, group_label_mask, None, {})
     if est.is_empty:
         return empty
 

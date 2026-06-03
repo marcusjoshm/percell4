@@ -85,9 +85,7 @@ class MatchCounts:
     fp_components: int
 
 
-def match_detections(
-    det_labels: NDArray, gt_points: NDArray, tol: float
-) -> MatchCounts:
+def match_detections(det_labels: NDArray, gt_points: NDArray, tol: float) -> MatchCounts:
     """Match a labeled detection mask against GT centroids (two-phase protocol).
 
     Parameters

@@ -37,17 +37,20 @@ def test_workflows_package_imports_without_qt():
     import percell4.workflows.models  # noqa: F401
     import percell4.workflows.puncta_validation  # noqa: F401
     import percell4.workflows.run_log  # noqa: F401
+
     for mod_name in (
-        "artifacts", "channels", "diagnostics", "failures", "host", "models",
-        "puncta_validation", "run_log",
+        "artifacts",
+        "channels",
+        "diagnostics",
+        "failures",
+        "host",
+        "models",
+        "puncta_validation",
+        "run_log",
     ):
         mod = getattr(pkg, mod_name, None) or sys.modules[f"percell4.workflows.{mod_name}"]
-        offenders = [
-            bad for bad in _FORBIDDEN_MODULES if bad in mod.__dict__
-        ]
-        assert not offenders, (
-            f"percell4.workflows.{mod_name} has forbidden symbols: {offenders}"
-        )
+        offenders = [bad for bad in _FORBIDDEN_MODULES if bad in mod.__dict__]
+        assert not offenders, f"percell4.workflows.{mod_name} has forbidden symbols: {offenders}"
 
 
 def test_no_qt_imports_in_workflows_source():
@@ -71,6 +74,5 @@ def test_no_qt_imports_in_workflows_source():
 
     if offenders:
         pytest.fail(
-            "workflows/ subpackage must be Qt-agnostic, found:\n  "
-            + "\n  ".join(offenders)
+            "workflows/ subpackage must be Qt-agnostic, found:\n  " + "\n  ".join(offenders)
         )

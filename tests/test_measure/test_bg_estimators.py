@@ -40,8 +40,13 @@ def test_registry_keys_match_names():
 
 def test_expected_keys_present():
     expected = {
-        "donut-median", "donut-mean", "gaussian-peak", "percentile",
-        "mad", "rolling-ball", "donut-surface",
+        "donut-median",
+        "donut-mean",
+        "gaussian-peak",
+        "percentile",
+        "mad",
+        "rolling-ball",
+        "donut-surface",
     }
     assert set(BACKGROUND_ESTIMATORS) == expected
 
@@ -103,7 +108,7 @@ def test_rolling_ball_flattens_gaussian_bump():
     """Gaussian-bump background → rolling-ball residual flatter than original."""
     rng = np.random.default_rng(8)
     bump = np.fromfunction(
-        lambda y, x: 80 * np.exp(-((y - 50) ** 2 + (x - 50) ** 2) / (2 * 12 ** 2)),
+        lambda y, x: 80 * np.exp(-((y - 50) ** 2 + (x - 50) ** 2) / (2 * 12**2)),
         (100, 100),
     )
     img = bump + rng.normal(0, 1.0, size=(100, 100))
@@ -190,9 +195,7 @@ def test_donut_uses_float_not_int():
 # ── All-NaN group ─────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    "name", ["gaussian-peak", "mad", "percentile", "rolling-ball"]
-)
+@pytest.mark.parametrize("name", ["gaussian-peak", "mad", "percentile", "rolling-ball"])
 def test_all_nan_group_is_empty_no_propagation(name):
     """All-NaN group → defined is_empty result; no NaN crash, residual finite."""
     img = np.full((40, 40), np.nan, dtype=float)

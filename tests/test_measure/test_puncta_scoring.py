@@ -15,8 +15,8 @@ from percell4.domain.measure.puncta_scoring import (
     MatchCounts,
     MicroScore,
     accumulate,
-    match_detections,
     mask_to_centroids,
+    match_detections,
 )
 
 
@@ -43,7 +43,7 @@ def test_mask_to_centroids_empty():
 def test_mask_to_centroids_closing_merges_fragments():
     # Two 3x3 granule fragments with a 1px gap -> closing(disk=1) merges them.
     mask = np.zeros((30, 30), dtype=np.uint8)
-    mask[10:13, 8:11] = 1   # cols 8,9,10
+    mask[10:13, 8:11] = 1  # cols 8,9,10
     mask[10:13, 12:15] = 1  # cols 12,13,14 (gap at col 11)
     assert mask_to_centroids(mask, close_radius=0).shape[0] == 2
     assert mask_to_centroids(mask, close_radius=1).shape[0] == 1
@@ -55,7 +55,7 @@ def test_mask_to_centroids_closing_merges_fragments():
 def test_perfect_match_recall_precision_one():
     mask = np.zeros((40, 40), dtype=np.uint8)
     gt = []
-    for (y, x) in [(10, 10), (10, 30), (30, 10), (30, 30)]:
+    for y, x in [(10, 10), (10, 30), (30, 10), (30, 30)]:
         mask[y - 1 : y + 2, x - 1 : x + 2] = 1
         gt.append((y, x))
     counts = match_detections(_label(mask), np.array(gt, float), tol=2.0)

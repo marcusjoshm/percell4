@@ -50,9 +50,7 @@ def _sample_config() -> WorkflowConfig:
                 compress_plan={"source_dir": "/tmp/tiffs"},
             ),
         ],
-        cellpose=CellposeSettings(
-            diameter=25.0, gpu=False, flow_threshold=0.5
-        ),
+        cellpose=CellposeSettings(diameter=25.0, gpu=False, flow_threshold=0.5),
         thresholding_rounds=[
             ThresholdingRound(
                 name="GFP_bright",
@@ -205,9 +203,7 @@ def test_create_run_folder_custom_prefix(tmp_path: Path) -> None:
 
 
 def test_create_run_folder_skip_subdirs(tmp_path: Path) -> None:
-    folder = create_run_folder(
-        tmp_path, prefix="flim_fret_run", create_subdirs=False
-    )
+    folder = create_run_folder(tmp_path, prefix="flim_fret_run", create_subdirs=False)
     assert folder.exists()
     # FLIM-FRET workflow writes a single combined CSV directly under the
     # run folder; it has no use for per_dataset/ or staging/.
@@ -255,9 +251,7 @@ def test_config_roundtrip_dict() -> None:
     assert restored.cellpose == cfg.cellpose
 
     assert len(restored.thresholding_rounds) == len(cfg.thresholding_rounds)
-    for r_rnd, orig_rnd in zip(
-        restored.thresholding_rounds, cfg.thresholding_rounds
-    ):
+    for r_rnd, orig_rnd in zip(restored.thresholding_rounds, cfg.thresholding_rounds):
         assert r_rnd == orig_rnd
 
 
@@ -402,9 +396,7 @@ def test_pre_evolution_run_config_loads_from_disk(tmp_path: Path) -> None:
 
     folder = tmp_path / "run_pre_evolution"
     folder.mkdir()
-    (folder / "run_config.json").write_text(
-        json.dumps(_pre_evolution_payload()), encoding="utf-8"
-    )
+    (folder / "run_config.json").write_text(json.dumps(_pre_evolution_payload()), encoding="utf-8")
 
     cfg, meta = read_run_config(folder)
 
@@ -539,9 +531,7 @@ def test_puncta_round_round_trips_through_full_config() -> None:
                 channel=_sample_config().thresholding_rounds[0].channel,
                 metric="mean_intensity",
                 algorithm=ThresholdAlgorithm.GMM,
-                puncta=PunctaDetectorSettings(
-                    detector_name="log", detector_params={"k": 2.5}
-                ),
+                puncta=PunctaDetectorSettings(detector_name="log", detector_params={"k": 2.5}),
             )
         ],
     )

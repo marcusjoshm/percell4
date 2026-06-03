@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from percell4.domain.measure.atrous import atrous_wavelet
-from percell4.domain.measure.puncta_detectors import DETECTORS, DETECTOR_NAMES
+from percell4.domain.measure.puncta_detectors import DETECTOR_NAMES, DETECTORS
 
 
 def test_atrous_wavelet_raises_not_implemented():

@@ -323,8 +323,7 @@ def test_edge_mode_has_three_values():
     assert EdgeMode("exclude") is EdgeMode.EXCLUDE
     assert EdgeMode("include_as_normal") is EdgeMode.INCLUDE_AS_NORMAL
     assert (
-        EdgeMode("include_as_size_normalized_cohort")
-        is EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
+        EdgeMode("include_as_size_normalized_cohort") is EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
     )
 
 
