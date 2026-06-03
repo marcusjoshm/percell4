@@ -31,6 +31,7 @@ from percell4.workflows.host import WorkflowHost
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -273,6 +274,73 @@ def test_runner_produces_expected_artifacts_when_segment_succeeds(
     assert loaded_meta.finished_at is not None
     # Failures list is empty on happy path
     assert loaded_meta.failures == []
+
+
+def test_runner_headless_puncta_round_writes_binary_mask(
+    qtbot, fake_host, tmp_path
+):
+    """A headless run (interactive_qc=False) with a puncta-mode round flows
+    through _make_threshold_apply_headless_handler unchanged and writes a
+    {0,1} uint8 mask end-to-end (plan U7)."""
+    import percell4.workflows.phases as phases
+
+    entries = _make_two_datasets(tmp_path)
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=entries,
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="SG",
+                channel="RFP",  # RFP cells carry bright focus-like centers
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.KMEANS,
+                kmeans_n_clusters=2,
+                gaussian_sigma=1.0,
+                puncta=PunctaDetectorSettings(
+                    detector_name="log",
+                    seed_detector_name="bg-k-sigma",
+                    background_estimator_name="gaussian-peak",
+                    detector_params={"threshold_rel": 0.05},
+                    min_spot_px=2,
+                ),
+            ),
+        ],
+        selected_csv_columns=["RFP_mean_intensity", "group_SG"],
+        output_parent=tmp_path / "runs",
+    )
+    meta = _make_metadata(run_folder)
+
+    original_segment = phases.segment_one
+
+    def _noop_segment(store, cfg_, cellpose_model=None, channel_idx=0, edge_mode=None):
+        return store.read_labels("cellpose_qc"), None, "noop"
+
+    phases.segment_one = _noop_segment
+    try:
+        import percell4.gui.workflows.single_cell.runner as runner_mod
+
+        runner_mod.segment_one = _noop_segment
+        runner = SingleCellThresholdingRunner(
+            config=cfg, metadata=meta, interactive_qc=False
+        )
+        events = []
+        runner.workflow_event.connect(lambda e: events.append(e))
+        runner.start(cfg, fake_host, meta)
+    finally:
+        phases.segment_one = original_segment
+        runner_mod.segment_one = original_segment
+
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1
+    assert finished[0].success is True, finished[0].message
+
+    # The puncta round wrote a {0,1} uint8 mask into each dataset's .h5.
+    store = DatasetStore(entries[0].h5_path)
+    assert "SG" in store.list_masks()
+    mask = store.read_mask("SG")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask).tolist()) <= {0, 1}
 
 
 def test_runner_records_failure_and_continues_other_datasets(
