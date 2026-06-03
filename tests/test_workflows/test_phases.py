@@ -19,6 +19,7 @@ from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -454,6 +455,45 @@ def test_apply_threshold_headless_writes_mask_and_groups(
     # The combined mask should have some positive pixels.
     combined = fixture_store_with_labels.read_mask("GFP_split")
     assert combined.sum() > 0
+
+
+def test_apply_threshold_headless_puncta_mode_writes_binary_mask(
+    fixture_store_with_labels,
+):
+    # A puncta round routes through detect_two_pass and must write a {0,1}
+    # uint8 mask plus a 2-column /groups table (the downstream contract).
+    round_spec = ThresholdingRound(
+        name="SG_puncta",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=1.0,
+        puncta=PunctaDetectorSettings(
+            detector_name="log",
+            seed_detector_name="bg-k-sigma",
+            background_estimator_name="gaussian-peak",
+            detector_params={"threshold_rel": 0.05},
+            min_spot_px=2,
+        ),
+    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
+    assert grouping is not None
+
+    failure, msg = apply_threshold_headless(
+        fixture_store_with_labels, round_spec, grouping
+    )
+    assert failure is None, msg
+
+    combined = fixture_store_with_labels.read_mask("SG_puncta")
+    # {0,1}-only invariant (read back from /masks, not assumed of the store).
+    assert combined.dtype == np.uint8
+    assert set(np.unique(combined).tolist()) <= {0, 1}
+
+    # /groups keeps exactly ["label", "group_<channel>_<metric>"] so the
+    # _merge_group_dfs 2-column guard does not silently drop the group column.
+    groups_df = fixture_store_with_labels.read_dataframe("/groups/SG_puncta")
+    assert list(groups_df.columns) == ["label", "group_GFP_mean_intensity"]
 
 
 def test_apply_threshold_headless_handles_unknown_channel(

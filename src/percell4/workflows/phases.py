@@ -550,6 +550,11 @@ def _apply_threshold_frame(
     else:
         smoothed = image.astype(np.float32)
 
+    # Puncta mode: a configured two-pass spot detector replaces per-group Otsu.
+    # A None / "otsu" sentinel keeps the legacy path byte-identical.
+    puncta = round_spec.puncta
+    use_puncta = puncta is not None and puncta.detector_name != "otsu"
+
     combined = np.zeros(labels.shape, dtype=np.uint8)
     for group_id in range(1, grouping.n_groups + 1):
         cells_in_group = grouping.group_assignments.index[
@@ -560,6 +565,20 @@ def _apply_threshold_frame(
         group_label_mask = np.isin(labels, list(cells_in_group))
         if not group_label_mask.any():
             continue
+
+        if use_puncta:
+            # Per-group two-pass detection (pure domain). Emits an all-zero
+            # group mask on no signal — never accept-all.
+            from percell4.domain.measure.puncta_pipeline import detect_two_pass
+
+            try:
+                group_mask = detect_two_pass(smoothed, group_label_mask, puncta)
+            except Exception as e:
+                logger.exception("puncta detect failed for group %d", group_id)
+                return None, None, f"puncta detect for group {group_id}: {e}"
+            np.maximum(combined, group_mask, out=combined)
+            continue
+
         group_pixels = smoothed[group_label_mask]
         if group_pixels.size == 0 or not np.isfinite(group_pixels).any():
             continue
@@ -576,6 +595,10 @@ def _apply_threshold_frame(
             logger.exception("otsu failed for group %d", group_id)
             return None, None, f"otsu for group {group_id}: {e}"
         np.maximum(combined, group_mask.astype(np.uint8), out=combined)
+
+    if use_puncta:
+        # Defensive: guarantee a {0,1} uint8 union (the store does not binarize).
+        combined = (combined > 0).astype(np.uint8)
 
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
