@@ -87,6 +87,85 @@ def _params_with_scale(
     return out
 
 
+def compute_seeds(
+    smoothed_image: np.ndarray,
+    group_label_mask: np.ndarray,
+    settings: PunctaDetectorSettings,
+    scale_range: tuple[float, float],
+) -> tuple:
+    """Run the pass-1 permissive seed detector for one group (once).
+
+    Returns the ``label_and_filter`` 4-tuple
+    ``(label_mask, binary_mask, region_ids, props_by_id)`` of the detected
+    seeds. The U6 calibration pre-pass calls this, measures the seed sizes, and
+    feeds the result back into :func:`detect_two_pass` via ``seeds=`` so pass-1
+    executes exactly once per group.
+    """
+    mu_boot, sigma_boot = _robust_bg(smoothed_image[group_label_mask])
+    boot_residual = _isolate(smoothed_image - mu_boot, group_label_mask)
+    seed_detector = DETECTORS[settings.seed_detector_name]
+    seed_params = _params_with_scale(settings.seed_params, scale_range)
+    seed_mask = seed_detector(
+        boot_residual, group_label_mask, sigma_boot, seed_params
+    )
+    return label_and_filter(seed_mask, 0)
+
+
+def seed_sigmas(seeds: tuple) -> list[float]:
+    """Per-seed characteristic Gaussian sigma from a ``label_and_filter`` tuple.
+
+    A detected blob of area ``A`` has equivalent radius ``r = sqrt(A/pi)``; the
+    detector paints a blob of radius ``ceil(sigma*sqrt(2))``, so the inverse
+    estimate is ``sigma ~= r / sqrt(2)``. Used only to propose a scale range —
+    a rough estimate is fine.
+    """
+    _label_mask, _binary, region_ids, props_by_id = seeds
+    out: list[float] = []
+    for rid in region_ids:
+        area = float(props_by_id[int(rid)].area)
+        if area > 0:
+            out.append(float(np.sqrt(area / np.pi) / np.sqrt(2.0)))
+    return out
+
+
+def calibrate_scale_range(
+    sigmas: list[float],
+    prior: tuple[float, float] | None,
+    *,
+    n_calib: int = 5,
+    default: tuple[float, float] = DEFAULT_SCALE_RANGE,
+    lo_pct: float = 10.0,
+    hi_pct: float = 90.0,
+) -> tuple[tuple[float, float], bool]:
+    """Derive a per-dataset ``(min_sigma, max_sigma)`` range from pooled seeds.
+
+    Bounded, narrow-only refinement: the candidate range (robust percentiles of
+    the pooled seed sigmas) may only *narrow within* the locked ``prior``, never
+    expand beyond it. Returns ``(refined_range, clamped)`` where ``clamped`` is
+    ``True`` when the candidate fell outside the prior bracket (the caller logs
+    a warning). With too few seeds (``< n_calib``) the prior is retained
+    unchanged; with no prior, the candidate (or ``default``) is used.
+    """
+    finite = [s for s in sigmas if np.isfinite(s) and s > 0]
+    base = prior if prior is not None else default
+    if len(finite) < n_calib:
+        return base, False
+
+    cand_lo = max(float(np.percentile(finite, lo_pct)), 0.5)
+    cand_hi = max(float(np.percentile(finite, hi_pct)), cand_lo + 0.5)
+
+    if prior is None:
+        return (cand_lo, cand_hi), False
+
+    clamped = cand_lo < prior[0] or cand_hi > prior[1]
+    refined_lo = max(cand_lo, prior[0])
+    refined_hi = min(cand_hi, prior[1])
+    if refined_lo >= refined_hi:
+        # Candidate is fully outside / inverts the prior bracket — keep prior.
+        return prior, True
+    return (refined_lo, refined_hi), clamped
+
+
 def _size_filter(
     mask: np.ndarray, min_spot_px: int, max_spot_px: int | None
 ) -> np.ndarray:
@@ -145,15 +224,10 @@ def detect_two_pass(
         scale_range = settings.spot_scale_prior or DEFAULT_SCALE_RANGE
 
     # PASS 1 (once): permissive seed detector on the bootstrap residual.
+    # When the caller (the U6 calibration pre-pass) supplies precomputed seeds,
+    # pass-1 is skipped so it runs exactly once per group.
     if seeds is None:
-        mu_boot, sigma_boot = _robust_bg(smoothed_image[group_label_mask])
-        boot_residual = _isolate(smoothed_image - mu_boot, group_label_mask)
-        seed_detector = DETECTORS[settings.seed_detector_name]
-        seed_params = _params_with_scale(settings.seed_params, scale_range)
-        seed_mask = seed_detector(
-            boot_residual, group_label_mask, sigma_boot, seed_params
-        )
-        seeds = label_and_filter(seed_mask, 0)
+        seeds = compute_seeds(smoothed_image, group_label_mask, settings, scale_range)
 
     # BACKGROUND estimate — fallback ladder: configured -> gaussian-peak -> empty.
     bg_params = dict(settings.detector_params)

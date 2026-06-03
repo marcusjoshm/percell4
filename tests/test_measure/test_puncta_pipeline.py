@@ -6,7 +6,13 @@ import numpy as np
 import pytest
 
 from percell4.domain.measure import puncta_pipeline
-from percell4.domain.measure.puncta_pipeline import DEFAULT_SCALE_RANGE, detect_two_pass
+from percell4.domain.measure.puncta_pipeline import (
+    DEFAULT_SCALE_RANGE,
+    calibrate_scale_range,
+    compute_seeds,
+    detect_two_pass,
+    seed_sigmas,
+)
 from percell4.workflows.models import PunctaDetectorSettings
 
 H = W = 64
@@ -194,3 +200,57 @@ def test_under_capture_fallback_uses_robust_background(monkeypatch):
     mask = detect_two_pass(img, gm, settings, seeds=empty_seeds)
     assert used["gp"] >= 1  # fell back to gaussian-peak rung
     assert _recovered(mask, centers) == 1  # dim focus still recovered
+
+
+# ── Spot-scale calibration (U6) ──────────────────────────────
+
+
+def test_calibrate_cold_start_uses_default():
+    # No prior, enough seeds -> candidate range; no prior + too few -> default.
+    rng, _ = None, None
+    refined, clamped = calibrate_scale_range([], prior=None)
+    assert refined == DEFAULT_SCALE_RANGE and clamped is False
+
+
+def test_calibrate_sparse_seeds_retains_prior():
+    prior = (1.0, 4.0)
+    refined, clamped = calibrate_scale_range([2.0, 2.1], prior=prior, n_calib=5)
+    assert refined == prior  # < n_calib -> prior retained
+    assert clamped is False
+
+
+def test_calibrate_narrows_within_prior():
+    prior = (1.0, 6.0)
+    # Tightly clustered seed sigmas around 2-3 -> candidate narrows within prior.
+    sigmas = [2.0, 2.2, 2.5, 2.8, 3.0, 2.3, 2.6]
+    refined, clamped = calibrate_scale_range(sigmas, prior=prior)
+    assert prior[0] <= refined[0] <= refined[1] <= prior[1]
+    assert refined != prior  # genuinely narrowed
+    assert clamped is False
+
+
+def test_calibrate_clamps_when_candidate_exceeds_prior():
+    prior = (2.0, 3.0)
+    # Big seeds (sigma ~5-8) push the candidate above the prior bracket.
+    sigmas = [5.0, 6.0, 7.0, 8.0, 6.5, 5.5]
+    refined, clamped = calibrate_scale_range(sigmas, prior=prior)
+    assert clamped is True  # candidate fell outside the locked prior
+    assert refined[0] >= prior[0] and refined[1] <= prior[1]  # never expands
+
+
+def test_calibrate_is_deterministic():
+    sigmas = [1.5, 2.0, 2.5, 3.0, 3.5, 2.2]
+    a, _ = calibrate_scale_range(sigmas, prior=(1.0, 5.0))
+    b, _ = calibrate_scale_range(sigmas, prior=(1.0, 5.0))
+    assert a == b
+
+
+def test_compute_seeds_and_sigmas_on_spots():
+    centers = [(20, 20, 200, 2.0), (44, 44, 150, 2.5)]
+    img = _field(centers)
+    gm = _group_mask()
+    settings = _log_settings(seed_detector_name="log")
+    seeds = compute_seeds(img, gm, settings, (1.0, 4.0))
+    sigmas = seed_sigmas(seeds)
+    assert len(sigmas) >= 1  # found at least one seed
+    assert all(s > 0 for s in sigmas)

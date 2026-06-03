@@ -529,6 +529,78 @@ def threshold_compute_one(
     return _group_image_labels(image, labels, round_spec)
 
 
+def _apply_puncta_groups(
+    smoothed: NDArray,
+    labels: NDArray,
+    grouping: GroupingResult,
+    puncta: object,
+    combined: NDArray,
+    round_name: str,
+) -> str:
+    """Two-pass puncta detection across one frame's groups, into ``combined``.
+
+    Two phases per frame (U6 scale calibration):
+    1. Run pass-1 seed detection ONCE per group, pooling the seed sizes, and
+       derive a per-dataset ``scale_range`` by bounded (narrow-only) refinement
+       of the locked prior.
+    2. Detect each group with the refined range and its cached pass-1 seeds
+       (so pass-1 never re-runs), unioning the per-group ``{0,1}`` masks.
+
+    Returns an error string on detector failure, else ``""``. Pass-1 results
+    stay in memory — no derived array is written to or re-read from HDF5.
+    """
+    from percell4.domain.measure.puncta_pipeline import (
+        DEFAULT_SCALE_RANGE,
+        calibrate_scale_range,
+        compute_seeds,
+        detect_two_pass,
+        seed_sigmas,
+    )
+
+    base_range = puncta.spot_scale_prior or DEFAULT_SCALE_RANGE
+    groups: list[tuple[NDArray, tuple]] = []
+    sigmas: list[float] = []
+    for group_id in range(1, grouping.n_groups + 1):
+        cells_in_group = grouping.group_assignments.index[
+            grouping.group_assignments.values == group_id
+        ].to_numpy(dtype=np.int32)
+        if len(cells_in_group) == 0:
+            continue
+        group_label_mask = np.isin(labels, list(cells_in_group))
+        if not group_label_mask.any():
+            continue
+        try:
+            seeds = compute_seeds(smoothed, group_label_mask, puncta, base_range)
+        except Exception as e:
+            logger.exception("puncta pass-1 failed for group %d", group_id)
+            return f"puncta pass-1 for group {group_id}: {e}"
+        groups.append((group_label_mask, seeds))
+        sigmas.extend(seed_sigmas(seeds))
+
+    refined, clamped = calibrate_scale_range(sigmas, puncta.spot_scale_prior)
+    if clamped:
+        logger.warning(
+            "round %s: per-dataset scale refinement fell outside the locked "
+            "prior %s; clamped to %s",
+            round_name,
+            puncta.spot_scale_prior,
+            refined,
+        )
+
+    for group_label_mask, seeds in groups:
+        try:
+            group_mask = detect_two_pass(
+                smoothed, group_label_mask, puncta, scale_range=refined, seeds=seeds
+            )
+        except Exception as e:
+            logger.exception("puncta detect failed")
+            return f"puncta detect: {e}"
+        np.maximum(combined, group_mask, out=combined)
+    # Guarantee a {0,1} uint8 union (the store does not binarize).
+    np.minimum(combined, 1, out=combined)
+    return ""
+
+
 def _apply_threshold_frame(
     image: NDArray,
     labels: NDArray,
@@ -556,49 +628,38 @@ def _apply_threshold_frame(
     use_puncta = puncta is not None and puncta.detector_name != "otsu"
 
     combined = np.zeros(labels.shape, dtype=np.uint8)
-    for group_id in range(1, grouping.n_groups + 1):
-        cells_in_group = grouping.group_assignments.index[
-            grouping.group_assignments.values == group_id
-        ].to_numpy(dtype=np.int32)
-        if len(cells_in_group) == 0:
-            continue
-        group_label_mask = np.isin(labels, list(cells_in_group))
-        if not group_label_mask.any():
-            continue
-
-        if use_puncta:
-            # Per-group two-pass detection (pure domain). Emits an all-zero
-            # group mask on no signal — never accept-all.
-            from percell4.domain.measure.puncta_pipeline import detect_two_pass
-
-            try:
-                group_mask = detect_two_pass(smoothed, group_label_mask, puncta)
-            except Exception as e:
-                logger.exception("puncta detect failed for group %d", group_id)
-                return None, None, f"puncta detect for group {group_id}: {e}"
-            np.maximum(combined, group_mask, out=combined)
-            continue
-
-        group_pixels = smoothed[group_label_mask]
-        if group_pixels.size == 0 or not np.isfinite(group_pixels).any():
-            continue
-        try:
-            from skimage.filters import threshold_otsu as sk_otsu
-
-            if np.unique(group_pixels).size < 2:
-                # Constant group — accept every pixel (safer than none).
-                group_mask = group_label_mask
-            else:
-                thr = float(sk_otsu(group_pixels))
-                group_mask = group_label_mask & (smoothed >= thr)
-        except Exception as e:
-            logger.exception("otsu failed for group %d", group_id)
-            return None, None, f"otsu for group {group_id}: {e}"
-        np.maximum(combined, group_mask.astype(np.uint8), out=combined)
-
     if use_puncta:
-        # Defensive: guarantee a {0,1} uint8 union (the store does not binarize).
-        combined = (combined > 0).astype(np.uint8)
+        err = _apply_puncta_groups(
+            smoothed, labels, grouping, puncta, combined, round_spec.name
+        )
+        if err:
+            return None, None, err
+    else:
+        for group_id in range(1, grouping.n_groups + 1):
+            cells_in_group = grouping.group_assignments.index[
+                grouping.group_assignments.values == group_id
+            ].to_numpy(dtype=np.int32)
+            if len(cells_in_group) == 0:
+                continue
+            group_label_mask = np.isin(labels, list(cells_in_group))
+            if not group_label_mask.any():
+                continue
+            group_pixels = smoothed[group_label_mask]
+            if group_pixels.size == 0 or not np.isfinite(group_pixels).any():
+                continue
+            try:
+                from skimage.filters import threshold_otsu as sk_otsu
+
+                if np.unique(group_pixels).size < 2:
+                    # Constant group — accept every pixel (safer than none).
+                    group_mask = group_label_mask
+                else:
+                    thr = float(sk_otsu(group_pixels))
+                    group_mask = group_label_mask & (smoothed >= thr)
+            except Exception as e:
+                logger.exception("otsu failed for group %d", group_id)
+                return None, None, f"otsu for group {group_id}: {e}"
+            np.maximum(combined, group_mask.astype(np.uint8), out=combined)
 
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
