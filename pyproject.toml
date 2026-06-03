@@ -87,6 +87,7 @@ percell4-batch-delete       = "percell4.interfaces.cli.batch_delete_resource:mai
 percell4-batch-phasor       = "percell4.interfaces.cli.batch_phasor:main"
 percell4-batch-phasor-masks = "percell4.interfaces.cli.batch_phasor_masks:main"
 percell4-batch-whole-field  = "percell4.interfaces.cli.batch_whole_field:main"
+percell4-batch-validate-puncta = "percell4.interfaces.cli.batch_validate_puncta:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
