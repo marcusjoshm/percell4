@@ -30,6 +30,7 @@ from percell4.workflows.models import (
     EdgeMode,
     GmmCriterion,
     ParticleSettings,
+    PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -171,8 +172,39 @@ def _cellpose_from_dict(d: dict[str, Any]) -> CellposeSettings:
     )
 
 
-def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
+def _puncta_to_dict(p: PunctaDetectorSettings) -> dict[str, Any]:
     return {
+        "detector_name": p.detector_name,
+        "seed_detector_name": p.seed_detector_name,
+        "background_estimator_name": p.background_estimator_name,
+        "detector_params": dict(p.detector_params),
+        "seed_params": dict(p.seed_params),
+        "min_spot_px": p.min_spot_px,
+        "max_spot_px": p.max_spot_px,
+        "spot_scale_prior": (
+            list(p.spot_scale_prior) if p.spot_scale_prior is not None else None
+        ),
+    }
+
+
+def _puncta_from_dict(d: dict[str, Any]) -> PunctaDetectorSettings:
+    prior = d.get("spot_scale_prior")
+    return PunctaDetectorSettings(
+        detector_name=d.get("detector_name", "otsu"),
+        seed_detector_name=d.get("seed_detector_name", "log"),
+        background_estimator_name=d.get(
+            "background_estimator_name", "gaussian-peak"
+        ),
+        detector_params=d.get("detector_params", {}),
+        seed_params=d.get("seed_params", {}),
+        min_spot_px=d.get("min_spot_px", 2),
+        max_spot_px=d.get("max_spot_px"),
+        spot_scale_prior=tuple(prior) if prior is not None else None,
+    )
+
+
+def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "name": r.name,
         "channel": r.channel,
         "metric": r.metric,
@@ -182,9 +214,16 @@ def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
         "kmeans_n_clusters": r.kmeans_n_clusters,
         "gaussian_sigma": r.gaussian_sigma,
     }
+    # Additive: only emitted for puncta rounds so legacy configs round-trip
+    # unchanged and old run_config.json files keep loading (the absent key
+    # reconstructs as a legacy Otsu round via _round_from_dict).
+    if r.puncta is not None:
+        out["puncta_detector"] = _puncta_to_dict(r.puncta)
+    return out
 
 
 def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
+    puncta_raw = d.get("puncta_detector")
     return ThresholdingRound(
         name=d["name"],
         channel=d["channel"],
@@ -194,6 +233,7 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
         gmm_max_components=d.get("gmm_max_components", 4),
         kmeans_n_clusters=d.get("kmeans_n_clusters", 3),
         gaussian_sigma=d.get("gaussian_sigma", 1.0),
+        puncta=_puncta_from_dict(puncta_raw) if puncta_raw is not None else None,
     )
 
 

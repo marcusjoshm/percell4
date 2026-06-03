@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from percell4.domain.measure.metrics import BUILTIN_METRICS
+from percell4.domain.measure.puncta_names import (
+    BG_ESTIMATOR_NAMES,
+    DETECTOR_NAMES,
+)
 from percell4.workflows.failures import FailureRecord
 
 # Matches single-line HDF5 paths AND pandas column suffixes. Length-capped so
@@ -104,6 +108,97 @@ class CellposeSettings:
             )
 
 
+def _normalize_params(params: Any) -> tuple[tuple[str, Any], ...]:
+    """Canonicalize a params bag to a sorted tuple of ``(key, value)`` pairs.
+
+    Accepts a dict or an iterable of pairs; values must be JSON scalars
+    (``str``/``int``/``float``/``bool``/``None``). Sorting makes the frozen
+    ``PunctaDetectorSettings`` hashable and its ``run_config.json`` round-trip
+    order-independent. Convert back to a plain dict at the registry boundary
+    with ``dict(...)``.
+    """
+    items = params.items() if isinstance(params, dict) else params
+    out: list[tuple[str, Any]] = []
+    for key, value in items:
+        if not isinstance(key, str):
+            raise ValueError(f"param key must be str, got {key!r}")
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ValueError(
+                f"param value for {key!r} must be a JSON scalar, "
+                f"got {type(value).__name__}"
+            )
+        out.append((key, value))
+    return tuple(sorted(out, key=lambda kv: kv[0]))
+
+
+@dataclass(frozen=True)
+class PunctaDetectorSettings:
+    """Pluggable two-pass puncta-detection settings for a thresholding round.
+
+    When a :class:`ThresholdingRound` carries this, the headless apply phase
+    runs the two-pass spot detector
+    (``percell4.domain.measure.puncta_pipeline.detect_two_pass``) instead of
+    per-group Otsu. All names validate against the skimage-free tuples in
+    ``percell4.domain.measure.puncta_names`` so constructing a round never
+    imports scikit-image.
+
+    ``detector_params`` / ``seed_params`` are stored as canonical sorted tuples
+    of ``(key, value)`` pairs (JSON scalars only) so the dataclass stays frozen
+    *and hashable* and round-trips through ``run_config.json`` byte-for-byte.
+    Convert to a plain dict at the registry boundary with
+    ``dict(settings.detector_params)``.
+    """
+
+    detector_name: str = "otsu"
+    seed_detector_name: str = "log"
+    background_estimator_name: str = "gaussian-peak"
+    detector_params: tuple[tuple[str, Any], ...] = ()
+    seed_params: tuple[tuple[str, Any], ...] = ()
+    min_spot_px: int = 2
+    max_spot_px: int | None = None
+    spot_scale_prior: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.detector_name not in DETECTOR_NAMES:
+            raise ValueError(
+                f"detector_name must be one of {DETECTOR_NAMES}, "
+                f"got {self.detector_name!r}"
+            )
+        if self.seed_detector_name not in DETECTOR_NAMES:
+            raise ValueError(
+                f"seed_detector_name must be one of {DETECTOR_NAMES}, "
+                f"got {self.seed_detector_name!r}"
+            )
+        if self.background_estimator_name not in BG_ESTIMATOR_NAMES:
+            raise ValueError(
+                "background_estimator_name must be one of "
+                f"{BG_ESTIMATOR_NAMES}, got {self.background_estimator_name!r}"
+            )
+        if self.min_spot_px < 1:
+            raise ValueError("min_spot_px must be >= 1")
+        if self.max_spot_px is not None and self.max_spot_px < self.min_spot_px:
+            raise ValueError("max_spot_px must be >= min_spot_px")
+        # Normalize params to canonical sorted tuples (hashable + stable
+        # round-trip). Accept a dict or an iterable of pairs at construction.
+        object.__setattr__(
+            self, "detector_params", _normalize_params(self.detector_params)
+        )
+        object.__setattr__(
+            self, "seed_params", _normalize_params(self.seed_params)
+        )
+        # Coerce a JSON-list scale prior back to a float tuple so the frozen
+        # __eq__ / __hash__ are stable across a run_config.json round-trip.
+        if self.spot_scale_prior is not None:
+            lo, hi = self.spot_scale_prior
+            lo, hi = float(lo), float(hi)
+            if not (0.0 < lo <= hi):
+                raise ValueError(
+                    "spot_scale_prior must be (lo, hi) with 0 < lo <= hi, "
+                    f"got {self.spot_scale_prior!r}"
+                )
+            object.__setattr__(self, "spot_scale_prior", (lo, hi))
+
+
 @dataclass(frozen=True)
 class ThresholdingRound:
     """One named round of grouped thresholding.
@@ -111,6 +206,11 @@ class ThresholdingRound:
     Rounds are ordered; the run executes them in list order. Each round's
     ``name`` becomes the HDF5 mask/group path component AND a pandas column
     suffix, so it is validated against a strict regex.
+
+    When ``puncta`` is ``None`` (the default), the apply phase uses the legacy
+    per-group Otsu path unchanged. When it carries a
+    :class:`PunctaDetectorSettings`, the headless two-pass spot detector runs
+    instead.
     """
 
     name: str
@@ -121,6 +221,7 @@ class ThresholdingRound:
     gmm_max_components: int = 4
     kmeans_n_clusters: int = 3
     gaussian_sigma: float = 1.0
+    puncta: PunctaDetectorSettings | None = None
 
     def __post_init__(self) -> None:
         if not _ROUND_NAME_RE.match(self.name):

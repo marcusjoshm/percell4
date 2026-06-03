@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from percell4.workflows.artifacts import (
+    _round_from_dict,
+    _round_to_dict,
     config_from_dict,
     config_to_dict,
     create_run_folder,
@@ -22,6 +24,7 @@ from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
     GmmCriterion,
+    PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -468,6 +471,112 @@ def test_post_evolution_round_trip_preserves_new_fields(tmp_path: Path) -> None:
     assert loaded_cfg.dilute_settings.algorithm is ThresholdAlgorithm.GMM
     assert loaded_cfg.dilute_settings.gmm_criterion is GmmCriterion.BIC
     assert loaded_meta.per_dataset_dilute_round_counts == {"DS1": 3, "DS2": 5}
+
+
+# ── PunctaDetectorSettings round-trip (U1) ───────────────────
+
+
+def test_legacy_round_omits_puncta_key() -> None:
+    """A legacy (Otsu) round serializes without the puncta_detector key, so
+    existing run_config.json files round-trip byte-identically."""
+    r = ThresholdingRound(
+        name="GFP_bright",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.GMM,
+    )
+    assert "puncta_detector" not in _round_to_dict(r)
+    assert _round_from_dict(_round_to_dict(r)) == r
+    assert _round_from_dict(_round_to_dict(r)).puncta is None
+
+
+def test_pre_evolution_round_without_puncta_loads_as_otsu() -> None:
+    """A round dict that predates puncta detection (no puncta_detector key)
+    reconstructs as a legacy Otsu round."""
+    legacy_round = {
+        "name": "GFP_bright",
+        "channel": "GFP",
+        "metric": "mean_intensity",
+        "algorithm": "gmm",
+    }
+    r = _round_from_dict(legacy_round)
+    assert r.puncta is None
+
+
+def test_puncta_round_round_trips_with_real_tuple_and_dict_params() -> None:
+    """A puncta round with dict-input params and a real tuple scale prior
+    round-trips to an equal object (the list/tuple and dict/tuple hazards)."""
+    p = PunctaDetectorSettings(
+        detector_name="log",
+        seed_detector_name="log",
+        background_estimator_name="gaussian-peak",
+        detector_params={"threshold_rel": 0.1, "k": 2.5},
+        min_spot_px=2,
+        max_spot_px=20,
+        spot_scale_prior=(1.0, 4.0),
+    )
+    r = ThresholdingRound(
+        name="SG",
+        channel="RFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        puncta=p,
+    )
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
+    # spot_scale_prior must survive the JSON list detour as a float tuple.
+    assert restored.puncta is not None
+    assert restored.puncta.spot_scale_prior == (1.0, 4.0)
+    assert isinstance(restored.puncta.spot_scale_prior, tuple)
+
+
+def test_puncta_round_round_trips_through_full_config() -> None:
+    cfg = replace(
+        _sample_config(),
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="SG",
+                channel=_sample_config().thresholding_rounds[0].channel,
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.GMM,
+                puncta=PunctaDetectorSettings(
+                    detector_name="log", detector_params={"k": 2.5}
+                ),
+            )
+        ],
+    )
+    restored = config_from_dict(config_to_dict(cfg))
+    assert restored == cfg
+    assert restored.thresholding_rounds[0].puncta is not None
+    assert restored.thresholding_rounds[0].puncta.detector_name == "log"
+
+
+def test_puncta_round_round_trips_on_disk(tmp_path: Path) -> None:
+    folder = create_run_folder(tmp_path)
+    cfg = replace(
+        _sample_config(),
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="SG",
+                channel=_sample_config().thresholding_rounds[0].channel,
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.GMM,
+                puncta=PunctaDetectorSettings(
+                    detector_name="log",
+                    detector_params={"threshold_rel": 0.08},
+                    spot_scale_prior=(1.5, 5.0),
+                ),
+            )
+        ],
+    )
+    meta = _sample_metadata(folder)
+    write_run_config(folder, cfg, meta)
+    loaded_cfg, _ = read_run_config(folder)
+    loaded_round = loaded_cfg.thresholding_rounds[0]
+    assert loaded_round.puncta is not None
+    assert loaded_round.puncta.detector_name == "log"
+    assert loaded_round.puncta.spot_scale_prior == (1.5, 5.0)
+    assert dict(loaded_round.puncta.detector_params) == {"threshold_rel": 0.08}
 
 
 def test_run_seg_qc_on_existing_round_trips():
