@@ -126,6 +126,12 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "domain/analysis must not import domain/measure"
+type = "forbidden"
+source_modules = ["percell4.domain.analysis"]
+forbidden_modules = ["percell4.domain.measure"]
+
+[[tool.importlinter.contracts]]
 name = "application/ must not import Qt, napari, or concrete adapters"
 type = "forbidden"
 source_modules = ["percell4.application"]
