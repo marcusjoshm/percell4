@@ -112,7 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         type=float,
         default=[2.5],
-        help="k (sigma multiplier) values to sweep (default: 2.5).",
+        help="k (sigma multiplier) for the gate / bg-k-sigma / h-maxima (default: 2.5).",
+    )
+    parser.add_argument(
+        "--threshold-rel",
+        nargs="+",
+        type=float,
+        default=[0.1],
+        help=(
+            "log/dog threshold_rel values to sweep — the multiscale recall knob "
+            "(lower = more detections = higher recall). Default: 0.1."
+        ),
     )
     parser.add_argument(
         "--tol",
@@ -217,8 +227,11 @@ def main(argv: list[str] | None = None) -> int:
             tol=tol,
             scale_range=(args.scale_min, args.scale_max),
             min_spot_px=args.min_spot_px,
+            extra_params=(("threshold_rel", tr),),
         )
-        for det, bg, k, tol in itertools.product(args.detectors, args.backgrounds, args.k, args.tol)
+        for det, bg, k, tol, tr in itertools.product(
+            args.detectors, args.backgrounds, args.k, args.tol, args.threshold_rel
+        )
     ]
 
     report = run_validation(
@@ -232,14 +245,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Ranked table.
     print(
-        f"\n{'detector':<14}{'background':<16}{'k':>5}{'tol':>6}"
+        f"\n{'detector':<14}{'background':<16}{'k':>5}{'t_rel':>7}{'tol':>6}"
         f"{'recall':>9}{'precision':>11}{'f_beta':>9}{'stable':>8}"
     )
-    print("-" * 78)
+    print("-" * 85)
     for row in report.ranked:
+        t_rel = row.get("threshold_rel")
+        t_rel_s = f"{t_rel:.3f}" if isinstance(t_rel, (int, float)) else "-"
         print(
             f"{row['detector_name']:<14}{row['background_estimator_name']:<16}"
-            f"{row['k']:>5.2f}{row['tol']:>6.1f}"
+            f"{row['k']:>5.2f}{t_rel_s:>7}{row['tol']:>6.1f}"
             f"{row['recall']:>9.3f}{row['precision']:>11.3f}"
             f"{row['f_beta']:>9.3f}{str(row['stable']):>8}"
         )
