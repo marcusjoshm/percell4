@@ -18,13 +18,17 @@ PerCell4 finds puncta in two passes. The **first pass** is a quick, generous sca
 that locates the obvious foci so the program can learn what each group of cells
 looks like. It then **estimates and removes the background** brightness from each
 group of cells, so dim foci are no longer buried under the cell's general glow.
-The **second pass** then looks again — this time for focus-*shaped* bright spots of
-the expected size — and catches the dim foci the first pass missed. The per-group
-results are combined into one mask.
+The **second pass** then looks again — this time comparing **every pixel to its own
+local surroundings** and keeping the ones that stand out as a bright bump — and
+catches the dim foci the first pass missed. The per-group results are combined into
+one mask.
 
-The key idea: instead of picking a single brightness cutoff (which always either
-lets in haze or misses dim foci), PerCell4 flattens each group's background and
-then looks for the *shape and size* of a focus.
+The key idea: instead of picking a single brightness cutoff for a whole cell (which
+always either lets in dilute haze or misses dim foci), PerCell4 lets the cutoff
+**float locally**. A focus is a sharp local bump and stands out; the dilute phase is
+raised evenly over a wide area, so it never beats its own surroundings and is left
+out — and because the test is pixel-by-pixel, each focus keeps its true, irregular
+shape.
 
 ---
 
@@ -48,12 +52,13 @@ cell from setting the rules for a faint one.
 Within each group, PerCell4 does a quick, **deliberately generous** scan that
 picks up the brighter, easy-to-see foci. Two things matter here:
 
-- This is **not the final mask.** Its only job is to *locate where signal is* so
-  the program can measure the background in the spaces between foci.
-- It looks for **small bright blobs**, not "everything above a brightness line."
-  (Your sketch had this pass producing an initial mask with Otsu autothresholding;
-  in the method that was validated, this scouting pass uses the same spot-finding
-  idea as the final pass, just tuned to be permissive — Otsu is not used.)
+- This is **not the final mask.** Its only job is to mark roughly *where the obvious
+  signal is*.
+- It uses a quick, permissive **Otsu auto-threshold** to do that. (Your original
+  sketch had this first pass using Otsu — that is exactly what the validated recipe
+  does.) Getting it perfect doesn't matter: the background step below reads the
+  background level straight from the brightness histogram, so it doesn't depend on
+  this scout being precise.
 
 ## 3. Estimate and remove each group's background
 
@@ -134,25 +139,33 @@ diffuse glow is gone and the foci sit on a near-zero floor.
 
 PerCell4 now scans the background-subtracted image again, this time to capture
 **all** the foci, including the dim ones the first pass skipped. Crucially, it does
-**not** use a single brightness cutoff (that was the old approach that kept failing).
-Instead it uses a **multiscale spot detector**:
+**not** use a single brightness cutoff for the whole cell (that was the old approach
+that kept failing). Instead it uses a **local adaptive threshold**:
 
-- It looks for the **shape of a focus** — a small, round, locally-bright bump —
-  rather than "any pixel above a brightness line."
-- It looks at **several focus sizes at once** ("multiscale"), so it works even
-  though the foci in this condition vary in size.
-- It has one **sensitivity knob**. Turning it down finds more (dimmer) foci at the
-  cost of occasionally picking up noise; turning it up is stricter. The validation
-  tuned this knob to the most-sensitive setting that still kept false positives low.
+- For **each pixel**, it looks at a small window of the immediate surroundings
+  (about 15 pixels across) and works out the **local** background right there.
+- It keeps the pixel only if it is brighter than that local background by a set
+  **margin** — a few times the noise level.
+- That margin is the one **sensitivity knob** (called *k*). Lower finds more, dimmer
+  foci; higher is stricter. The winning setting was the most generous one that still
+  picked up zero dilute phase.
+
+Because the comparison is always against the **local** surroundings, a patch of
+dilute phase — raised evenly over a wide area — never beats its own neighborhood and
+is left out, while a small focus — a sharp local bump — stands out and is kept. And
+because it is a true pixel-by-pixel test, each focus keeps its **real, irregular
+shape** (it is never rounded into a disk), which the later per-particle measurements
+depend on.
 
 A final size filter removes anything too small to be a real focus.
 
-> Why this replaces Otsu: a single brightness cutoff has to pick one number for the
-> whole group, so it is forced to either include the diffuse haze (too low) or miss
-> the dim foci (too high). A shape-and-size detector on a flattened background does
-> not face that dilemma — it recognizes a dim focus by *how it sits above its local
-> surroundings*, not by an absolute brightness. That is the whole reason the new
-> method beats the old one.
+> Why this replaces a plain Otsu cutoff: a single brightness cut has to pick one
+> number for the whole cell, so it must either include the diffuse haze (too low) or
+> miss the dim foci (too high). A *local* cutoff doesn't face that dilemma — it
+> recognizes a dim focus by *how it sits above its immediate surroundings*, not by an
+> absolute brightness. This is the automation of the manual trick of circling a small
+> region to threshold it against its own neighborhood. That is the whole reason the
+> new method beats the old one.
 
 ## 5. Combine into the final mask
 
@@ -161,28 +174,34 @@ result, produced with no manual QC step.
 
 ---
 
-## What was tested, and what won
+## What was tested, and how the winner was chosen
 
-To prove the method is trustworthy, every focus in a real image
+To have something to check against, every focus in a real image
 (`Dish 2 TAOK2 KO 60min As + Noco`, mNG channel) was marked by eye — **4,664 foci**,
-including the faint ones — to serve as the answer key. The program's results were
-then scored against that answer key. For reference, the previous hand-QC'd mask
-recovered **67%** of those 4,664 foci.
+including the faint ones. This answer key confirmed the detector finds foci in the
+right places, and showed that the old hand-QC'd mask only recovered about **67%** of
+them (it was missing the dim ones).
 
-The detectors and sensitivity settings were raced against each other. The
-**Laplacian-of-Gaussian spot detector** with the **Gaussian background-peak**
-subtraction, at the most-sensitive setting that kept precision at or above 90%,
-came out on top — and it stayed stable when its settings were nudged:
+But a count of correctly-placed dots can't tell you whether each granule's **shape**
+is right, or whether any **dilute phase** snuck in — and those are the two things
+that actually matter. (One family of detectors scored well on placement but drew
+every granule as a uniform circle — useless for measuring real, irregular granules,
+so it was rejected.) So the winner was chosen the same way the manual QC was done: by
+**laying the candidate masks over the real image and comparing them by eye**, walking
+the sensitivity knob from generous toward strict and stopping at the **first setting
+with no dilute phase at all** that still kept the small dim foci.
 
-| | Foci correctly found (recall) | Of what it found, how much is real (precision) |
-|---|---|---|
-| Old hand-QC mask | **67%** | — |
-| New automated method | **82%** | **91%** |
+The winning setting — a **15-pixel local window** with a **margin of k = 2.25** —
+found **4,247 granules, about 19% more than the old manual mask's 3,570**, at the
+same typical granule size, with **no dilute phase** and no manual step:
 
-So the automated, hands-off method finds **about 82% of every focus that was
-labeled by eye — roughly 15 percentage points more than the old manual mask — while
-keeping 9 out of 10 of its detections real.** Those extra foci are exactly the dim
-ones the old approach was missing.
+| | Granules found | Typical size | Dilute phase | Manual QC |
+|---|---:|---:|:--:|:--:|
+| Old hand-QC mask | 3,570 | 17 px | none | required |
+| New automated method | **4,247** | 18 px | **none** | **none** |
+
+Those extra granules are exactly the small, dim ones the old approach was missing —
+the ones no existing stress-granule method reliably picks up.
 
 This means: for this experimental condition, the laborious manual QC step can be
 retired, and the same recipe can be applied automatically to comparable images.

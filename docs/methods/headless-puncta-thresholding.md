@@ -11,9 +11,11 @@ origin:
 
 This document describes the headless puncta-detection thresholding subsystem: why
 it exists, the detection pipeline that runs in production, every pluggable method
-it ships, the validation harness that qualifies a method, and the empirical
-results from the first real validation (`Dish 2 TAOK2 KO 60min As + Noco`, mNG
-channel) — including the method that passed the stability-gated lock.
+it ships, the validation harness that guardrails a method, and how the production
+method was selected on the first real dataset (`Dish 2 TAOK2 KO 60min As + Noco`,
+mNG channel) — by **visual spot-test**, the same judgment the manual ROI-QC step
+encoded, against two hard requirements: pixel-accurate granule shapes and **zero
+dilute-phase pickup**.
 
 ---
 
@@ -56,8 +58,11 @@ byte-identical:
 3. **A per-dataset spot-scale calibration** that bounds detector scale to a
    validated range.
 4. **A dev-time validation harness** that scores candidate methods against
-   labeled ground truth and locks a qualifying winner. Validate once, lock the
-   recipe, run headless = QC retired for that condition.
+   labeled ground truth (centroid recall / precision). This is a *guardrail*,
+   not the selector: the centroid metric is blind to granule shape and to
+   dilute-phase pickup, which are the actual acceptance criteria, so final
+   selection is a visual spot-test. Choose the recipe once, lock it, run headless
+   = QC retired for that condition.
 
 ```
 GROUND TRUTH (per condition)                 PRODUCTION (every dataset, headless)
@@ -65,12 +70,12 @@ GROUND TRUTH (per condition)                 PRODUCTION (every dataset, headless
 exhaustive napari points (Tier A) ─┐          per intensity group g:
 old QC mask (Tier B, recall floor) ─┤            isolate residual to g (out-of-group -> NaN)
                                     ▼            pass-1 seed detect (once)  ──┐
-              VALIDATION HARNESS                 background fallback ladder ◄─┘
-        race detector × bg × k × t_rel × tol      signal-presence gate (empty, not accept-all)
-        score per-punctum recall / precision      pass-2 detect at calibrated scale
-        stability probe + lock criterion          size filter
+         HARNESS (guardrail) + EYE               background fallback ladder ◄─┘
+        sweep detector × bg × window × k          signal-presence gate (empty, not accept-all)
+        centroid recall/precision (narrows)       pass-2 detect at calibrated scale
+        visual spot-test: shape + zero dilute      size filter
                     │                             union per group  →  /masks (0/1 uint8)
-          lock recipe (JSON) ──────────────────►  via ThresholdingRound.puncta
+         choose recipe (JSON) ──────────────────►  via ThresholdingRound.puncta
 ```
 
 Code: `src/percell4/domain/measure/{puncta_names,bg_estimators,puncta_detectors,atrous,puncta_pipeline,puncta_scoring}.py`,
@@ -157,16 +162,30 @@ Deterministic (no RNG).
 
 | Name | Knob | What it does | Notes |
 |---|---|---|---|
-| `log` | `threshold_rel` | Laplacian-of-Gaussian multiscale blob detection (`skimage.feature.blob_log`); each `(y,x,σ)` painted to a disk of radius `⌈σ√2⌉`. | **Multiscale default. The locked method (§6).** `threshold_rel` is the recall knob (lower = more recall). |
-| `dog` | `threshold_rel` | Difference-of-Gaussians blobs (`blob_dog`), painted likewise. | Faster cousin of `log`; **raced in validation** (lost to `log`). |
-| `white-tophat` | `radius`, `k` | `white_tophat(disk(r))` residual thresholded at `k·MAD`. | Implicit background removal; available, not yet raced. |
-| `h-maxima` | `h = k·σ` | `h_maxima` on a LoG-prefiltered residual — regional maxima with prominence ≥ `h`. | Directly encodes "a bump that clears its surroundings by a margin." Available, not yet raced. |
-| `bg-k-sigma` | `k` | `residual > k·σ`. | Simple statistical threshold on the corrected residual. Available. |
-| `otsu` | — | Otsu on the in-group residual. | Baseline / regression comparator. |
+| `adaptive` | `window_px`, `k` | Local adaptive threshold: `threshold_local` (Gaussian-weighted, `block_size = window_px`) gives a per-pixel local background; a pixel fires iff `residual > local_bg + k·σ`. | **Production / locked method (§6).** Automates "circle a focus and threshold it vs its surroundings": the cut floats with the local dilute level, so locally-flat dilute phase never passes while compact foci do — with **true pixel boundaries**. Small `window_px` starves extended structures (streaks); `k` is the contrast floor (the recall ↔ dilute-rejection dial). The local fix for `bg-k-sigma`'s dilute pickup. |
+| `log` | `threshold_rel` | Laplacian-of-Gaussian multiscale blobs (`blob_log`); each `(y,x,σ)` painted to a disk of radius `⌈σ√2⌉`. | High centroid recall/precision, but **paints uniform disks — wrong granule shape and size. Rejected**: the downstream per-particle morphology needs pixel-accurate, irregular boundaries (stress granules are not round). |
+| `dog` | `threshold_rel` | Difference-of-Gaussians blobs (`blob_dog`), painted likewise. | Same disk-painting shape problem as `log`, and lost to it on centroid recall anyway. Rejected. |
+| `bg-k-sigma` | `k` | `residual > k·σ` (one global per-group threshold). | True pixel shapes, high recall, but a **global** floor — picks up dilute phase wherever background varies within the group. Superseded by `adaptive`'s local floor. |
+| `otsu-floored` | `floor_k` | NaN-out pixels at/below `floor_k·σ`, then Otsu on the survivors. | Removing the background bulk frees Otsu to drop toward the foci, but Otsu's split still caps dim-foci recall. Tested, not selected. |
+| `local-otsu` | `window_r`, `k` | Per-pixel rank-Otsu in a sliding disk (`window_r`), with a `k·σ` group floor. | Windowed true-Otsu; bloats on class-imbalanced neighborhoods. Tested, not selected. |
+| `refine-otsu` | `expand_px` | Seed via global Otsu, then re-Otsu inside each **particle** dilated by `expand_px`. | Per-particle automation of the manual ROI; Otsu's class-balance assumption still bloats. Tested, not selected. |
+| `refine-cell-otsu` | `unit`, `expand_px` | Seed via global Otsu, then re-Otsu inside the foci-neighborhood ROI of each **cell/group** and apply that one threshold unit-wide. | Whole-cell ROI automation; closest Otsu variant to the manual workflow but the Otsu ceiling on dim foci persists. Tested, not selected. |
+| `white-tophat` | `r`, `k` | `white_tophat(disk(r))` residual thresholded at `k·MAD`. | Implicit background removal; available, not selected. |
+| `h-maxima` | `h = k·σ` | `h_maxima` on a LoG-prefiltered residual — regional maxima with prominence ≥ `h`. | Encodes "a bump that clears its surroundings by a margin." Available, not selected. |
+| `otsu` | — | Otsu on the in-group residual. | Baseline / regression comparator — the behavior the puncta work replaces. |
 | `atrous-wavelet` | — | *(stub)* hand-rolled B3-spline à-trous multiscale-product spot detection (Olivo-Marin 2002). | **Not implemented** — raises `NotImplementedError`; deferred until library detectors are shown insufficient. |
 
 The morphological top-hat spans both axes (it is simultaneously a background
 subtractor and a detector); that is acceptable and it lives on the detector axis.
+
+**Why a pixel-threshold detector, not a blob detector.** `log`/`dog` score well
+on centroid recall/precision but paint every detection as an idealized disk —
+the centroid is right, the morphology is wrong. Because each granule's true,
+irregular shape feeds the downstream per-particle measurement, the family that
+won is the per-pixel local-threshold one (`adaptive`), which traces the actual
+boundary. Otsu-family refinements (`otsu-floored`, `local-otsu`, `refine-*`) keep
+true shapes but inherit Otsu's class-balance ceiling and cannot reach the dimmest
+foci. `adaptive`'s `local_bg + k·σ` test has no such ceiling.
 
 ---
 
@@ -202,18 +221,21 @@ the precision denominator, so flooding a cell with a few giant blobs cannot
 inflate precision toward 1.0. Counts are micro-averaged across fields, then
 `recall`, `precision`, and `F_β` (β = 2, recall-weighted) are computed.
 
-### 5.3 Stability probe & lock criterion
+### 5.3 Stability probe & the role of the harness
 
 Each candidate is re-scored with the pass-1 seed `k` perturbed by `± δ`; recall
-and precision must each move by `≤ band` to be `stable`. The harness **locks**
-the candidate with the best `F_β` that also clears:
+and precision must each move by `≤ band` to be `stable`. The harness ranks by
+`F_β` subject to `recall ≥ Tier-B recall floor`, `precision ≥ precision_floor`,
+and the stability probe.
 
-- `recall ≥ Tier-B recall floor`, **and**
-- `precision ≥ precision_floor` (default 0.90), **and**
-- the stability probe.
-
-If nothing qualifies, it reports "keep interactive QC for this condition." The
-locked `PunctaDetectorSettings` is written as JSON.
+**The harness is a guardrail, not the selector.** Its score is centroid-based —
+it confirms a method finds foci in roughly the right places and is stable, but it
+is blind to the two things that actually decide acceptance: whether each granule's
+**pixel shape** is faithful (a disk-painting detector can score perfectly and
+still be unusable downstream) and whether any **dilute phase** is picked up. So
+the harness narrows the field, and the final operating point is chosen by a
+**visual spot-test** over the candidate `/masks` (see §6). The chosen
+`PunctaDetectorSettings` is written as JSON.
 
 ### 5.4 Running it
 
@@ -233,84 +255,94 @@ first `--tol` value; keep `--tol` fixed for an apples-to-apples lock.
 
 ---
 
-## 6. Validation results — `Dish 2 TAOK2 KO 60min As + Noco`, mNG channel
+## 6. Selection — `Dish 2 TAOK2 KO 60min As + Noco`, mNG channel
 
-**Ground truth:** 4,664 foci exhaustively labeled by eye on the mNG channel
-(`scripts/label_foci.py`). Cells from `/labels/cp_mask`.
-**Tier-B recall floor:** the existing `/masks/SG_mask` recovers **0.670** of the
-4,664 labels at `tol = 4 px`. (That the hand-QC mask only reaches 67% confirms
-the labels include many dim foci the old method missed — the under-capture story.)
-**Fixed parameters:** `tol = 4`, `scale = (1.0, 4.0)`, `min_spot_px = 2`,
-background `gaussian-peak`, gate `k = 2.5`, precision floor 0.90, `F_β` β = 2,
-stability probe `k ± 0.5`, band 0.10.
+**Ground truth (guardrail):** 4,664 foci exhaustively labeled by eye on the mNG
+channel (`scripts/label_foci.py`); cells from `/labels/cp_mask`. The centroid
+harness confirmed the multiscale detectors find foci in the right places and that
+the per-group isolation works end-to-end on the full 2048×2048 field. But the
+centroid score cannot see shape or dilute pickup, so it was used only to narrow,
+not to choose (§5.3).
 
-### 6.1 Initial sanity check
+### 6.1 Why the centroid race did not pick the method
 
-`log`, `threshold_rel = 0.1` → recall ≈ 0.46–0.50, precision ≈ 0.99. Confirmed
-the harness runs end-to-end on the full 2048×2048 field and that the default
-`threshold_rel` is far too conservative (very high precision, low recall).
+`log`/`dog` scored well on centroid recall/precision, but every detection is
+painted as a uniform disk of radius `⌈σ√2⌉`: the centroid lands right while the
+**shape and size are wrong**. Because each granule's true (irregular) boundary
+feeds the downstream per-particle measurement, a disk-painting detector is
+unusable however good its centroid numbers — confirmed by eye, the `log` masks
+made every granule the wrong size and shape. Selection therefore moved to the
+per-pixel `adaptive` detector and a visual spot-test.
 
-### 6.2 Coarse race — `log` vs `dog` × `threshold_rel`
+### 6.2 The selection criterion (by eye)
 
-| detector | `threshold_rel` | recall | precision | F_β | stable |
-|---|---:|---:|---:|---:|:--:|
-| log | 0.02 | 0.973 | 0.542 | 0.839 | ✅ |
-| log | 0.04 | 0.895 | 0.842 | 0.883 | ✅ |
-| log | 0.07 | 0.669 | 0.968 | 0.713 | ✅ |
-| log | 0.10 | 0.501 | 0.986 | 0.555 | ✅ |
-| dog | 0.02 | 0.950 | 0.594 | 0.848 | ✅ |
-| dog | 0.04 | 0.839 | 0.862 | 0.844 | ✅ |
-| dog | 0.07 | 0.613 | 0.970 | 0.661 | ✅ |
-| dog | 0.10 | 0.457 | 0.985 | 0.512 | ✅ |
+Each candidate `/masks` layer was overlaid on the mNG channel and compared
+against the manual `/masks/SG_mask` (`scripts/compare_masks.py --solo`), walking
+the contrast floor from permissive toward conservative and stopping at the
+**first mask with zero dilute-phase pickup** while still retaining the small dim
+puncta. The constraints, in priority order:
 
-`log` dominates `dog` (higher recall at comparable precision) at every setting,
-and the precision-≥0.90 frontier sits between `threshold_rel` 0.04 and 0.07.
+1. **Hard: zero dilute phase.** Non-negotiable. Oversampling is unacceptable;
+   undersampling the dimmest foci is acceptable.
+2. **Keep the small/dim puncta** — the differentiator over existing SG methods.
+3. **Pixel-accurate, irregular shapes** for the per-particle analysis.
+4. **Bar: match or beat the manual mask.**
 
-### 6.3 Refined race — `log`, `threshold_rel` 0.045–0.065
+### 6.3 The `adaptive` sweep (window `w`, contrast `k`)
 
-| detector | `threshold_rel` | recall | precision | F_β | stable | qualifies (recall≥0.670 ∧ precision≥0.90 ∧ stable) |
-|---|---:|---:|---:|---:|:--:|:--:|
-| log | 0.045 | 0.856 | 0.879 | 0.861 | ✅ | ✗ (precision < 0.90) |
-| **log** | **0.050** | **0.824** | **0.910** | **0.840** | ✅ | **✓ — LOCKED** |
-| log | 0.055 | 0.780 | 0.930 | 0.806 | ✅ | ✓ |
-| log | 0.060 | 0.739 | 0.945 | 0.773 | ✅ | ✓ |
-| log | 0.065 | 0.700 | 0.955 | 0.740 | ✅ | ✓ |
+Foci = connected components; mean px = mean component area. Listed
+most-permissive → most-conservative:
 
-### 6.4 The method that passed — locked recipe
+| recipe | `window_px` | `k` | px | foci | mean px | by eye |
+|---|---:|---:|---:|---:|---:|---|
+| `adapt_w15` | 15 | 2.00 | 83,948 | 4,698 | 17.9 | catches everything **incl. dilute streaks** |
+| **`aw15_k225`** | **15** | **2.25** | **75,416** | **4,247** | **17.8** | **first fully dilute-free — SELECTED** |
+| `aw15_k25` | 15 | 2.50 | 68,334 | 3,921 | 17.4 | clean; begins shedding dim foci |
+| `aw15_k275` | 15 | 2.75 | 62,296 | 3,622 | 17.2 | clean; more undersampling |
+| `aw15_k30` | 15 | 3.00 | 56,999 | 3,344 | 17.0 | clean; further undersampling |
+| `aw11_k20` | 11 | 2.00 | 55,314 | 3,651 | 15.2 | smaller window — tightest shapes |
+| `aw11_k225` | 11 | 2.25 | 48,934 | 3,308 | 14.8 | clean (small-window alternative) |
+| `aw9_k20` | 9 | 2.00 | 37,895 | 2,890 | 13.1 | clean; most undersampled |
+| `SG_mask` (manual) | — | — | 61,929 | 3,570 | 17.3 | the bar |
 
-**`log` + `gaussian-peak`, `threshold_rel = 0.05`** — the highest-recall setting
-that still clears the 0.90 precision floor, and stable to the pass-1-`k`
-perturbation:
+Two levers: **smaller `window_px`** makes extended structures (streaks, dilute
+patches) their own local background so they fail the local test, preferentially
+starving dilute without a global contrast cost; **higher `k`** raises the contrast
+floor uniformly, removing the faintest pickups (dilute first, then dim granules).
 
-| | recall | precision | stable |
+### 6.4 The selected recipe
+
+**`adaptive` + `gaussian-peak`, `window_px = 15`, `k = 2.25`** (`aw15_k225`) — the
+least-aggressive dial-back of the permissive `adapt_w15` that the eye confirmed
+has **zero dilute phase**, while keeping the small dim puncta:
+
+| | foci | mean px | dilute (by eye) |
 |---|---:|---:|:--:|
-| old `SG_mask` (hand QC) | 0.670 | — | — |
-| **locked automated method** | **0.824** | **0.910** | ✅ |
+| old `SG_mask` (hand QC) | 3,570 | 17.3 | none |
+| **selected `adaptive` recipe** | **4,247** | **17.8** | **none** |
 
-The automated, fully-headless method captures **~82% of every labeled focus vs
-~67% for the laborious hand mask** (+~23 points of recall — the dim foci the old
-method missed) at **91% precision**, with no per-image QC. For this condition,
-the lock-once trust model is satisfied.
+It captures **~19% more granules than the laborious hand mask** (the small dim
+foci the old method missed) at faithful pixel shapes (mean 17.8 ≈ 17.3 px), fully
+headless. The production mask is written as `/masks/SG_auto`.
 
 `locked_SG.json`:
 
 ```json
 {
-  "detector_name": "log",
-  "seed_detector_name": "log",
+  "detector_name": "adaptive",
+  "seed_detector_name": "otsu",
   "background_estimator_name": "gaussian-peak",
-  "detector_params": { "k": 2.5, "threshold_rel": 0.05 },
+  "detector_params": { "window_px": 15, "k": 2.25 },
   "seed_params": { "k": 2.5 },
-  "min_spot_px": 2,
+  "min_spot_px": 3,
   "max_spot_px": null,
   "spot_scale_prior": [1.0, 4.0]
 }
 ```
 
-If a different operating point is wanted, the frontier above is explicit: e.g.
-`threshold_rel = 0.045` reaches 0.856 recall at 0.879 precision (lower
-`--precision-floor` to allow it), or 0.055–0.065 trade recall for precision up to
-0.955.
+To trade recall for an even cleaner margin, the sweep is explicit: raise `k`
+(15/2.5 → 15/3.0) or shrink the window (11/2.25, 9/2.0) — each undersamples the
+dimmest foci further while staying dilute-free.
 
 ---
 
@@ -323,10 +355,10 @@ ThresholdingRound(
     name="SG", channel="mNG", metric="mean_intensity",
     algorithm=ThresholdAlgorithm.KMEANS, gaussian_sigma=1.0,
     puncta=PunctaDetectorSettings(
-        detector_name="log", seed_detector_name="log",
+        detector_name="adaptive", seed_detector_name="otsu",
         background_estimator_name="gaussian-peak",
-        detector_params={"k": 2.5, "threshold_rel": 0.05},
-        min_spot_px=2, spot_scale_prior=(1.0, 4.0),
+        detector_params={"window_px": 15, "k": 2.25},
+        min_spot_px=3, spot_scale_prior=(1.0, 4.0),
     ),
 )
 ```
@@ -339,22 +371,28 @@ threshold-QC step. The settings round-trip through `run_config.json`.
 
 ## 8. Trust model & caveats
 
-- **Lock-once, per condition.** A recipe is qualified on labeled data and then
+- **Choose-once, per condition.** A recipe is selected on labeled data and then
   trusted headless on comparable datasets. "Comparable" is currently a *scale*
   regime check (bounded refinement); SNR / background-structure drift beyond
   scale is not yet caught — that is the deferred outlier-flag safety net.
-- **Single-field lock.** The `threshold_rel = 0.05` result was locked on one
-  field of one dataset. Before retiring QC for the whole condition, validate the
-  same recipe on 1–2 more `TAOK2 KO 60min As+Noco` dishes (label them with
-  `scripts/label_foci.py`, re-run the harness) to confirm it generalizes.
+- **By-eye selection on a single field.** `window_px = 15, k = 2.25` was chosen by
+  visual spot-test on one field of one dataset against the manual `SG_mask`. Before
+  retiring QC for the whole condition, eyeball the same recipe on 1–2 more `TAOK2
+  KO 60min As+Noco` dishes (generate with `scripts/gen_puncta_masks.py`, compare
+  with `scripts/compare_masks.py`) to confirm it stays dilute-free and keeps the
+  dim foci.
+- **The centroid harness is a guardrail, not the judge.** It cannot see granule
+  shape or dilute-phase pickup — the two acceptance criteria — so a high `F_β` is
+  necessary-but-insufficient. Trust the overlay, not the number.
 - **Deferred, evidence-gated.** `donut-surface` (RBF estimator), `atrous-wavelet`
   (hand-rolled wavelet detector), and the ML pixel-classifier + full keep-QC /
   outlier-flag safety net ship as stubs / future work — to be implemented only if
-  the library detectors and the `gaussian-peak` rung prove insufficient.
-- **Not yet empirically raced** on this dataset: `white-tophat`, `h-maxima`,
-  `bg-k-sigma`, and the donut / `mad` / `percentile` / `rolling-ball` background
-  estimators. They are implemented and available; the harness can race them by
-  adding them to `--detectors` / `--backgrounds`.
+  the shipped detectors prove insufficient.
+- **Available but not selected** on this dataset: `log`/`dog` (disk-shape,
+  rejected), the Otsu-family refinements (`otsu-floored`, `local-otsu`,
+  `refine-otsu`, `refine-cell-otsu`), `white-tophat`, `h-maxima`, `bg-k-sigma`,
+  and the donut / `mad` / `percentile` / `rolling-ball` background estimators.
+  All are implemented; re-race them via `--detectors` / `--backgrounds`.
 
 ---
 
