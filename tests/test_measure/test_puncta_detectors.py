@@ -78,7 +78,20 @@ def test_registry_keys_match_names():
 
 
 def test_expected_keys_present():
-    expected = {"otsu", "bg-k-sigma", "white-tophat", "log", "dog", "h-maxima", "atrous-wavelet"}
+    expected = {
+        "otsu",
+        "bg-k-sigma",
+        "white-tophat",
+        "log",
+        "dog",
+        "h-maxima",
+        "otsu-floored",
+        "adaptive",
+        "local-otsu",
+        "refine-otsu",
+        "refine-cell-otsu",
+        "atrous-wavelet",
+    }
     assert set(DETECTORS) == expected
 
 

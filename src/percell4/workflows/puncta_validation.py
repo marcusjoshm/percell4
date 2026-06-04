@@ -243,6 +243,7 @@ def run_validation(
                 "tol": gp.tol,
                 "scale_range": gp.scale_range,
                 "threshold_rel": dict(settings.detector_params).get("threshold_rel"),
+                "min_spot_px": gp.min_spot_px,
                 "recall": recall,
                 "precision": precision,
                 "f_beta": fbeta,

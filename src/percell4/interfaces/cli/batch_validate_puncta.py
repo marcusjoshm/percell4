@@ -108,6 +108,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Background estimator names to sweep (default: gaussian-peak).",
     )
     parser.add_argument(
+        "--seed-detector",
+        default="log",
+        help=(
+            "Detector for the permissive pass-1 seed step (default: log). Set to "
+            "'otsu' to run Otsu on both passes."
+        ),
+    )
+    parser.add_argument(
         "--k",
         nargs="+",
         type=float,
@@ -145,9 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--min-spot-px",
+        nargs="+",
         type=int,
-        default=2,
-        help="Minimum spot area in pixels (default: 2).",
+        default=[2],
+        help="Minimum spot area in pixels to sweep (filters noise specks; default: 2).",
     )
     parser.add_argument(
         "--precision-floor",
@@ -223,14 +232,20 @@ def main(argv: list[str] | None = None) -> int:
         GridPoint(
             detector_name=det,
             background_estimator_name=bg,
+            seed_detector_name=args.seed_detector,
             k=k,
             tol=tol,
             scale_range=(args.scale_min, args.scale_max),
-            min_spot_px=args.min_spot_px,
+            min_spot_px=msp,
             extra_params=(("threshold_rel", tr),),
         )
-        for det, bg, k, tol, tr in itertools.product(
-            args.detectors, args.backgrounds, args.k, args.tol, args.threshold_rel
+        for det, bg, k, tol, tr, msp in itertools.product(
+            args.detectors,
+            args.backgrounds,
+            args.k,
+            args.tol,
+            args.threshold_rel,
+            args.min_spot_px,
         )
     ]
 
@@ -245,16 +260,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Ranked table.
     print(
-        f"\n{'detector':<14}{'background':<16}{'k':>5}{'t_rel':>7}{'tol':>6}"
+        f"\n{'detector':<14}{'background':<16}{'k':>5}{'t_rel':>7}{'minpx':>6}{'tol':>6}"
         f"{'recall':>9}{'precision':>11}{'f_beta':>9}{'stable':>8}"
     )
-    print("-" * 85)
+    print("-" * 91)
     for row in report.ranked:
         t_rel = row.get("threshold_rel")
         t_rel_s = f"{t_rel:.3f}" if isinstance(t_rel, (int, float)) else "-"
         print(
             f"{row['detector_name']:<14}{row['background_estimator_name']:<16}"
-            f"{row['k']:>5.2f}{t_rel_s:>7}{row['tol']:>6.1f}"
+            f"{row['k']:>5.2f}{t_rel_s:>7}{row.get('min_spot_px', '-'):>6}{row['tol']:>6.1f}"
             f"{row['recall']:>9.3f}{row['precision']:>11.3f}"
             f"{row['f_beta']:>9.3f}{str(row['stable']):>8}"
         )

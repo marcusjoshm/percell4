@@ -25,6 +25,11 @@ DETECTOR_NAMES: tuple[str, ...] = (
     "log",
     "dog",
     "h-maxima",
+    "otsu-floored",
+    "adaptive",
+    "local-otsu",
+    "refine-otsu",
+    "refine-cell-otsu",
     "atrous-wavelet",
 )
 

@@ -308,6 +308,209 @@ def _h_maxima(
     return _restrict(maxima, residual, group_mask)
 
 
+def _otsu_floored(
+    residual: np.ndarray, group_mask: np.ndarray, sigma: float | None, params: dict
+) -> np.ndarray:
+    """Otsu restricted to above-background pixels — a shape-preserving recall lever.
+
+    NaN-out pixels at/below a per-group floor ``floor_k * sigma`` (in residual
+    units, i.e. ``image <= bg + floor_k*sigma``), then run Otsu on the
+    survivors. Removing the background bulk frees Otsu's threshold to drop into
+    the foci regime (more dim-foci recall than plain Otsu) while staying a pixel
+    threshold (true shapes).
+
+    ``floor_k`` (default 1.0) is the per-group automatic margin in noise units;
+    ``sigma`` is the background estimator's noise scale, or a robust in-group
+    ``1.4826 * MAD`` when the estimator provides none. Unlike a plain background
+    *subtraction* — which Otsu ignores (shift-invariant) — the floor's absolute
+    position depends on the background estimate, so the estimate method
+    genuinely changes the result.
+    """
+    floor_k = float(params.get("floor_k", 1.0))
+    if sigma is None:
+        sigma = _robust_sigma(residual, group_mask)
+    if sigma is None or float(sigma) <= 0:
+        return _zero_mask(residual)
+    floor = floor_k * float(sigma)
+    sel = _finite_in_group(residual, group_mask)
+    above = sel & (residual > floor)
+    survivors = residual[above]
+    if survivors.size < 2 or float(survivors.min()) == float(survivors.max()):
+        return _zero_mask(residual)
+    thr = float(_sk_threshold_otsu(survivors))
+    mask = sel & (residual > thr)
+    return _restrict(mask, residual, group_mask)
+
+
+def _adaptive(
+    residual: np.ndarray, group_mask: np.ndarray, sigma: float | None, params: dict
+) -> np.ndarray:
+    """Local adaptive threshold — the automation of "circle a focus and threshold it".
+
+    A pixel is foreground iff it exceeds its **local** background (a
+    Gaussian-weighted neighborhood mean over a window ~ the ROI you'd draw) by
+    ``k * sigma``. Because the threshold floats with the local dilute level,
+    locally-flat dilute phase never passes (it equals its own local mean) while
+    foci (local bumps) do — with true pixel boundaries. ``window_px`` is the
+    neighborhood size (odd); ``k`` the contrast margin in noise units. This is
+    the *local* version of ``bg-k-sigma`` — the fix for dilute pickup.
+    """
+    from skimage.filters import threshold_local
+
+    block = int(params.get("window_px", 31)) | 1  # force odd
+    k = float(params.get("k", 2.0))
+    if sigma is None:
+        sigma = _robust_sigma(residual, group_mask)
+    if sigma is None or float(sigma) <= 0:
+        return _zero_mask(residual)
+    filled = _fill_nan(residual, fill=0.0)
+    local_bg = threshold_local(filled, block_size=block, method="gaussian")
+    sel = _finite_in_group(residual, group_mask)
+    mask = sel & (residual > local_bg + k * float(sigma))
+    return _restrict(mask, residual, group_mask)
+
+
+def _local_otsu(
+    residual: np.ndarray, group_mask: np.ndarray, sigma: float | None, params: dict
+) -> np.ndarray:
+    """Windowed (true) Otsu — the literal automation of "Otsu inside a small ROI".
+
+    For each pixel, Otsu's threshold is computed from a local disk neighborhood
+    (radius ``window_r``) using only finite in-group pixels (the rank filter's
+    ``mask``), so the cut floats with the local dilute level. A coarse
+    ``k * sigma`` group floor suppresses spurious splits in locally-flat regions
+    (pure local Otsu always bisects — even noise). ``window_r`` ~ the radius of
+    the ROI you'd draw.
+    """
+    from skimage.filters.rank import otsu as _rank_otsu
+
+    r = int(params.get("window_r", 12))
+    k = float(params.get("k", 1.0))
+    sel = _finite_in_group(residual, group_mask)
+    vals = residual[sel]
+    if vals.size == 0 or float(vals.min()) == float(vals.max()):
+        return _zero_mask(residual)
+    lo, hi = float(vals.min()), float(vals.max())
+    scaled = (np.clip((residual - lo) / (hi - lo), 0.0, 1.0) * 65535.0).astype(np.uint16)
+    local_t = _rank_otsu(scaled, disk(r), mask=sel.astype(np.uint8))
+    mask = sel & (scaled.astype(np.int64) > local_t.astype(np.int64))
+    if sigma is None:
+        sigma = _robust_sigma(residual, group_mask)
+    if sigma is not None and float(sigma) > 0:
+        mask = mask & (residual > k * float(sigma))
+    return _restrict(mask, residual, group_mask)
+
+
+def _refine_otsu(
+    residual: np.ndarray, group_mask: np.ndarray, sigma: float | None, params: dict
+) -> np.ndarray:
+    """Per-particle local Otsu refinement — the literal automation of your manual
+    'circle each focus and re-Otsu it' workflow.
+
+    Pass 1: a global in-group Otsu seeds initial particles (where the foci are).
+    Pass 2: each seed particle is dilated by ``expand_px`` (disk) to build a
+    local ROI = the particle plus a surrounding ring; Otsu is recomputed on the
+    original residual *within that ROI only* and the region is re-thresholded.
+    The ring supplies local class balance and a local-dilute reference, so the
+    refined boundary is locally correct and the dilute phase around the focus is
+    excluded (it sits below the focus's own local Otsu cut). The refined
+    particles are unioned.
+
+    Recall is seed-limited: this fixes the *shape* of foci the first pass found
+    and rejects dilute, but a focus the seed pass misses entirely never gets an
+    ROI. Use a permissive ``seed_detector`` upstream to also reach dim foci.
+    """
+    from skimage import measure
+    from skimage.morphology import dilation
+
+    expand = int(params.get("expand_px", 10))
+    sel = _finite_in_group(residual, group_mask)
+    vals = residual[sel]
+    if vals.size < 2 or float(vals.min()) == float(vals.max()):
+        return _zero_mask(residual)
+
+    # Pass 1: seed particles via a global in-group Otsu.
+    seed = sel & (residual > float(_sk_threshold_otsu(vals)))
+    labels = measure.label(seed)
+    out = np.zeros(residual.shape, dtype=bool)
+    footprint = disk(expand)
+    pad = expand + 1
+    h, w = residual.shape
+    for region in measure.regionprops(labels):
+        minr, minc, maxr, maxc = region.bbox
+        r0, c0 = max(minr - pad, 0), max(minc - pad, 0)
+        r1, c1 = min(maxr + pad, h), min(maxc + pad, w)
+        part = labels[r0:r1, c0:c1] == region.label
+        roi = dilation(part, footprint) & sel[r0:r1, c0:c1]
+        crop = residual[r0:r1, c0:c1]
+        roi_vals = crop[roi]
+        if roi_vals.size < 2 or float(roi_vals.min()) == float(roi_vals.max()):
+            out[r0:r1, c0:c1] |= part  # cannot refine — keep the seed
+            continue
+        thr = float(_sk_threshold_otsu(roi_vals))
+        out[r0:r1, c0:c1] |= roi & (crop > thr)
+    return _restrict(sel & out, residual, group_mask)
+
+
+def _refine_cell_otsu(
+    residual: np.ndarray, group_mask: np.ndarray, sigma: float | None, params: dict
+) -> np.ndarray:
+    """Per-cell (or per-group) Otsu recomputed from the foci-neighborhood region.
+
+    The automation of "circle the area with foci and re-Otsu the whole region",
+    with **one threshold per unit applied to the ENTIRE unit** (not per particle).
+
+    Pass 1: a global in-group Otsu seeds particles. Pass 2, per ``unit`` (each
+    cell — connected components of the group — or the whole group): dilate that
+    unit's seed particles by ``expand_px`` to form an informative ROI (foci plus
+    their immediate surroundings, **excluding the empty dilute expanse**),
+    recompute Otsu on the residual *within that ROI only*, and apply the
+    resulting threshold across the entire unit. Excluding the empty dilute from
+    the histogram restores the class balance Otsu lacks cell-wide, so the cut
+    drops enough to catch dim foci — applied unit-wide with true pixel shapes.
+
+    ``unit`` is ``'cell'`` (default) or ``'group'``; ``expand_px`` (default 10)
+    sizes the ROI ring. (Per-cell units are connected components of
+    ``group_mask``; cells that physically abut would merge — acceptable for the
+    common separated-cell case.)
+    """
+    from skimage import measure
+    from skimage.morphology import dilation
+
+    unit = str(params.get("unit", "cell"))
+    expand = int(params.get("expand_px", 10))
+    sel = _finite_in_group(residual, group_mask)
+    vals = residual[sel]
+    if vals.size < 2 or float(vals.min()) == float(vals.max()):
+        return _zero_mask(residual)
+
+    seed = sel & (residual > float(_sk_threshold_otsu(vals)))
+    unit_labels = (
+        sel.astype(np.intp) if unit == "group" else measure.label(group_mask)
+    )
+    footprint = disk(expand)
+    pad = expand + 1
+    h, w = residual.shape
+    out = np.zeros(residual.shape, dtype=bool)
+    for region in measure.regionprops(unit_labels):
+        minr, minc, maxr, maxc = region.bbox
+        r0, c0 = max(minr - pad, 0), max(minc - pad, 0)
+        r1, c1 = min(maxr + pad, h), min(maxc + pad, w)
+        umask = (unit_labels[r0:r1, c0:c1] == region.label) & sel[r0:r1, c0:c1]
+        useed = seed[r0:r1, c0:c1] & umask
+        if not useed.any():
+            continue
+        crop = residual[r0:r1, c0:c1]
+        roi = dilation(useed, footprint) & umask  # foci-neighborhood ROI
+        roi_vals = crop[roi]
+        if roi_vals.size < 2 or float(roi_vals.min()) == float(roi_vals.max()):
+            out[r0:r1, c0:c1] |= useed
+            continue
+        thr = float(_sk_threshold_otsu(roi_vals))
+        out[r0:r1, c0:c1] |= umask & (crop > thr)  # apply ENTIRE-unit
+    return _restrict(sel & out, residual, group_mask)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -320,6 +523,11 @@ DETECTORS: dict[str, Callable[..., np.ndarray]] = {
     "log": _log,
     "dog": _dog,
     "h-maxima": _h_maxima,
+    "otsu-floored": _otsu_floored,
+    "adaptive": _adaptive,
+    "local-otsu": _local_otsu,
+    "refine-otsu": _refine_otsu,
+    "refine-cell-otsu": _refine_cell_otsu,
     "atrous-wavelet": atrous_wavelet,
 }
 
