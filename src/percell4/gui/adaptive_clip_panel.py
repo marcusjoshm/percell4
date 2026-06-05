@@ -61,6 +61,28 @@ def run_adaptive_detection(image, gaussian_sigma, settings, auto_window):
     return mask, window_used
 
 
+def run_adaptive_detection_stack(image, gaussian_sigma, settings, auto_window):
+    """Worker body for a time-lapse ``(T, H, W)`` channel: detect each frame.
+
+    Loops over the leading time axis, runs :func:`run_adaptive_detection` on each
+    frame, and stacks the per-frame masks into ``(T, H, W)``. The auto window is
+    estimated per frame (contract D3), so frames with different intensity stats
+    get their own window. Mirrors ``segmentation_panel.run_cellpose_stack``'s
+    per-frame dispatch. Returns ``(mask (T,H,W) uint8, windows list[int])``.
+    Pure (no Qt) so it is unit-testable and worker-safe.
+    """
+    image = np.asarray(image)
+    frames: list[np.ndarray] = []
+    windows: list[int] = []
+    for t in range(image.shape[0]):
+        mask_t, window_t = run_adaptive_detection(
+            image[t], gaussian_sigma, settings, auto_window
+        )
+        frames.append(np.asarray(mask_t, dtype=np.uint8))
+        windows.append(int(window_t))
+    return np.stack(frames, axis=0), windows
+
+
 class AdaptiveClipPanel(QWidget):
     """Interactive Adaptive Local Clipping panel (Creator)."""
 
@@ -143,9 +165,11 @@ class AdaptiveClipPanel(QWidget):
         if image is None:
             self._show_status(f"Channel '{channel}' not found in viewer")
             return
-        if image.ndim == 3:  # time-lapse: detect on the currently-displayed frame
-            t = int(viewer_win.viewer.dims.current_step[0])
-            image = image[t]
+        # Time-lapse: a (T,H,W) channel layer is detected per frame (stacked to
+        # a (T,H,W) mask), not sliced to the displayed frame. A 2D channel takes
+        # the historical single-frame path.
+        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+        is_timelapse = image.ndim == 3 and n_timepoints > 1
 
         config = self._settings.current_config()
 
@@ -191,14 +215,17 @@ class AdaptiveClipPanel(QWidget):
         self._pending_auto = config.auto_window
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
-        self._show_status(
-            "Detecting (auto window)..." if config.auto_window else "Detecting..."
-        )
+        n_frames = image.shape[0] if is_timelapse else 1
+        detecting = "Detecting (auto window)..." if config.auto_window else "Detecting..."
+        if is_timelapse:
+            detecting = f"Detecting across {n_frames} timepoints..."
+        self._show_status(detecting)
 
         from percell4.gui.workers import Worker
 
+        worker_fn = run_adaptive_detection_stack if is_timelapse else run_adaptive_detection
         self._worker = Worker(
-            run_adaptive_detection, image, config.gaussian_sigma, settings, config.auto_window
+            worker_fn, image, config.gaussian_sigma, settings, config.auto_window
         )
         self._worker.finished.connect(self._on_detect_done)
         self._worker.error.connect(self._on_detect_error)
@@ -213,6 +240,12 @@ class AdaptiveClipPanel(QWidget):
         mask, window_used = result
         self._run_btn.setEnabled(True)
         self._settings.set_enabled(True)
+
+        # The time-lapse stack worker returns a per-frame list of windows;
+        # the single-frame worker returns one int. Normalize for the spinbox
+        # (show the first frame's auto window) and the status note.
+        is_stack = isinstance(window_used, (list, tuple))
+        window_display = (window_used[0] if window_used else 0) if is_stack else window_used
 
         name = self._pending_name or "adaptive"
         try:
@@ -230,7 +263,14 @@ class AdaptiveClipPanel(QWidget):
             viewer_win.add_mask(np.asarray(mask, dtype=np.uint8), name=name)
 
         if self._pending_auto:
-            self._settings.set_window_value(window_used)
+            self._settings.set_window_value(window_display)
 
-        win_note = f" (auto window {window_used})" if self._pending_auto else ""
+        if self._pending_auto:
+            win_note = (
+                f" (auto window {window_display}, per frame)"
+                if is_stack
+                else f" (auto window {window_display})"
+            )
+        else:
+            win_note = ""
         self._show_status(f"Saved '{name}': {res.n_positive:,} px{win_note}")
