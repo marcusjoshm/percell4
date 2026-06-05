@@ -95,6 +95,21 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def write_labels_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        """Write a single timepoint's 2D ``frame`` into a labels resource.
+
+        Per-frame counterpart to :meth:`read_labels` with a ``timepoint``;
+        allocates / promotes / splices as needed. See
+        :meth:`DatasetStore.write_labels_frame`.
+        """
+        ...
+
     def list_labels(self, handle: DatasetHandle) -> list[str]:
         """List all segmentation label names."""
         ...
@@ -128,6 +143,21 @@ class DatasetRepository(Protocol):
 
         ``attrs`` (optional) are stamped onto the stored dataset.
         Phase-6 Creators use this to record ``created_at_bin``.
+        """
+        ...
+
+    def write_mask_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        """Write a single timepoint's 2D ``frame`` into a mask resource.
+
+        Per-frame counterpart to :meth:`read_mask` with a ``timepoint``;
+        allocates / promotes / splices as needed. See
+        :meth:`DatasetStore.write_mask_frame`.
         """
         ...
 

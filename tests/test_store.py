@@ -741,6 +741,102 @@ def test_read_channel_non_time_byte_identical(store):
     )
 
 
+# ── Per-frame write: write_labels_frame / write_mask_frame (U3) ──
+
+
+def test_write_mask_frame_allocates_stack_when_absent(store):
+    """Per-frame write into an absent resource allocates a (T,H,W) zero stack."""
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    frame = np.zeros((8, 8), dtype=np.uint8)
+    frame[2, 2] = 1
+    store.write_mask_frame("roi", frame, timepoint=2)
+
+    full = store.read_mask("roi")
+    assert full.shape == (3, 8, 8)
+    assert full[2, 2, 2] == 1
+    # Other frames are zero.
+    assert full[0].sum() == 0 and full[1].sum() == 0
+    np.testing.assert_array_equal(store.read_mask("roi", timepoint=2), frame)
+
+
+def test_write_labels_frame_allocates_stack_when_absent(store):
+    _make_timelapse_store(store, t=2, h=8, w=8)
+    frame = np.zeros((8, 8), dtype=np.int32)
+    frame[1, 1] = 9
+    store.write_labels_frame("manual", frame, timepoint=1)
+    full = store.read_labels("manual")
+    assert full.shape == (2, 8, 8)
+    assert full[1, 1, 1] == 9
+    assert full[0].sum() == 0
+
+
+def test_write_mask_frame_promotes_2d_time_invariant(store):
+    """Writing a frame to an existing 2D (time-invariant) mask promotes it to
+    (T,H,W), broadcasting the old plane to every frame except the written one."""
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    flat = np.zeros((8, 8), dtype=np.uint8)
+    flat[4, 4] = 1  # the time-invariant gate
+    store.write_mask("gate", flat)
+    assert store.read_mask("gate").shape == (8, 8)  # 2D before
+
+    new_frame = np.zeros((8, 8), dtype=np.uint8)
+    new_frame[0, 0] = 1
+    store.write_mask_frame("gate", new_frame, timepoint=1)
+
+    full = store.read_mask("gate")
+    assert full.shape == (3, 8, 8)  # promoted to a stack
+    # Frames 0 and 2 keep the broadcast gate; frame 1 is the new frame.
+    np.testing.assert_array_equal(full[0], flat)
+    np.testing.assert_array_equal(full[2], flat)
+    np.testing.assert_array_equal(full[1], new_frame)
+
+
+def test_write_labels_frame_inplace_preserves_other_frames(store):
+    """Writing one frame of an existing (T,H,W) resource leaves the other
+    frames' bytes untouched (in-place assign, no delete+recreate)."""
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    stack = np.zeros((3, 8, 8), dtype=np.int32)
+    stack[0] = 1
+    stack[1] = 2
+    stack[2] = 3
+    store.write_labels("tracked", stack)
+
+    new_frame = np.full((8, 8), 7, dtype=np.int32)
+    store.write_labels_frame("tracked", new_frame, timepoint=1)
+
+    full = store.read_labels("tracked")
+    assert full.shape == (3, 8, 8)
+    np.testing.assert_array_equal(full[0], np.full((8, 8), 1))  # untouched
+    np.testing.assert_array_equal(full[1], new_frame)            # replaced
+    np.testing.assert_array_equal(full[2], np.full((8, 8), 3))  # untouched
+
+
+def test_write_mask_frame_out_of_range_raises(store):
+    _make_timelapse_store(store, t=2, h=8, w=8)
+    with pytest.raises(IndexError, match="timepoint=5 out of range"):
+        store.write_mask_frame("roi", np.zeros((8, 8), dtype=np.uint8), timepoint=5)
+
+
+def test_write_mask_frame_wrong_shape_raises(store):
+    from percell4.store import LayerSizeMismatchError
+
+    _make_timelapse_store(store, t=2, h=8, w=8)
+    with pytest.raises(LayerSizeMismatchError, match="native_shape"):
+        store.write_mask_frame("roi", np.zeros((8, 10), dtype=np.uint8), timepoint=0)
+
+
+def test_write_labels_frame_single_timepoint_writes_2d(store):
+    """On a single-timepoint dataset, write_*_frame(t=0) writes a 2D resource
+    byte-identical to write_labels."""
+    store.write_array("intensity", np.zeros((8, 8), dtype=np.float32))
+    frame = np.zeros((8, 8), dtype=np.int32)
+    frame[3, 3] = 4
+    store.write_labels_frame("manual", frame, timepoint=0)
+    out = store.read_labels("manual")
+    assert out.shape == (8, 8)
+    np.testing.assert_array_equal(out, frame)
+
+
 # ── Tracks (lineage tables) (U7) ──────────────────────────────
 
 

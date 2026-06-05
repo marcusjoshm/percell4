@@ -156,6 +156,15 @@ class Hdf5DatasetRepository:
     ) -> None:
         self._store(handle).write_labels(name, data, attrs=attrs)
 
+    def write_labels_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        self._store(handle).write_labels_frame(name, frame, timepoint)
+
     def list_labels(self, handle: DatasetHandle) -> list[str]:
         return self._store(handle).list_labels()
 
@@ -180,6 +189,15 @@ class Hdf5DatasetRepository:
         attrs: dict[str, Any] | None = None,
     ) -> None:
         self._store(handle).write_mask(name, data, attrs=attrs)
+
+    def write_mask_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        self._store(handle).write_mask_frame(name, frame, timepoint)
 
     def list_masks(self, handle: DatasetHandle) -> list[str]:
         return self._store(handle).list_masks()

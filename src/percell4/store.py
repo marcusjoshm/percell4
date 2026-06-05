@@ -8,6 +8,7 @@ session mode for efficient repeated reads.
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from contextlib import contextmanager
@@ -19,6 +20,8 @@ import h5py
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
 
 from percell4.domain.io.cross_format import deserialize_rule, serialize_rule
 from percell4.domain.io.models import (
@@ -571,6 +574,85 @@ class DatasetStore:
             )
         return ["T", "H", "W"]
 
+    def _write_resource_frame(
+        self,
+        prefix: str,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+        dtype: Any,
+        kind: str,
+        whole_writer,
+    ) -> int:
+        """Splice a single timepoint's 2D ``frame`` into a labels/masks resource.
+
+        Shared core for :meth:`write_labels_frame` / :meth:`write_mask_frame`.
+        Three cases (see those methods for the contract):
+
+        1. **Absent** on a time-lapse dataset: allocate a ``(T, H, W)`` zero
+           stack and set frame ``timepoint``.
+        2. **Present and 2D** (time-invariant) on a time-lapse dataset:
+           broadcast the existing plane to ``(T, H, W)``, splice the frame, and
+           write the stack. This irreversibly converts a time-invariant gate
+           into a per-frame stack, so it is logged (surfaced), not silent.
+        3. **Present and ``(T, H, W)``**: assign ``ds[timepoint] = frame`` in
+           place under an ``'a'`` open — no delete+recreate, so the other
+           frames' bytes are untouched.
+
+        On a single-timepoint dataset (``n_timepoints == 1``) the call is a 2D
+        write at ``timepoint == 0``, byte-identical to ``whole_writer``.
+        """
+        if frame.ndim != 2:
+            raise ValueError(f"{kind} frame must be 2D (H,W); got {frame.ndim}D")
+        ns, nt = self._native_shape_and_timepoints()
+        if not 0 <= timepoint < nt:
+            raise IndexError(f"timepoint={timepoint} out of range [0, {nt})")
+        if ns is not None and tuple(int(x) for x in frame.shape) != ns:
+            raise LayerSizeMismatchError(
+                f"{kind} frame shape {tuple(int(x) for x in frame.shape)} "
+                f"disagrees with dataset native_shape {ns}."
+            )
+        frame = frame.astype(dtype, copy=False)
+        path = f"{prefix}/{name}"
+
+        # Single-timepoint dataset: a per-frame write at t=0 is just the 2D write.
+        if nt <= 1:
+            return whole_writer(name, frame)
+
+        present = False
+        is_2d = False
+        if self.path.exists():
+            with h5py.File(self.path, "r") as f:
+                present = path in f
+                if present:
+                    is_2d = f[path].ndim == 2
+
+        h, w = ns if ns is not None else (int(frame.shape[0]), int(frame.shape[1]))
+
+        if not present:
+            # Case 1: allocate a (T,H,W) zero stack, splice the frame, validate-write.
+            stack = np.zeros((nt, h, w), dtype=dtype)
+            stack[timepoint] = frame
+            return whole_writer(name, stack)
+
+        if is_2d:
+            # Case 2: promote a 2D time-invariant resource to (T,H,W).
+            with h5py.File(self.path, "r") as f:
+                existing = np.asarray(f[path][()])
+            stack = np.broadcast_to(existing, (nt, h, w)).astype(dtype, copy=True)
+            stack[timepoint] = frame
+            logger.info(
+                "Promoting 2D time-invariant %s '%s' to a (T,H,W) per-frame "
+                "stack on first per-frame write (timepoint=%d).",
+                kind, name, timepoint,
+            )
+            return whole_writer(name, stack)
+
+        # Case 3: existing (T,H,W) -- in-place single-frame write, no recreate.
+        with h5py.File(self.path, "a") as f:
+            f[path][timepoint] = frame
+        return int(frame.size)
+
     def write_labels(
         self,
         name: str,
@@ -593,6 +675,22 @@ class DatasetStore:
         if attrs:
             merged_attrs.update(attrs)
         return self.write_array(f"labels/{name}", array, attrs=merged_attrs)
+
+    def write_labels_frame(
+        self, name: str, frame: NDArray, timepoint: int
+    ) -> int:
+        """Write a single timepoint's 2D ``frame`` into /labels/<name>.
+
+        The symmetric per-frame counterpart to :meth:`read_labels` with a
+        ``timepoint``. Lets interactive editors and per-frame Creators persist
+        one frame without re-implementing read-splice-write. ``frame`` is a 2D
+        ``(H, W)`` int32 label plane; ``timepoint`` is in ``[0, n_timepoints)``.
+        See :meth:`_write_resource_frame` for the absent / 2D-promote / in-place
+        cases. Enforces int32 dtype.
+        """
+        return self._write_resource_frame(
+            "labels", name, frame, timepoint, np.int32, "Labels", self.write_labels
+        )
 
     def read_labels(
         self, name: str, view_bin: int = 1, timepoint: int | None = None
@@ -651,6 +749,21 @@ class DatasetStore:
         if attrs:
             merged_attrs.update(attrs)
         return self.write_array(f"masks/{name}", array, attrs=merged_attrs)
+
+    def write_mask_frame(
+        self, name: str, frame: NDArray, timepoint: int
+    ) -> int:
+        """Write a single timepoint's 2D ``frame`` into /masks/<name>.
+
+        The symmetric per-frame counterpart to :meth:`read_mask` with a
+        ``timepoint``. ``frame`` is a 2D ``(H, W)`` uint8 mask plane;
+        ``timepoint`` is in ``[0, n_timepoints)``. See
+        :meth:`_write_resource_frame` for the absent / 2D-promote / in-place
+        cases. Enforces uint8 dtype.
+        """
+        return self._write_resource_frame(
+            "masks", name, frame, timepoint, np.uint8, "Mask", self.write_mask
+        )
 
     def read_mask(
         self, name: str, view_bin: int = 1, timepoint: int | None = None
