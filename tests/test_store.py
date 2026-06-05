@@ -837,6 +837,85 @@ def test_write_labels_frame_single_timepoint_writes_2d(store):
     np.testing.assert_array_equal(out, frame)
 
 
+# ── Probes + dims-corruption detection (U4) ───────────────────
+
+
+def test_is_time_stacked_true_for_leading_t(store):
+    store.write_array(
+        "intensity", np.zeros((3, 8, 8), dtype=np.float32),
+        attrs={"dims": ["T", "H", "W"]},
+    )
+    assert store.is_time_stacked("intensity") is True
+
+
+def test_is_time_stacked_true_for_tchw(store):
+    store.write_array(
+        "intensity", np.zeros((2, 2, 8, 8), dtype=np.float32),
+        attrs={"dims": ["T", "C", "H", "W"]},
+    )
+    assert store.is_time_stacked("intensity") is True
+
+
+def test_is_time_stacked_false_for_channels_and_2d(store):
+    store.write_array(
+        "intensity", np.zeros((2, 8, 8), dtype=np.float32),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+    assert store.is_time_stacked("intensity") is False
+    assert store.is_time_stacked("missing/path") is False
+
+
+def test_masks_shape_distinguishes_2d_from_stack(store):
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    store.write_mask("stack", np.zeros((3, 8, 8), dtype=np.uint8))
+    store.write_mask("gate", np.zeros((8, 8), dtype=np.uint8))
+    assert store.masks_shape("stack") == (3, 8, 8)
+    assert store.masks_shape("gate") == (8, 8)
+
+
+def test_dims_consistency_noop_on_valid_channel_dataset(store):
+    """A correctly-stamped (C,H,W) dataset with matching channel_names passes."""
+    store.write_array(
+        "intensity", np.zeros((2, 8, 8), dtype=np.float32),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+    store.set_metadata({"channel_names": ["GFP", "DAPI"]})
+    store.check_intensity_dims_consistency()  # no raise
+
+
+def test_dims_consistency_noop_on_timelapse(store):
+    _make_timelapse_store(store, t=4, c=2, h=8, w=8)
+    store.set_metadata({"channel_names": ["GFP", "DAPI"]})
+    store.check_intensity_dims_consistency()  # no raise
+
+
+def test_dims_consistency_detects_mis_stamped_time_axis(store):
+    """A (T,H,W) array mis-stamped ['C','H','W'] with a channel count that
+    doesn't match the leading axis is flagged (the Add-Layer corruption)."""
+    from percell4.store import DimsConsistencyError
+
+    # 6-frame time-lapse mis-stamped as 6 "channels" but only 2 channel names.
+    store.write_array(
+        "intensity", np.zeros((6, 8, 8), dtype=np.float32),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+    store.set_metadata({"channel_names": ["GFP", "DAPI"]})
+    with pytest.raises(DimsConsistencyError, match="mis-stamped|leading 'C'"):
+        store.check_intensity_dims_consistency()
+
+
+def test_dims_consistency_detects_rank_mismatch(store):
+    """A dims attr whose length disagrees with the array rank is corrupt."""
+    from percell4.store import DimsConsistencyError
+
+    store.write_array(
+        "intensity", np.zeros((3, 8, 8), dtype=np.float32),
+        attrs={"dims": ["T", "C", "H", "W"]},  # 4 entries, 3D array
+    )
+    with pytest.raises(DimsConsistencyError, match="dims attribute is corrupt"):
+        store.check_intensity_dims_consistency()
+
+
 # ── Tracks (lineage tables) (U7) ──────────────────────────────
 
 

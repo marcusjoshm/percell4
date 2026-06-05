@@ -157,6 +157,17 @@ def measure_cells(
     """
     metric_names = _validate_metrics(metrics)
 
+    # Pure 2D contract (time-handling contract D): the caller must slice to a
+    # single timepoint before measuring. Handing a (T,H,W) stack against 2D
+    # labels otherwise surfaces as a cryptic boolean-index mismatch deep inside
+    # the crop loop -- fail loud with an actionable message instead.
+    if image.shape != labels.shape:
+        raise ValueError(
+            f"measure_cells expects image and labels to share the same 2D shape; "
+            f"got image {image.shape} vs labels {labels.shape}. Slice to a single "
+            "timepoint before measuring (pure domain functions stay 2D)."
+        )
+
     if labels.max() == 0:
         columns = _build_column_list(metric_names, has_mask=mask is not None)
         return pd.DataFrame(columns=columns)

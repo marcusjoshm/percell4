@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from percell4.adapters.hdf5_store import Hdf5DatasetRepository
 from percell4.store import DatasetStore
@@ -136,3 +137,28 @@ def test_repo_read_mask_2d_broadcasts_per_timepoint(tmp_path):
         frame = repo.read_mask(handle, "gate", timepoint=t)
         assert frame.shape == (8, 8)
         assert frame[4, 4] == 1
+
+
+def test_open_detects_dims_corrupted_dataset(tmp_path):
+    """repo.open flags a (T,H,W) array mis-stamped ['C','H','W'] rather than
+    silently treating it as single-timepoint (U4)."""
+    from percell4.store import DimsConsistencyError
+
+    h5 = tmp_path / "corrupt.h5"
+    # 6-frame time-lapse mis-stamped as 6 channels, but only 2 channel names.
+    intensity = np.zeros((6, 8, 8), dtype=np.float32)
+    _make_dataset(h5, intensity, ["C", "H", "W"], ["GFP", "DAPI"])
+
+    repo = Hdf5DatasetRepository()
+    with pytest.raises(DimsConsistencyError):
+        repo.open(h5)
+
+
+def test_open_accepts_valid_timelapse(tmp_path):
+    """A correctly-stamped time-lapse dataset opens cleanly (no false positive)."""
+    h5 = tmp_path / "ok.h5"
+    intensity = np.zeros((3, 2, 8, 8), dtype=np.float32)
+    _make_dataset(h5, intensity, ["T", "C", "H", "W"], ["GFP", "DAPI"])
+    repo = Hdf5DatasetRepository()
+    handle = repo.open(h5)  # no raise
+    assert handle.metadata["n_timepoints"] == 3

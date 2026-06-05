@@ -60,6 +60,9 @@ class Hdf5DatasetRepository:
         store = DatasetStore(path)
         if not store.exists():
             raise FileNotFoundError(f"Dataset not found: {path}")
+        # Detect a dims-corrupted dataset at open rather than silently treating
+        # a mis-stamped (T,H,W) array as single-timepoint (U4).
+        store.check_intensity_dims_consistency()
         return DatasetHandle(path=path, metadata=_build_handle_metadata(store))
 
     def build_view(self, handle: DatasetHandle) -> DatasetView:

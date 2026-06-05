@@ -167,6 +167,18 @@ class CrossFormatRuleConflictError(Exception):
     """Raised when an append would persist a rule different from one already stored."""
 
 
+class DimsConsistencyError(Exception):
+    """Raised when /intensity's ``dims`` attr disagrees with its shape + counts.
+
+    The canonical corruption: an older Add-Layer Channel write stamped
+    ``dims=['C','H','W']`` onto a ``(T, H, W)`` time-lapse array, so the dataset
+    reads back as ``n_timepoints == 1`` and every time-aware feature silently
+    collapses to frame 0 (the exact silent-collapse the multi-timepoint work
+    exists to eliminate). We refuse to open such a dataset silently. Also raised
+    when the ``dims`` attribute length doesn't match the array rank.
+    """
+
+
 # Backwards-compat aliases — the names without the Error suffix were used in
 # the first round of tests. Keep them around so callers writing
 # ``from percell4.store import LayerAlreadyExists`` still work.
@@ -493,6 +505,117 @@ class DatasetStore:
             return tuple(int(x) for x in obj.shape)
         finally:
             self._close_if_not_session(f)
+
+    def masks_shape(self, name: str) -> tuple[int, ...]:
+        """Return the on-disk shape of /masks/<name> without loading data.
+
+        Mirror of :meth:`labels_shape` for masks -- lets callers distinguish a
+        2D (time-invariant) mask from a ``(T, H, W)`` stack cheaply. Raises
+        ``KeyError`` when the path is missing or is a group.
+        """
+        f = self._open_read()
+        try:
+            path = f"masks/{name}"
+            if path not in f:
+                raise KeyError(f"Dataset not found: {path}")
+            obj = f[path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{path} is a group, not a dataset")
+            return tuple(int(x) for x in obj.shape)
+        finally:
+            self._close_if_not_session(f)
+
+    def is_time_stacked(self, hdf5_path: str) -> bool:
+        """Return ``True`` iff the array at ``hdf5_path`` is time-stacked.
+
+        Reads only the ``dims`` attribute (``dims[0] == 'T'``) -- no array data
+        is loaded. The public form of the inline check used by
+        :meth:`read_array_frame` and :meth:`read_channel`, so callers (e.g. the
+        delete-channel disambiguation) stop re-deriving it from raw shape.
+        Returns ``False`` for a missing path, a group, or an array with no/short
+        ``dims`` attr.
+        """
+        f = self._open_read()
+        try:
+            if hdf5_path not in f:
+                return False
+            obj = f[hdf5_path]
+            if not isinstance(obj, h5py.Dataset):
+                return False
+            dims = obj.attrs.get("dims")
+            return dims is not None and len(dims) > 0 and str(dims[0]) == "T"
+        finally:
+            self._close_if_not_session(f)
+
+    def check_intensity_dims_consistency(self) -> None:
+        """Raise :class:`DimsConsistencyError` when /intensity's dims are corrupt.
+
+        Detects the Add-Layer corruption signature at dataset-open time: a 3D
+        ``/intensity`` stamped ``dims=['C','H','W']`` whose leading-axis size
+        disagrees with the declared channel count -- almost certainly a
+        ``(T, H, W)`` time-lapse array mis-stamped as channels, which would make
+        the dataset read back as single-timepoint and silently collapse every
+        time-aware feature to frame 0. Also flags a ``dims`` attr whose length
+        doesn't match the array rank.
+
+        No-op when ``/intensity`` is absent, has no ``dims`` attr, or is
+        consistent. Reads only attributes + shape (no array data).
+        """
+        f = self._open_read()
+        try:
+            if "intensity" not in f:
+                return
+            ds = f["intensity"]
+            if not isinstance(ds, h5py.Dataset):
+                return
+            raw_dims = ds.attrs.get("dims")
+            if raw_dims is None:
+                return
+            dims = [str(d) for d in raw_dims]
+            ndim = int(ds.ndim)
+            shape = tuple(int(x) for x in ds.shape)
+            raw_channel_names = (
+                f["metadata"].attrs.get("channel_names")
+                if "metadata" in f
+                else None
+            )
+        finally:
+            self._close_if_not_session(f)
+
+        if len(dims) != ndim:
+            raise DimsConsistencyError(
+                f"/intensity.dims={dims} has {len(dims)} entries but the array "
+                f"is {ndim}D (shape {shape}). The dims attribute is corrupt."
+            )
+
+        if raw_channel_names is None:
+            n_channels: int | None = None
+            channel_names: list = []
+        elif isinstance(raw_channel_names, (bytes, str)):
+            n_channels = 1
+            channel_names = [raw_channel_names]
+        else:
+            channel_names = list(raw_channel_names)
+            n_channels = len(channel_names)
+
+        # A leading 'C' axis must match the channel count. When it matches
+        # neither (n_channels known and != shape[0]), the leading axis is almost
+        # certainly a mis-stamped time axis.
+        if (
+            ndim >= 3
+            and dims[0] == "C"
+            and n_channels is not None
+            and n_channels > 0
+            and shape[0] != n_channels
+        ):
+            raise DimsConsistencyError(
+                f"/intensity has a leading 'C' axis of size {shape[0]} but the "
+                f"dataset declares {n_channels} channel(s) ({channel_names!r}). "
+                "This looks like a (T,H,W) time-lapse array mis-stamped as "
+                "['C','H','W'] (e.g. by an older Add-Layer write); the dataset "
+                "would silently read as single-timepoint. Re-import or correct "
+                "the /intensity dims attribute."
+            )
 
     # ── DataFrame operations ──────────────────────────────────
 
