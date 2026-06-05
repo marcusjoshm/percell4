@@ -56,14 +56,22 @@ class ExportImages:
         from percell4.adapters.tiff_writer import write_tiff_with_metadata
 
         request.output_folder.mkdir(parents=True, exist_ok=True)
-        exported = 0
-
         write_kwargs = {
             "pixel_size_um": request.pixel_size_um,
             "view_bin": request.view_bin,
         }
 
-        # Export intensity channels
+        n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)
+        if n_timepoints > 1:
+            exported = self._export_timelapse(
+                handle, request, write_kwargs, n_timepoints
+            )
+            return ExportResult(
+                exported_count=exported, output_folder=request.output_folder
+            )
+
+        exported = 0
+        # Export intensity channels (single-timepoint: historical path)
         if request.channels:
             intensity = self._repo.read_array(
                 handle, "intensity", view_bin=request.view_bin,
@@ -96,3 +104,41 @@ class ExportImages:
             exported += 1
 
         return ExportResult(exported_count=exported, output_folder=request.output_folder)
+
+    def _export_timelapse(
+        self, handle, request, write_kwargs, n_timepoints: int
+    ) -> int:
+        """Export one TIFF per timepoint with a ``_t{NN}`` suffix.
+
+        Each channel/label/mask is sliced to a 2D frame on disk per timepoint
+        (channel idx is the C index after the time axis is sliced) and written
+        as ``<dataset>_<name>_t{NN}.tif`` — mirroring the import token
+        convention so the export round-trips back through Add Layer / Compress.
+        """
+        from percell4.adapters.tiff_writer import write_tiff_with_metadata
+        from percell4.domain.io.timepoints import timepoint_label
+
+        exported = 0
+        folder = request.output_folder
+        ds = request.dataset_name
+        vb = request.view_bin
+        for t in range(n_timepoints):
+            suffix = timepoint_label(t)  # "t00", "t01", ...
+            for name, idx in request.channels:
+                data = self._repo.read_channel(
+                    handle, "intensity", idx, view_bin=vb, timepoint=t,
+                )
+                out_path = folder / f"{ds}_{name}_{suffix}.tif"
+                write_tiff_with_metadata(out_path, data, **write_kwargs)
+                exported += 1
+            for name in request.labels:
+                data = self._repo.read_labels(handle, name, view_bin=vb, timepoint=t)
+                out_path = folder / f"{ds}_{name}_{suffix}.tif"
+                write_tiff_with_metadata(out_path, data, **write_kwargs)
+                exported += 1
+            for name in request.masks:
+                data = self._repo.read_mask(handle, name, view_bin=vb, timepoint=t)
+                out_path = folder / f"{ds}_{name}_{suffix}.tif"
+                write_tiff_with_metadata(out_path, data, **write_kwargs)
+                exported += 1
+        return exported

@@ -85,9 +85,16 @@ class ExportImagesDialog(QDialog):
         with self._store.open_read() as s:
             meta = s.metadata
             channel_names = list(meta.get("channel_names", []))
+            n_timepoints = int(meta.get("n_timepoints", 1) or 1)
             try:
                 intensity = s.read_array("intensity")
-                n_channels = intensity.shape[0] if intensity.ndim == 3 else 1
+                # Strip the leading T axis on a time-lapse dataset before
+                # counting channels: (T,H,W) is ONE channel, (T,C,H,W) is C
+                # (the channel idx is sliced per timepoint by ExportImages).
+                shape = intensity.shape
+                if n_timepoints > 1 and intensity.ndim >= 3:
+                    shape = shape[1:]
+                n_channels = shape[0] if len(shape) == 3 else 1
             except KeyError:
                 n_channels = 0
             label_names = s.list_labels()
