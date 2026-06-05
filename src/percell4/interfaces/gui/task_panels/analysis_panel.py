@@ -624,6 +624,27 @@ class AnalysisPanel(QWidget):
         self._meas_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self._show_status(f"Measured {n_cells} cells, {n_cols} columns")
 
+        # U18a: draw the lineage Tracks overlay after a tracked time-lapse
+        # measure. track_id is attached by MeasureCells._join_lineage and does
+        # NOT exist at track time, so the overlay is triggered here (not in the
+        # Track Cells step). No-op for single-t or untracked segmentations.
+        session = self.data_model.session
+        if session.n_timepoints > 1 and "track_id" in df.columns:
+            viewer_win = self._get_viewer_window()
+            if viewer_win is not None and hasattr(
+                viewer_win, "show_tracks_from_measurements"
+            ):
+                try:
+                    lineage = repo.read_tracks(session.dataset, seg_name)
+                except KeyError:
+                    lineage = None
+                try:
+                    viewer_win.show_tracks_from_measurements(
+                        df, lineage_df=lineage, name=f"{seg_name}_tracks"
+                    )
+                except Exception as e:  # noqa: BLE001 — overlay is best-effort
+                    self._show_status(f"Measured; tracks overlay skipped: {e}")
+
     def _show_metric_config_dialog(self) -> list[str] | None:
         from percell4.domain.measure.metrics import BUILTIN_METRICS
 

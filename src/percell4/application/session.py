@@ -54,6 +54,15 @@ class Session:
     _active_channel: ChannelName | None = field(default=None, repr=False)
     _active_bin: int = field(default=1, repr=False)
     _active_timepoint: int = field(default=0, repr=False)
+    # Cross-window selection is GLOBAL BY LABEL (no timepoint dimension). This is
+    # correct for a TRACKED segmentation, where the label value equals the track
+    # id and is stable across frames, so selecting a cell highlights the same
+    # track in every frame it exists. On an UNTRACKED per-frame stack (raw
+    # run_cellpose_stack output) label numbers are independent per frame, so a
+    # global selection cross-links unrelated physical cells across frames — peer
+    # views stay frame-scoped (slider-follows-frame, U16/U17) to contain this.
+    # A (label, timepoint) selection key is intentionally NOT added (large
+    # blast radius on the selection contract, no concrete feature needs it).
     _selection: frozenset[CellId] = field(default_factory=frozenset, repr=False)
     _filter_ids: frozenset[CellId] | None = field(default=None, repr=False)
     _measurements: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)

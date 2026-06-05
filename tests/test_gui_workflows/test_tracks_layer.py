@@ -91,3 +91,33 @@ def test_show_tracks_from_measurements(viewer_win):
     assert "tracks" in viewer_win.viewer.layers
     # Daughter track 2 links to parent 1 in the layer graph.
     assert viewer_win.viewer.layers["tracks"].graph == {2: [1]}
+
+
+def test_show_tracks_from_measurements_tracked_timelapse(viewer_win):
+    """A tracked time-lapse measurements df renders a Tracks layer -- the
+    lineage overlay U18a draws after a successful measure."""
+    import napari
+
+    df = pd.DataFrame(
+        {
+            "label": [1, 2, 1, 2],
+            "track_id": [1, 2, 1, 2],
+            "timepoint": [0, 0, 1, 1],
+            "centroid_y": [1.0, 5.0, 2.0, 6.0],
+            "centroid_x": [1.0, 5.0, 2.0, 6.0],
+        }
+    )
+    viewer_win.show_tracks_from_measurements(df, lineage_df=None, name="cp_tracks")
+
+    assert "cp_tracks" in viewer_win.viewer.layers
+    assert isinstance(viewer_win.viewer.layers["cp_tracks"], napari.layers.Tracks)
+
+
+def test_show_tracks_untracked_measurements_is_noop(viewer_win):
+    """An untracked measurements df (no track_id) draws no Tracks layer."""
+    df = pd.DataFrame(
+        {"label": [1, 2], "timepoint": [0, 1], "centroid_y": [1.0, 2.0],
+         "centroid_x": [1.0, 2.0]}
+    )
+    viewer_win.show_tracks_from_measurements(df, lineage_df=None, name="cp_tracks")
+    assert "cp_tracks" not in viewer_win.viewer.layers
