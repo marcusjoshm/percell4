@@ -58,6 +58,7 @@ def load_layers(
     h5_path: Path,
     layer_map: dict[str, str],
     roles: dict[str, ImageRole],
+    timepoint: int | None = None,
 ) -> dict[str, NDArray]:
     """Read every role in ``layer_map`` from ``h5_path``.
 
@@ -75,6 +76,13 @@ def load_layers(
         Combined role declarations (required + optional + flattened
         input-groups) the loader dispatches on. Must contain every key
         in ``layer_map``.
+    timepoint:
+        When given, load the **2D frame** for that timepoint of a
+        time-lapse dataset (intensity sliced per channel, labels/masks
+        sliced or 2D-broadcast). ``None`` (default) reads whole — the
+        single-timepoint path. The analysis framework loops timepoints and
+        passes ``timepoint=t`` so each analysis run receives 2D inputs that
+        satisfy the role ``ndim`` declarations.
 
     Returns
     -------
@@ -100,7 +108,7 @@ def load_layers(
                 f"(path={h5_path})"
             )
         role = roles[role_name]
-        arr = _read_one(store, role_name, layer_name, role, h5_path)
+        arr = _read_one(store, role_name, layer_name, role, h5_path, timepoint)
         if arr.ndim not in role.ndim:
             raise LayerDtypeError(
                 f"role {role_name!r}: layer {layer_name!r} has ndim="
@@ -119,15 +127,16 @@ def _read_one(
     layer_name: str,
     role: ImageRole,
     h5_path: Path,
+    timepoint: int | None,
 ) -> NDArray:
     """Read a single layer per ``role.kind``."""
     kind = role.kind
     if kind == "intensity":
-        return _read_intensity(store, role_name, layer_name, h5_path)
+        return _read_intensity(store, role_name, layer_name, h5_path, timepoint)
     if kind == "mask":
-        return _read_mask(store, role_name, layer_name, h5_path)
+        return _read_mask(store, role_name, layer_name, h5_path, timepoint)
     if kind == "label":
-        return _read_label(store, role_name, layer_name, h5_path)
+        return _read_label(store, role_name, layer_name, h5_path, timepoint)
     # ImageRole.kind is a Literal so this is unreachable from a typed
     # caller; guard anyway for the runtime contract.
     raise LayerError(
@@ -140,17 +149,20 @@ def _read_intensity(
     role_name: str,
     layer_name: str,
     h5_path: Path,
+    timepoint: int | None,
 ) -> NDArray:
     """Resolve an intensity layer.
 
     First try ``metadata["channel_names"]``; fall back to
-    ``/decay/<layer_name>`` with sum-over-bins projection.
+    ``/decay/<layer_name>`` with sum-over-bins projection. ``timepoint``
+    slices the intensity channel to a single frame on a time-lapse dataset
+    (decay has no acquisition-T axis, so it is read whole).
     """
     channel_names = store.metadata.get("channel_names") or []
     if layer_name in channel_names:
         idx = list(channel_names).index(layer_name)
         try:
-            arr = store.read_channel("intensity", idx)
+            arr = store.read_channel("intensity", idx, timepoint=timepoint)
         except KeyError as exc:
             raise LayerNotFoundError(
                 f"role {role_name!r}: channel {layer_name!r} in "
@@ -174,10 +186,15 @@ def _read_mask(
     role_name: str,
     layer_name: str,
     h5_path: Path,
+    timepoint: int | None,
 ) -> NDArray:
-    """Read ``/masks/<layer_name>`` and coerce to bool."""
+    """Read ``/masks/<layer_name>`` and coerce to bool.
+
+    ``timepoint`` slices a ``(T, H, W)`` mask to one frame, or broadcasts a
+    2D time-invariant mask, via ``store.read_mask``.
+    """
     try:
-        arr = store.read_array(f"masks/{layer_name}")
+        arr = store.read_mask(layer_name, timepoint=timepoint)
     except KeyError as exc:
         raise LayerNotFoundError(
             f"role {role_name!r}: mask {layer_name!r} not found at "
@@ -191,10 +208,15 @@ def _read_label(
     role_name: str,
     layer_name: str,
     h5_path: Path,
+    timepoint: int | None,
 ) -> NDArray:
-    """Read ``/labels/<layer_name>`` and coerce to int32."""
+    """Read ``/labels/<layer_name>`` and coerce to int32.
+
+    ``timepoint`` slices a ``(T, H, W)`` labels stack to one frame, or
+    broadcasts a 2D time-invariant label, via ``store.read_labels``.
+    """
     try:
-        arr = store.read_labels(layer_name)
+        arr = store.read_labels(layer_name, timepoint=timepoint)
     except KeyError as exc:
         raise LayerNotFoundError(
             f"role {role_name!r}: labels {layer_name!r} not found at "

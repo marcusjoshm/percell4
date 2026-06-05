@@ -48,6 +48,7 @@ from percell4.domain.analysis import (
     ImageRole,
     TableOutput,
 )
+from percell4.store import DatasetStore
 
 
 def run_analysis(
@@ -157,12 +158,17 @@ def run_analysis(
         analysis_name, cls, resolved, layer_map, group_satisfaction
     )
 
-    # 8. Load arrays.
-    arrays = load_layers(h5_path, layer_map, roles_dict)
-
-    # 9. Run. Pass the optional progress kwargs only when this analysis's
-    # ``run()`` actually accepts them — the base contract lets a subclass
-    # that emits no progress keep the plain ``(inputs, params)`` signature.
+    # 8-9. Load arrays + run. Pass the optional progress kwargs only when this
+    # analysis's ``run()`` actually accepts them — the base contract lets a
+    # subclass that emits no progress keep the plain ``(inputs, params)``
+    # signature.
+    #
+    # On a time-lapse dataset the framework loops timepoints: each run receives
+    # 2D inputs (``load_layers(timepoint=t)``) and the per-frame outputs are
+    # aggregated — TableOutputs concatenated with a ``timepoint`` column,
+    # ImageOutputs stacked on a leading T axis -> ``(T, ...)``. This multi-t
+    # return shape is a contract the batch runner / tests depend on. The
+    # single-timepoint path is byte-identical (one run, no timepoint column).
     run_callable = cls().run
     run_kwargs = _accepted_progress_kwargs(
         run_callable,
@@ -170,7 +176,17 @@ def run_analysis(
         set_label=h5_path.stem if set_label is None else set_label,
         layer_map=layer_map,
     )
-    outputs = run_callable(arrays, resolved, **run_kwargs)
+
+    n_timepoints = int(DatasetStore(h5_path).metadata.get("n_timepoints", 1) or 1)
+    if n_timepoints <= 1:
+        arrays = load_layers(h5_path, layer_map, roles_dict)
+        outputs = run_callable(arrays, resolved, **run_kwargs)
+    else:
+        per_t: list[tuple[int, dict[str, Any]]] = []
+        for t in range(n_timepoints):
+            arrays_t = load_layers(h5_path, layer_map, roles_dict, timepoint=t)
+            per_t.append((t, run_callable(arrays_t, resolved, **run_kwargs)))
+        outputs = _aggregate_timepoints(per_t, cls)
 
     # 10. Compute the produced set.
     produced = {
@@ -215,6 +231,41 @@ def run_analysis(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+
+def _aggregate_timepoints(
+    per_t: list[tuple[int, dict[str, Any]]],
+    cls: type[Analysis],
+) -> dict[str, Any]:
+    """Aggregate per-timepoint analysis outputs into a single output dict.
+
+    ``TableOutput``s are concatenated with a ``timepoint`` column;
+    ``ImageOutput``s are stacked on a new leading T axis -> ``(T, ...)``.
+    Output names are the union across frames, so a ``produced_when`` output
+    that is absent on some frames is tolerated. This is genuinely new shape
+    (one analysis run per frame, then aggregate), not a wrap of one run.
+    """
+    names: set[str] = set()
+    for _t, out in per_t:
+        names.update(out)
+
+    aggregated: dict[str, Any] = {}
+    for name in names:
+        decl = cls.outputs[name]
+        if isinstance(decl, TableOutput):
+            frames: list[pd.DataFrame] = []
+            for t, out in per_t:
+                if name in out:
+                    df = out[name].copy()
+                    df["timepoint"] = t
+                    frames.append(df)
+            aggregated[name] = (
+                pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            )
+        elif isinstance(decl, ImageOutput):
+            arrs = [out[name] for _t, out in per_t if name in out]
+            aggregated[name] = np.stack(arrs, axis=0)
+    return aggregated
 
 
 def _accepted_progress_kwargs(
