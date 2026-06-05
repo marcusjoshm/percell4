@@ -354,6 +354,13 @@ class AnalysisPanel(QWidget):
 
         image = active.data.astype(np.float32)
 
+        # Time-lapse: preview operates on the active timepoint's 2D frame so the
+        # threshold/ROI math never indexes the leading T axis as rows. Accept
+        # then re-thresholds every frame (per-frame auto threshold, U10).
+        session = self.data_model.session
+        if image.ndim == 3 and session.n_timepoints > 1:
+            image = image[session.active_timepoint]
+
         sigma = self._thresh_sigma.value()
         if sigma > 0:
             image = apply_gaussian_smoothing(image, sigma)
@@ -499,6 +506,57 @@ class AnalysisPanel(QWidget):
             for layer in list(viewer_win.viewer.layers):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
+
+        session = self.data_model.session
+        n_timepoints = session.n_timepoints
+
+        if n_timepoints > 1:
+            # Per-frame caller-loop (U10): read each timepoint's raw channel
+            # frame, recompute the threshold per frame for auto methods (manual
+            # broadcasts), stack to (T,H,W), and persist via the Creator steps.
+            # AcceptThreshold stays single-image/shape-transparent and is not
+            # used here (it cannot recompute per-frame auto thresholds).
+            from percell4.gui._threshold_logic import build_threshold_mask_stack
+
+            repo = self._get_repo()
+            handle = session.dataset
+            sigma = self._thresh_sigma.value()
+            try:
+                frames = [
+                    repo.read_channel_images(handle, timepoint=t)[channel_name]
+                    for t in range(n_timepoints)
+                ]
+                mask_stack, values = build_threshold_mask_stack(
+                    frames, sigma, method, value
+                )
+                mask_name = f"{method}_{channel_name}"
+                repo.write_mask(handle, mask_name, mask_stack)
+                session.refresh_resource_lists(mask_names=repo.list_masks(handle))
+                session.set_active_mask(mask_name)
+            except (ValueError, KeyError) as e:
+                self._show_status(str(e))
+                return
+
+            viewer_win.add_mask(mask_stack, name=mask_name)
+            n_pos = int(mask_stack.sum())
+            n_total = int(mask_stack.size)
+            pct = 100.0 * n_pos / n_total if n_total > 0 else 0
+            v_note = (
+                f"manual {value:.1f}"
+                if method == "manual"
+                else f"per-frame {min(values):.1f}–{max(values):.1f}"
+            )
+            self._thresh_result_label.setText(
+                f"Saved: {mask_name}\n"
+                f"Threshold: {v_note} | {n_pos:,} / {n_total:,} px ({pct:.1f}%)"
+            )
+            self._thresh_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
+            self._show_status(
+                f"Saved mask '{mask_name}' ({n_timepoints} timepoints, {v_note})"
+            )
+            self._thresh_working_image = None
+            self._thresh_channel_name = None
+            return
 
         try:
             from percell4.adapters.napari_viewer import NapariViewerAdapter
