@@ -1,0 +1,202 @@
+"""Tests for AdaptiveClipPanel (U4)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import numpy as np
+from skimage.draw import disk
+
+from percell4.gui import adaptive_clip_panel as panel_module
+
+# ── synchronous fake Worker so the Creator chain runs deterministically ──
+
+
+class _Sig:
+    def __init__(self) -> None:
+        self._cbs: list = []
+
+    def connect(self, cb) -> None:
+        self._cbs.append(cb)
+
+    def emit(self, *a) -> None:
+        for cb in list(self._cbs):
+            cb(*a)
+
+
+class FakeWorker:
+    def __init__(self, fn, *args, **kwargs):
+        self._fn, self._args, self._kwargs = fn, args, kwargs
+        self.finished = _Sig()
+        self.error = _Sig()
+
+    def start(self):
+        try:
+            result = self._fn(*self._args, **self._kwargs)
+        except Exception as e:  # noqa: BLE001
+            err = type("E", (), {"exc_type": type(e).__name__, "message": str(e)})()
+            self.error.emit(err)
+            return
+        self.finished.emit(result)
+
+
+class FakeRepo:
+    def __init__(self) -> None:
+        self.masks: dict[str, np.ndarray] = {}
+
+    def write_mask(self, handle, name, data, attrs=None):  # noqa: ARG002
+        self.masks[name] = data
+
+    def list_masks(self, handle):  # noqa: ARG002
+        return sorted(self.masks.keys())
+
+
+def _blob_image(shape=(120, 120)) -> np.ndarray:
+    img = np.full(shape, 10.0, dtype=np.float32)
+    for c in [(30, 30), (30, 90), (90, 60)]:
+        rr, cc = disk(c, 6, shape=shape)
+        img[rr, cc] = 200.0
+    return img
+
+
+def _build(
+    qtbot, monkeypatch, *, channel="mNG", pixel_size_um=None, existing=None, with_channel=True
+):
+    from percell4.domain.dataset import DatasetHandle
+    from percell4.gui.adaptive_clip_panel import AdaptiveClipPanel
+    from percell4.model import CellDataModel
+
+    model = CellDataModel()
+    model.session.set_dataset(DatasetHandle(path=Path("/tmp/t.h5"), metadata={}))
+    if channel:
+        model.session.set_active_channel(channel)
+
+    repo = FakeRepo()
+    store = MagicMock()
+    store.list_masks.return_value = list(existing or [])
+    store.metadata = {} if pixel_size_um is None else {"pixel_size_um": pixel_size_um}
+
+    layers = []
+    if with_channel and channel:
+        layer = MagicMock()
+        layer.__class__ = type("Image", (MagicMock,), {})
+        layer.__class__.__name__ = "Image"
+        layer.name = channel
+        layer.data = _blob_image()
+        layers.append(layer)
+    viewer = MagicMock()
+    viewer.layers = layers
+    viewer_win = MagicMock()
+    viewer_win.viewer = viewer
+    viewer_win.add_mask = MagicMock()
+
+    monkeypatch.setattr("percell4.gui.workers.Worker", FakeWorker)
+
+    panel = AdaptiveClipPanel(
+        model,
+        get_repo=lambda: repo,
+        get_store=lambda: store,
+        get_viewer_window=lambda: viewer_win,
+        show_status=lambda _m: None,
+    )
+    qtbot.addWidget(panel)
+    return panel, model, repo, viewer_win
+
+
+# ── happy paths ─────────────────────────────────────────────────────────
+
+def test_manual_run_creates_and_selects_mask(qtbot, monkeypatch):
+    panel, model, repo, viewer_win = _build(qtbot, monkeypatch)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "adaptive")
+
+    panel._on_run()
+
+    assert "adaptive" in repo.masks
+    stored = repo.masks["adaptive"]
+    assert stored.dtype == np.uint8
+    assert set(np.unique(stored)).issubset({0, 1})
+    assert int(stored.sum()) > 0
+    viewer_win.add_mask.assert_called_once()
+    assert model.session.active_mask == "adaptive"
+
+
+def test_manual_config_reaches_detector(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch)
+    panel._settings._window.setValue(31)
+    panel._settings._k.setValue(2.5)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    # The settings handed to the worker carry the configured window/k.
+    settings = panel._worker._args[2]
+    params = dict(settings.detector_params)
+    assert params["window_px"] == 31
+    assert params["k"] == 2.5
+
+
+def test_auto_window_estimates_and_writes_back(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch)
+    panel._settings._auto.setChecked(True)
+    panel._settings._window.setValue(15)  # ignored under auto
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    # Expected estimate from the same image the panel sees.
+    from percell4.domain.measure.adaptive_clip import (
+        estimate_adaptive_window,
+        otsu_first_pass,
+    )
+    from percell4.domain.measure.thresholding import apply_gaussian_smoothing
+
+    cfg = panel._settings.current_config()
+    expected = estimate_adaptive_window(
+        otsu_first_pass(apply_gaussian_smoothing(_blob_image(), cfg.gaussian_sigma))
+    )
+
+    panel._on_run()
+
+    # The estimated window is surfaced back into the (disabled) spinbox.
+    assert panel._settings.current_config().window_px == expected
+    assert expected % 2 == 1
+
+
+# ── error / edge paths ──────────────────────────────────────────────────
+
+def test_um2_without_pixel_size_aborts(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch, pixel_size_um=None)
+    panel._settings._unit.setCurrentText("µm²")
+    called = []
+    monkeypatch.setattr(
+        panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
+    )
+
+    panel._on_run()
+
+    assert called == []  # aborted before the name prompt
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
+
+
+def test_no_active_channel_aborts(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch, channel="")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
+
+
+def test_channel_layer_missing_aborts(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch, with_channel=False)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
+
+
+def test_cancel_prompt_writes_nothing(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: None)
+    panel._on_run()
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
