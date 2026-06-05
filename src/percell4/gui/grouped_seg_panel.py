@@ -31,26 +31,6 @@ from percell4.model import CellDataModel
 logger = logging.getLogger(__name__)
 
 
-def slice_to_active_frame(channel_image, seg_labels, timepoint):
-    """Slice a ``(T, H, W)`` channel and/or labels to the active 2D frame.
-
-    Grouped thresholding's interactive QC is single-frame. On a time-lapse
-    dataset both the channel layer and a ``(T, H, W)`` labels stack are sliced
-    to the displayed timepoint so the 2D measurer/QC never receive a
-    ``(T, H, W)`` stack against 2D labels — the source of the
-    ``IndexError: ... dimension is 6 but corresponding boolean dimension is 485``
-    crash. A 2D *time-invariant* label is left as-is. Returns
-    ``(channel_2d, labels_2d)`` (int32 labels preserved). Pure (no Qt).
-    """
-    ch = np.asarray(channel_image)
-    if ch.ndim == 3:
-        ch = ch[timepoint]
-    lbl = np.asarray(seg_labels)
-    if lbl.ndim == 3:
-        lbl = lbl[timepoint]
-    return ch, lbl
-
-
 class GroupedSegPanel(QWidget):
     """Panel for grouped thresholding workflow."""
 
@@ -61,6 +41,7 @@ class GroupedSegPanel(QWidget):
         get_store: Callable[[], Any | None] = lambda: None,
         get_viewer_window: Callable[[], Any | None] = lambda: None,
         show_status: Callable[[str], None] = lambda _: None,
+        repopulate_viewer: Callable[[], None] = lambda: None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -68,8 +49,14 @@ class GroupedSegPanel(QWidget):
         self._get_store = get_store
         self._get_viewer_window = get_viewer_window
         self._show_status_cb = show_status
+        # Restores the dataset's viewer layers after the per-timepoint QC (which
+        # clears the viewer between frames). Wired from the launcher's
+        # _populate_viewer_from_store.
+        self._repopulate_viewer_cb = repopulate_viewer
         self._worker = None
         self._qc_controller = None
+        self._tl_qc_entry = None  # holds the per-timepoint QC driver (anti-GC)
+        self._tl_qc_mask_name: str | None = None
 
         self._build_ui()
 
@@ -158,19 +145,6 @@ class GroupedSegPanel(QWidget):
             return
         seg_labels = labels_layer.data.astype(np.int32)
 
-        # Time-lapse: the interactive measure -> group -> QC flow is single-frame.
-        # Slice the channel and (T,H,W) labels to the displayed timepoint so the
-        # 2D measurer never receives a (T,H,W) stack (the '6 vs 485' IndexError).
-        # The accepted mask is stored 2D (time-invariant) for that frame's
-        # grouping; per-frame (T,H,W) grouped masks are produced by the batch
-        # workflow runner (see TimelapseThresholdQCQueueEntry).
-        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
-        if n_timepoints > 1:
-            t = int(viewer_win.viewer.dims.current_step[0])
-            channel_image, seg_labels = slice_to_active_frame(
-                channel_image, seg_labels, t
-            )
-
         # Prompt for mask name. Default "grouped"; refuse-and-re-prompt on
         # collision with any existing /masks/<name>. Mirrors the Apply
         # Current Phasor as Mask flow via the shared helper. Cancel aborts
@@ -184,6 +158,18 @@ class GroupedSegPanel(QWidget):
             existing_names=existing_masks,
         )
         if mask_name is None:
+            return
+
+        # Time-lapse: threshold EVERY timepoint. Drive one interactive QC per
+        # timepoint (the user QCs each frame's groups in turn) and stack the
+        # accepted per-frame masks into a (T,H,W) /masks/<name> resource -- the
+        # same artifact the batch single-cell workflow produces. The single-
+        # timepoint path below is unchanged.
+        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+        if n_timepoints > 1:
+            self._run_timelapse_grouped(
+                store, viewer_win, channel, seg_name, mask_name, config
+            )
             return
 
         # Check if measurement exists, auto-compute if needed
@@ -345,3 +331,117 @@ class GroupedSegPanel(QWidget):
     def _on_qc_complete(self, success: bool, msg: str) -> None:
         self._show_status(msg)
         self._qc_controller = None
+
+    # ── Time-lapse: per-timepoint grouped thresholding ────────
+
+    def _run_timelapse_grouped(
+        self, store, viewer_win, channel, seg_name, mask_name, config
+    ) -> None:
+        """Threshold every timepoint via one interactive QC per frame.
+
+        Builds the per-timepoint groupings (per-frame measure + cluster) and
+        drives :class:`TimelapseThresholdQCQueueEntry`, which runs the single-
+        frame QC controller once per timepoint and stacks the accepted per-frame
+        masks into a ``(T, H, W)`` ``/masks/<name>`` resource (the same artifact
+        the batch single-cell workflow produces).
+        """
+        from percell4.gui.workflows.single_cell.threshold_qc_queue import (
+            TimelapseThresholdQCQueueEntry,
+        )
+        from percell4.workflows.models import (
+            DatasetSource,
+            GmmCriterion,
+            ThresholdAlgorithm,
+            ThresholdingRound,
+            WorkflowDatasetEntry,
+        )
+        from percell4.workflows.phases import threshold_compute_one
+
+        algo = (
+            ThresholdAlgorithm.GMM
+            if config.algorithm == "GMM"
+            else ThresholdAlgorithm.KMEANS
+        )
+        try:
+            round_spec = ThresholdingRound(
+                name=mask_name,
+                channel=channel,
+                metric=config.metric,
+                algorithm=algo,
+                gmm_criterion=GmmCriterion(str(config.gmm_criterion).lower()),
+                gmm_max_components=config.gmm_max_components,
+                kmeans_n_clusters=config.kmeans_n_clusters,
+                gaussian_sigma=config.sigma,
+            )
+        except ValueError as e:
+            self._show_status(
+                f"Cannot threshold per timepoint with these settings: {e}"
+            )
+            return
+
+        # Per-frame measure + cluster -> dict[timepoint, GroupingResult].
+        self._show_status("Grouping each timepoint…")
+        grouping_by_timepoint, failure, msg = threshold_compute_one(
+            store, round_spec, seg_name
+        )
+        if failure is not None or not isinstance(grouping_by_timepoint, dict):
+            self._show_status(f"Grouping failed: {msg}")
+            return
+
+        entry = WorkflowDatasetEntry(
+            name=store.path.stem,
+            source=DatasetSource.H5_EXISTING,
+            h5_path=store.path,
+            channel_names=tuple(store.metadata.get("channel_names", [])),
+            compress_plan=None,
+        )
+
+        self._show_status(
+            f"QC each of {len(grouping_by_timepoint)} timepoint(s) — "
+            "accept (Ctrl+Enter) to advance to the next frame."
+        )
+        self._tl_qc_mask_name = mask_name
+        self._tl_qc_entry = TimelapseThresholdQCQueueEntry(
+            viewer_win=viewer_win,
+            data_model=self.data_model,
+            entry=entry,
+            round_spec=round_spec,
+            grouping_by_timepoint=grouping_by_timepoint,
+            queue_index=0,
+            queue_total=1,
+            on_complete=self._on_timelapse_qc_complete,
+            seg_name=seg_name,
+        )
+        self._tl_qc_entry.start()
+
+    def _on_timelapse_qc_complete(self, result) -> None:
+        """After the per-timepoint QC: restore the viewer and select the mask.
+
+        The QC driver cleared the viewer between frames and already wrote the
+        ``(T, H, W)`` ``/masks/<name>`` + ``/groups/<name>`` resources; restore
+        the dataset's layers and (on success) auto-select the new mask.
+        """
+        self._tl_qc_entry = None
+        self._repopulate_viewer()
+        if not getattr(result, "success", False):
+            self._show_status(
+                f"Grouped thresholding cancelled: {getattr(result, 'message', '')}"
+            )
+            return
+        store = self._get_store()
+        if store is not None:
+            self.data_model.session.refresh_resource_lists(
+                mask_names=store.list_masks()
+            )
+        if self._tl_qc_mask_name:
+            self.data_model.set_active_mask(self._tl_qc_mask_name)
+        self._show_status(
+            f"Grouped thresholding done across timepoints: "
+            f"'{self._tl_qc_mask_name}' — {getattr(result, 'message', '')}"
+        )
+
+    def _repopulate_viewer(self) -> None:
+        try:
+            self._repopulate_viewer_cb()
+        except Exception:  # noqa: BLE001 — viewer restore is best-effort
+            logger.exception("grouped threshold: viewer repopulate failed")

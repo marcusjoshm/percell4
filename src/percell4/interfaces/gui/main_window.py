@@ -288,6 +288,7 @@ class LauncherWindow(QMainWindow):
             show_window=self._show_window,
             get_store=lambda: getattr(self, "_current_store", None),
             show_status=lambda msg: self.statusBar().showMessage(msg),
+            repopulate_viewer=self._populate_viewer_from_store,
         )
         return self._analysis_panel
 

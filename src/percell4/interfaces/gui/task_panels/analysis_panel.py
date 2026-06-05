@@ -45,6 +45,7 @@ class AnalysisPanel(QWidget):
         show_window: Callable[[str], None],
         get_store: Callable[[], Any | None] = lambda: None,
         show_status: Callable[[str], None] = lambda _: None,
+        repopulate_viewer: Callable[[], None] = lambda: None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -55,6 +56,7 @@ class AnalysisPanel(QWidget):
         self._show_window_cb = show_window
         self._get_store = get_store
         self._show_status = show_status
+        self._repopulate_viewer_cb = repopulate_viewer
 
         # Threshold preview state
         self._thresh_working_image = None
@@ -181,6 +183,7 @@ class AnalysisPanel(QWidget):
             get_store=self._get_store,
             get_viewer_window=self._get_viewer_window,
             show_status=self._show_status,
+            repopulate_viewer=self._repopulate_viewer_cb,
         )
         grouped_group = QGroupBox("Grouped Thresholding")
         grouped_layout = QVBoxLayout(grouped_group)
