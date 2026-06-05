@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from percell4.domain.io.layout import split_channels_2d, split_intensity_layers
+from percell4.domain.io.layout import (
+    plan_channel_deletion,
+    split_channels_2d,
+    split_intensity_layers,
+)
 
 
 # ── split_channels_2d (single-timepoint plane) ────────────────
@@ -88,3 +92,70 @@ def test_shape_ambiguity_resolved_by_n_timepoints():
     assert len(as_channels) == 3
     assert len(as_time) == 1
     assert as_time[0][1].shape == (3, 8, 8)
+
+
+# ── plan_channel_deletion (T-vs-C disambiguation on delete) (U7) ──
+
+
+def test_plan_delete_timelapse_thw_empties_intensity():
+    """A (T,H,W) single-channel time-lapse dataset is emptied, NOT sliced along
+    the time axis (the corruption the old code caused)."""
+    intensity = np.zeros((6, 8, 8), dtype=np.float32)
+    action, arr, dims = plan_channel_deletion(intensity, slice_idx=0, n_timepoints=6)
+    assert action == "delete"
+    assert arr is None and dims is None
+
+
+def test_plan_delete_timelapse_tchw_slices_channel_axis():
+    """(T,C,H,W): deleting channel 1 slices axis=1 -> (T,C-1,H,W), keeping T."""
+    intensity = np.zeros((3, 3, 8, 8), dtype=np.float32)
+    for c in range(3):
+        intensity[:, c] = c
+    action, arr, dims = plan_channel_deletion(intensity, slice_idx=1, n_timepoints=3)
+    assert action == "write"
+    assert arr.shape == (3, 2, 8, 8)
+    assert dims == ["T", "C", "H", "W"]
+    # Channels 0 and 2 survive (1 removed); time axis intact.
+    assert np.all(arr[:, 0] == 0)
+    assert np.all(arr[:, 1] == 2)
+
+
+def test_plan_delete_timelapse_tchw_collapses_to_thw():
+    """Deleting one of two channels collapses (T,2,H,W) -> (T,H,W)."""
+    intensity = np.zeros((3, 2, 8, 8), dtype=np.float32)
+    intensity[:, 1] = 5
+    action, arr, dims = plan_channel_deletion(intensity, slice_idx=0, n_timepoints=3)
+    assert action == "write"
+    assert arr.shape == (3, 8, 8)
+    assert dims == ["T", "H", "W"]
+    assert np.all(arr == 5)
+
+
+def test_plan_delete_non_timelapse_chw_slices_axis0():
+    """Non-time-lapse (C,H,W): unchanged behavior, slice axis 0 as channels."""
+    intensity = np.zeros((3, 8, 8), dtype=np.float32)
+    for c in range(3):
+        intensity[c] = c
+    action, arr, dims = plan_channel_deletion(intensity, slice_idx=1, n_timepoints=1)
+    assert action == "write"
+    assert arr.shape == (2, 8, 8)
+    assert dims == ["C", "H", "W"]
+    assert np.all(arr[0] == 0) and np.all(arr[1] == 2)
+
+
+def test_plan_delete_non_timelapse_single_channel_chw_empties():
+    intensity = np.zeros((1, 8, 8), dtype=np.float32)
+    action, _, _ = plan_channel_deletion(intensity, slice_idx=0, n_timepoints=1)
+    assert action == "delete"
+
+
+def test_plan_delete_2d_empties():
+    intensity = np.zeros((8, 8), dtype=np.float32)
+    action, _, _ = plan_channel_deletion(intensity, slice_idx=0, n_timepoints=1)
+    assert action == "delete"
+
+
+def test_plan_delete_index_past_axis_is_noop():
+    intensity = np.zeros((3, 2, 8, 8), dtype=np.float32)
+    action, _, _ = plan_channel_deletion(intensity, slice_idx=9, n_timepoints=3)
+    assert action == "noop"

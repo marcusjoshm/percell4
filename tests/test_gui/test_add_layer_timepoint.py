@@ -243,3 +243,32 @@ def test_batch_single_timepoint_stays_2d(tmp_path):
     # (the loop must NOT call ordered_timepoint_tokens on the "" token).
     real_tokens = [t for t in tp_groups if t != ""]
     assert real_tokens == []
+
+
+# ── Delete channel keeps the time axis (U7, store integration) ──
+
+
+def test_delete_channel_on_tchw_keeps_time_axis(tmp_h5):
+    """Deleting a channel from a (T,C,H,W) dataset slices the C axis and leaves
+    n_timepoints intact -- it does not delete a timepoint or mis-stamp dims."""
+    from percell4.domain.io.layout import plan_channel_deletion
+
+    store = DatasetStore(tmp_h5)
+    store.create(metadata={"channel_names": ["GFP", "DAPI", "mCherry"]})
+    store.write_array(
+        "intensity", np.zeros((3, 3, 8, 8), dtype=np.float32),
+        attrs={"dims": ["T", "C", "H", "W"]},
+    )
+    intensity = store.read_array("intensity")
+
+    action, new_intensity, dims = plan_channel_deletion(
+        intensity, slice_idx=1, n_timepoints=3
+    )
+    assert action == "write"
+    store.write_array("intensity", new_intensity, attrs={"dims": dims})
+    store.set_metadata({"channel_names": ["GFP", "mCherry"], "n_channels": 2})
+
+    store.check_intensity_dims_consistency()  # no corruption
+    meta = store.metadata
+    assert meta["n_timepoints"] == 3  # the time axis survived
+    assert store.read_array("intensity").shape == (3, 2, 8, 8)

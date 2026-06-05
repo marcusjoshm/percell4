@@ -677,7 +677,17 @@ class AddLayerDialog(QDialog):
             seg_names = [n for n in self._store.list_labels() if n not in mask_set]
             self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
             self._data_model.set_active_segmentation(name)
-            self.statusBar_msg(f"Imported {n_cells} ROIs as '{name}'")
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            if n_timepoints > 1:
+                # ImageJ ROIs rasterize to one 2D plane; on a time-lapse dataset
+                # that is stored as a time-invariant gate (per-frame ROI import
+                # is deferred).
+                self.statusBar_msg(
+                    f"Imported {n_cells} ROIs as '{name}' (time-invariant — "
+                    "same ROIs for every timepoint)"
+                )
+            else:
+                self.statusBar_msg(f"Imported {n_cells} ROIs as '{name}'")
             self.accept()
         except ImportError:
             QMessageBox.warning(
@@ -734,6 +744,19 @@ class AddLayerDialog(QDialog):
         try:
             from percell4.adapters.roi_import import import_cellpose_seg
             labels = import_cellpose_seg(path)
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            # Explicit rank policy: a 2D mask is a time-invariant gate; a 3D
+            # mask must match the dataset's timepoint count (write_labels
+            # enforces this too, but a clear up-front message is friendlier).
+            time_invariant = labels.ndim == 2 and n_timepoints > 1
+            if labels.ndim == 3 and labels.shape[0] != n_timepoints:
+                QMessageBox.warning(
+                    self, "Error",
+                    f"Cellpose .npy has {labels.shape[0]} frame(s) but the "
+                    f"dataset has {n_timepoints} timepoint(s). A per-frame "
+                    "segmentation must cover every timepoint.",
+                )
+                return
             n_cells = int(labels.max())
             name = self._cp_name_edit.text().strip() or f"cellpose_import_{n_cells}"
             self._store.write_labels(name, labels)
@@ -743,7 +766,13 @@ class AddLayerDialog(QDialog):
             seg_names = [n for n in self._store.list_labels() if n not in mask_set]
             self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
             self._data_model.set_active_segmentation(name)
-            self.statusBar_msg(f"Imported {n_cells} cells as '{name}'")
+            if time_invariant:
+                self.statusBar_msg(
+                    f"Imported {n_cells} cells as '{name}' (time-invariant — "
+                    "same segmentation for every timepoint)"
+                )
+            else:
+                self.statusBar_msg(f"Imported {n_cells} cells as '{name}'")
             self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Import error:\n{e}")

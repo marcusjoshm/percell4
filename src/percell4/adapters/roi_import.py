@@ -66,7 +66,11 @@ def import_cellpose_seg(seg_path: str | Path) -> NDArray[np.int32]:
 
     Returns
     -------
-    Label array (H, W) int32.
+    Label array, int32, preserving rank: ``(H, W)`` for a single segmentation
+    or ``(T, H, W)`` for a per-frame stack. The caller (Add-Layer dialog)
+    enforces the rank policy against the dataset's ``n_timepoints`` — a 2D mask
+    is a time-invariant gate; a 3D mask must match the timepoint count. Any
+    other rank raises here.
     """
     seg_path = Path(seg_path)
 
@@ -85,5 +89,10 @@ def import_cellpose_seg(seg_path: str | Path) -> NDArray[np.int32]:
     if "masks" not in data:
         raise KeyError("_seg.npy file does not contain 'masks' key")
 
-    masks = data["masks"]
-    return np.asarray(masks, dtype=np.int32)
+    masks = np.asarray(data["masks"], dtype=np.int32)
+    if masks.ndim not in (2, 3):
+        raise ValueError(
+            f"Cellpose masks must be 2D (H,W) or 3D (T,H,W); got {masks.ndim}D "
+            f"shape {masks.shape}."
+        )
+    return masks

@@ -14,7 +14,11 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["split_channels_2d", "split_intensity_layers"]
+__all__ = [
+    "split_channels_2d",
+    "split_intensity_layers",
+    "plan_channel_deletion",
+]
 
 # Historical heuristic: a leading axis this small on a non-time-lapse
 # dataset is treated as channels; anything larger is shown as one layer.
@@ -74,3 +78,52 @@ def split_intensity_layers(
         ]
     # Unexpected rank for a time-lapse dataset — show as one layer.
     return [("Intensity", intensity)]
+
+
+def plan_channel_deletion(
+    intensity: NDArray, slice_idx: int, n_timepoints: int
+) -> tuple[str, NDArray | None, list[str] | None]:
+    """Plan the ``/intensity`` rewrite when deleting one channel.
+
+    Returns one of:
+
+    - ``("delete", None, None)``        -- delete ``/intensity`` entirely
+    - ``("write", new_intensity, dims)`` -- rewrite with the channel removed
+    - ``("noop", None, None)``          -- ``slice_idx`` past the channel axis;
+      leave ``/intensity`` untouched (the napari layer is still removed)
+
+    Disambiguates a leading T axis from a leading C axis via ``n_timepoints``,
+    so a ``(T, H, W)`` single-channel time-lapse dataset is **emptied** rather
+    than having a timepoint sliced away, and a ``(T, C, H, W)`` dataset slices
+    the **C** axis (``axis=1``) — never the time axis. When the C axis collapses
+    to one channel the result is stored back as ``(T, H, W)``. Non-time-lapse
+    ``(C, H, W)`` / ``(H, W)`` behavior is unchanged (slice ``axis=0``).
+    """
+    nt = int(n_timepoints or 1)
+    if nt > 1:
+        if intensity.ndim == 3:
+            # (T, H, W): a single channel over time -> deleting it empties it.
+            return ("delete", None, None)
+        if intensity.ndim == 4:
+            n_channels = intensity.shape[1]
+            if slice_idx >= n_channels:
+                return ("noop", None, None)
+            if n_channels <= 1:
+                return ("delete", None, None)
+            keep = [c for c in range(n_channels) if c != slice_idx]
+            new_intensity = intensity[:, keep]
+            if new_intensity.shape[1] == 1:
+                return ("write", new_intensity[:, 0], ["T", "H", "W"])
+            return ("write", new_intensity, ["T", "C", "H", "W"])
+        return ("noop", None, None)  # unexpected rank
+    # Non-time-lapse
+    if intensity.ndim == 3:
+        if slice_idx >= intensity.shape[0]:
+            return ("noop", None, None)
+        if intensity.shape[0] <= 1:
+            return ("delete", None, None)
+        keep = [i for i in range(intensity.shape[0]) if i != slice_idx]
+        return ("write", intensity[keep, :, :], ["C", "H", "W"])
+    if intensity.ndim == 2:
+        return ("delete", None, None)
+    return ("noop", None, None)

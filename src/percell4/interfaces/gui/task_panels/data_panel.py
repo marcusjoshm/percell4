@@ -544,24 +544,26 @@ class DataPanel(QWidget):
         except KeyError:
             intensity = None
 
-        if intensity is not None and slice_idx is not None and intensity.ndim == 3:
-            if slice_idx < intensity.shape[0]:
-                if intensity.shape[0] <= 1:
+        if intensity is not None and slice_idx is not None:
+            # Disambiguate a leading T axis from a leading C axis via
+            # n_timepoints before slicing: on (T,H,W) deleting the channel
+            # empties /intensity (never slice a timepoint); on (T,C,H,W) slice
+            # the C axis. Non-time-lapse (C,H,W)/(H,W) behavior is unchanged.
+            from percell4.domain.io.layout import plan_channel_deletion
+
+            nt = int(store.metadata.get("n_timepoints", 1) or 1)
+            action, new_intensity, dims = plan_channel_deletion(
+                intensity, slice_idx, nt
+            )
+            if action == "delete":
+                # Only empty a genuinely 2D dataset when the layer is a real
+                # channel (a ch<N> orphan on a 2D dataset must not delete it).
+                if intensity.ndim != 2 or in_metadata:
                     store.delete_item("intensity")
-                else:
-                    keep = [i for i in range(intensity.shape[0]) if i != slice_idx]
-                    new_intensity = intensity[keep, :, :]
-                    store.write_array(
-                        "intensity", new_intensity, attrs={"dims": ["C", "H", "W"]},
-                    )
-            else:
-                # Layer name suggested an index past the current /intensity.
-                # Nothing to slice on disk; the napari layer removal below
-                # still happens.
-                pass
-        elif intensity is not None and intensity.ndim == 2 and in_metadata:
-            # 2D — single-channel dataset, deletion empties it
-            store.delete_item("intensity")
+            elif action == "write":
+                store.write_array("intensity", new_intensity, attrs={"dims": dims})
+            # "noop": index past the channel axis; napari layer removal still
+            # happens below.
 
         # Update channel_names if the deleted layer was in metadata.
         if in_metadata:
