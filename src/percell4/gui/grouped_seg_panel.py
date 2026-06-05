@@ -31,6 +31,26 @@ from percell4.model import CellDataModel
 logger = logging.getLogger(__name__)
 
 
+def slice_to_active_frame(channel_image, seg_labels, timepoint):
+    """Slice a ``(T, H, W)`` channel and/or labels to the active 2D frame.
+
+    Grouped thresholding's interactive QC is single-frame. On a time-lapse
+    dataset both the channel layer and a ``(T, H, W)`` labels stack are sliced
+    to the displayed timepoint so the 2D measurer/QC never receive a
+    ``(T, H, W)`` stack against 2D labels — the source of the
+    ``IndexError: ... dimension is 6 but corresponding boolean dimension is 485``
+    crash. A 2D *time-invariant* label is left as-is. Returns
+    ``(channel_2d, labels_2d)`` (int32 labels preserved). Pure (no Qt).
+    """
+    ch = np.asarray(channel_image)
+    if ch.ndim == 3:
+        ch = ch[timepoint]
+    lbl = np.asarray(seg_labels)
+    if lbl.ndim == 3:
+        lbl = lbl[timepoint]
+    return ch, lbl
+
+
 class GroupedSegPanel(QWidget):
     """Panel for grouped thresholding workflow."""
 
@@ -137,6 +157,19 @@ class GroupedSegPanel(QWidget):
             self._show_status(f"Segmentation '{seg_name}' not found in viewer")
             return
         seg_labels = labels_layer.data.astype(np.int32)
+
+        # Time-lapse: the interactive measure -> group -> QC flow is single-frame.
+        # Slice the channel and (T,H,W) labels to the displayed timepoint so the
+        # 2D measurer never receives a (T,H,W) stack (the '6 vs 485' IndexError).
+        # The accepted mask is stored 2D (time-invariant) for that frame's
+        # grouping; per-frame (T,H,W) grouped masks are produced by the batch
+        # workflow runner (see TimelapseThresholdQCQueueEntry).
+        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+        if n_timepoints > 1:
+            t = int(viewer_win.viewer.dims.current_step[0])
+            channel_image, seg_labels = slice_to_active_frame(
+                channel_image, seg_labels, t
+            )
 
         # Prompt for mask name. Default "grouped"; refuse-and-re-prompt on
         # collision with any existing /masks/<name>. Mirrors the Apply
