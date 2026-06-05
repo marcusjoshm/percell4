@@ -60,6 +60,7 @@ def run_pipeline(
     output_csv: Path | None = None,
     skip_segmentation: bool = False,
     skip_threshold: bool = False,
+    track: bool = False,
 ) -> PipelineResult:
     """Run the analysis pipeline headlessly through use cases.
 
@@ -100,19 +101,35 @@ def run_pipeline(
         from percell4.adapters.cellpose import CellposeSegmenter
 
         segment_uc = SegmentCells(repo, session, segmenter=CellposeSegmenter())
+        n_timepoints = session.n_timepoints
 
-        # Read the first channel image for segmentation
-        images = repo.read_channel_images(handle)
-        if not images:
-            raise ValueError("Dataset has no channel images")
-        first_channel = next(iter(images.values()))
-
-        logger.info("Running Cellpose (%s)...", cellpose_model)
-        raw_masks = segment_uc.run_inference(
-            first_channel,
-            model_type=cellpose_model,
-            diameter=cellpose_diameter,
-        )
+        if n_timepoints > 1:
+            # Time-lapse: build a (T,H,W) stack of the first channel and segment
+            # every frame (run_inference_stack), writing a (T,H,W) labels
+            # resource — not just frame 0.
+            frames = [
+                next(iter(repo.read_channel_images(handle, timepoint=t).values()))
+                for t in range(n_timepoints)
+            ]
+            stack = np.stack(frames, axis=0)
+            logger.info(
+                "Running Cellpose (%s) on %d timepoints...",
+                cellpose_model, n_timepoints,
+            )
+            raw_masks = segment_uc.run_inference_stack(
+                stack, model_type=cellpose_model, diameter=cellpose_diameter,
+            )
+        else:
+            images = repo.read_channel_images(handle)
+            if not images:
+                raise ValueError("Dataset has no channel images")
+            first_channel = next(iter(images.values()))
+            logger.info("Running Cellpose (%s)...", cellpose_model)
+            raw_masks = segment_uc.run_inference(
+                first_channel,
+                model_type=cellpose_model,
+                diameter=cellpose_diameter,
+            )
 
         result = segment_uc.finalize(raw_masks)
         seg_name = result.seg_name
@@ -121,6 +138,23 @@ def run_pipeline(
             "Segmented: %d cells (%d edge, %d small removed)",
             result.n_cells, result.edge_removed, result.small_removed,
         )
+
+        # Optional tracking on a time-lapse dataset: relabel by track id and
+        # switch the active segmentation to the tracked resource so measurement
+        # joins lineage.
+        if track and n_timepoints > 1:
+            from percell4.adapters.laptrack_tracker import LaptrackTracker
+            from percell4.application.use_cases.track_cells import TrackCells
+
+            track_result = TrackCells(repo, session, LaptrackTracker()).execute(
+                seg_name
+            )
+            seg_name = track_result.seg_name
+            session.set_active_segmentation(seg_name)
+            logger.info(
+                "Tracked: %d tracks, %d divisions -> %s",
+                track_result.n_tracks, track_result.n_divisions, seg_name,
+            )
     else:
         # Use existing segmentation
         labels_list = repo.list_labels(handle)
@@ -133,16 +167,12 @@ def run_pipeline(
 
     # ── Thresholding ──
     if not skip_threshold:
-        images = repo.read_channel_images(handle)
-        ch_name = threshold_channel or next(iter(images))
-        if ch_name not in images:
-            raise ValueError(f"Channel '{ch_name}' not found. Available: {list(images)}")
+        n_timepoints = session.n_timepoints
+        ch_name = threshold_channel or next(iter(repo.read_channel_images(handle)))
 
-        image = images[ch_name].astype(np.float32)
-
-        if threshold_value is not None:
-            value = threshold_value
-        else:
+        def _resolve_threshold(frame: np.ndarray) -> float:
+            if threshold_value is not None:
+                return float(threshold_value)
             from percell4.domain.measure.thresholding import THRESHOLD_METHODS
 
             method_key = threshold_method.lower()
@@ -151,16 +181,47 @@ def run_pipeline(
                     f"Unknown threshold method '{method_key}'. "
                     f"Available: {list(THRESHOLD_METHODS)}"
                 )
-            _, value = THRESHOLD_METHODS[method_key](image)
+            return float(THRESHOLD_METHODS[method_key](frame)[1])
 
-        thresh_uc = AcceptThreshold(repo, viewer, session)
-        thresh_result = thresh_uc.execute(image, value, threshold_method, ch_name)
-        mask_name = thresh_result.mask_name
-        pct = 100.0 * thresh_result.n_positive / thresh_result.n_total if thresh_result.n_total else 0
-        logger.info(
-            "Threshold: %s = %.1f → %d/%d px (%.1f%%)",
-            mask_name, value, thresh_result.n_positive, thresh_result.n_total, pct,
-        )
+        if n_timepoints > 1:
+            # Per-frame threshold -> (T,H,W) mask (matches U10's caller-loop:
+            # auto methods recompute per frame, a manual value broadcasts).
+            masks = []
+            for t in range(n_timepoints):
+                images_t = repo.read_channel_images(handle, timepoint=t)
+                if ch_name not in images_t:
+                    raise ValueError(
+                        f"Channel '{ch_name}' not found. Available: {list(images_t)}"
+                    )
+                frame = images_t[ch_name].astype(np.float32)
+                value_t = _resolve_threshold(frame)
+                masks.append((frame > value_t).astype(np.uint8))
+            mask_stack = np.stack(masks, axis=0)
+            mask_name = f"{threshold_method}_{ch_name}"
+            repo.write_mask(handle, mask_name, mask_stack)
+            session.refresh_resource_lists(mask_names=repo.list_masks(handle))
+            session.set_active_mask(mask_name)
+            n_pos = int(mask_stack.sum())
+            logger.info(
+                "Threshold: %s over %d timepoints -> %d px",
+                mask_name, n_timepoints, n_pos,
+            )
+        else:
+            images = repo.read_channel_images(handle)
+            if ch_name not in images:
+                raise ValueError(
+                    f"Channel '{ch_name}' not found. Available: {list(images)}"
+                )
+            image = images[ch_name].astype(np.float32)
+            value = _resolve_threshold(image)
+            thresh_uc = AcceptThreshold(repo, viewer, session)
+            thresh_result = thresh_uc.execute(image, value, threshold_method, ch_name)
+            mask_name = thresh_result.mask_name
+            pct = 100.0 * thresh_result.n_positive / thresh_result.n_total if thresh_result.n_total else 0
+            logger.info(
+                "Threshold: %s = %.1f → %d/%d px (%.1f%%)",
+                mask_name, value, thresh_result.n_positive, thresh_result.n_total, pct,
+            )
 
     # ── Measurement ──
     if metrics is None:
@@ -201,6 +262,7 @@ def main() -> int:
     parser.add_argument("--output", "-o", type=Path, help="Output CSV path")
     parser.add_argument("--skip-segmentation", action="store_true", help="Use existing segmentation")
     parser.add_argument("--skip-threshold", action="store_true", help="Skip thresholding")
+    parser.add_argument("--track", action="store_true", help="Track cells across timepoints (time-lapse only)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
@@ -221,6 +283,7 @@ def main() -> int:
             output_csv=args.output,
             skip_segmentation=args.skip_segmentation,
             skip_threshold=args.skip_threshold,
+            track=args.track,
         )
         print(f"Done: {result.n_cells} cells, {result.n_columns} columns")
         if result.output_csv:
