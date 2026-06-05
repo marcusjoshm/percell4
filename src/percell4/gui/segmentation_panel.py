@@ -14,7 +14,6 @@ import numpy as np
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -28,8 +27,10 @@ from qtpy.QtWidgets import (
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
+from percell4.gui._cellpose_settings_form import CellposeSettingsForm
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
+from percell4.workflows.models import CellposeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -105,25 +106,16 @@ class SegmentationPanel(QWidget):
         cp_group = QGroupBox("Cellpose")
         cp_layout = QVBoxLayout(cp_group)
 
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Model:"))
-        self._cp_model = QComboBox()
-        self._cp_model.addItems(["cpsam", "cyto3", "cyto2", "cyto", "nuclei"])
-        model_row.addWidget(self._cp_model)
-        cp_layout.addLayout(model_row)
-
-        diam_row = QHBoxLayout()
-        diam_row.addWidget(QLabel("Diameter:"))
-        self._cp_diameter = QSpinBox()
-        self._cp_diameter.setRange(0, 500)
-        self._cp_diameter.setValue(30)
-        self._cp_diameter.setSpecialValueText("Auto")
-        diam_row.addWidget(self._cp_diameter)
-        cp_layout.addLayout(diam_row)
-
-        self._cp_gpu = QCheckBox("Use GPU")
-        self._cp_gpu.setStyleSheet(f"QCheckBox {{ color: {theme.TEXT}; }}")
-        cp_layout.addWidget(self._cp_gpu)
+        # Model / Diameter / GPU / Flow / Cellprob / Min-size / Saturation /
+        # Sigma all live in the shared CellposeSettingsForm so this panel and
+        # the workflow setup dialog cannot drift. The channel is NOT picked
+        # here — _on_run_cellpose reads session.active_channel (the
+        # SessionWindow Selector owns it). Seed diameter at 300 for parity
+        # with the workflow window.
+        self._cp_form = CellposeSettingsForm(
+            initial=CellposeSettings(diameter=300.0)
+        )
+        cp_layout.addWidget(self._cp_form)
 
         self._cp_remove_edges = QCheckBox("Remove edge cells")
         self._cp_remove_edges.setChecked(True)
@@ -133,6 +125,20 @@ class SegmentationPanel(QWidget):
             "Untick to keep partial edge cells (e.g., for tiled imaging)."
         )
         cp_layout.addWidget(self._cp_remove_edges)
+
+        margin_row = QHBoxLayout()
+        margin_row.addWidget(QLabel("Edge margin (px):"))
+        self._cp_edge_margin = QSpinBox()
+        self._cp_edge_margin.setRange(0, 500)
+        self._cp_edge_margin.setValue(0)
+        self._cp_edge_margin.setToolTip(
+            "Pixel margin from the image border that counts as 'edge'.\n"
+            "0 = strict border-touching cells only.\n"
+            "N > 0 = cells within N pixels of any border are removed.\n"
+            "Only applies when 'Remove edge cells' is ticked."
+        )
+        margin_row.addWidget(self._cp_edge_margin)
+        cp_layout.addLayout(margin_row)
 
         btn_run_cp = QPushButton("Run Cellpose")
         btn_run_cp.clicked.connect(self._on_run_cellpose)
@@ -444,10 +450,35 @@ class SegmentationPanel(QWidget):
 
         import numpy as np
 
-        image = active_layer.data
-        model_type = self._cp_model.currentText()
-        diameter = self._cp_diameter.value() if self._cp_diameter.value() > 0 else None
-        gpu = self._cp_gpu.isChecked()
+        from percell4.domain.segmentation.preprocess import (
+            apply_gaussian_blur,
+            apply_saturation_lut,
+        )
+
+        s = self._cp_form.settings()
+        model_type = s.model
+        diameter = s.diameter if s.diameter > 0 else None
+        gpu = s.gpu
+
+        # Pre-Cellpose preprocessing — saturation LUT then Gaussian blur,
+        # mirroring phases.segment_one. Applied to an in-memory copy of the
+        # layer data only; the on-disk /intensity is never modified. For a
+        # time-lapse (T, H, W) layer both are applied per-frame so the
+        # saturation percentile reference is the frame's own intensity and
+        # the blur never bleeds across timepoints.
+        raw = np.asarray(active_layer.data)
+
+        def _preprocess(plane):
+            if s.saturation_pct > 0.0:
+                plane = apply_saturation_lut(plane, s.saturation_pct)
+            if s.blur_sigma > 0.0:
+                plane = apply_gaussian_blur(plane, s.blur_sigma)
+            return plane
+
+        if raw.ndim == 3:
+            image = np.stack([_preprocess(raw[t]) for t in range(raw.shape[0])])
+        else:
+            image = _preprocess(raw)
 
         from percell4.gui.workers import Worker
         from percell4.adapters.cellpose import run_cellpose, run_cellpose_stack
@@ -456,8 +487,8 @@ class SegmentationPanel(QWidget):
         # write one (T, H, W) raw-label resource. A 2D layer is the historical
         # single-frame path. (run_cellpose reads a 3D array as multichannel,
         # so the stack must go through run_cellpose_stack.)
-        if np.asarray(image).ndim == 3:
-            n_t = int(np.asarray(image).shape[0])
+        if image.ndim == 3:
+            n_t = int(image.shape[0])
             self._show_status(
                 f"Running Cellpose ({model_type}) on {n_t} timepoints..."
             )
@@ -467,11 +498,21 @@ class SegmentationPanel(QWidget):
                 model_type=model_type,
                 diameter=diameter,
                 gpu=gpu,
+                flow_threshold=s.flow_threshold,
+                cellprob_threshold=s.cellprob_threshold,
+                min_size=s.min_size,
             )
         else:
             self._show_status(f"Running Cellpose ({model_type})...")
             self._worker = Worker(
-                run_cellpose, image, model_type=model_type, diameter=diameter, gpu=gpu,
+                run_cellpose,
+                image,
+                model_type=model_type,
+                diameter=diameter,
+                gpu=gpu,
+                flow_threshold=s.flow_threshold,
+                cellprob_threshold=s.cellprob_threshold,
+                min_size=s.min_size,
             )
         self._worker.finished.connect(self._on_cellpose_done)
         self._worker.error.connect(self._on_cellpose_error)
@@ -499,6 +540,7 @@ class SegmentationPanel(QWidget):
                 remove_edge_cells=self._cp_remove_edges.isChecked(),
                 name=getattr(self, "_cellpose_pending_name", None),
                 view_bin=getattr(self, "_cellpose_pending_bin", 1),
+                edge_margin=self._cp_edge_margin.value(),
             )
         except ValueError as e:
             self._show_status(f"Error: {e}")

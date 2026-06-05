@@ -104,14 +104,20 @@ class SegmentCells:
 
     @staticmethod
     def _postprocess_frame(
-        raw: NDArray[np.int32], min_area: int, remove_edge_cells: bool
+        raw: NDArray[np.int32],
+        min_area: int,
+        remove_edge_cells: bool,
+        edge_margin: int = 0,
     ) -> tuple[NDArray[np.int32], int, int]:
         """Post-process one 2D label frame: edge filter, small filter, relabel.
+
+        ``edge_margin`` widens the edge band: cells within ``edge_margin``
+        pixels of any border are treated as edge (0 = strict border-touching).
 
         Returns ``(labels, edge_removed, small_removed)``.
         """
         if remove_edge_cells:
-            labels, edge_removed = filter_edge_cells(raw)
+            labels, edge_removed = filter_edge_cells(raw, edge_margin=edge_margin)
         else:
             labels = raw.copy()
             edge_removed = 0
@@ -126,6 +132,7 @@ class SegmentCells:
         remove_edge_cells: bool = True,
         name: str | None = None,
         view_bin: int = 1,
+        edge_margin: int = 0,
     ) -> SegmentationResult:
         """Post-process masks, write to store, update session.
 
@@ -160,7 +167,7 @@ class SegmentCells:
             per_frame_counts = []
             for t in range(raw_masks.shape[0]):
                 lab, er, sr = self._postprocess_frame(
-                    raw_masks[t], min_area, remove_edge_cells
+                    raw_masks[t], min_area, remove_edge_cells, edge_margin
                 )
                 frame_labels.append(lab)
                 edge_removed += er
@@ -170,7 +177,7 @@ class SegmentCells:
             n_cells = max(per_frame_counts) if per_frame_counts else 0
         else:
             labels, edge_removed, small_removed = self._postprocess_frame(
-                raw_masks, min_area, remove_edge_cells
+                raw_masks, min_area, remove_edge_cells, edge_margin
             )
             n_cells = int(labels.max())
 

@@ -105,6 +105,7 @@ def test_cellpose_defaults():
     assert c.model == "cpsam"
     assert c.diameter == 30.0
     assert c.gpu is True
+    assert c.blur_sigma == 0.0
 
 
 def test_cellpose_rejects_bad_values():
@@ -112,6 +113,13 @@ def test_cellpose_rejects_bad_values():
         CellposeSettings(diameter=-1)
     with pytest.raises(ValueError, match="min_size"):
         CellposeSettings(min_size=-1)
+    with pytest.raises(ValueError, match="blur_sigma"):
+        CellposeSettings(blur_sigma=-1)
+
+
+def test_cellpose_accepts_blur_sigma():
+    c = CellposeSettings(blur_sigma=1.5)
+    assert c.blur_sigma == 1.5
 
 
 # ── WorkflowDatasetEntry ─────────────────────────────────────

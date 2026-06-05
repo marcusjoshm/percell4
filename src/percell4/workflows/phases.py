@@ -310,17 +310,23 @@ def segment_one(
 
     diameter = cfg.diameter if cfg.diameter > 0 else None
 
-    # Pre-Cellpose saturation LUT — same ImageJ-style Enhance Contrast
-    # operation the seg-QC Modify Channel group exposes interactively.
-    # 0 is a no-op so legacy runs and users who opt out get
-    # byte-identical Cellpose input. For time-lapse stacks the LUT is
-    # applied per-frame so the percentile reference is the frame's
-    # own intensity, not the whole stack's.
-    from percell4.domain.segmentation.preprocess import apply_saturation_lut
+    # Pre-Cellpose preprocessing — a saturation LUT (ImageJ-style Enhance
+    # Contrast, same operation the seg-QC Modify Channel group exposes
+    # interactively) followed by an optional Gaussian blur. Both default
+    # to no-ops (saturation_pct/blur_sigma == 0) so legacy runs and users
+    # who opt out get byte-identical Cellpose input. For time-lapse stacks
+    # both are applied per-frame so the saturation percentile reference is
+    # the frame's own intensity and the blur never bleeds across frames.
+    from percell4.domain.segmentation.preprocess import (
+        apply_gaussian_blur,
+        apply_saturation_lut,
+    )
 
     def _preprocess(plane: NDArray) -> NDArray:
         if cfg.saturation_pct > 0.0:
-            return apply_saturation_lut(plane, cfg.saturation_pct)
+            plane = apply_saturation_lut(plane, cfg.saturation_pct)
+        if cfg.blur_sigma > 0.0:
+            plane = apply_gaussian_blur(plane, cfg.blur_sigma)
         return plane
 
     def _infer(plane: NDArray) -> NDArray:

@@ -6,7 +6,7 @@ raw channel has long-tail intensity outliers (dust, hot pixels) that
 skew Cellpose's internal percentile normalization. The transformation
 is in-memory only; persisted ``/intensity`` is never modified.
 
-Two entry points:
+Entry points:
 
 - :func:`apply_lut` — explicit ``(lo, hi)`` clip + stretch. Used by
   the seg-QC controller's interactive histogram-handle UI.
@@ -14,6 +14,10 @@ Two entry points:
   by the single-cell workflow's segmentation phase. Mirrors ImageJ's
   Enhance Contrast: ``saturation_pct`` % of the brightest pixels are
   clipped to the dtype max; ``lo`` is the channel min.
+- :func:`apply_gaussian_blur` — sigma-controlled Gaussian smoothing.
+  A sibling Cellpose-input transformation that damps shot noise so
+  speckled channels segment as single cell bodies. Applied *after* the
+  saturation LUT in both the workflow phase and the Segment panel.
 """
 
 from __future__ import annotations
@@ -106,3 +110,47 @@ def apply_saturation_lut(
     lo = float(channel.min())
     hi = float(np.percentile(channel, 100.0 - saturation_pct))
     return apply_lut(channel, lo, hi)
+
+
+def apply_gaussian_blur(
+    channel: NDArray, sigma: float,
+) -> NDArray:
+    """Gaussian-blur ``channel`` by ``sigma`` (kernel std-dev), preserving dtype.
+
+    A Cellpose-input transformation that smooths shot noise so speckled
+    or grainy segmentation channels resolve as single cell bodies rather
+    than fragmenting into many tiny masks. Applied *after*
+    :func:`apply_saturation_lut` in the run paths so hot-pixel outliers
+    are clipped before they get smeared by the blur. In-memory only;
+    persisted ``/intensity`` is never modified.
+
+    ``sigma == 0`` is a no-op: returns the channel unchanged so callers
+    can invoke this unconditionally and let the parameter decide whether
+    the blur is engaged. Reasonable values are typically 0.5 to 3.0 px.
+
+    Parameters
+    ----------
+    channel : NDArray
+        Source intensity. For time-lapse stacks the caller should apply
+        per-frame (pass each 2D plane) so the blur never bleeds across
+        timepoints.
+    sigma : float
+        Standard deviation of the Gaussian kernel. Must be ``>= 0``; a
+        negative value raises ``ValueError``.
+
+    Returns
+    -------
+    NDArray
+        Same shape and dtype as ``channel``.
+    """
+    if sigma < 0:
+        raise ValueError(f"sigma must be >= 0 (0 = no blur), got {sigma}")
+    if sigma == 0.0:
+        return channel
+    # Lazy import: scipy is a heavier dep and this path is opt-in.
+    from scipy.ndimage import gaussian_filter
+
+    blurred = gaussian_filter(channel, sigma=sigma)
+    # gaussian_filter preserves the input dtype, but be explicit so an
+    # integer channel never reaches Cellpose as floats.
+    return blurred.astype(channel.dtype, copy=False)

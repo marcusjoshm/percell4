@@ -176,6 +176,68 @@ class TestFinalizeEdgeRemoval:
 
         assert np.array_equal(edge_and_interior_masks, original)
 
+    @staticmethod
+    def _near_edge_and_interior_masks():
+        """Two cells: one 2 px from the top border (not touching), one deep
+        in the interior."""
+        masks = np.zeros((20, 20), dtype=np.int32)
+        masks[2:6, 8:12] = 1   # near top border (rows 0,1 are background)
+        masks[8:14, 8:14] = 2  # interior, far from every border
+        return masks
+
+    def test_edge_margin_zero_keeps_near_edge_cell(self, session):
+        """Default margin (0) only removes strictly border-touching cells, so
+        the 2-px-away cell survives — current behavior preserved."""
+        repo = FakeRepo()
+        uc = SegmentCells(repo, session)
+
+        result = uc.finalize(self._near_edge_and_interior_masks(), min_area=0)
+
+        assert result.edge_removed == 0
+        assert result.n_cells == 2
+
+    def test_edge_margin_removes_near_edge_cell(self, session):
+        """A non-zero margin removes cells within that many px of the border."""
+        repo = FakeRepo()
+        uc = SegmentCells(repo, session)
+
+        result = uc.finalize(
+            self._near_edge_and_interior_masks(), min_area=0, edge_margin=2
+        )
+
+        assert result.edge_removed == 1
+        assert result.n_cells == 1  # only the interior cell survives
+        assert not np.any(result.labels[2:6, 8:12] != 0)
+
+    def test_edge_margin_ignored_when_remove_edge_cells_false(self, session):
+        """remove_edge_cells=False short-circuits the edge filter regardless
+        of the margin."""
+        repo = FakeRepo()
+        uc = SegmentCells(repo, session)
+
+        result = uc.finalize(
+            self._near_edge_and_interior_masks(),
+            min_area=0,
+            remove_edge_cells=False,
+            edge_margin=5,
+        )
+
+        assert result.edge_removed == 0
+        assert result.n_cells == 2
+
+    def test_edge_margin_applies_per_frame_in_stack(self, session):
+        """The margin is threaded into each frame's postprocess for stacks."""
+        repo = FakeRepo()
+        uc = SegmentCells(repo, session)
+        frame = self._near_edge_and_interior_masks()
+        stack = np.stack([frame, frame.copy()], axis=0)
+
+        result = uc.finalize(stack, min_area=0, edge_margin=2)
+
+        # One near-edge cell removed per frame → 2 total across the stack.
+        assert result.edge_removed == 2
+        assert not np.any(result.labels[:, 2:6, 8:12] != 0)
+
 
 # ── view_bin handling (U12) ───────────────────────────────────────
 

@@ -942,38 +942,48 @@ widgets:
   # ╚══════════════════════════════════════════════════════════════╝
 
   # ── gui/segmentation_panel.py ────────────────────────────────
-  - id: segmentation_panel.cellpose_model_combo
+  - id: segmentation_panel.cellpose_settings_form
     class: Action
-    path: src/percell4/gui/segmentation_panel.py
-    lines: "87-89"
-    widget_type: QComboBox
+    path: src/percell4/gui/_cellpose_settings_form.py
+    lines: "42-145"
+    widget_type: CellposeSettingsForm
     handler: null
     reads: []
     writes: []
     keystroke: null
-    notes: "Operand for Run Cellpose."
+    notes: >-
+      Operand for Run Cellpose. Shared widget (also consumed by
+      WorkflowConfigDialog) holding Model, Diameter (0 = auto-detect), Use GPU,
+      Flow threshold, Cellprob threshold, Min cell size, Saturation, and Blur
+      (sigma). All are Action operands read at run time via
+      CellposeSettingsForm.settings(); none write session. Saturation and Blur
+      preprocess the in-memory Cellpose input only — the on-disk /intensity is
+      never modified.
 
-  - id: segmentation_panel.cellpose_diameter_spin
+  - id: segmentation_panel.cellpose_remove_edges_checkbox
     class: Action
     path: src/percell4/gui/segmentation_panel.py
-    lines: "94-98"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Operand for Run Cellpose; 0 means auto-detect."
-
-  - id: segmentation_panel.cellpose_gpu_checkbox
-    class: Action
-    path: src/percell4/gui/segmentation_panel.py
-    lines: "101-103"
+    lines: "121-128"
     widget_type: QCheckBox
     handler: null
     reads: []
     writes: []
     keystroke: null
-    notes: "Operand for Run Cellpose."
+    notes: "Operand for Run Cellpose; gates the post-segmentation edge filter."
+
+  - id: segmentation_panel.cellpose_edge_margin_spin
+    class: Action
+    path: src/percell4/gui/segmentation_panel.py
+    lines: "130-142"
+    widget_type: QSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: >-
+      Operand for Run Cellpose. Feeds SegmentCells.finalize(edge_margin=...) →
+      filter_edge_cells; only effective when 'Remove edge cells' is ticked.
+      0 = strict border-touching cells only.
 
   - id: segmentation_panel.run_cellpose_button
     class: Creator

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from percell4.domain.segmentation.preprocess import (
+    apply_gaussian_blur,
     apply_lut,
     apply_saturation_lut,
 )
@@ -104,3 +105,42 @@ def test_apply_saturation_lut_preserves_dtype():
     arr = np.linspace(0, 1000, 100, dtype=np.float32).reshape((10, 10))
     out = apply_saturation_lut(arr, saturation_pct=2.0)
     assert out.dtype == np.float32
+
+
+# ── apply_gaussian_blur (sigma-controlled smoothing) ────────────────────
+
+
+def test_apply_gaussian_blur_zero_is_noop():
+    """sigma == 0 returns the channel unchanged (opt-out semantic)."""
+    rng = np.random.default_rng(0)
+    arr = rng.integers(0, 4000, size=(16, 16), dtype=np.uint16)
+    out = apply_gaussian_blur(arr, sigma=0.0)
+    assert np.array_equal(out, arr)
+
+
+def test_apply_gaussian_blur_smooths_and_matches_scipy_reference():
+    """sigma > 0 smooths noise; output equals scipy.ndimage reference."""
+    from scipy.ndimage import gaussian_filter
+
+    rng = np.random.default_rng(1)
+    arr = rng.integers(0, 4000, size=(32, 32), dtype=np.uint16)
+    out = apply_gaussian_blur(arr, sigma=1.5)
+    expected = gaussian_filter(arr, sigma=1.5).astype(np.uint16)
+    np.testing.assert_array_equal(out, expected)
+    # Blurring damps pixel-to-pixel variance.
+    assert out.var() < arr.var()
+
+
+def test_apply_gaussian_blur_preserves_shape_and_dtype():
+    """Output keeps the input shape and dtype (no float leak for ints)."""
+    arr = np.linspace(0, 1000, 256, dtype=np.uint16).reshape((16, 16))
+    out = apply_gaussian_blur(arr, sigma=2.0)
+    assert out.shape == arr.shape
+    assert out.dtype == np.uint16
+
+
+def test_apply_gaussian_blur_negative_sigma_raises():
+    """A negative sigma is rejected."""
+    arr = np.zeros((8, 8), dtype=np.uint16)
+    with pytest.raises(ValueError, match=r"sigma"):
+        apply_gaussian_blur(arr, sigma=-1.0)

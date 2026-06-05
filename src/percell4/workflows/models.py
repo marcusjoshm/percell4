@@ -91,6 +91,12 @@ class CellposeSettings:
     # Strictly a Cellpose-input preprocessor — the on-disk /intensity
     # is never modified.
     saturation_pct: float = 1.0
+    # Gaussian blur sigma (standard deviation of the kernel) applied to
+    # the segmentation channel before Cellpose runs, after the saturation
+    # LUT. Smooths shot noise so speckled channels segment as single cell
+    # bodies. 0.0 disables it. Like saturation_pct, strictly a
+    # Cellpose-input preprocessor — the on-disk /intensity is never modified.
+    blur_sigma: float = 0.0
 
     def __post_init__(self) -> None:
         if self.diameter < 0:
@@ -101,6 +107,10 @@ class CellposeSettings:
             raise ValueError(
                 "saturation_pct must be in [0, 50] "
                 f"(got {self.saturation_pct})"
+            )
+        if self.blur_sigma < 0:
+            raise ValueError(
+                f"blur_sigma must be >= 0 (0 = no blur), got {self.blur_sigma}"
             )
 
 

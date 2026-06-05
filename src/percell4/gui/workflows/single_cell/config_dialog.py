@@ -56,6 +56,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.domain.measure.metrics import BUILTIN_METRICS
+from percell4.gui._cellpose_settings_form import CellposeSettingsForm
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.store import DatasetStore
 from percell4.workflows.channels import ChannelSource, intersect_channels
@@ -81,8 +82,6 @@ logger = logging.getLogger(__name__)
 _QSETTINGS_ORG = "LeeLabPerCell4"
 _QSETTINGS_APP = "PerCell4"
 _QSETTINGS_OUTPUT_KEY = "single_cell_threshold_workflow/output_parent"
-
-_CELLPOSE_MODELS = ("cpsam", "cyto3", "cyto2", "cyto", "nuclei")
 
 # Shown (disabled) in the segmentation picker for datasets with no labels yet.
 _NO_SEGMENTATION_LABEL = "None — Cellpose will segment"
@@ -433,58 +432,16 @@ class WorkflowConfigDialog(QDialog):
         )
         form.addRow("Segmentation channel:", self._cp_seg_channel)
 
-        self._cp_model = QComboBox()
-        self._cp_model.addItems(_CELLPOSE_MODELS)
-        self._cp_model.setCurrentText("cpsam")
-        form.addRow("Model:", self._cp_model)
-
-        self._cp_diameter = QDoubleSpinBox()
-        self._cp_diameter.setRange(0.0, 1000.0)
-        self._cp_diameter.setSingleStep(1.0)
-        self._cp_diameter.setValue(300.0)
-        self._cp_diameter.setToolTip("0 = auto-detect")
-        form.addRow("Diameter (px):", self._cp_diameter)
-
-        self._cp_gpu = QCheckBox("Use GPU")
-        self._cp_gpu.setChecked(True)
-        form.addRow("", self._cp_gpu)
-
-        self._cp_flow = QDoubleSpinBox()
-        self._cp_flow.setRange(0.0, 10.0)
-        self._cp_flow.setSingleStep(0.1)
-        self._cp_flow.setValue(0.4)
-        form.addRow("Flow threshold:", self._cp_flow)
-
-        self._cp_cellprob = QDoubleSpinBox()
-        self._cp_cellprob.setRange(-10.0, 10.0)
-        self._cp_cellprob.setSingleStep(0.1)
-        self._cp_cellprob.setValue(0.0)
-        form.addRow("Cellprob threshold:", self._cp_cellprob)
-
-        self._cp_min_size = QSpinBox()
-        self._cp_min_size.setRange(0, 100000)
-        self._cp_min_size.setValue(15)
-        form.addRow("Min cell size (px):", self._cp_min_size)
-
-        # ImageJ-style Enhance Contrast applied to the segmentation
-        # channel before Cellpose runs. Same operation the seg-QC
-        # Modify Channel group exposes interactively. 1.0% mirrors
-        # the QC default; set to 0 to disable.
-        self._cp_saturation = QDoubleSpinBox()
-        self._cp_saturation.setRange(0.0, 50.0)
-        self._cp_saturation.setSingleStep(0.5)
-        self._cp_saturation.setDecimals(1)
-        self._cp_saturation.setValue(1.0)
-        self._cp_saturation.setSuffix(" %")
-        self._cp_saturation.setToolTip(
-            "Saturation % applied as an ImageJ-style Enhance Contrast "
-            "LUT to the segmentation channel before Cellpose runs. "
-            "1% saturates the brightest 1% of pixels to dtype-max so "
-            "Cellpose's percentile normalization isn't skewed by hot "
-            "pixels or speck outliers. Set to 0 to disable. The "
-            "on-disk /intensity is never modified."
+        # The seven inference controls (Model, Diameter, GPU, Flow, Cellprob,
+        # Min size, Saturation) plus the Gaussian-blur Sigma row live in the
+        # shared CellposeSettingsForm so this dialog and the Segment panel
+        # cannot drift. Seed the diameter at 300 to preserve this dialog's
+        # historical default. The surface-specific rows (seg-channel above;
+        # seg-name and edge-mode/margin below) stay here.
+        self._cp_form = CellposeSettingsForm(
+            initial=CellposeSettings(diameter=300.0)
         )
-        form.addRow("Saturation:", self._cp_saturation)
+        form.addRow(self._cp_form)
 
         # Segmentation-layer name (was hardcoded as "cellpose_qc" before
         # this evolution; now configurable so a researcher can keep
@@ -1752,17 +1709,9 @@ class WorkflowConfigDialog(QDialog):
             self._warn(str(e))
             return None
 
-        # Cellpose settings.
+        # Cellpose settings — read from the shared form.
         try:
-            cellpose = CellposeSettings(
-                model=self._cp_model.currentText(),
-                diameter=float(self._cp_diameter.value()),
-                gpu=self._cp_gpu.isChecked(),
-                flow_threshold=float(self._cp_flow.value()),
-                cellprob_threshold=float(self._cp_cellprob.value()),
-                min_size=int(self._cp_min_size.value()),
-                saturation_pct=float(self._cp_saturation.value()),
-            )
+            cellpose = self._cp_form.settings()
         except ValueError as e:
             self._warn(f"Cellpose settings invalid: {e}")
             return None

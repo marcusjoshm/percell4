@@ -154,11 +154,34 @@ def test_remove_selected_dataset(dialog, h5_ds1, h5_ds2):
 
 
 def test_cellpose_defaults(dialog):
-    assert dialog._cp_model.currentText() == "cpsam"
-    assert dialog._cp_diameter.value() == 300.0
-    assert dialog._cp_gpu.isChecked() is True
-    assert dialog._cp_min_size.value() == 15
+    # Inference controls now live in the shared CellposeSettingsForm.
+    s = dialog._cp_form.settings()
+    assert s.model == "cpsam"
+    assert s.diameter == 300.0
+    assert s.gpu is True
+    assert s.min_size == 15
+    assert s.saturation_pct == 1.0
+    assert s.blur_sigma == 0.0
+    # Surface-specific naming control stays on the dialog.
     assert dialog._cp_seg_name.text() == "cp_mask"
+
+
+def test_cellpose_default_config_unchanged_by_extraction(dialog):
+    """Characterization (R6): default form state builds the historical
+    CellposeSettings plus the new blur_sigma=0.0 (which keeps batch runs
+    byte-identical)."""
+    from percell4.workflows.models import CellposeSettings
+
+    assert dialog._cp_form.settings() == CellposeSettings(
+        model="cpsam",
+        diameter=300.0,
+        gpu=True,
+        flow_threshold=0.4,
+        cellprob_threshold=0.0,
+        min_size=15,
+        saturation_pct=1.0,
+        blur_sigma=0.0,
+    )
 
 
 # ── Rounds table ────────────────────────────────────────────────────────

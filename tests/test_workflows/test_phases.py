@@ -177,7 +177,7 @@ def test_segment_one_applies_saturation_lut_when_pct_positive(
     captured: dict = {}
 
     def fake_run(plane, *a, **kw):  # noqa: ARG001
-        captured["plane"] = np.asarray(plane, copy=True)
+        captured["plane"] = np.array(plane, copy=True)
         return _fake_cellpose_labels_with_edges()
 
     monkeypatch.setattr(phases, "run_cellpose", fake_run)
@@ -199,11 +199,60 @@ def test_segment_one_skips_lut_when_saturation_pct_zero(
     captured: dict = {}
 
     def fake_run(plane, *a, **kw):  # noqa: ARG001
-        captured["plane"] = np.asarray(plane, copy=True)
+        captured["plane"] = np.array(plane, copy=True)
         return _fake_cellpose_labels_with_edges()
 
     monkeypatch.setattr(phases, "run_cellpose", fake_run)
     cfg = CellposeSettings(min_size=5, saturation_pct=0.0)
+
+    segment_one(fixture_store_50px, cfg)
+
+    raw = fixture_store_50px.read_channel("intensity", 0)
+    assert np.array_equal(captured["plane"], raw)
+
+
+def test_segment_one_applies_gaussian_blur_after_saturation(
+    fixture_store_50px, monkeypatch
+):
+    """blur_sigma > 0 → segment_one feeds run_cellpose the
+    saturation-LUT-then-Gaussian-blur output, in that order."""
+    from percell4.domain.segmentation.preprocess import (
+        apply_gaussian_blur,
+        apply_saturation_lut,
+    )
+    from percell4.workflows import phases
+
+    captured: dict = {}
+
+    def fake_run(plane, *a, **kw):  # noqa: ARG001
+        captured["plane"] = np.array(plane, copy=True)
+        return _fake_cellpose_labels_with_edges()
+
+    monkeypatch.setattr(phases, "run_cellpose", fake_run)
+    cfg = CellposeSettings(min_size=5, saturation_pct=1.0, blur_sigma=1.5)
+
+    segment_one(fixture_store_50px, cfg)
+
+    raw = fixture_store_50px.read_channel("intensity", 0)
+    expected = apply_gaussian_blur(apply_saturation_lut(raw, 1.0), 1.5)
+    assert np.array_equal(captured["plane"], expected)
+
+
+def test_segment_one_skips_blur_when_sigma_zero(
+    fixture_store_50px, monkeypatch
+):
+    """blur_sigma == 0 → no blur; the saturated (here raw) channel passes
+    through unchanged."""
+    from percell4.workflows import phases
+
+    captured: dict = {}
+
+    def fake_run(plane, *a, **kw):  # noqa: ARG001
+        captured["plane"] = np.array(plane, copy=True)
+        return _fake_cellpose_labels_with_edges()
+
+    monkeypatch.setattr(phases, "run_cellpose", fake_run)
+    cfg = CellposeSettings(min_size=5, saturation_pct=0.0, blur_sigma=0.0)
 
     segment_one(fixture_store_50px, cfg)
 
