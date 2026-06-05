@@ -532,8 +532,33 @@ class AddLayerDialog(QDialog):
         try:
             import tifffile
 
-            from percell4.domain.io.assembler import assemble_tiles
+            from collections import defaultdict
+
+            from percell4.domain.io.assembler import (
+                assemble_tiles,
+                stack_timepoints,
+            )
             from percell4.domain.io.scanner import FileScanner
+            from percell4.domain.io.timepoints import ordered_timepoint_tokens
+
+            def _stitch_plane(plane_files: list) -> np.ndarray:
+                """Stitch one timepoint's tiles into a 2D plane (today's logic)."""
+                tile_groups: dict[int, np.ndarray] = {}
+                for f in plane_files:
+                    tile_idx = int(f.tokens.get("tile", "0"))
+                    img = tifffile.imread(str(f.path))
+                    if img.ndim > 2:
+                        img = img[0] if img.ndim == 3 else img[0, 0]
+                    tile_groups[tile_idx] = img
+                if tile_config and len(tile_groups) > 1:
+                    return assemble_tiles(
+                        tile_groups,
+                        grid_rows=tile_config.grid_rows,
+                        grid_cols=tile_config.grid_cols,
+                        grid_type=tile_config.grid_type,
+                        order=tile_config.order,
+                    )
+                return next(iter(tile_groups.values()))
 
             imported_count = 0
             for ds in self._batch_datasets:
@@ -548,7 +573,6 @@ class AddLayerDialog(QDialog):
                     scan = scanner.scan(path=ds.source_dir)
 
                 # Group by channel
-                from collections import defaultdict
                 by_channel: dict[str, list] = defaultdict(list)
                 for f in scan.files:
                     ch = f.tokens.get("channel", "")
@@ -561,25 +585,24 @@ class AddLayerDialog(QDialog):
                     files = by_channel[ch_id]
                     name, layer_type = selected[ch_id]
 
-                    # Group by tile, load and stitch
-                    tile_groups: dict[int, np.ndarray] = {}
+                    # Group this channel's files by timepoint token, then
+                    # assemble one stitched plane per timepoint and stack on a
+                    # leading T axis. A single (or absent) timepoint collapses
+                    # to one 2D plane -- byte-identical to the old behavior.
+                    tp_groups: dict[str, list] = defaultdict(list)
                     for f in files:
-                        tile_idx = int(f.tokens.get("tile", "0"))
-                        img = tifffile.imread(str(f.path))
-                        if img.ndim > 2:
-                            img = img[0] if img.ndim == 3 else img[0, 0]
-                        tile_groups[tile_idx] = img
+                        tp_groups[f.tokens.get("timepoint", "")].append(f)
+                    # Only real (non-empty) _t tokens drive stacking; token-less
+                    # files share the "" key and stay a single plane (matching
+                    # the importer, which gates on count_timepoints > 1).
+                    real_tokens = [t for t in tp_groups if t != ""]
 
-                    if tile_config and len(tile_groups) > 1:
-                        array = assemble_tiles(
-                            tile_groups,
-                            grid_rows=tile_config.grid_rows,
-                            grid_cols=tile_config.grid_cols,
-                            grid_type=tile_config.grid_type,
-                            order=tile_config.order,
-                        )
+                    if len(real_tokens) > 1:
+                        tp_tokens = ordered_timepoint_tokens(real_tokens)
+                        planes = [_stitch_plane(tp_groups[tp]) for tp in tp_tokens]
+                        array = stack_timepoints(planes)
                     else:
-                        array = next(iter(tile_groups.values()))
+                        array = _stitch_plane(files)
 
                     self._write_layer(name, layer_type, array)
                     imported_count += 1

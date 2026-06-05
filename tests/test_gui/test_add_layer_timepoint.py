@@ -173,3 +173,73 @@ def test_add_channel_does_not_reproduce_old_corruption(tmp_h5):
     # Leading axis stays the time axis; it did not grow to 5 under a 'C' label.
     assert dims[0] == "T"
     assert stacked.shape[0] == 4
+
+
+# ── Batch tab: timepoint grouping + stacking (U6) ─────────────
+
+
+def test_batch_groups_by_timepoint_and_stacks(tmp_path):
+    """The batch Discover-TIFFs path groups a channel's files by timepoint and
+    stacks them into (T,H,W) -- the fix for collapsing every timepoint to one
+    plane. Exercises the canonical scan -> group -> stack composition the loop
+    delegates to, with real TIFF I/O."""
+    import tifffile
+    from collections import defaultdict
+
+    from percell4.domain.io.assembler import stack_timepoints
+    from percell4.domain.io.models import TokenConfig
+    from percell4.domain.io.scanner import FileScanner
+    from percell4.domain.io.timepoints import ordered_timepoint_tokens
+
+    src = tmp_path / "movie"
+    src.mkdir()
+    # 3 timepoints x 2 channels; encode (t, c) in the pixel value.
+    for t in range(3):
+        for c in range(2):
+            arr = np.full((8, 8), t * 10 + c, dtype=np.uint16)
+            tifffile.imwrite(src / f"a_t0{t}_ch0{c}.tif", arr)
+
+    scan = FileScanner(TokenConfig()).scan(path=str(src))
+
+    by_channel: dict[str, list] = defaultdict(list)
+    for f in scan.files:
+        by_channel[f.tokens.get("channel", "")].append(f)
+    assert set(by_channel) == {"00", "01"}
+
+    # Channel "01" must stack its 3 timepoints, not collapse to one plane.
+    files = by_channel["01"]
+    tp_groups: dict[str, list] = defaultdict(list)
+    for f in files:
+        tp_groups[f.tokens.get("timepoint", "")].append(f)
+    tp_tokens = ordered_timepoint_tokens(tp_groups.keys())
+    assert tp_tokens == ["00", "01", "02"]
+
+    planes = [tifffile.imread(str(tp_groups[tp][0].path)) for tp in tp_tokens]
+    stacked = stack_timepoints(planes)
+    assert stacked.shape == (3, 8, 8)
+    for t in range(3):
+        assert np.all(stacked[t] == t * 10 + 1)  # channel 1
+
+
+def test_batch_single_timepoint_stays_2d(tmp_path):
+    """A flat single-timepoint folder yields one 2D plane per channel (no T
+    axis), byte-identical to the old behavior."""
+    import tifffile
+    from collections import defaultdict
+
+    from percell4.domain.io.models import TokenConfig
+    from percell4.domain.io.scanner import FileScanner
+
+    src = tmp_path / "still"
+    src.mkdir()
+    tifffile.imwrite(src / "a_ch00.tif", np.ones((8, 8), dtype=np.uint16))
+
+    scan = FileScanner(TokenConfig()).scan(path=str(src))
+    files = [f for f in scan.files if f.tokens.get("channel") == "00"]
+    tp_groups: dict[str, list] = defaultdict(list)
+    for f in files:
+        tp_groups[f.tokens.get("timepoint", "")].append(f)
+    # No _t token -> only the empty-string key -> no real tokens -> no stacking
+    # (the loop must NOT call ordered_timepoint_tokens on the "" token).
+    real_tokens = [t for t in tp_groups if t != ""]
+    assert real_tokens == []

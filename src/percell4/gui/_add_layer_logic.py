@@ -77,6 +77,11 @@ def build_added_channel_intensity(
     new_array = np.asarray(new_array, dtype=np.float32)
 
     if n_timepoints <= 1:
+        if new_array.ndim != 2:
+            raise ValueError(
+                f"cannot add a {new_array.ndim}D channel to a single-timepoint "
+                "dataset; the source carries a time/extra axis the target lacks."
+            )
         if existing is None:
             return new_array, ["H", "W"]
         existing = np.asarray(existing, dtype=np.float32)
