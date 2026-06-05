@@ -438,6 +438,7 @@ class PhasorMasksDialog(QDialog):
         """Add datasets to the queue (deduped by resolved path)."""
         assert self._dataset_list is not None
         existing = {pd.h5_path for pd in self._pending_datasets}
+        skipped_timelapse: list[str] = []
         for path in paths:
             try:
                 resolved = path.resolve()
@@ -455,10 +456,17 @@ class PhasorMasksDialog(QDialog):
                 decay_channels = [
                     _normalize_channel_name(n) for n in store.list_groups("decay")
                 ]
+                n_timepoints = int(meta.get("n_timepoints", 1) or 1)
             except Exception:
                 logger.exception(
                     "phasor-masks dialog: failed to read %s", resolved
                 )
+                continue
+            if n_timepoints > 1:
+                # Time-lapse FLIM is not supported (/decay has no acquisition-T
+                # axis); skip discoverably instead of silently producing a
+                # time-invariant phasor mask. Full time-lapse FLIM is deferred.
+                skipped_timelapse.append(resolved.name)
                 continue
             self._pending_datasets.append(
                 _PendingDataset(
@@ -468,6 +476,15 @@ class PhasorMasksDialog(QDialog):
                 )
             )
             existing.add(resolved)
+
+        if skipped_timelapse:
+            QMessageBox.information(
+                self,
+                "Time-lapse FLIM not supported",
+                "Skipped time-lapse dataset(s) — /decay has no acquisition-time "
+                "axis, so phasor masks on time-lapse FLIM are not yet supported:"
+                "\n\n" + "\n".join(skipped_timelapse),
+            )
 
         self._refresh_dataset_list()
         self._refresh_channel_picker()

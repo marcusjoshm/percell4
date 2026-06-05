@@ -63,10 +63,13 @@ class FakeRepo:
     def read_channel_images(self, handle, view_bin=1):
         return self.channel_images
 
-    def read_labels(self, handle, name, view_bin=1):
+    def read_labels(self, handle, name, view_bin=1, timepoint=None):
         if name not in self.labels:
             raise KeyError(f"Labels not found: {name}")
-        return self.labels[name]
+        labels = self.labels[name]
+        if timepoint is not None and labels.ndim == 3:
+            return labels[timepoint]
+        return labels
 
     def list_labels(self, handle):
         return list(self.labels.keys())

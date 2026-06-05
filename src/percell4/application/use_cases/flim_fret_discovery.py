@@ -86,21 +86,23 @@ def _evaluate_candidate(path: Path, *, single_cell: bool) -> DatasetCandidate:
 
 
 def _intensity_is_time_lapse(path: Path) -> bool:
-    """Inspect ``/intensity``'s rank without loading the array.
+    """Inspect ``/intensity`` without loading the array.
 
-    Time-lapse data is stored as ``(T, C, H, W)`` (4D). Single-timepoint
-    data is ``(C, H, W)`` or ``(H, W)``. Anything 4D or higher is
-    rejected.
+    The authoritative time-axis discriminator is the ``dims`` attribute (a
+    leading ``'T'``), per the time-handling contract — a single-channel
+    ``(T, H, W)`` movie is only 3D, so a bare ``ndim >= 4`` check would miss it.
+    Falls back to ``ndim >= 4`` for legacy files written without a ``dims`` attr.
 
     Opens the file directly with ``h5py`` to avoid pulling the full
-    array through :meth:`DatasetStore.read_array`. Matches the
-    lightweight-inspect pattern at
-    ``gui/batch_tcspc_dialog.py:_read_store_summary``.
+    array through :meth:`DatasetStore.read_array`.
     """
     with h5py.File(path, "r") as f:
         ds = f.get("intensity")
         if ds is None:
             return False
+        dims = ds.attrs.get("dims")
+        if dims is not None and len(dims) > 0:
+            return str(dims[0]) == "T"
         return ds.ndim >= 4
 
 

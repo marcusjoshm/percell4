@@ -126,6 +126,23 @@ def add_decay_to_dataset(
             errors={"intensity": "no /intensity channels in dataset (channel_names empty)"}
         )
 
+    # Time-lapse FLIM guard (U20): /decay has no acquisition-time axis, so
+    # appending TCSPC decay to a multi-timepoint dataset would silently stitch a
+    # single volume that mis-aligns with the time-stacked intensity. Surface the
+    # limitation instead of collapsing it. Full time-lapse FLIM is deferred.
+    n_timepoints = int(metadata.get("n_timepoints", 1) or 1)
+    if n_timepoints > 1:
+        return AppendReport(
+            errors={
+                "decay": (
+                    f"Time-lapse FLIM is not yet supported: this dataset has "
+                    f"{n_timepoints} timepoints and /decay has no acquisition-time "
+                    "axis. Appending TCSPC .bin decay to a time-lapse dataset is "
+                    "deferred."
+                )
+            }
+        )
+
     # Build IntensityChannel records — caller-supplied list (from the
     # dialog's per-channel token overrides) wins over digit-suffix
     # derivation. Required when channels have semantic names like

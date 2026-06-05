@@ -176,12 +176,25 @@ class RunPhasorGMM:
             )
         intensity = decay.sum(axis=-1, dtype=np.float64).astype(np.float32)
 
+        # The phasor (g, s) and decay-derived intensity are 2D (/decay has no
+        # acquisition-T axis). On a time-lapse dataset the labels/mask resources
+        # may be (T,H,W); read them at the active timepoint so the raveled
+        # labels/mask align with the 2D g/s/intensity instead of mismatching
+        # T*H*W vs H*W (the boolean-index crash). Single-timepoint passes
+        # timepoint=None -> today's behavior. (Full time-lapse FLIM is deferred:
+        # /decay would need an acquisition-T axis.)
+        tp = (
+            self._session.active_timepoint
+            if self._session.n_timepoints > 1
+            else None
+        )
+
         # ── Read mask (optional, only when filter is engaged) ────
         mask_array: NDArray[np.uint8] | None = None
         if mask_filter_active and self._session.active_mask is not None:
             try:
                 mask_array = self._repo.read_mask(
-                    handle, self._session.active_mask, view_bin=view_bin
+                    handle, self._session.active_mask, view_bin=view_bin, timepoint=tp
                 )
             except (KeyError, ValueError, OSError):
                 mask_array = None  # silent bypass — pure helper handles None
@@ -195,7 +208,9 @@ class RunPhasorGMM:
         seg_name = self._session.active_segmentation
         if seg_name:
             try:
-                labels_array = self._repo.read_labels(handle, seg_name)
+                labels_array = self._repo.read_labels(
+                    handle, seg_name, view_bin=view_bin, timepoint=tp
+                )
             except (KeyError, ValueError, OSError):
                 labels_array = None
 
