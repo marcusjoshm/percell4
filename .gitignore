@@ -66,3 +66,6 @@ scripts/claude_code_hooks/
 # Scratch SVG exports at repo root (analysis runs).
 # docs/**/*.svg and src/**/*.svg remain trackable.
 /*.svg
+
+# Separate Tauri/Node desktop-app project living in the repo dir (incl. node_modules).
+/desktop/
