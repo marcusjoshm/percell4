@@ -326,19 +326,31 @@ class DatasetStore:
         return self.read_array(f"decay/{channel}", view_bin=view_bin)
 
     def read_channel(
-        self, hdf5_path: str, channel_idx: int, view_bin: int = 1
+        self,
+        hdf5_path: str,
+        channel_idx: int,
+        view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray:
-        """Read a single channel plane from a 2D or 3D array.
+        """Read a single channel plane from a 2D, 3D, or time-stacked array.
 
         For 2D arrays, ``channel_idx`` must be 0 and the full array is returned.
         For 3D ``(C, H, W)`` arrays, returns only ``array[channel_idx]`` without
         loading the other channels — useful for phases that only need one channel
         on each dataset.
 
+        On a **time-stacked** array (leading ``dims[0] == 'T'``), ``timepoint``
+        is **required**: the frame is sliced first, then ``channel_idx`` is
+        indexed on the resulting ``(H, W)`` (from ``(T, H, W)``) or ``(C, H, W)``
+        (from ``(T, C, H, W)``) slice. This is the canonical fix for the old
+        behavior that treated a leading ``T`` axis as channels — returning frame
+        0 on ``(T, H, W)`` or raising "got 4D" on ``(T, C, H, W)``. Passing
+        ``timepoint`` on a non-time-stacked array is ignored, so 2D / ``(C,H,W)``
+        reads stay byte-identical.
+
         ``view_bin`` follows the same rule as :meth:`read_array`. Only
         ``/intensity`` paths are expected here, so the downsampler is
-        ``sum_bin_2d`` regardless of the leading 2D-vs-3D shape (the slice
-        is 2D by the time we apply the bin).
+        ``sum_bin_2d`` (the slice is 2D by the time we apply the bin).
         """
         if view_bin < 1:
             raise ValueError(f"view_bin must be >= 1, got {view_bin}")
@@ -347,7 +359,39 @@ class DatasetStore:
             if hdf5_path not in f:
                 raise KeyError(f"Dataset not found: {hdf5_path}")
             ds = f[hdf5_path]
-            if ds.ndim == 2:
+            dims = ds.attrs.get("dims")
+            is_time_stacked = (
+                dims is not None and len(dims) > 0 and str(dims[0]) == "T"
+            )
+            if is_time_stacked:
+                n_t = ds.shape[0]
+                if timepoint is None:
+                    raise ValueError(
+                        f"{hdf5_path} is time-stacked ({n_t} timepoints); "
+                        "read_channel requires an explicit timepoint."
+                    )
+                if not 0 <= timepoint < n_t:
+                    raise IndexError(
+                        f"timepoint={timepoint} out of range [0, {n_t})"
+                    )
+                # (T,H,W) -> (H,W); (T,C,H,W) -> (C,H,W)
+                frame = ds[timepoint]
+                if frame.ndim == 2:
+                    if channel_idx != 0:
+                        raise IndexError(
+                            f"channel_idx={channel_idx} out of range for a "
+                            "single-channel time-stacked array"
+                        )
+                    arr = frame
+                else:
+                    n_channels = frame.shape[0]
+                    if not 0 <= channel_idx < n_channels:
+                        raise IndexError(
+                            f"channel_idx={channel_idx} out of range "
+                            f"[0, {n_channels})"
+                        )
+                    arr = frame[channel_idx]
+            elif ds.ndim == 2:
                 if channel_idx != 0:
                     raise IndexError(
                         f"channel_idx={channel_idx} out of range for 2D array"

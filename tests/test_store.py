@@ -661,6 +661,66 @@ def test_time_stacked_intensity_view_bin_per_frame(store):
     assert binned[0, 0, 0, 0] == 4.0
 
 
+# ── read_channel: time-aware (U1) ─────────────────────────────
+
+
+def test_read_channel_time_stacked_tchw(store):
+    """read_channel on (T,C,H,W) slices the timepoint THEN the channel -> (H,W)."""
+    # Distinct value per (t, c) so a wrong axis read is detectable.
+    intensity = np.zeros((3, 2, 4, 4), dtype=np.float32)
+    for t in range(3):
+        for c in range(2):
+            intensity[t, c] = t * 10 + c
+    store.write_array("intensity", intensity, attrs={"dims": ["T", "C", "H", "W"]})
+
+    out = store.read_channel("intensity", 1, timepoint=2)
+    assert out.shape == (4, 4)
+    assert np.all(out == 21)  # t=2, c=1
+
+
+def test_read_channel_time_stacked_thw_single_channel(store):
+    """read_channel on (T,H,W) returns the timepoint's (H,W); channel must be 0."""
+    intensity = np.zeros((3, 4, 4), dtype=np.float32)
+    intensity[1] = 7.0
+    store.write_array("intensity", intensity, attrs={"dims": ["T", "H", "W"]})
+
+    out = store.read_channel("intensity", 0, timepoint=1)
+    assert out.shape == (4, 4)
+    assert np.all(out == 7.0)
+
+    with pytest.raises(IndexError, match="single-channel time-stacked"):
+        store.read_channel("intensity", 1, timepoint=1)
+
+
+def test_read_channel_time_stacked_requires_timepoint(store):
+    """Calling read_channel on a time-stacked array with no timepoint raises
+    a clear error rather than silently returning frame 0 (the old bug)."""
+    intensity = np.zeros((3, 4, 4), dtype=np.float32)
+    store.write_array("intensity", intensity, attrs={"dims": ["T", "H", "W"]})
+    with pytest.raises(ValueError, match="time-stacked"):
+        store.read_channel("intensity", 0)
+
+
+def test_read_channel_time_stacked_timepoint_out_of_range(store):
+    intensity = np.zeros((3, 4, 4), dtype=np.float32)
+    store.write_array("intensity", intensity, attrs={"dims": ["T", "H", "W"]})
+    with pytest.raises(IndexError, match="timepoint=5 out of range"):
+        store.read_channel("intensity", 0, timepoint=5)
+
+
+def test_read_channel_non_time_byte_identical(store):
+    """On a (C,H,W) array, read_channel is unchanged and ignores timepoint."""
+    data = np.zeros((2, 6, 6), dtype=np.float32)
+    data[1] = 3.0
+    store.write_array("intensity", data, attrs={"dims": ["C", "H", "W"]})
+    # No timepoint -> today's behavior.
+    np.testing.assert_array_equal(store.read_channel("intensity", 1), data[1])
+    # Passing timepoint on a non-time-stacked array is ignored.
+    np.testing.assert_array_equal(
+        store.read_channel("intensity", 1, timepoint=0), data[1]
+    )
+
+
 # ── Tracks (lineage tables) (U7) ──────────────────────────────
 
 

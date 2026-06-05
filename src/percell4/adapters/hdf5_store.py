@@ -122,6 +122,18 @@ class Hdf5DatasetRepository:
                 result[name] = arr.astype(np.float32)
         return result
 
+    def read_channel(
+        self,
+        handle: DatasetHandle,
+        path: str,
+        channel_idx: int,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        return self._store(handle).read_channel(
+            path, channel_idx, view_bin=view_bin, timepoint=timepoint
+        )
+
     # ── Segmentation labels ──────────────────────────────────
 
     def read_labels(

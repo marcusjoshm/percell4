@@ -47,6 +47,23 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def read_channel(
+        self,
+        handle: DatasetHandle,
+        path: str,
+        channel_idx: int,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        """Read a single channel plane from a 2D/3D/time-stacked array.
+
+        On a time-stacked array (leading ``dims[0] == 'T'``), ``timepoint`` is
+        required: the frame is sliced first, then ``channel_idx`` is indexed on
+        the resulting plane, returning a 2D ``(H, W)`` array. See
+        :meth:`DatasetStore.read_channel`.
+        """
+        ...
+
     # ── Segmentation labels ──────────────────────────────────
 
     def read_labels(

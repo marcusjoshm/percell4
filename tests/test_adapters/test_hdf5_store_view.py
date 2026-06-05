@@ -90,3 +90,32 @@ def test_read_channel_images_non_timelapse_unchanged(tmp_path):
     imgs = repo.read_channel_images(repo.open(h5))
     assert set(imgs) == {"GFP", "DAPI"}
     assert imgs["GFP"].shape == (8, 8)
+
+
+def test_repo_read_channel_timelapse_slices_frame_then_channel(tmp_path):
+    """repo.read_channel reaches store.read_channel's timepoint param (U1)."""
+    h5 = tmp_path / "movie.h5"
+    intensity = np.zeros((3, 2, 8, 8), dtype=np.float32)
+    for t in range(3):
+        for c in range(2):
+            intensity[t, c] = t * 10 + c
+    _make_dataset(h5, intensity, ["T", "C", "H", "W"], ["GFP", "DAPI"])
+
+    repo = Hdf5DatasetRepository()
+    handle = repo.open(h5)
+    out = repo.read_channel(handle, "intensity", 1, timepoint=2)
+    assert out.shape == (8, 8)
+    assert np.all(out == 21)  # t=2, c=1
+
+
+def test_repo_read_channel_non_timelapse_unchanged(tmp_path):
+    """On (C,H,W), repo.read_channel returns the channel plane as today."""
+    h5 = tmp_path / "still.h5"
+    intensity = np.zeros((2, 8, 8), dtype=np.float32)
+    intensity[1] = 5.0
+    _make_dataset(h5, intensity, ["C", "H", "W"], ["GFP", "DAPI"])
+
+    repo = Hdf5DatasetRepository()
+    out = repo.read_channel(repo.open(h5), "intensity", 1)
+    assert out.shape == (8, 8)
+    assert np.all(out == 5.0)
