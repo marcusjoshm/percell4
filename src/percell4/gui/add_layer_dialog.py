@@ -41,6 +41,11 @@ from percell4.application.use_cases.add_decay_to_dataset import (
     AppendReport,
     add_decay_to_dataset,
 )
+from percell4.gui._add_layer_logic import (
+    build_added_channel_intensity,
+    coerce_added_array,
+    is_time_invariant_add,
+)
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.domain.io.cross_format import (
     IntensityChannel,
@@ -148,11 +153,21 @@ class AddLayerDialog(QDialog):
         try:
             import tifffile
             array = tifffile.imread(path)
-            if array.ndim > 2:
-                array = array[0] if array.ndim == 3 else array[0, 0]
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            # Time-aware coercion: on a time-lapse dataset a multi-frame TIFF is
+            # kept as a (T,H,W) stack (validated against n_timepoints) instead of
+            # being flattened to frame 0; a 2D source is a time-invariant layer.
+            time_invariant = is_time_invariant_add(array, n_timepoints)
+            array = coerce_added_array(array, n_timepoints)
             self._write_layer(name, layer_type, array)
             self._refresh_viewer()
-            self.statusBar_msg(f"Added {layer_type.lower()} '{name}'")
+            if time_invariant:
+                self.statusBar_msg(
+                    f"Added {layer_type.lower()} '{name}' as a time-invariant "
+                    "layer (same plane for every timepoint)"
+                )
+            else:
+                self.statusBar_msg(f"Added {layer_type.lower()} '{name}'")
             self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed:\n{e}")
@@ -718,33 +733,28 @@ class AddLayerDialog(QDialog):
         """Write an array to the store as the specified layer type and
         notify subscribers of the inventory change."""
         if layer_type == "Channel":
-            array = array.astype(np.float32)
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
             try:
                 existing = self._store.read_array("intensity")
-                if existing.ndim == 2:
-                    stacked = np.stack([existing, array], axis=0)
-                else:
-                    stacked = np.concatenate(
-                        [existing, array[np.newaxis]], axis=0
-                    )
-                self._store.write_array(
-                    "intensity", stacked, attrs={"dims": ["C", "H", "W"]},
-                )
-                meta = self._store.metadata
-                names = list(meta.get("channel_names", []))
-                names.append(name)
-                self._store.set_metadata({
-                    "channel_names": names,
-                    "n_channels": len(names),
-                })
             except KeyError:
-                self._store.write_array(
-                    "intensity", array, attrs={"dims": ["H", "W"]},
-                )
-                self._store.set_metadata({
-                    "channel_names": [name],
-                    "n_channels": 1,
-                })
+                existing = None
+            # Time-aware concat: on a time-lapse dataset the new channel is
+            # coerced to (T,H,W) and concatenated on the C axis -> (T,C,H,W),
+            # never along the time axis (the silent-corruption fix).
+            stacked, dims = build_added_channel_intensity(
+                existing, array, n_timepoints
+            )
+            self._store.write_array("intensity", stacked, attrs={"dims": dims})
+            meta = self._store.metadata
+            names = list(meta.get("channel_names", []))
+            names.append(name)
+            self._store.set_metadata({
+                "channel_names": names,
+                "n_channels": len(names),
+            })
+            # U4 caller-side guard: confirm the write kept /intensity's dims
+            # consistent (catches a regressed time-vs-channel mis-stack).
+            self._store.check_intensity_dims_consistency()
             new_channel_names = list(self._store.metadata.get("channel_names", []))
             self._data_model.session.refresh_resource_lists(channel_names=new_channel_names)
         elif layer_type == "Segmentation":
