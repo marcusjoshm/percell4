@@ -1283,11 +1283,25 @@ class LauncherWindow(QMainWindow):
         if viewer_win is None or not viewer_win._is_alive():
             return None
 
+        session = self.data_model.session
+
+        def _slice_active_frame(data) -> np.ndarray:
+            """Return the 2D active-timepoint frame of a (T,H,W) labels layer.
+
+            A 2D (time-invariant) or single-timepoint label is returned as-is.
+            Without this, raveling a whole (T,H,W) stack into the phasor feed
+            mixes frames.
+            """
+            arr = np.asarray(data, dtype=np.int32)
+            if arr.ndim == 3 and session.n_timepoints > 1:
+                return arr[session.active_timepoint]
+            return arr
+
         seg_name = self.data_model.active_segmentation
         if seg_name:
             for layer in viewer_win._viewer.layers:
                 if layer.name == seg_name:
-                    return np.asarray(layer.data, dtype=np.int32)
+                    return _slice_active_frame(layer.data)
 
         # Fallback: find a segmentation labels layer (skip mask layers)
         from percell4.gui.viewer import LAYER_TYPE_MASK, PERCELL_TYPE_KEY
@@ -1298,7 +1312,7 @@ class LauncherWindow(QMainWindow):
                 continue
             if layer.metadata.get(PERCELL_TYPE_KEY) == LAYER_TYPE_MASK:
                 continue
-            return np.asarray(layer.data, dtype=np.int32)
+            return _slice_active_frame(layer.data)
         return None
 
     def _get_phasor_roi_names(self) -> dict[int, str]:

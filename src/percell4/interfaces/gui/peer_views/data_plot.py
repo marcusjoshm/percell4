@@ -22,6 +22,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.interfaces.gui.peer_views._timepoint_view import active_timepoint_view
 
 
 class SelectionViewBox(pg.ViewBox):
@@ -150,6 +151,9 @@ class DataPlotWindow(QMainWindow):
             self._session.subscribe(Event.DATASET_CHANGED, self._on_data_changed),
             self._session.subscribe(Event.FILTER_CHANGED, self._on_filter_changed),
             self._session.subscribe(Event.SELECTION_CHANGED, self._on_selection_changed),
+            self._session.subscribe(
+                Event.ACTIVE_TIMEPOINT_CHANGED, self._on_timepoint_changed
+            ),
         ]
         self._x_combo.currentTextChanged.connect(self._refresh_plot)
         self._y_combo.currentTextChanged.connect(self._refresh_plot)
@@ -170,6 +174,14 @@ class DataPlotWindow(QMainWindow):
     def _on_selection_changed(self) -> None:
         """Handle SELECTION_CHANGED — update highlight scatter only."""
         self._update_selection_highlights()
+
+    def _on_timepoint_changed(self) -> None:
+        """Slider-follows-frame: re-render the scatter for the active timepoint.
+
+        No-op when the measurements have no ``timepoint`` column (single-t).
+        """
+        if "timepoint" in self._session.df.columns:
+            self._refresh_plot()
 
     def _rebuild_dropdowns(self) -> None:
         """Populate X/Y column dropdowns from current DataFrame.
@@ -254,9 +266,13 @@ class DataPlotWindow(QMainWindow):
     def _refresh_plot(self) -> None:
         """Redraw the base scatter from current DataFrame and column selections.
 
-        Uses filtered_df for row data, df for column availability.
+        Uses filtered_df for row data, df for column availability. On a
+        time-lapse dataset the scatter shows the active timepoint's points
+        (slider-follows-frame, D8); single-timepoint data shows all points.
         """
-        df = self._session.filtered_df
+        df = active_timepoint_view(
+            self._session.filtered_df, self._session.active_timepoint
+        )
         x_col = self._x_combo.currentText()
         y_col = self._y_combo.currentText()
 
