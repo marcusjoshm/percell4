@@ -71,10 +71,13 @@ class FakeRepo:
     def list_labels(self, handle):
         return list(self.labels.keys())
 
-    def read_mask(self, handle, name, view_bin=1):
+    def read_mask(self, handle, name, view_bin=1, timepoint=None):
         if name not in self.masks:
             raise KeyError(f"Mask not found: {name}")
-        return self.masks[name]
+        mask = self.masks[name]
+        if timepoint is not None and mask.ndim == 3:
+            return mask[timepoint]
+        return mask
 
     def write_mask(self, handle, name, data):
         self.written_masks[name] = data

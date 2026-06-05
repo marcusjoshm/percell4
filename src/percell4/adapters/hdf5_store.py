@@ -162,9 +162,15 @@ class Hdf5DatasetRepository:
     # ── Masks ────────────────────────────────────────────────
 
     def read_mask(
-        self, handle: DatasetHandle, name: str, view_bin: int = 1
+        self,
+        handle: DatasetHandle,
+        name: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.uint8]:
-        return self._store(handle).read_mask(name, view_bin=view_bin)
+        return self._store(handle).read_mask(
+            name, view_bin=view_bin, timepoint=timepoint
+        )
 
     def write_mask(
         self,

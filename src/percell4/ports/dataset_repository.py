@@ -106,10 +106,14 @@ class DatasetRepository(Protocol):
         handle: DatasetHandle,
         name: str,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.uint8]:
         """Read a mask array by name.
 
-        ``view_bin`` downsamples via majority vote.
+        ``view_bin`` downsamples via majority vote. When ``timepoint`` is given,
+        returns that single frame of a time-stacked ``(T, H, W)`` mask; a 2D
+        (time-invariant) mask broadcasts the same plane for every timepoint
+        (mirrors :meth:`read_labels`). See :meth:`DatasetStore.read_mask`.
         """
         ...
 

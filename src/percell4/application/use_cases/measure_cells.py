@@ -116,7 +116,6 @@ class MeasureCells:
         no rows, so per-timepoint counts may legitimately differ.
         """
         n_timepoints = self._session.n_timepoints
-        mask_full = self._read_active_mask(handle, view_bin)
         filter_ids = (
             list(self._session.filter_ids)
             if (self._session.is_filtered and self._session.filter_ids)
@@ -141,11 +140,10 @@ class MeasureCells:
             images_t = self._repo.read_channel_images(
                 handle, view_bin=view_bin, timepoint=t
             )
-            mask_t = (
-                mask_full[t]
-                if (mask_full is not None and mask_full.ndim == 3)
-                else mask_full
-            )
+            # Per-frame mask read (one broadcast policy): read_mask returns the
+            # (H,W) frame of a (T,H,W) mask, or broadcasts a 2D time-invariant
+            # mask. No manual mask_full[t] slice — see store.read_mask (U2).
+            mask_t = self._read_active_mask(handle, view_bin, timepoint=t)
             df_t = self._measure_one(
                 images_t, labels_t, mask_t, metrics, roi_names, view_bin
             )
@@ -160,13 +158,21 @@ class MeasureCells:
         df = pd.concat(frames, ignore_index=True)
         return self._join_lineage(handle, seg_name, df)
 
-    def _read_active_mask(self, handle, view_bin):
-        """Read the active mask (full array), or None when absent/missing."""
+    def _read_active_mask(self, handle, view_bin, timepoint=None):
+        """Read the active mask, or None when absent/missing.
+
+        ``timepoint`` is threaded through to ``read_mask`` so a time-lapse
+        measure reads each frame's mask directly (a 2D time-invariant mask
+        broadcasts; a ``(T,H,W)`` mask slices the frame). The single-timepoint
+        path passes ``timepoint=None`` and gets the whole 2D mask, unchanged.
+        """
         mask_name = self._session.active_mask
         if not mask_name:
             return None
         try:
-            return self._repo.read_mask(handle, mask_name, view_bin=view_bin)
+            return self._repo.read_mask(
+                handle, mask_name, view_bin=view_bin, timepoint=timepoint
+            )
         except KeyError:
             logger.warning("Mask '%s' not found, proceeding without mask", mask_name)
             return None

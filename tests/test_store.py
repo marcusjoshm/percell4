@@ -605,6 +605,26 @@ def test_write_time_stacked_mask(store):
     assert store.read_mask("roi", timepoint=1)[2, 2] == 1
 
 
+def test_read_mask_2d_broadcasts_across_timepoints(store):
+    """A 2D (time-invariant) mask on a time-lapse dataset reads the same (H,W)
+    for every timepoint instead of raising IndexError (U2 — the live crash).
+
+    Mirrors read_labels' 2D-broadcast guard. Whole-field / ROI gates are one
+    constant 2D mask; per-timepoint phases must read them for any t.
+    """
+    _make_timelapse_store(store, t=3, h=8, w=8)
+    flat = np.zeros((8, 8), dtype=np.uint8)  # time-invariant gate
+    flat[4, 4] = 1
+    store.write_mask("gate", flat)
+
+    # Stored shape stays 2D — genuinely time-invariant, not a stack.
+    assert store.read_mask("gate").shape == (8, 8)
+    for t in range(3):
+        frame = store.read_mask("gate", timepoint=t)
+        assert frame.shape == (8, 8)
+        np.testing.assert_array_equal(frame, flat)
+
+
 def test_time_stacked_labels_dims_attr(store):
     """Time-stacked labels are tagged dims=[T,H,W]."""
     _make_timelapse_store(store, t=3, h=8, w=8)

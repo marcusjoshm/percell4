@@ -661,12 +661,20 @@ class DatasetStore:
         downsample via majority vote (>= ceil(k**2 / 2)). When ``timepoint``
         is given, returns only that frame of a time-stacked ``(T, H, W)``
         mask resource.
+
+        A 2D mask on a time-lapse dataset is *time-invariant* (e.g. a whole-field
+        or ROI gate): a per-timepoint read broadcasts it, returning the same
+        ``(H, W)`` frame for every ``timepoint``. This mirrors
+        :meth:`read_labels` — without the broadcast guard a ``timepoint != 0``
+        read of a 2D mask hits ``read_array_frame``'s "not time-stacked" guard
+        and raises ``IndexError``.
         """
+        path = f"masks/{name}"
         if timepoint is None:
-            return self.read_array(f"masks/{name}", view_bin=view_bin)
-        return self.read_array_frame(
-            f"masks/{name}", timepoint, view_bin=view_bin
-        )
+            return self.read_array(path, view_bin=view_bin)
+        if self._is_2d_array(path):
+            return self.read_array(path, view_bin=view_bin)
+        return self.read_array_frame(path, timepoint, view_bin=view_bin)
 
     def list_masks(self) -> list[str]:
         """List all mask names under /masks/."""

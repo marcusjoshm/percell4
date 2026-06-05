@@ -16,10 +16,11 @@ from percell4.domain.dataset import DatasetHandle
 class FakeTimelapseRepo:
     """Repo backed by a (T,H,W) tracked segmentation + per-frame channel."""
 
-    def __init__(self, channel_stack, label_stack, tracks=None):
+    def __init__(self, channel_stack, label_stack, tracks=None, mask=None):
         self._channel = channel_stack  # (T,H,W)
         self._labels = label_stack      # (T,H,W)
         self._tracks = tracks           # DataFrame or None
+        self._mask = mask               # 2D (time-invariant), (T,H,W), or None
         self.written = None
 
     def read_channel_images(self, handle, view_bin=1, timepoint=None):
@@ -31,8 +32,14 @@ class FakeTimelapseRepo:
             return self._labels
         return self._labels[timepoint]
 
-    def read_mask(self, handle, name, view_bin=1):
-        raise KeyError(name)
+    def read_mask(self, handle, name, view_bin=1, timepoint=None):
+        if self._mask is None:
+            raise KeyError(name)
+        # Mirror store.read_mask: a 2D mask broadcasts (same plane every t);
+        # a (T,H,W) mask slices the frame.
+        if timepoint is not None and self._mask.ndim == 3:
+            return self._mask[timepoint]
+        return self._mask
 
     def read_tracks(self, handle, name):
         if self._tracks is None:
@@ -75,6 +82,34 @@ def test_measurement_has_timepoint_column_per_frame():
     assert sorted(df["timepoint"].unique().tolist()) == [0, 1]
     # Two cells per frame x 2 frames = 4 rows.
     assert len(df) == 4
+
+
+def test_timelapse_measure_with_2d_time_invariant_mask():
+    """A 2D time-invariant active mask is read per-frame via the timepoint
+    param (broadcast), not the old whole-array mask_full[t] slice (U2).
+
+    Before U2 this path crashed in production: store.read_mask(timepoint=t!=0)
+    on a 2D mask raised IndexError. Here we assert the measure completes and
+    emits mask-scope columns for every frame.
+    """
+    labels = np.stack([_two_cell_frame(1, 2), _two_cell_frame(1, 2)], axis=0)
+    channel = np.ones((2, 20, 20), dtype=np.float32)
+    gate = np.zeros((20, 20), dtype=np.uint8)
+    gate[4:8, 4:8] = 1  # time-invariant gate over cell 1's region
+    repo = FakeTimelapseRepo(channel, labels, mask=gate)
+    s = _session(2)
+    s.set_active_mask("gate")
+    uc = MeasureCells(repo, s)
+
+    df = uc.execute(metrics=["area"])
+
+    assert "timepoint" in df.columns
+    assert sorted(df["timepoint"].unique().tolist()) == [0, 1]
+    assert len(df) == 4
+    # The mask scope ran for every frame (no crash, columns present).
+    # measure_multichannel prefixes columns with the channel name.
+    assert "GFP_area_mask_inside" in df.columns
+    assert "GFP_area_mask_outside" in df.columns
 
 
 def test_lineage_columns_joined_for_tracked_segmentation():
@@ -145,7 +180,7 @@ def test_single_timepoint_has_no_timepoint_column():
         def read_labels(self, handle, name, view_bin=1, timepoint=None):
             return label_2d
 
-        def read_mask(self, handle, name, view_bin=1):
+        def read_mask(self, handle, name, view_bin=1, timepoint=None):
             raise KeyError(name)
 
         def read_group_columns(self, handle):

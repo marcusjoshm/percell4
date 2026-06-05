@@ -119,3 +119,20 @@ def test_repo_read_channel_non_timelapse_unchanged(tmp_path):
     out = repo.read_channel(repo.open(h5), "intensity", 1)
     assert out.shape == (8, 8)
     assert np.all(out == 5.0)
+
+
+def test_repo_read_mask_2d_broadcasts_per_timepoint(tmp_path):
+    """repo.read_mask threads timepoint to store; a 2D mask broadcasts (U2)."""
+    h5 = tmp_path / "movie.h5"
+    intensity = np.zeros((3, 8, 8), dtype=np.float32)
+    store = _make_dataset(h5, intensity, ["T", "H", "W"], ["GFP"])
+    gate = np.zeros((8, 8), dtype=np.uint8)
+    gate[4, 4] = 1
+    store.write_mask("gate", gate)
+
+    repo = Hdf5DatasetRepository()
+    handle = repo.open(h5)
+    for t in range(3):
+        frame = repo.read_mask(handle, "gate", timepoint=t)
+        assert frame.shape == (8, 8)
+        assert frame[4, 4] == 1
