@@ -188,8 +188,17 @@ class DilutePhaseQueueEntry(QObject):
         try:
             self._store = DatasetStore(self._entry.h5_path)
             channel_idx = _channel_index(self._store, self._dilute_settings.channel)
-            channel_image = self._store.read_channel("intensity", channel_idx)
-            seg_labels = self._store.read_labels(self._seg_name)
+            # The dilute controller is single-frame. On a time-lapse dataset
+            # operate on frame 0 (read_channel requires an explicit timepoint on
+            # a time-stacked array, U1); the dilute mask is stored 2D
+            # (time-invariant). Full per-frame (T,H,W) dilute is a deferred
+            # follow-up (mirror TimelapseThresholdQCQueueEntry).
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            tp = 0 if n_timepoints > 1 else None
+            channel_image = self._store.read_channel(
+                "intensity", channel_idx, timepoint=tp
+            )
+            seg_labels = self._store.read_labels(self._seg_name, timepoint=tp)
         except Exception as e:
             logger.exception(
                 "dilute queue: failed to load %s for dilute phase",

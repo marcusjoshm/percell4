@@ -123,8 +123,12 @@ def test_refresh_before_set_active_mask(handle):
 # ── Edge cases: input validation ─────────────────────────────
 
 
-def test_non_2d_input_raises_and_skips_store_write(session, handle):
-    """1D or 3D input raises ValueError; store.write_mask is not invoked."""
+def test_invalid_rank_raises_and_skips_store_write(session, handle):
+    """1D and 4D input raise ValueError; store.write_mask is not invoked.
+
+    A 3D ``(T, H, W)`` stack is now ACCEPTED (the per-frame dilute mask, U11);
+    the store's ``write_mask`` enforces the per-frame/native-shape invariants.
+    """
     repo = MagicMock()
     uc = AcceptDiluteMask(repo=repo, session=session)
 
@@ -133,10 +137,15 @@ def test_non_2d_input_raises_and_skips_store_write(session, handle):
         uc.execute(handle, "bad", bad_1d)
     assert repo.write_mask.call_count == 0
 
-    bad_3d = np.ones((2, 4, 4), dtype=bool)
+    bad_4d = np.ones((2, 2, 4, 4), dtype=bool)
     with pytest.raises(ValueError):
-        uc.execute(handle, "bad", bad_3d)
+        uc.execute(handle, "bad", bad_4d)
     assert repo.write_mask.call_count == 0
+
+    # 3D (T,H,W) is now valid input -> write_mask IS invoked.
+    good_3d = np.ones((2, 4, 4), dtype=bool)
+    uc.execute(handle, "ok", good_3d, batch_mode=True)
+    assert repo.write_mask.call_count == 1
 
 
 def test_non_boolean_input_raises_and_skips_store_write(session, handle):
@@ -196,3 +205,32 @@ def test_integration_real_repo_and_session(tmp_path):
         assert on_disk.dtype == np.uint8
         assert on_disk.shape == (10, 10)
         np.testing.assert_array_equal(on_disk, mask.astype(np.uint8))
+
+
+def test_integration_thw_dilute_mask_round_trips(tmp_path):
+    """A (T,H,W) dilute mask persists on a time-lapse dataset (U11)."""
+    from percell4.adapters.hdf5_store import Hdf5DatasetRepository
+    from percell4.store import DatasetStore
+
+    h5 = tmp_path / "movie.h5"
+    store = DatasetStore(h5)
+    store.create(metadata={"channel_names": ["GFP"]})
+    store.write_array(
+        "intensity", np.zeros((3, 10, 10), dtype=np.float32),
+        attrs={"dims": ["T", "H", "W"]},
+    )
+
+    handle = DatasetHandle(path=h5, metadata={"n_timepoints": 3})
+    session = Session()
+    session.set_dataset(handle)
+    repo = Hdf5DatasetRepository()
+    uc = AcceptDiluteMask(repo=repo, session=session)
+
+    mask = np.zeros((3, 10, 10), dtype=bool)
+    mask[1, 2:4, 2:4] = True
+    uc.execute(handle, "dilute_thw", mask)
+
+    assert session.active_mask == "dilute_thw"
+    assert store.read_mask("dilute_thw").shape == (3, 10, 10)
+    assert store.read_mask("dilute_thw", timepoint=1)[2, 2] == 1
+    assert store.read_mask("dilute_thw", timepoint=0).sum() == 0

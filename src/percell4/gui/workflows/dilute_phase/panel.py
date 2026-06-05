@@ -427,6 +427,16 @@ class DilutePhaseMaskPanel(QWidget):
             return
         seg_labels = np.asarray(seg_labels, dtype=np.int32)
 
+        # Time-lapse: the dilute controller is single-frame; operate on the
+        # active timepoint (a (T,H,W) channel/labels stack is sliced to the
+        # displayed frame). Full per-frame (T,H,W) dilute is deferred.
+        if self._session.n_timepoints > 1:
+            t = self._session.active_timepoint
+            if channel_image.ndim == 3:
+                channel_image = channel_image[t]
+            if seg_labels.ndim == 3:
+                seg_labels = seg_labels[t]
+
         locked_config = self._settings_widget.current_config()
         mask_name = self._name_edit.text().strip()
         dilation = int(self._dilation_spin.value())

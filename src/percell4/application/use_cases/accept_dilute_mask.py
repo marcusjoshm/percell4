@@ -47,12 +47,14 @@ def write_dilute_mask(
     session refresh + set-active steps).
 
     Raises:
-        ValueError: If ``mask`` is not 2D, or its dtype is not bool.
-            Raised before any store write occurs.
+        ValueError: If ``mask`` is neither 2D ``(H, W)`` nor 3D ``(T, H, W)``,
+            or its dtype is not bool. Raised before any store write occurs.
+            The store's ``write_mask`` enforces the per-frame/native-shape
+            invariants for a ``(T, H, W)`` stack.
     """
-    if mask.ndim != 2:
+    if mask.ndim not in (2, 3):
         raise ValueError(
-            f"dilute mask must be 2D, got {mask.ndim}D"
+            f"dilute mask must be 2D (H,W) or 3D (T,H,W), got {mask.ndim}D"
         )
     if mask.dtype != np.bool_:
         raise ValueError(
