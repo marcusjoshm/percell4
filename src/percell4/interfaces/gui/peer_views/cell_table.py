@@ -23,6 +23,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.interfaces.gui.peer_views._timepoint_view import active_timepoint_view
 
 
 class PandasTableModel(QAbstractTableModel):
@@ -204,6 +205,9 @@ class CellTableWindow(QMainWindow):
             self._session.subscribe(Event.DATASET_CHANGED, self._on_data_changed),
             self._session.subscribe(Event.FILTER_CHANGED, self._on_filter_changed),
             self._session.subscribe(Event.SELECTION_CHANGED, self._on_selection_changed),
+            self._session.subscribe(
+                Event.ACTIVE_TIMEPOINT_CHANGED, self._on_timepoint_changed
+            ),
         ]
         self._table.selectionModel().selectionChanged.connect(
             self._on_table_selection_changed
@@ -230,9 +234,31 @@ class CellTableWindow(QMainWindow):
             return
         self._highlight_selected_rows()
 
+    def _on_timepoint_changed(self) -> None:
+        """Slider-follows-frame: re-slice to the active timepoint's rows.
+
+        Only re-renders when the measurements carry a ``timepoint`` column
+        (time-lapse); single-timepoint data has no column and is a no-op.
+        """
+        if self._is_originator:
+            return
+        if "timepoint" not in self._session.df.columns:
+            return
+        self._reload_table_data()
+        if self._session.is_filtered:
+            self._apply_filter()
+        if self._session.selected_ids:
+            self._highlight_selected_rows()
+
     def _reload_table_data(self) -> None:
-        """Replace the table's DataFrame and update status."""
-        df = self._session.df
+        """Replace the table's DataFrame and update status.
+
+        On a time-lapse dataset the table shows the active timepoint's rows
+        (slider-follows-frame); single-timepoint data shows all rows unchanged.
+        """
+        df = active_timepoint_view(
+            self._session.df, self._session.active_timepoint
+        )
         self._model.set_dataframe(df)
 
         if df.empty:
