@@ -532,6 +532,30 @@ class SegmentationQCController(QObject):
         self._rerun_group = box
         return box
 
+    def _active_frame_index(self) -> int | None:
+        """Displayed timepoint when the dataset is time-lapse, else ``None``.
+
+        The seg-QC editor is single-frame; an in-QC Cellpose Re-run must feed a
+        2D frame, not a ``(T, H, W)`` stack (which Cellpose would mis-read as
+        multichannel). Returns the napari dims slider position on a time-lapse
+        dataset, ``None`` otherwise (single-timepoint — no slicing).
+        """
+        if self._store is None:
+            return None
+        try:
+            nt = int(self._store.metadata.get("n_timepoints", 1) or 1)
+        except Exception:  # noqa: BLE001
+            nt = 1
+        if nt <= 1:
+            return None
+        viewer = self._viewer_win.viewer if self._viewer_win is not None else None
+        if viewer is None:
+            return 0
+        try:
+            return int(viewer.dims.current_step[0])
+        except Exception:  # noqa: BLE001
+            return 0
+
     def _cellpose_input_image(self) -> np.ndarray:
         """Return the image to feed Cellpose for an in-QC Re-run.
 
@@ -545,13 +569,21 @@ class SegmentationQCController(QObject):
         Falls back to ``self._intensity`` when the napari layer
         doesn't exist yet (defensive — start() always installs it
         before the Re-run button can be reached).
+
+        On a time-lapse dataset the ``(T, H, W)`` buffer is sliced to the
+        displayed frame so Cellpose receives a 2D image.
         """
         viewer = self._viewer_win.viewer if self._viewer_win is not None else None
         if viewer is not None and _LAYER_IMAGE in viewer.layers:
-            return np.asarray(viewer.layers[_LAYER_IMAGE].data)
-        if self._intensity is None:
+            data = np.asarray(viewer.layers[_LAYER_IMAGE].data)
+        elif self._intensity is not None:
+            data = np.asarray(self._intensity)
+        else:
             raise RuntimeError("intensity not loaded; QC window not started")
-        return np.asarray(self._intensity)
+        t = self._active_frame_index()
+        if t is not None and data.ndim == 3:
+            data = data[t]
+        return data
 
     def _on_rerun_clicked(self) -> None:
         if self._finished or self._rerun_button is None:
@@ -579,7 +611,11 @@ class SegmentationQCController(QObject):
         new_ch_idx = self._rerun_channel.currentIndex()
         if new_ch_idx != self._channel_idx and new_ch_idx >= 0:
             try:
-                channel_image = self._store.read_channel("intensity", new_ch_idx)
+                # Time-lapse: read the displayed frame (read_channel requires an
+                # explicit timepoint on a time-stacked array, U1).
+                channel_image = self._store.read_channel(
+                    "intensity", new_ch_idx, timepoint=self._active_frame_index()
+                )
             except (KeyError, IndexError, ValueError) as e:
                 self._set_rerun_status(f"channel read failed: {e}")
                 return

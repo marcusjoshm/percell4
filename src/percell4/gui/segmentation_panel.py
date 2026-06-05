@@ -40,6 +40,18 @@ logger = logging.getLogger(__name__)
 _PAINT_AUTOSAVE_DEBOUNCE_MS = 200
 
 
+def empty_labels_array(shape, n_timepoints: int) -> np.ndarray:
+    """Allocate an empty int32 labels canvas for Create Empty Labels.
+
+    ``(H, W)`` on a single-timepoint dataset; ``(T, H, W)`` on a time-lapse
+    dataset (``n_timepoints > 1``) so the user can draw per frame and the
+    time-aware edit handlers engage. Pure (no Qt). ``shape`` is ``(H, W)``.
+    """
+    if n_timepoints > 1:
+        return np.zeros((n_timepoints, *tuple(shape)), dtype=np.int32)
+    return np.zeros(tuple(shape), dtype=np.int32)
+
+
 class SegmentationPanel(QWidget):
     """Panel for cell segmentation with multiple methods.
 
@@ -654,7 +666,12 @@ class SegmentationPanel(QWidget):
         if shape is None:
             self._show_status("Load an image first")
             return
-        labels = np.zeros(shape, dtype=np.int32)
+        # Time-lapse: allocate a (T,H,W) canvas (T from session.n_timepoints, the
+        # canonical source) so per-frame drawing works and the already
+        # time-aware edit handlers (delete/relabel/cleanup) engage. A 2D zeros
+        # array would be stored as a time-invariant gate and could not be edited
+        # per frame.
+        labels = empty_labels_array(shape, self.data_model.session.n_timepoints)
         viewer_win.add_labels(labels, name="manual")
         self.data_model.set_active_segmentation("manual")
         # Persist immediately so the labels/manual entry exists in HDF5
