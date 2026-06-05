@@ -19,6 +19,7 @@ from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -118,9 +119,7 @@ def test_segment_one_writes_cellpose_qc(fixture_store):
 
     cfg = CellposeSettings(diameter=8.0, gpu=True, min_size=5)
     model = build_cellpose_model(gpu=True)
-    labels, failure, msg = segment_one(
-        fixture_store, cfg, cellpose_model=model, channel_idx=0
-    )
+    labels, failure, msg = segment_one(fixture_store, cfg, cellpose_model=model, channel_idx=0)
     # With tiny synthetic squares and tiny diameter, Cellpose may or may
     # not find them. Either way the dataset is no longer marked failed;
     # an empty result is now a recoverable case that writes empty
@@ -142,9 +141,7 @@ def test_segment_one_empty_cellpose_writes_empty_labels_and_succeeds(
     """
     from percell4.workflows import phases
 
-    monkeypatch.setattr(
-        phases, "run_cellpose", lambda *a, **kw: np.zeros((50, 50), dtype=np.int32)
-    )
+    monkeypatch.setattr(phases, "run_cellpose", lambda *a, **kw: np.zeros((50, 50), dtype=np.int32))
     cfg = CellposeSettings(min_size=5)
 
     labels, failure, msg = segment_one(fixture_store_50px, cfg)
@@ -162,9 +159,7 @@ def test_segment_one_empty_cellpose_writes_empty_labels_and_succeeds(
     assert "manual" in msg.lower() or "draw" in msg.lower()
 
 
-def test_segment_one_applies_saturation_lut_when_pct_positive(
-    fixture_store_50px, monkeypatch
-):
+def test_segment_one_applies_saturation_lut_when_pct_positive(fixture_store_50px, monkeypatch):
     """segment_one preprocesses the seg channel with the saturation LUT
     when CellposeSettings.saturation_pct > 0.
 
@@ -190,9 +185,7 @@ def test_segment_one_applies_saturation_lut_when_pct_positive(
     assert np.array_equal(captured["plane"], expected)
 
 
-def test_segment_one_skips_lut_when_saturation_pct_zero(
-    fixture_store_50px, monkeypatch
-):
+def test_segment_one_skips_lut_when_saturation_pct_zero(fixture_store_50px, monkeypatch):
     """saturation_pct == 0 → segment_one passes the raw channel."""
     from percell4.workflows import phases
 
@@ -298,21 +291,15 @@ def fixture_store_50px(tmp_path: Path) -> DatasetStore:
     return _make_fixture_h5(tmp_path / "edge_ds.h5", n_cells=4, size=50)
 
 
-def test_segment_one_exclude_mode_removes_edge_cells(
-    fixture_store_50px, monkeypatch
-):
+def test_segment_one_exclude_mode_removes_edge_cells(fixture_store_50px, monkeypatch):
     """Default EXCLUDE mode preserves today's filter-edge invariant."""
     from percell4.workflows import phases
     from percell4.workflows.models import EdgeMode
 
-    monkeypatch.setattr(
-        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
-    )
+    monkeypatch.setattr(phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges())
     cfg = CellposeSettings(min_size=5)
 
-    labels, failure, _msg = segment_one(
-        fixture_store_50px, cfg, edge_mode=EdgeMode.EXCLUDE
-    )
+    labels, failure, _msg = segment_one(fixture_store_50px, cfg, edge_mode=EdgeMode.EXCLUDE)
 
     assert failure is None
     # Cells 1 and 4 (edge-touching) were removed; cells 2 and 3 survive
@@ -321,16 +308,12 @@ def test_segment_one_exclude_mode_removes_edge_cells(
     assert len(unique) == 2  # exactly 2 cells remain
 
 
-def test_segment_one_include_normal_keeps_edge_cells(
-    fixture_store_50px, monkeypatch
-):
+def test_segment_one_include_normal_keeps_edge_cells(fixture_store_50px, monkeypatch):
     """INCLUDE_AS_NORMAL mode keeps edge cells in labels."""
     from percell4.workflows import phases
     from percell4.workflows.models import EdgeMode
 
-    monkeypatch.setattr(
-        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
-    )
+    monkeypatch.setattr(phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges())
     cfg = CellposeSettings(min_size=5)
 
     labels, failure, _msg = segment_one(
@@ -343,9 +326,7 @@ def test_segment_one_include_normal_keeps_edge_cells(
     assert len(unique) == 4
 
 
-def test_segment_one_size_normalized_cohort_keeps_edge_cells(
-    fixture_store_50px, monkeypatch
-):
+def test_segment_one_size_normalized_cohort_keeps_edge_cells(fixture_store_50px, monkeypatch):
     """INCLUDE_AS_SIZE_NORMALIZED_COHORT mode also keeps edge cells in Phase 1.
 
     The cohort treatment is a measure-time concern (U4), not a Phase 1
@@ -354,9 +335,7 @@ def test_segment_one_size_normalized_cohort_keeps_edge_cells(
     from percell4.workflows import phases
     from percell4.workflows.models import EdgeMode
 
-    monkeypatch.setattr(
-        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
-    )
+    monkeypatch.setattr(phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges())
     cfg = CellposeSettings(min_size=5)
 
     labels, failure, _msg = segment_one(
@@ -370,15 +349,11 @@ def test_segment_one_size_normalized_cohort_keeps_edge_cells(
     assert len(unique) == 4
 
 
-def test_segment_one_default_edge_mode_is_exclude(
-    fixture_store_50px, monkeypatch
-):
+def test_segment_one_default_edge_mode_is_exclude(fixture_store_50px, monkeypatch):
     """Calling segment_one without edge_mode preserves the today's-behavior default."""
     from percell4.workflows import phases
 
-    monkeypatch.setattr(
-        phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges()
-    )
+    monkeypatch.setattr(phases, "run_cellpose", lambda *a, **kw: _fake_cellpose_labels_with_edges())
     cfg = CellposeSettings(min_size=5)
 
     # No edge_mode kwarg — default EXCLUDE
@@ -401,17 +376,11 @@ def test_segment_one_include_normal_with_no_edge_cells_matches_exclude(
     interior_labels[10:20, 10:20] = 1
     interior_labels[30:40, 30:40] = 2
 
-    monkeypatch.setattr(
-        phases, "run_cellpose", lambda *a, **kw: interior_labels.copy()
-    )
+    monkeypatch.setattr(phases, "run_cellpose", lambda *a, **kw: interior_labels.copy())
     cfg = CellposeSettings(min_size=5)
 
-    out_exclude, _, _ = segment_one(
-        fixture_store_50px, cfg, edge_mode=EdgeMode.EXCLUDE
-    )
-    out_normal, _, _ = segment_one(
-        fixture_store_50px, cfg, edge_mode=EdgeMode.INCLUDE_AS_NORMAL
-    )
+    out_exclude, _, _ = segment_one(fixture_store_50px, cfg, edge_mode=EdgeMode.EXCLUDE)
+    out_normal, _, _ = segment_one(fixture_store_50px, cfg, edge_mode=EdgeMode.INCLUDE_AS_NORMAL)
 
     # Both produce the same sequential labels [1, 2]
     np.testing.assert_array_equal(out_exclude, out_normal)
@@ -429,9 +398,7 @@ def test_threshold_compute_kmeans_happy_path(fixture_store_with_labels):
         algorithm=ThresholdAlgorithm.KMEANS,
         kmeans_n_clusters=2,
     )
-    result, failure, msg = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    result, failure, msg = threshold_compute_one(fixture_store_with_labels, round_spec)
     assert failure is None
     assert isinstance(result, GroupingResult)
     # With 6 cells of varying intensity, k-means should produce 2 groups.
@@ -446,9 +413,7 @@ def test_threshold_compute_unknown_channel(fixture_store_with_labels):
         algorithm=ThresholdAlgorithm.KMEANS,
         kmeans_n_clusters=2,
     )
-    result, failure, msg = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    result, failure, msg = threshold_compute_one(fixture_store_with_labels, round_spec)
     assert result is None
     assert failure is DatasetFailure.THRESHOLD_ERROR
     assert "NotAChannel" in msg
@@ -484,14 +449,10 @@ def test_apply_threshold_headless_writes_mask_and_groups(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,  # no smoothing — makes the test deterministic
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     assert grouping is not None
 
-    failure, msg = apply_threshold_headless(
-        fixture_store_with_labels, round_spec, grouping
-    )
+    failure, msg = apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
     assert failure is None, msg
 
     # Verify the mask and groups DF were written.
@@ -503,6 +464,43 @@ def test_apply_threshold_headless_writes_mask_and_groups(
     # The combined mask should have some positive pixels.
     combined = fixture_store_with_labels.read_mask("GFP_split")
     assert combined.sum() > 0
+
+
+def test_apply_threshold_headless_puncta_mode_writes_binary_mask(
+    fixture_store_with_labels,
+):
+    # A puncta round routes through detect_two_pass and must write a {0,1}
+    # uint8 mask plus a 2-column /groups table (the downstream contract).
+    round_spec = ThresholdingRound(
+        name="SG_puncta",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=1.0,
+        puncta=PunctaDetectorSettings(
+            detector_name="log",
+            seed_detector_name="bg-k-sigma",
+            background_estimator_name="gaussian-peak",
+            detector_params={"threshold_rel": 0.05},
+            min_spot_px=2,
+        ),
+    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
+    assert grouping is not None
+
+    failure, msg = apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+    assert failure is None, msg
+
+    combined = fixture_store_with_labels.read_mask("SG_puncta")
+    # {0,1}-only invariant (read back from /masks, not assumed of the store).
+    assert combined.dtype == np.uint8
+    assert set(np.unique(combined).tolist()) <= {0, 1}
+
+    # /groups keeps exactly ["label", "group_<channel>_<metric>"] so the
+    # _merge_group_dfs 2-column guard does not silently drop the group column.
+    groups_df = fixture_store_with_labels.read_dataframe("/groups/SG_puncta")
+    assert list(groups_df.columns) == ["label", "group_GFP_mean_intensity"]
 
 
 def test_apply_threshold_headless_handles_unknown_channel(
@@ -518,15 +516,11 @@ def test_apply_threshold_headless_handles_unknown_channel(
     # Fake a grouping result (we never get this far in practice if
     # threshold_compute_one already failed).
     grouping = GroupingResult(
-        group_assignments=pd.Series(
-            [1, 1, 2, 2, 2, 2], index=[1, 2, 3, 4, 5, 6], name="group"
-        ),
+        group_assignments=pd.Series([1, 1, 2, 2, 2, 2], index=[1, 2, 3, 4, 5, 6], name="group"),
         n_groups=2,
         group_means=[1.0, 2.0],
     )
-    failure, msg = apply_threshold_headless(
-        fixture_store_with_labels, round_spec, grouping
-    )
+    failure, msg = apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
     assert failure is DatasetFailure.THRESHOLD_ERROR
 
 
@@ -620,14 +614,10 @@ def test_measure_one_with_round_masks(fixture_store_with_labels):
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
 
-    df, failure, msg = measure_one(
-        fixture_store_with_labels, round_specs=[round_spec]
-    )
+    df, failure, msg = measure_one(fixture_store_with_labels, round_specs=[round_spec])
     assert failure is None, msg
     assert len(df) == 12
 
@@ -654,9 +644,7 @@ def test_measure_one_missing_mask_still_succeeds(fixture_store_with_labels):
         algorithm=ThresholdAlgorithm.KMEANS,
         kmeans_n_clusters=2,
     )
-    df, failure, msg = measure_one(
-        fixture_store_with_labels, round_specs=[round_spec]
-    )
+    df, failure, msg = measure_one(fixture_store_with_labels, round_specs=[round_spec])
     assert failure is None
     assert len(df) == 12
     # No _in_nonexistent columns because the mask was missing
@@ -672,9 +660,7 @@ def test_measure_one_populates_cell_id_column(fixture_store_with_labels):
     assert failure is None
     assert "cell_id" in df.columns
     # cell_id mirrors label for real cells.
-    pd.testing.assert_series_equal(
-        df["cell_id"].rename("label"), df["label"], check_dtype=False
-    )
+    pd.testing.assert_series_equal(df["cell_id"].rename("label"), df["label"], check_dtype=False)
 
 
 def test_measure_one_populates_is_edge_columns_default_exclude(
@@ -781,8 +767,8 @@ def test_measure_one_synthetic_row_area_equals_whole_mean_area(
     fixture_store_with_edge_cells,
 ):
     """U4: synthetic row's area = sum(edge_area) / N_theoretical
-              = sum(edge_area) / (sum(edge_area) / mean(whole_area))
-              = mean(whole_area).
+    = sum(edge_area) / (sum(edge_area) / mean(whole_area))
+    = mean(whole_area).
     """
     from percell4.workflows.models import EdgeMode
 
@@ -863,12 +849,8 @@ def test_measure_one_synthetic_row_has_nan_group_columns(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_edge_cells, round_spec
-    )
-    apply_threshold_headless(
-        fixture_store_with_edge_cells, round_spec, grouping
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_edge_cells, round_spec)
+    apply_threshold_headless(fixture_store_with_edge_cells, round_spec, grouping)
 
     df, failure, _ = measure_one(
         fixture_store_with_edge_cells,
@@ -887,9 +869,7 @@ def test_measure_one_default_edge_mode_exclude_emits_no_synthetic_row(
     """U4: calling measure_one without edge_mode uses EXCLUDE default —
     edge cells appear with is_edge=True (Phase 1 didn't filter here since
     we wrote labels directly) but no synthetic row is emitted."""
-    df, failure, _ = measure_one(
-        fixture_store_with_edge_cells, round_specs=[]
-    )
+    df, failure, _ = measure_one(fixture_store_with_edge_cells, round_specs=[])
     assert failure is None
     # Edge cells are tagged (measure-time recompute), but no synthetic row
     # because edge_mode defaults to EXCLUDE.
@@ -967,21 +947,15 @@ def test_export_run_writes_parquet_and_csvs(tmp_path, fixture_store_with_labels)
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
-    df, failure, _ = measure_one(
-        fixture_store_with_labels, round_specs=[round_spec]
-    )
+    df, failure, _ = measure_one(fixture_store_with_labels, round_specs=[round_spec])
     assert failure is None
 
     write_staging_parquet(run_folder, "DS1", df)
     assert (run_folder / "staging" / "DS1.parquet").exists()
 
-    cfg = _sample_workflow_config(
-        selected_cols=["GFP_mean_intensity", "group_R"]
-    )
+    cfg = _sample_workflow_config(selected_cols=["GFP_mean_intensity", "group_R"])
     meta = _sample_run_metadata(run_folder)
 
     failure, msg = export_run(run_folder, cfg, meta)
@@ -1043,9 +1017,7 @@ def test_export_run_fails_if_no_staging_parquets(tmp_path):
 # ── export_run summary CSVs (U6) ────────────────────────────────────────
 
 
-def test_export_run_writes_summary_groups_csv(
-    tmp_path, fixture_store_with_labels
-):
+def test_export_run_writes_summary_groups_csv(tmp_path, fixture_store_with_labels):
     """U6: summary_groups.csv has one row per (dataset, round_name, group_label)."""
     run_folder = tmp_path / "run_summary"
     (run_folder / "per_dataset").mkdir(parents=True)
@@ -1059,13 +1031,9 @@ def test_export_run_writes_summary_groups_csv(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
-    df, _, _ = measure_one(
-        fixture_store_with_labels, round_specs=[round_spec]
-    )
+    df, _, _ = measure_one(fixture_store_with_labels, round_specs=[round_spec])
     write_staging_parquet(run_folder, "DS1", df)
 
     cfg = _sample_workflow_config(selected_cols=[])
@@ -1078,8 +1046,7 @@ def test_export_run_writes_summary_groups_csv(
     summary = pd.read_csv(summary_path)
 
     # Columns we promised in origin R18.
-    for col in ("dataset", "round_name", "group_label", "n_cells",
-                "fraction_of_dataset_cells"):
+    for col in ("dataset", "round_name", "group_label", "n_cells", "fraction_of_dataset_cells"):
         assert col in summary.columns
 
     # Per-metric stats for the GFP_mean_intensity column at minimum.
@@ -1099,9 +1066,7 @@ def test_export_run_writes_summary_groups_csv(
     assert total_in_round == 12
 
 
-def test_export_run_writes_summary_datasets_csv(
-    tmp_path, fixture_store_with_labels
-):
+def test_export_run_writes_summary_datasets_csv(tmp_path, fixture_store_with_labels):
     """U6: summary_datasets.csv has one row per dataset with origin R19 columns."""
     run_folder = tmp_path / "run_summary_ds"
     (run_folder / "per_dataset").mkdir(parents=True)
@@ -1120,9 +1085,18 @@ def test_export_run_writes_summary_datasets_csv(
     summary = pd.read_csv(summary_path)
 
     # Origin R19 columns
-    for col in ("dataset", "source", "n_cells_total", "n_cells_whole",
-                "n_cells_edge", "n_rounds_thresholding", "n_rounds_dilute",
-                "dilute_enabled", "edge_mode", "failure_reason"):
+    for col in (
+        "dataset",
+        "source",
+        "n_cells_total",
+        "n_cells_whole",
+        "n_cells_edge",
+        "n_rounds_thresholding",
+        "n_rounds_dilute",
+        "dilute_enabled",
+        "edge_mode",
+        "failure_reason",
+    ):
         assert col in summary.columns
 
     assert len(summary) == 1
@@ -1139,9 +1113,7 @@ def test_export_run_writes_summary_datasets_csv(
     assert row["edge_mode"] == "exclude"  # default
 
 
-def test_summary_datasets_csv_records_failure_reason(
-    tmp_path, fixture_store_with_labels
-):
+def test_summary_datasets_csv_records_failure_reason(tmp_path, fixture_store_with_labels):
     """U6: failure_reason column populated when a dataset has metadata failures."""
     run_folder = tmp_path / "run_summary_fail"
     (run_folder / "per_dataset").mkdir(parents=True)
@@ -1169,9 +1141,7 @@ def test_summary_datasets_csv_records_failure_reason(
     assert "threshold: all cells in one group" in str(row["failure_reason"])
 
 
-def test_summary_groups_excludes_synthetic_rows(
-    tmp_path, fixture_store_with_edge_cells
-):
+def test_summary_groups_excludes_synthetic_rows(tmp_path, fixture_store_with_edge_cells):
     """U6: synthetic rows (is_edge_synthetic=True) excluded from group stats."""
     from percell4.workflows.models import EdgeMode
 
@@ -1187,12 +1157,8 @@ def test_summary_groups_excludes_synthetic_rows(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_edge_cells, round_spec
-    )
-    apply_threshold_headless(
-        fixture_store_with_edge_cells, round_spec, grouping
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_edge_cells, round_spec)
+    apply_threshold_headless(fixture_store_with_edge_cells, round_spec, grouping)
     df, _, _ = measure_one(
         fixture_store_with_edge_cells,
         round_specs=[round_spec],
@@ -1230,9 +1196,7 @@ def test_measure_one_merges_particle_columns_when_particle_settings_set(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
 
     df, failure, _ = measure_one(
@@ -1260,9 +1224,7 @@ def test_measure_one_no_particle_columns_when_particle_settings_none(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
 
     df, failure, _ = measure_one(
@@ -1289,9 +1251,7 @@ def test_measure_particles_one_returns_per_particle_rows(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
 
     particles, failure, msg = measure_particles_one(
@@ -1323,9 +1283,7 @@ def test_measure_particles_one_no_rounds_returns_empty_df(
     assert particles.empty
 
 
-def test_export_run_writes_particles_parquet_and_csv(
-    tmp_path, fixture_store_with_labels
-):
+def test_export_run_writes_particles_parquet_and_csv(tmp_path, fixture_store_with_labels):
     """U7: when staging_particles/ has parquet files, export_run produces
     particles.parquet and particles.csv in the run folder."""
     from percell4.workflows.models import ParticleSettings
@@ -1342,9 +1300,7 @@ def test_export_run_writes_particles_parquet_and_csv(
         kmeans_n_clusters=2,
         gaussian_sigma=0.0,
     )
-    grouping, _, _ = threshold_compute_one(
-        fixture_store_with_labels, round_spec
-    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
     apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
 
     df, _, _ = measure_one(
@@ -1377,9 +1333,7 @@ def test_export_run_writes_particles_parquet_and_csv(
         assert not (run_folder / "staging_particles").exists()
 
 
-def test_summary_csvs_written_atomically_no_tmp_residue(
-    tmp_path, fixture_store_with_labels
-):
+def test_summary_csvs_written_atomically_no_tmp_residue(tmp_path, fixture_store_with_labels):
     """U6: write_atomic is used for both summary CSVs — no .tmp leftovers."""
     run_folder = tmp_path / "run_atomic"
     (run_folder / "per_dataset").mkdir(parents=True)

@@ -267,6 +267,17 @@ widgets:
     keystroke: null
     notes: "Creator: AcceptThreshold use case writes a new mask resource (HDF5) and auto-selects it via session.set_active_mask at use_cases/accept_threshold.py:70."
 
+  - id: adaptive_clip_panel.run_button
+    class: Creator
+    path: src/percell4/gui/adaptive_clip_panel.py
+    lines: "99, 123"
+    widget_type: QPushButton
+    handler: _on_run
+    reads: [active_channel]
+    writes: [active_mask]
+    keystroke: null
+    notes: "Creator: runs the adaptive detector whole-frame and writes a new /masks resource via the AcceptPunctaMask use case, auto-selecting it via session.set_active_mask. Reads active_channel; no other session writes. Embedded in the Analysis tab after Grouped Thresholding."
+
   - id: analysis_panel.measure_cells_button
     class: Creator
     path: src/percell4/interfaces/gui/task_panels/analysis_panel.py

@@ -12,6 +12,7 @@ from percell4.workflows.models import (
     DiluteSettings,
     EdgeMode,
     GmmCriterion,
+    PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -95,6 +96,89 @@ def test_round_is_frozen():
     r = _valid_round()
     with pytest.raises((AttributeError, TypeError)):
         r.name = "mutated"  # type: ignore[misc]
+
+
+# ── PunctaDetectorSettings (U1) ──────────────────────────────
+
+
+def test_round_defaults_puncta_to_none():
+    assert _valid_round().puncta is None
+
+
+def test_puncta_settings_defaults_are_valid():
+    p = PunctaDetectorSettings()
+    assert p.detector_name == "otsu"
+    assert p.background_estimator_name == "gaussian-peak"
+    assert p.detector_params == ()
+    assert p.spot_scale_prior is None
+
+
+def test_puncta_settings_rejects_unknown_names():
+    with pytest.raises(ValueError, match="detector_name"):
+        PunctaDetectorSettings(detector_name="nonsense")
+    with pytest.raises(ValueError, match="seed_detector_name"):
+        PunctaDetectorSettings(seed_detector_name="nonsense")
+    with pytest.raises(ValueError, match="background_estimator_name"):
+        PunctaDetectorSettings(background_estimator_name="nonsense")
+
+
+def test_puncta_settings_rejects_bad_spot_px():
+    with pytest.raises(ValueError, match="min_spot_px"):
+        PunctaDetectorSettings(min_spot_px=0)
+    with pytest.raises(ValueError, match="max_spot_px"):
+        PunctaDetectorSettings(min_spot_px=5, max_spot_px=3)
+
+
+def test_puncta_settings_rejects_bad_scale_prior():
+    with pytest.raises(ValueError, match="spot_scale_prior"):
+        PunctaDetectorSettings(spot_scale_prior=(4.0, 1.0))  # lo > hi
+    with pytest.raises(ValueError, match="spot_scale_prior"):
+        PunctaDetectorSettings(spot_scale_prior=(0.0, 4.0))  # lo not > 0
+
+
+def test_puncta_params_canonicalize_to_sorted_tuple():
+    # Dict input (any order) normalizes to a sorted tuple of pairs so the
+    # frozen dataclass is hashable and round-trips order-independently.
+    p = PunctaDetectorSettings(
+        detector_name="log", detector_params={"threshold_rel": 0.1, "k": 2.5}
+    )
+    assert p.detector_params == (("k", 2.5), ("threshold_rel", 0.1))
+    assert dict(p.detector_params) == {"threshold_rel": 0.1, "k": 2.5}
+
+
+def test_puncta_params_reject_non_scalar_values():
+    with pytest.raises(ValueError, match="JSON scalar"):
+        PunctaDetectorSettings(detector_params={"bad": [1, 2, 3]})
+
+
+def test_puncta_scale_prior_coerces_list_to_tuple():
+    # A JSON-loaded list must become a float tuple so __eq__/__hash__ are
+    # stable across a run_config.json round-trip.
+    p = PunctaDetectorSettings(spot_scale_prior=[1.0, 4.0])  # type: ignore[arg-type]
+    assert p.spot_scale_prior == (1.0, 4.0)
+    assert isinstance(p.spot_scale_prior, tuple)
+
+
+def test_round_with_puncta_is_hashable():
+    p = PunctaDetectorSettings(
+        detector_name="log", detector_params={"k": 2.5}, spot_scale_prior=(1.0, 4.0)
+    )
+    r = _valid_round(puncta=p)
+    # Must not raise — _grouping_cache and any future set/dict use depend on it.
+    hash(r)
+    hash(p)
+
+
+def test_puncta_names_validation_is_skimage_free():
+    # Constructing a round (legacy or puncta) must not import scikit-image:
+    # validation pulls names from the dependency-light puncta_names module.
+    import sys
+
+    for mod in [m for m in sys.modules if m.startswith("skimage")]:
+        del sys.modules[mod]
+    PunctaDetectorSettings(detector_name="log")
+    _valid_round()
+    assert not any(m.startswith("skimage") for m in sys.modules)
 
 
 # ── CellposeSettings ─────────────────────────────────────────
@@ -247,8 +331,7 @@ def test_edge_mode_has_three_values():
     assert EdgeMode("exclude") is EdgeMode.EXCLUDE
     assert EdgeMode("include_as_normal") is EdgeMode.INCLUDE_AS_NORMAL
     assert (
-        EdgeMode("include_as_size_normalized_cohort")
-        is EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
+        EdgeMode("include_as_size_normalized_cohort") is EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT
     )
 
 

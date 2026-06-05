@@ -187,6 +187,21 @@ class AnalysisPanel(QWidget):
         grouped_layout.addWidget(self._grouped_seg_panel)
         layout.addWidget(grouped_group)
 
+        # ── Adaptive Local Clipping ──
+        from percell4.gui.adaptive_clip_panel import AdaptiveClipPanel
+
+        self._adaptive_clip_panel = AdaptiveClipPanel(
+            self.data_model,
+            get_repo=self._get_repo,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
+        )
+        adaptive_group = QGroupBox("Adaptive Local Clipping")
+        adaptive_layout = QVBoxLayout(adaptive_group)
+        adaptive_layout.addWidget(self._adaptive_clip_panel)
+        layout.addWidget(adaptive_group)
+
         # ── Measurements group ──
         meas_group = QGroupBox("Measurements")
         meas_layout = QVBoxLayout(meas_group)
@@ -486,8 +501,8 @@ class AnalysisPanel(QWidget):
                     viewer_win.viewer.layers.remove(layer)
 
         try:
-            from percell4.application.use_cases.accept_threshold import AcceptThreshold
             from percell4.adapters.napari_viewer import NapariViewerAdapter
+            from percell4.application.use_cases.accept_threshold import AcceptThreshold
 
             repo = self._get_repo()
             viewer_adapter = NapariViewerAdapter(viewer_win)
