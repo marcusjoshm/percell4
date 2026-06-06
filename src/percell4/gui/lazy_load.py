@@ -22,6 +22,7 @@ from percell4.adapters.parallel_loader import (
     plan_resources,
 )
 from percell4.gui.workers import BackgroundFrameFiller
+from percell4.store import DatasetStore
 
 
 class LazyLoadController:
@@ -79,7 +80,9 @@ class LazyLoadController:
         self._buffer = LazyResidentBuffer(
             store.path, n_timepoints, specs, view_bin
         )
-        self._buffer.fill_frame(0)  # ~1 s — makes the viewer usable immediately
+        # Frame 0 synchronously — makes the viewer usable immediately. Reuse the
+        # caller's open store so the intensity frame is decoded once.
+        self._buffer.fill_frame(0, store=store)
         for spec in specs:
             self._add_layer(
                 spec.kind,
@@ -141,7 +144,9 @@ class LazyLoadController:
         buf = self._buffer
         if buf is None or not (0 <= t < buf.n_timepoints) or buf.is_ready(t):
             return
-        buf.fill_frame(t)
+        store = DatasetStore(self._path)
+        with store.open_read() as s:
+            buf.fill_frame(t, store=s)
         if self._viewer_win is not None:
             self._viewer_win.refresh_all_layers()
 
@@ -156,8 +161,10 @@ class LazyLoadController:
         buf = self._buffer
         if buf is None:
             return
-        for t in buf.pending_frames():
-            buf.fill_frame(t)
+        store = DatasetStore(self._path)
+        with store.open_read() as s:
+            for t in buf.pending_frames():
+                buf.fill_frame(t, store=s)
         if self._viewer_win is not None:
             self._viewer_win.refresh_all_layers()
 
