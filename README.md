@@ -15,7 +15,7 @@
 - [Workflow Protocol](#workflow-protocol)
   - [Step-by-step protocol](#step-by-step-protocol)
 - [Command-line Tools](#command-line-tools)
-  - [`percell4-batch` — headless compress + segment + track](#percell4-batch--headless-compress--segment--track)
+  - [`percell4-batch-cellpose-laptrack` — headless compress + segment + track](#percell4-batch-cellpose-laptrack--headless-compress--segment--track)
   - [`percell4-batch-export` — TIFF export](#percell4-batch-export--tiff-export)
   - [`percell4-batch-phasor` — compute phasor + wavelet filter](#percell4-batch-phasor--compute-phasor--wavelet-filter)
   - [`percell4-batch-phasor-masks` — fit GMM ellipse + write dual-threshold masks](#percell4-batch-phasor-masks--fit-gmm-ellipse--write-dual-threshold-masks)
@@ -157,33 +157,48 @@ PerCell4 ships several headless CLI tools for batch operations across `.h5` data
 - **Exit codes:** `0` if at least one dataset made progress, `1` if every dataset was skipped or failed, `2` on argparse / validation failure (no I/O performed).
 - **GUI files first.** Close any open PerCell4 GUI session against the target files before running — the batch tools write to the same `.h5` files the GUI reads.
 
-### `percell4-batch` — headless compress + segment + track
+### `percell4-batch-cellpose-laptrack` — headless compress + segment + track
 
-End-to-end headless pipeline for multi-timepoint TIFF source directories. Compresses each source into one `.h5`, runs Cellpose on every timepoint, and tracks cells across time (unless `--no-track`). Designed for overnight batch runs on a remote workstation.
+End-to-end headless pipeline for multi-timepoint datasets. Each source is either a **TIFF source directory** (compressed into one `.h5`) or an **already-compressed `.h5`** (the compress step is skipped). Runs Cellpose on every timepoint and tracks cells across time (unless `--no-track`). Exposes the full GUI Segment-tab Cellpose controls so headless runs reproduce interactive tuning. Designed for overnight batch runs on a remote workstation.
 
 ```bash
-percell4-batch SOURCES --output-dir DIR [options]
+percell4-batch-cellpose-laptrack SOURCES [--output-dir DIR] [options]
 ```
+
+**Inputs.** TIFF directory sources require `--output-dir` (each `<source_dirname>.h5` lands there). For an `.h5` source, omit `--output-dir` to **segment it in place**, or pass `--output-dir` to **copy it there first** and segment the copy (the original is left untouched).
 
 | Option | Purpose |
 |---|---|
-| `sources` | One or more dataset TIFF source directories (positional, required). |
-| `--output-dir OUTPUT_DIR` | Directory for the output `.h5` files. Each `<source_dirname>.h5` lands here. **Required.** |
+| `sources` | One or more dataset TIFF source directories and/or `.h5` files (positional, required). |
+| `--output-dir OUTPUT_DIR` | Directory for the output `.h5` files. **Required for TIFF directory sources.** For `.h5` sources: omit to segment in place, or give it to copy-then-segment. |
 | `--seg-channel SEG_CHANNEL` | Channel name to segment. Default: first channel. Matched against `--channel-names` when given. |
 | `--channel-names CHANNEL_NAMES` | Comma-separated names to rename the imported channels, in order (e.g. `'DAPI,GFP,RFP'`). Must match the imported channel count. |
 | `--seg-name SEG_NAME` | Name for the segmentation layer. Default: `cellpose_<n_cells>`. |
-| `--cellpose-model CELLPOSE_MODEL` | Cellpose model type. Default: `cyto3`. |
-| `--cellpose-diameter CELLPOSE_DIAMETER` | Cell diameter in pixels. Default: auto. |
+| `--cellpose-model {cpsam,cyto3,cyto2,cyto,nuclei}` | Cellpose model. Default: `cpsam`. Ignored on Cellpose 4.x (cpsam is the only model). |
+| `--cellpose-diameter CELLPOSE_DIAMETER` | Cell diameter in pixels; `0` = auto-detect. Default: `30`. |
 | `--gpu` | Use GPU for Cellpose (requires the `gpu` extra and a working CUDA driver). |
+| `--flow-threshold FLOW_THRESHOLD` | Flow error threshold; higher = more permissive. Default: `0.4`. |
+| `--cellprob-threshold CELLPROB_THRESHOLD` | Cell probability threshold. Default: `0.0`. |
+| `--min-size MIN_SIZE` | Minimum cell size in pixels. Default: `15`. |
+| `--saturation SATURATION` | Saturation % for an ImageJ-style Enhance Contrast LUT applied to the segmentation channel before Cellpose; `0` disables. Default: `1.0`. The on-disk `/intensity` is never modified. |
+| `--blur-sigma BLUR_SIGMA` | Gaussian blur sigma applied after the saturation LUT and before Cellpose; `0` disables. Default: `0.0`. The on-disk `/intensity` is never modified. |
+| `--no-remove-edge-cells` | Keep cells touching the image border (default: remove them). |
+| `--edge-margin EDGE_MARGIN` | Pixels from the border counted as edge when removing edge cells. Default: `0` (strict border-touching). |
 | `--no-track` | Skip tracking even for time-lapse datasets. |
 | `--quiet` | Suppress per-dataset progress lines. |
 | `--verbose`, `-v` | Enable debug logging. |
 
+The Cellpose defaults match the GUI Segment tab, so the same settings produce the same segmentation interactively and headlessly.
+
 Examples:
 
 ```bash
-percell4-batch /scratch/tiffs/dish_1/ /scratch/tiffs/dish_2/ --output-dir /scratch/h5/
-percell4-batch /scratch/tiffs/timelapse_a/ --output-dir /scratch/h5/ --gpu --cellpose-diameter 240
+percell4-batch-cellpose-laptrack /scratch/tiffs/dish_1/ /scratch/tiffs/dish_2/ --output-dir /scratch/h5/
+percell4-batch-cellpose-laptrack /scratch/tiffs/timelapse_a/ --output-dir /scratch/h5/ --gpu --cellpose-diameter 240
+# Re-segment an already-compressed .h5 in place with tuned thresholds:
+percell4-batch-cellpose-laptrack /scratch/h5/dish_1.h5 --cellprob-threshold -1.0 --saturation 2.0
+# Copy an .h5 elsewhere, then segment the copy (original untouched):
+percell4-batch-cellpose-laptrack /scratch/h5/dish_1.h5 --output-dir /scratch/h5_reseg/
 ```
 
 ### `percell4-batch-export` — TIFF export
