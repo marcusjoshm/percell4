@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from time import perf_counter
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +18,8 @@ from percell4.domain.segmentation.postprocess import (
 from percell4.ports.dataset_repository import DatasetRepository
 from percell4.ports.segmenter import Segmenter
 from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -74,7 +78,8 @@ class SegmentCells:
                 "No segmenter injected. Pass a Segmenter at construction "
                 "(e.g., CellposeSegmenter from adapters/cellpose.py)."
             )
-        return self._segmenter.run(
+        t0 = perf_counter()
+        labels = self._segmenter.run(
             image,
             model_type=model_type,
             diameter=diameter,
@@ -83,6 +88,11 @@ class SegmentCells:
             cellprob_threshold=cellprob_threshold,
             min_size=min_size,
         )
+        logger.debug(
+            "cellpose: %d cells found in %.2f s",
+            int(labels.max()), perf_counter() - t0,
+        )
+        return labels
 
     def run_inference_stack(
         self,
@@ -112,17 +122,21 @@ class SegmentCells:
         n_t = len(images)
         frames = []
         for t in range(n_t):
-            frames.append(
-                self._segmenter.run(
-                    images[t],
-                    model_type=model_type,
-                    diameter=diameter,
-                    gpu=gpu,
-                    flow_threshold=flow_threshold,
-                    cellprob_threshold=cellprob_threshold,
-                    min_size=min_size,
-                )
+            t0 = perf_counter()
+            frame = self._segmenter.run(
+                images[t],
+                model_type=model_type,
+                diameter=diameter,
+                gpu=gpu,
+                flow_threshold=flow_threshold,
+                cellprob_threshold=cellprob_threshold,
+                min_size=min_size,
             )
+            logger.debug(
+                "cellpose frame %d/%d: %d cells found in %.2f s",
+                t + 1, n_t, int(frame.max()), perf_counter() - t0,
+            )
+            frames.append(frame)
             if progress_callback is not None:
                 progress_callback(t + 1, n_t)
         return np.stack(frames, axis=0).astype(np.int32)

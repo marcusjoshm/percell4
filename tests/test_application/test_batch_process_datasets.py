@@ -546,13 +546,11 @@ def test_skip_segmentation_single_timepoint_recorded(tmp_path):
 
 def test_batch_emits_debug_progress(tmp_path, caplog):
     import logging
+    import re
 
     h5 = _make_source_h5(tmp_path, "movie", timelapse=True)
 
-    with caplog.at_level(
-        logging.DEBUG,
-        logger="percell4.application.use_cases.batch_process_datasets",
-    ):
+    with caplog.at_level(logging.DEBUG):  # capture batch + segment_cells loggers
         batch_process_datasets(
             [DatasetSpec(source_dir=h5, output_h5=h5)],
             seg_channel="ch00", track=True,
@@ -561,7 +559,29 @@ def test_batch_emits_debug_progress(tmp_path, caplog):
         )
 
     text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "segmented frame 1/2" in text
-    assert "segmented frame 2/2" in text
+    # Per-frame model time + cell count (from SegmentCells).
+    assert re.search(r"cellpose frame 1/2: \d+ cells found in [\d.]+ s", text)
+    assert re.search(r"cellpose frame 2/2: \d+ cells found in [\d.]+ s", text)
+    # Per-dataset totals + tracking (from the batch use case).
     assert "cellpose inference finished" in text
     assert "tracking" in text
+
+
+def test_run_inference_logs_time_and_count_single_frame(tmp_path, caplog):
+    """Single-image path logs model time + cell count too."""
+    import logging
+
+    src = tmp_path / "still"
+    _single_tiff(src)
+
+    with caplog.at_level(logging.DEBUG):
+        batch_process_datasets(
+            [DatasetSpec(source_dir=src, output_h5=tmp_path / "o.h5")],
+            seg_channel="ch00",
+            settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+            segmenter=FakeSegmenter(), tracker=FakeTracker(),
+        )
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    import re
+    assert re.search(r"cellpose: \d+ cells found in [\d.]+ s", text)

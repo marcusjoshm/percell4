@@ -284,16 +284,14 @@ def batch_process_datasets(
                         axis=0,
                     )
 
-                    def _frame_progress(done: int, n: int) -> None:
-                        logger.debug("%s: segmented frame %d/%d", spec.name, done, n)
-
+                    # Per-frame timing + cell counts are logged by
+                    # SegmentCells.run_inference_stack (DEBUG).
                     raw = seg_uc.run_inference_stack(
                         stack, model_type=settings.model,
                         diameter=cp_diameter, gpu=settings.gpu,
                         flow_threshold=settings.flow_threshold,
                         cellprob_threshold=settings.cellprob_threshold,
                         min_size=settings.min_size,
-                        progress_callback=_frame_progress,
                     )
                 else:
                     image = _preprocess(repo.read_channel_images(handle)[ch])
