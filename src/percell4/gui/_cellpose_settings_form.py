@@ -31,11 +31,12 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.workflows.models import CellposeSettings
+from percell4.workflows.models import CELLPOSE_MODELS, CellposeSettings
 
-# Cellpose model identifiers, in display order. Single source of truth for
-# both the workflow dialog and the Segment panel (config_dialog imports this).
-CELLPOSE_MODELS = ("cpsam", "cyto3", "cyto2", "cyto", "nuclei")
+# CELLPOSE_MODELS now lives in the Qt-free workflows.models so the headless
+# batch CLI can share the same source of truth without importing this GUI
+# module. Re-exported here for callers that reference it via this module.
+__all__ = ["CELLPOSE_MODELS", "CellposeSettingsForm"]
 
 
 class CellposeSettingsForm(QWidget):

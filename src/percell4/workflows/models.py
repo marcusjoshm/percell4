@@ -74,6 +74,12 @@ class EdgeMode(StrEnum):
     INCLUDE_AS_SIZE_NORMALIZED_COHORT = "include_as_size_normalized_cohort"
 
 
+# Cellpose model identifiers, in display order. Qt-free single source of
+# truth shared by the GUI form (CellposeSettingsForm), the workflow dialog,
+# and the headless batch CLI. The first entry is the default model.
+CELLPOSE_MODELS = ("cpsam", "cyto3", "cyto2", "cyto", "nuclei")
+
+
 @dataclass(frozen=True)
 class CellposeSettings:
     """Global Cellpose configuration for a run.
