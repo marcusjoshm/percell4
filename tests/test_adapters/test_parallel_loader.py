@@ -42,7 +42,7 @@ def test_plan_resources_timelapse_multichannel(tmp_h5):
     assert n_t == 4
     names = {s.layer_name for s in lazy_specs}
     assert names == {"A", "B", "cellpose"}
-    assert eager == {}  # everything is time-stacked
+    assert eager == []  # everything is time-stacked
     a = next(s for s in lazy_specs if s.layer_name == "A")
     assert a.kind == "intensity" and a.channel_idx == 0
     b = next(s for s in lazy_specs if s.layer_name == "B")
@@ -138,8 +138,9 @@ def test_two_d_time_invariant_mask_is_eager(tmp_h5):
 
     n_t, specs, eager = plan_resources(store)
     # The 2D mask is eager, not a lazy spec.
-    assert "gate" in eager
-    assert eager["gate"].shape == (16, 16)
+    gate = next(layer for layer in eager if layer.name == "gate")
+    assert gate.kind == "mask"
+    assert gate.array.shape == (16, 16)
     assert "gate" not in {s.layer_name for s in specs}
 
 
@@ -153,7 +154,10 @@ def test_non_timelapse_all_eager(tmp_h5):
     n_t, specs, eager = plan_resources(store)
     assert n_t == 1
     assert specs == []
-    assert "GFP" in eager and "DAPI" in eager and "cellpose" in eager
+    eager_names = {layer.name for layer in eager}
+    assert {"GFP", "DAPI", "cellpose"} <= eager_names
+    cellpose = next(layer for layer in eager if layer.name == "cellpose")
+    assert cellpose.kind == "labels"
 
 
 def test_fill_frame_out_of_range(tmp_h5):

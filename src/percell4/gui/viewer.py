@@ -415,6 +415,25 @@ class ViewerWindow(QObject):
         if self._viewer is not None and self._is_alive():
             self._viewer.layers.clear()
 
+    def refresh_all_layers(self) -> None:
+        """Repaint every layer from its (possibly mutated) backing array.
+
+        Used by the lazy loader after a background/on-demand frame fill writes
+        new data in place into a layer's resident buffer — napari does not
+        observe in-place ``layer.data`` mutations on its own.
+        """
+        if self._viewer is None or not self._is_alive():
+            return
+        for layer in self._viewer.layers:
+            layer.refresh()
+
+    def current_timepoint(self) -> int:
+        """Current napari dims slider position on axis 0 (0 if no time slider)."""
+        if self._viewer is None or not self._is_alive():
+            return 0
+        step = self._viewer.dims.current_step
+        return int(step[0]) if step else 0
+
     def _on_layer_inserted(self, event) -> None:
         """Wire selection events when a new labels layer is added."""
         import napari

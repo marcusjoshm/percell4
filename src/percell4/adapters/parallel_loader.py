@@ -34,6 +34,15 @@ ResourceKind = Literal["intensity", "labels", "mask"]
 
 
 @dataclass(frozen=True)
+class EagerLayer:
+    """A non-lazy display layer read in full (2D / non-time-lapse plane)."""
+
+    kind: ResourceKind
+    name: str
+    array: NDArray
+
+
+@dataclass(frozen=True)
 class ResourceSpec:
     """Describes one time-stacked ``(T, H, W)`` display resource.
 
@@ -210,7 +219,7 @@ class LazyResidentBuffer:
 
 def plan_resources(
     store: DatasetStore, view_bin: int = 1
-) -> tuple[int, list[ResourceSpec], dict[str, NDArray]]:
+) -> tuple[int, list[ResourceSpec], list[EagerLayer]]:
     """Inspect a dataset and split it into lazy + eager display resources.
 
     Returns ``(n_timepoints, lazy_specs, eager_layers)`` where:
@@ -218,9 +227,9 @@ def plan_resources(
     * ``lazy_specs`` describe every time-stacked ``(T, …)`` resource that a
       :class:`LazyResidentBuffer` should own (intensity channels, time-lapse
       labels and masks).
-    * ``eager_layers`` is ``{layer_name: 2D array}`` for resources that are a
-      single cheap plane (non-time-lapse datasets, or 2D/time-invariant labels
-      and masks on a time-lapse dataset) — read here and added directly.
+    * ``eager_layers`` is a list of :class:`EagerLayer` for resources that are
+      a single cheap plane (non-time-lapse datasets, or 2D/time-invariant
+      labels and masks on a time-lapse dataset) — read here and added directly.
 
     Reads only metadata + per-frame shapes to build specs (no full-stack
     decode); eager 2D planes are small and read in full.
@@ -232,7 +241,7 @@ def plan_resources(
     n_timepoints = int(meta.get("n_timepoints", 1) or 1)
 
     lazy_specs: list[ResourceSpec] = []
-    eager_layers: dict[str, NDArray] = {}
+    eager_layers: list[EagerLayer] = []
 
     # Non-time-lapse: nothing benefits from lazy framing — read eagerly, same
     # as the historical path (the dataset is a single plane / channel stack).
@@ -241,7 +250,7 @@ def plan_resources(
         for name, arr in split_intensity_layers(
             intensity, channel_names, n_timepoints
         ):
-            eager_layers[name] = arr
+            eager_layers.append(EagerLayer("intensity", name, arr))
         _add_eager_labels_masks(store, view_bin, eager_layers)
         return n_timepoints, lazy_specs, eager_layers
 
@@ -314,15 +323,16 @@ def _classify_resource(
     n_timepoints: int,
     view_bin: int,
     lazy_specs: list[ResourceSpec],
-    eager_layers: dict[str, NDArray],
+    eager_layers: list[EagerLayer],
 ) -> None:
     """Route one labels/mask resource to lazy (time-stacked) or eager (2D)."""
     if store._is_2d_array(hdf5_path):
         # Time-invariant plane — read once, add directly.
         if kind == "labels":
-            eager_layers[name] = store.read_labels(name, view_bin=view_bin)
+            plane = store.read_labels(name, view_bin=view_bin)
         else:
-            eager_layers[name] = store.read_mask(name, view_bin=view_bin)
+            plane = store.read_mask(name, view_bin=view_bin)
+        eager_layers.append(EagerLayer(kind, name, plane))
         return
     frame0 = store.read_array_frame(hdf5_path, 0, view_bin=view_bin)
     lazy_specs.append(
@@ -339,14 +349,21 @@ def _classify_resource(
 
 
 def _add_eager_labels_masks(
-    store: DatasetStore, view_bin: int, eager_layers: dict[str, NDArray]
+    store: DatasetStore, view_bin: int, eager_layers: list[EagerLayer]
 ) -> None:
     """Read all labels (minus masks) and masks as full arrays (non-time-lapse)."""
     mask_names = set(store.list_masks())
     for label_name in store.list_labels():
         if label_name not in mask_names:
-            eager_layers[label_name] = store.read_labels(
-                label_name, view_bin=view_bin
+            eager_layers.append(
+                EagerLayer(
+                    "labels", label_name,
+                    store.read_labels(label_name, view_bin=view_bin),
+                )
             )
     for mask_name in store.list_masks():
-        eager_layers[mask_name] = store.read_mask(mask_name, view_bin=view_bin)
+        eager_layers.append(
+            EagerLayer(
+                "mask", mask_name, store.read_mask(mask_name, view_bin=view_bin)
+            )
+        )
