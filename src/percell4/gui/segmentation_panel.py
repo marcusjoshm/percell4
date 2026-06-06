@@ -478,6 +478,17 @@ class SegmentationPanel(QWidget):
         # time-lapse (T, H, W) layer both are applied per-frame so the
         # saturation percentile reference is the frame's own intensity and
         # the blur never bleeds across timepoints.
+        # The lazy loader may still be streaming timepoints into this layer's
+        # resident buffer. Force the data resident before reading it: a whole
+        # (T, H, W) stack needs every frame; a 2D layer needs only the active
+        # frame. No-op on eagerly-loaded datasets.
+        if getattr(active_layer.data, "ndim", 2) == 3:
+            viewer_win.ensure_all_timepoints_ready()
+        else:
+            viewer_win.ensure_timepoint_ready(
+                self.data_model.session.active_timepoint
+            )
+
         raw = np.asarray(active_layer.data)
 
         def _preprocess(plane):

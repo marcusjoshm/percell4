@@ -145,6 +145,22 @@ class LazyLoadController:
         if self._viewer_win is not None:
             self._viewer_win.refresh_all_layers()
 
+    def ensure_all_ready(self) -> None:
+        """Decode every remaining timepoint now (blocking).
+
+        Used before whole-stack interactive ops (e.g. Cellpose over a
+        ``(T, H, W)`` channel) that read all frames at once. Coordinates with
+        the background filler through the buffer's per-frame locks, so frames
+        the filler already finished are skipped rather than re-decoded.
+        """
+        buf = self._buffer
+        if buf is None:
+            return
+        for t in buf.pending_frames():
+            buf.fill_frame(t)
+        if self._viewer_win is not None:
+            self._viewer_win.refresh_all_layers()
+
     def _on_dims_changed(self, event=None) -> None:
         if self._buffer is None or self._viewer_win is None:
             return

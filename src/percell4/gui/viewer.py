@@ -164,6 +164,10 @@ class ViewerWindow(QObject):
         # with an in-flight label-selection or active-layer push.
         self._timepoint_originator = False
         self._selected_label_forwarding_suspended = False
+        # Set by the launcher when a dataset is loaded lazily; lets interactive
+        # ops force a not-yet-streamed frame (or the whole stack) resident
+        # before reading layer.data. None on eager / fully-loaded datasets.
+        self._lazy_controller = None
         self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
         self._hidden_mask_layers: dict[str, float] = {}  # {layer_name: original_opacity}
         # Held so Qt doesn't GC the multi-select controller mid-session.
@@ -433,6 +437,24 @@ class ViewerWindow(QObject):
             return 0
         step = self._viewer.dims.current_step
         return int(step[0]) if step else 0
+
+    def set_lazy_controller(self, controller) -> None:
+        """Attach the lazy-load controller so interactive ops can force fills."""
+        self._lazy_controller = controller
+
+    def ensure_timepoint_ready(self, t: int) -> None:
+        """Force timepoint ``t`` resident before reading a layer's frame.
+
+        No-op when the dataset was loaded eagerly (no controller) — the data
+        is already complete.
+        """
+        if self._lazy_controller is not None:
+            self._lazy_controller.ensure_frame_ready(t)
+
+    def ensure_all_timepoints_ready(self) -> None:
+        """Force the whole stack resident before a full-timecourse read."""
+        if self._lazy_controller is not None:
+            self._lazy_controller.ensure_all_ready()
 
     def _on_layer_inserted(self, event) -> None:
         """Wire selection events when a new labels layer is added."""

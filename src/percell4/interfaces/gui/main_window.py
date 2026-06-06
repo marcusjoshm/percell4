@@ -1184,6 +1184,7 @@ class LauncherWindow(QMainWindow):
         # non-time-lapse) layers in full, and streams time-stacked layers. It
         # also tears down any previous dataset's background filler + buffer.
         controller = self._ensure_lazy_controller()
+        viewer_win.set_lazy_controller(controller)
         try:
             controller.load(
                 store,
@@ -1281,6 +1282,13 @@ class LauncherWindow(QMainWindow):
             return None
 
         session = self.data_model.session
+
+        # If the dataset is still streaming, make the active timepoint resident
+        # before reading the labels layer's data (otherwise an unfilled frame
+        # would read as zeros).
+        controller = getattr(self, "_lazy_controller", None)
+        if controller is not None:
+            controller.ensure_frame_ready(session.active_timepoint)
 
         def _slice_active_frame(data) -> np.ndarray:
             """Return the 2D active-timepoint frame of a (T,H,W) labels layer.
