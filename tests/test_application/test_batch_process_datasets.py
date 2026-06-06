@@ -194,3 +194,267 @@ def test_batch_continues_after_per_dataset_failure(tmp_path):
     assert report.items[0].error is not None  # bad dataset recorded
     assert report.items[1].succeeded          # good dataset still processed
     assert calls == [(1, 2), (2, 2)]           # progress fired for both
+
+
+# --- U2: full CellposeSettings + edge options + preprocessing + .h5 input ---
+
+from percell4.workflows.models import CellposeSettings  # noqa: E402
+
+
+class RecordingSegmenter:
+    """Records the image + kwargs of each .run call; returns two interior cells."""
+
+    def __init__(self) -> None:
+        self.images: list = []
+        self.kwargs: list[dict] = []
+
+    def run(self, image, **kwargs):
+        self.images.append(np.asarray(image).copy())
+        self.kwargs.append(kwargs)
+        h, w = image.shape[-2], image.shape[-1]
+        lab = np.zeros((h, w), dtype=np.int32)
+        lab[h // 4 : h // 4 + 4, w // 4 : w // 4 + 4] = 1
+        lab[h // 2 : h // 2 + 4, w // 2 : w // 2 + 4] = 2
+        return lab
+
+
+class RawMaskSegmenter:
+    """Returns a fixed raw mask regardless of input (to exercise finalize)."""
+
+    def __init__(self, mask: np.ndarray) -> None:
+        self._mask = mask.astype(np.int32)
+
+    def run(self, image, **kwargs):
+        return self._mask.copy()
+
+
+def _gradient_tiff(src: Path):
+    src.mkdir(parents=True)
+    ramp = np.tile(np.linspace(0, 600, 40, dtype=np.uint16), (40, 1))
+    ramp[0:2, :] = 6000  # hot rows so the saturation LUT visibly bites
+    tifffile.imwrite(str(src / "grad_ch00.tif"), ramp)
+
+
+def _read_stored_channel(out: Path, ch="ch00"):
+    from percell4.adapters.hdf5_store import Hdf5DatasetRepository
+    from percell4.adapters.null_viewer import NullViewerAdapter
+    from percell4.application.session import Session
+    from percell4.application.use_cases.load_dataset import LoadDataset
+
+    repo = Hdf5DatasetRepository()
+    handle = LoadDataset(repo, NullViewerAdapter(), Session()).execute(out)
+    return repo.read_channel_images(handle)[ch]
+
+
+def test_batch_forwards_cellpose_inference_settings(tmp_path):
+    src = tmp_path / "still"
+    _single_tiff(src)
+    seg = RecordingSegmenter()
+
+    batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=tmp_path / "o.h5")],
+        seg_channel="ch00",
+        settings=CellposeSettings(
+            model="cyto3", diameter=120.0, flow_threshold=0.7,
+            cellprob_threshold=-1.0, min_size=22,
+            saturation_pct=0.0, blur_sigma=0.0,
+        ),
+        segmenter=seg, tracker=FakeTracker(),
+    )
+
+    kw = seg.kwargs[0]
+    assert kw["model_type"] == "cyto3"
+    assert kw["diameter"] == 120.0
+    assert kw["flow_threshold"] == 0.7
+    assert kw["cellprob_threshold"] == -1.0
+    assert kw["min_size"] == 22
+
+
+def test_batch_diameter_zero_means_auto(tmp_path):
+    src = tmp_path / "still"
+    _single_tiff(src)
+    seg = RecordingSegmenter()
+
+    batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=tmp_path / "o.h5")],
+        seg_channel="ch00",
+        settings=CellposeSettings(diameter=0.0, saturation_pct=0.0, blur_sigma=0.0),
+        segmenter=seg, tracker=FakeTracker(),
+    )
+
+    assert seg.kwargs[0]["diameter"] is None  # 0 -> auto-detect
+
+
+def test_batch_preprocessing_applied_without_mutating_intensity(tmp_path):
+    src = tmp_path / "grad"
+    _gradient_tiff(src)
+    out = tmp_path / "o.h5"
+    seg = RecordingSegmenter()
+
+    batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=1.0, blur_sigma=2.0),
+        segmenter=seg, tracker=FakeTracker(),
+    )
+
+    fed = seg.images[0]
+    stored = _read_stored_channel(out)
+    # Preprocessing changed what Cellpose saw...
+    assert not np.array_equal(fed, stored)
+    # ...but the on-disk /intensity was untouched (still the imported ramp).
+    assert stored.max() >= 6000
+
+
+def test_batch_no_preprocessing_feeds_raw_channel(tmp_path):
+    src = tmp_path / "grad"
+    _gradient_tiff(src)
+    out = tmp_path / "o.h5"
+    seg = RecordingSegmenter()
+
+    batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+        segmenter=seg, tracker=FakeTracker(),
+    )
+
+    assert np.array_equal(seg.images[0], _read_stored_channel(out))
+
+
+def _edge_and_interior_mask() -> np.ndarray:
+    m = np.zeros((40, 40), dtype=np.int32)
+    m[10:25, 10:25] = 1   # interior cell (not touching border)
+    m[0:6, 30:36] = 2     # border-touching cell (row 0)
+    return m
+
+
+def test_batch_remove_edge_cells_toggle(tmp_path):
+    src = tmp_path / "still"
+    _single_tiff(src)
+    mask = _edge_and_interior_mask()
+
+    removed = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=tmp_path / "rm.h5")],
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0, min_size=1),
+        remove_edge_cells=True,
+        segmenter=RawMaskSegmenter(mask), tracker=FakeTracker(),
+    )
+    kept = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=tmp_path / "keep.h5")],
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0, min_size=1),
+        remove_edge_cells=False,
+        segmenter=RawMaskSegmenter(mask), tracker=FakeTracker(),
+    )
+
+    assert removed.items[0].n_cells == 1   # border cell dropped
+    assert kept.items[0].n_cells == 2      # border cell retained
+
+
+def test_batch_min_size_drops_small_cells(tmp_path):
+    src = tmp_path / "still"
+    _single_tiff(src)
+    mask = np.zeros((40, 40), dtype=np.int32)
+    mask[10:25, 10:25] = 1   # big interior cell (225 px)
+    mask[30:32, 30:31] = 2   # tiny cell (2 px)
+
+    big_only = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=tmp_path / "a.h5")],
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0, min_size=15),
+        remove_edge_cells=False,
+        segmenter=RawMaskSegmenter(mask), tracker=FakeTracker(),
+    )
+    both = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=tmp_path / "b.h5")],
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0, min_size=1),
+        remove_edge_cells=False,
+        segmenter=RawMaskSegmenter(mask), tracker=FakeTracker(),
+    )
+
+    assert big_only.items[0].n_cells == 1  # tiny cell filtered by min_size=15
+    assert both.items[0].n_cells == 2      # min_size=1 keeps both
+
+
+def _make_source_h5(tmp_path: Path, name: str, timelapse=False) -> Path:
+    """Import TIFFs to a standalone .h5 to use as an already-compressed source."""
+    from percell4.adapters.importer import import_dataset
+
+    src = tmp_path / f"{name}_tiffs"
+    if timelapse:
+        _timelapse_tiffs(src, n_t=2)
+    else:
+        _single_tiff(src)
+    h5 = tmp_path / f"{name}.h5"
+    import_dataset(src, h5)
+    return h5
+
+
+def test_batch_h5_source_segments_in_place(tmp_path):
+    h5 = _make_source_h5(tmp_path, "dish")
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],  # in place
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.items[0].succeeded
+    # Segmentation landed in the same file; channel still present.
+    labels = DatasetStore(h5).list_labels()
+    assert any(not n.endswith("_tracked") for n in labels)
+    assert "ch00" in DatasetStore(h5).metadata.get("channel_names", [])
+
+
+def test_batch_h5_source_copies_to_output_and_leaves_original(tmp_path):
+    import hashlib
+
+    h5 = _make_source_h5(tmp_path, "dish")
+    before = hashlib.sha256(h5.read_bytes()).hexdigest()
+    out = tmp_path / "copied" / "dish.h5"
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=out)],  # copy then segment
+        seg_channel="ch00",
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.items[0].succeeded
+    assert out.exists()
+    assert any(not n.endswith("_tracked") for n in DatasetStore(out).list_labels())
+    # The original .h5 is byte-for-byte unchanged.
+    assert hashlib.sha256(h5.read_bytes()).hexdigest() == before
+
+
+def test_batch_h5_source_timelapse_tracks(tmp_path):
+    h5 = _make_source_h5(tmp_path, "movie", timelapse=True)
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],
+        seg_channel="ch00", track=True,
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.items[0].n_timepoints == 2
+    assert report.items[0].tracked is True
+    assert any(n.endswith("_tracked") for n in DatasetStore(h5).list_labels())
+
+
+def test_batch_h5_in_place_seg_name_collision_recorded(tmp_path):
+    h5 = _make_source_h5(tmp_path, "dish")
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],
+        seg_channel="ch00", seg_name="ch00",  # collides with existing channel
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.n_failed == 1
+    assert "collides" in (report.items[0].error or "")

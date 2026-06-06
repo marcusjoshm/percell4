@@ -22,7 +22,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class DatasetSpec:
-    """One dataset to process: a TIFF source directory and its output ``.h5``."""
+    """One dataset to process.
+
+    ``source_dir`` is either a TIFF source **directory** (imported to
+    ``output_h5``) or an already-compressed ``.h5`` **file** (the
+    compress/import step is skipped). When the source is an ``.h5`` and
+    ``output_h5`` resolves to that same path the dataset is segmented in
+    place; otherwise the ``.h5`` is copied to ``output_h5`` first and the
+    copy is processed (the original is never modified).
+    """
 
     source_dir: Path
     output_h5: Path
@@ -30,6 +38,16 @@ class DatasetSpec:
     @property
     def name(self) -> str:
         return self.output_h5.stem
+
+    @property
+    def is_h5_source(self) -> bool:
+        """True when the source is an already-compressed ``.h5`` file."""
+        return self.source_dir.suffix.lower() == ".h5"
+
+    @property
+    def in_place(self) -> bool:
+        """True when an ``.h5`` source is processed where it lives (no copy)."""
+        return self.is_h5_source and self.source_dir.resolve() == self.output_h5.resolve()
 
 
 @dataclass
@@ -70,9 +88,9 @@ def batch_process_datasets(
     seg_channel: str | None = None,
     channel_names: list[str] | None = None,
     seg_name: str | None = None,
-    cellpose_model: str = "cyto3",
-    cellpose_diameter: float | None = None,
-    gpu: bool = False,
+    settings: "CellposeSettings | None" = None,
+    remove_edge_cells: bool = True,
+    edge_margin: int = 0,
     track: bool = True,
     import_kwargs: dict | None = None,
     segmenter=None,
@@ -80,6 +98,11 @@ def batch_process_datasets(
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> BatchProcessReport:
     """Compress + segment (all timepoints) + track each dataset, headlessly.
+
+    A spec's ``source_dir`` may be a TIFF directory (imported) or an
+    already-compressed ``.h5`` (the compress/import step is skipped — see
+    :class:`DatasetSpec`). ``.h5`` sources are segmented in place, or copied
+    to ``output_h5`` first when that differs from the source.
 
     ``seg_channel`` selects the segmentation channel (defaults to the first);
     it is resolved against the *effective* channel names, i.e. after any
@@ -99,12 +122,23 @@ def batch_process_datasets(
     segmentation in the flat HDF5 namespace is rejected (such a collision
     crashes the GUI on later load).
 
+    ``settings`` is the full :class:`CellposeSettings` (model, diameter, GPU,
+    flow/cellprob thresholds, min size, saturation %, blur sigma); defaults to
+    ``CellposeSettings()`` when not given. The per-frame saturation LUT and
+    Gaussian blur are applied to an in-memory copy of the segmentation channel
+    before inference — mirroring the GUI Segment panel and
+    ``workflows.phases.segment_one``; the on-disk ``/intensity`` is never
+    modified. ``remove_edge_cells`` / ``edge_margin`` control border-cell
+    removal in post-processing.
+
     ``track`` runs tracking for time-lapse datasets (``n_timepoints > 1``).
     ``segmenter`` / ``tracker`` may be injected for testing; otherwise the
     real Cellpose / laptrack adapters are constructed lazily. A per-dataset
     failure is recorded on the report and never aborts the batch.
     ``progress_callback(done, total, message)`` fires after each dataset.
     """
+    import shutil
+
     from percell4.adapters.hdf5_store import Hdf5DatasetRepository
     from percell4.adapters.importer import import_dataset
     from percell4.adapters.null_viewer import NullViewerAdapter
@@ -112,14 +146,39 @@ def batch_process_datasets(
     from percell4.application.use_cases.load_dataset import LoadDataset
     from percell4.application.use_cases.segment_cells import SegmentCells
     from percell4.application.use_cases.track_cells import TrackCells
+    from percell4.domain.segmentation.preprocess import (
+        apply_gaussian_blur,
+        apply_saturation_lut,
+    )
     from percell4.store import DatasetStore
+    from percell4.workflows.models import CellposeSettings
+
+    if settings is None:
+        settings = CellposeSettings()
+
+    def _preprocess(plane: NDArray) -> NDArray:
+        """Per-frame saturation LUT then Gaussian blur (mirrors the GUI /
+        ``phases.segment_one``). Both default to no-ops. Operates on a copy;
+        the on-disk /intensity is never touched."""
+        if settings.saturation_pct > 0.0:
+            plane = apply_saturation_lut(plane, settings.saturation_pct)
+        if settings.blur_sigma > 0.0:
+            plane = apply_gaussian_blur(plane, settings.blur_sigma)
+        return plane
 
     report = BatchProcessReport()
     total = len(specs)
 
     for i, spec in enumerate(specs):
         try:
-            import_dataset(spec.source_dir, spec.output_h5, **(import_kwargs or {}))
+            if spec.is_h5_source:
+                # Already compressed: skip import. Copy into output_h5 first
+                # unless we're segmenting the source in place.
+                if not spec.in_place:
+                    spec.output_h5.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(spec.source_dir, spec.output_h5)
+            else:
+                import_dataset(spec.source_dir, spec.output_h5, **(import_kwargs or {}))
 
             repo = Hdf5DatasetRepository()
             session = Session()
@@ -168,25 +227,37 @@ def batch_process_datasets(
                 repo, session,
                 segmenter=segmenter or _default_segmenter(),
             )
+            cp_diameter = settings.diameter if settings.diameter > 0 else None
             if n_timepoints > 1:
                 stack = np.stack(
                     [
-                        repo.read_channel_images(handle, timepoint=t)[ch]
+                        _preprocess(repo.read_channel_images(handle, timepoint=t)[ch])
                         for t in range(n_timepoints)
                     ],
                     axis=0,
                 )
                 raw = seg_uc.run_inference_stack(
-                    stack, model_type=cellpose_model,
-                    diameter=cellpose_diameter, gpu=gpu,
+                    stack, model_type=settings.model,
+                    diameter=cp_diameter, gpu=settings.gpu,
+                    flow_threshold=settings.flow_threshold,
+                    cellprob_threshold=settings.cellprob_threshold,
+                    min_size=settings.min_size,
                 )
             else:
-                image = repo.read_channel_images(handle)[ch]
+                image = _preprocess(repo.read_channel_images(handle)[ch])
                 raw = seg_uc.run_inference(
-                    image, model_type=cellpose_model,
-                    diameter=cellpose_diameter, gpu=gpu,
+                    image, model_type=settings.model,
+                    diameter=cp_diameter, gpu=settings.gpu,
+                    flow_threshold=settings.flow_threshold,
+                    cellprob_threshold=settings.cellprob_threshold,
+                    min_size=settings.min_size,
                 )
-            seg_result = seg_uc.finalize(raw, name=seg_name)
+            seg_result = seg_uc.finalize(
+                raw, name=seg_name,
+                min_area=settings.min_size,
+                remove_edge_cells=remove_edge_cells,
+                edge_margin=edge_margin,
+            )
 
             n_tracks = 0
             tracked = False
