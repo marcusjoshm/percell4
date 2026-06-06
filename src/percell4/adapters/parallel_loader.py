@@ -79,6 +79,25 @@ def decode_frame_into(
     out[t] = frame
 
 
+def frame_contrast_limits(plane: NDArray) -> tuple[float, float] | None:
+    """Nan-aware ``(lo, hi)`` contrast for a single plane, or ``None``.
+
+    Mirrors the auto-contrast in ``gui/viewer.py::ViewerWindow.add_image`` but
+    is computed from one timepoint so the lazy path never scans the full stack
+    (which would also be wrong while most frames are still zero-filled). Returns
+    ``None`` when the plane is all-NaN or flat (``hi <= lo``), matching the
+    "don't pass contrast_limits" behavior so the caller falls back to defaults.
+    """
+    d = np.asarray(plane)
+    if not np.any(np.isfinite(d)):
+        return None
+    lo = float(np.nanmin(d))
+    hi = float(np.nanmax(d))
+    if hi > lo:
+        return (lo, hi)
+    return None
+
+
 class LazyResidentBuffer:
     """Full-shape resident arrays for a dataset's time-stacked layers.
 

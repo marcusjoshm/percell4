@@ -8,6 +8,7 @@ import pytest
 from percell4.adapters.parallel_loader import (
     LazyResidentBuffer,
     decode_frame_into,
+    frame_contrast_limits,
     plan_resources,
 )
 from percell4.store import DatasetStore
@@ -173,6 +174,41 @@ def test_close_releases_and_resets(tmp_h5):
     buf.close()
     assert buf.arrays == {}
     assert not buf.is_ready(0)
+
+
+def test_frame_contrast_limits():
+    plane = np.array([[0.0, 10.0], [5.0, 20.0]], dtype=np.float32)
+    assert frame_contrast_limits(plane) == (0.0, 20.0)
+
+
+def test_frame_contrast_limits_ignores_nan():
+    plane = np.array([[np.nan, 10.0], [5.0, 30.0]], dtype=np.float32)
+    assert frame_contrast_limits(plane) == (5.0, 30.0)
+
+
+def test_frame_contrast_limits_all_nan_returns_none():
+    plane = np.full((4, 4), np.nan, dtype=np.float32)
+    assert frame_contrast_limits(plane) is None
+
+
+def test_frame_contrast_limits_flat_returns_none():
+    plane = np.full((4, 4), 7.0, dtype=np.float32)
+    assert frame_contrast_limits(plane) is None
+
+
+def test_frame_contrast_from_buffer_frame0_not_full_stack(tmp_h5):
+    """Contrast must come from frame 0, not the mostly-zero buffer."""
+    intensity = _make_timelapse(tmp_h5)
+    store = DatasetStore(tmp_h5)
+    n_t, specs, _ = plan_resources(store)
+    buf = LazyResidentBuffer(tmp_h5, n_t, specs)
+    buf.fill_frame(0)
+    # Limits from frame 0 only — equal to the real frame-0 plane's range.
+    limits = frame_contrast_limits(buf.arrays["A"][0])
+    assert limits == (
+        float(np.nanmin(intensity[0, 0])),
+        float(np.nanmax(intensity[0, 0])),
+    )
 
 
 def test_decode_frame_into_primitive(tmp_h5):
