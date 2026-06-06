@@ -15,6 +15,11 @@ Usage:
         --channel-names DAPI,GFP,RFP --seg-channel GFP --seg-name nuclei
     # Re-segment an already-compressed .h5 in place:
     percell4-batch-cellpose-laptrack /data/h5/dish1.h5 --cellprob-threshold -1.0
+    # Track-only: re-run laptrack on an existing segmentation, no Cellpose:
+    percell4-batch-cellpose-laptrack /data/h5/movie.h5 \\
+        --skip-segmentation --seg-name cellpose_88
+    # Verbose: surface Cellpose/laptrack native logs + per-frame timing:
+    percell4-batch-cellpose-laptrack /data/h5/movie.h5 --verbose
 
 Each positional argument is either a dataset's TIFF source **directory** (which
 is imported to ``<output-dir>/<source_dirname>.h5``) or an already-compressed
@@ -53,6 +58,29 @@ from percell4.application.use_cases.batch_process_datasets import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_logging(verbose: bool) -> None:
+    """Set up logging for the run.
+
+    Normal mode is quiet: only WARNING+ from libraries, and the use case's
+    own INFO milestones. ``--verbose`` switches to a timestamped DEBUG stream
+    and lifts the Cellpose and laptrack loggers to INFO so their native
+    progress (model load, GPU/MPS device, per-image cell counts and timing,
+    linking progress) is surfaced. Those loggers are NOTSET by default and
+    would otherwise stay silent behind the WARNING root in normal mode.
+    """
+    if verbose:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+    else:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    dep_level = logging.INFO if verbose else logging.WARNING
+    for name in ("cellpose", "laptrack"):
+        logging.getLogger(name).setLevel(dep_level)
 
 
 def _build_specs(sources: list[Path], output_dir: Path | None) -> list[DatasetSpec]:
@@ -116,7 +144,13 @@ def main(argv: list[str] | None = None) -> int:
                              "match the imported channel count.")
     parser.add_argument("--seg-name", default=None,
                         help="Name for the segmentation layer "
-                             "(default: cellpose_<n_cells>).")
+                             "(default: cellpose_<n_cells>). With "
+                             "--skip-segmentation this is the EXISTING "
+                             "segmentation layer to track (required).")
+    parser.add_argument("--skip-segmentation", action="store_true",
+                        help="Skip Cellpose; only run laptrack on an existing "
+                             "segmentation. Requires --seg-name (the existing "
+                             "(T,H,W) layer) and a time-lapse dataset.")
 
     cp = parser.add_argument_group("Cellpose settings (match the GUI Segment tab)")
     cp.add_argument("--cellpose-model", default=defaults.model,
@@ -163,10 +197,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="Enable debug logging.")
 
     args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s: %(message)s",
-    )
+    _configure_logging(args.verbose)
+
+    if args.skip_segmentation and args.seg_name is None:
+        print(
+            "--skip-segmentation requires --seg-name (the existing segmentation "
+            "layer to track).",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         settings = CellposeSettings(
@@ -209,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         settings=settings,
         remove_edge_cells=args.remove_edge_cells,
         edge_margin=args.edge_margin,
+        skip_segmentation=args.skip_segmentation,
         track=not args.no_track,
         progress_callback=_progress,
     )

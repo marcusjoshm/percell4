@@ -173,7 +173,8 @@ percell4-batch-cellpose-laptrack SOURCES [--output-dir DIR] [options]
 | `--output-dir OUTPUT_DIR` | Directory for the output `.h5` files. **Required for TIFF directory sources.** For `.h5` sources: omit to segment in place, or give it to copy-then-segment. |
 | `--seg-channel SEG_CHANNEL` | Channel name to segment. Default: first channel. Matched against `--channel-names` when given. |
 | `--channel-names CHANNEL_NAMES` | Comma-separated names to rename the imported channels, in order (e.g. `'DAPI,GFP,RFP'`). Must match the imported channel count. |
-| `--seg-name SEG_NAME` | Name for the segmentation layer. Default: `cellpose_<n_cells>`. |
+| `--seg-name SEG_NAME` | Name for the segmentation layer. Default: `cellpose_<n_cells>`. With `--skip-segmentation`, this is the **existing** segmentation layer to track (required). |
+| `--skip-segmentation` | Skip Cellpose and only run laptrack on an existing segmentation. Requires `--seg-name` (the existing `(T,H,W)` layer) and a time-lapse dataset. |
 | `--cellpose-model {cpsam,cyto3,cyto2,cyto,nuclei}` | Cellpose model. Default: `cpsam`. Ignored on Cellpose 4.x (cpsam is the only model). |
 | `--cellpose-diameter CELLPOSE_DIAMETER` | Cell diameter in pixels; `0` = auto-detect. Default: `30`. |
 | `--gpu` | Use GPU for Cellpose (requires the `gpu` extra and a working CUDA driver). |
@@ -186,7 +187,7 @@ percell4-batch-cellpose-laptrack SOURCES [--output-dir DIR] [options]
 | `--edge-margin EDGE_MARGIN` | Pixels from the border counted as edge when removing edge cells. Default: `0` (strict border-touching). |
 | `--no-track` | Skip tracking even for time-lapse datasets. |
 | `--quiet` | Suppress per-dataset progress lines. |
-| `--verbose`, `-v` | Enable debug logging. |
+| `--verbose`, `-v` | Timestamped DEBUG stream plus per-frame/timing detail; lifts the Cellpose and laptrack loggers to INFO so their native progress (device, model load, per-image cell counts and timing, linking) is surfaced. |
 
 The Cellpose defaults match the GUI Segment tab, so the same settings produce the same segmentation interactively and headlessly.
 
@@ -199,6 +200,10 @@ percell4-batch-cellpose-laptrack /scratch/tiffs/timelapse_a/ --output-dir /scrat
 percell4-batch-cellpose-laptrack /scratch/h5/dish_1.h5 --cellprob-threshold -1.0 --saturation 2.0
 # Copy an .h5 elsewhere, then segment the copy (original untouched):
 percell4-batch-cellpose-laptrack /scratch/h5/dish_1.h5 --output-dir /scratch/h5_reseg/
+# Track-only: re-run laptrack on an existing segmentation, no Cellpose:
+percell4-batch-cellpose-laptrack /scratch/h5/movie.h5 --skip-segmentation --seg-name cellpose_88
+# Verbose: surface Cellpose/laptrack native logs + per-frame timing:
+percell4-batch-cellpose-laptrack /scratch/h5/movie.h5 --verbose
 ```
 
 ### `percell4-batch-export` — TIFF export

@@ -188,3 +188,45 @@ def test_invalid_model_is_argparse_error(tmp_path):
         cli.main([str(tmp_path / "dishA"), "--output-dir", str(tmp_path / "o"),
                   "--cellpose-model", "not-a-model"])
     assert exc.value.code == 2  # argparse choices rejection
+
+
+# --- skip-segmentation (track-only) ---
+
+def test_skip_segmentation_forwarded(tmp_path, captured):
+    h5 = tmp_path / "movie.h5"
+    h5.write_bytes(b"")
+    rc = cli.main([str(h5), "--skip-segmentation", "--seg-name", "cellpose_42"])
+    assert rc == 0
+    assert captured["kwargs"]["skip_segmentation"] is True
+    assert captured["kwargs"]["seg_name"] == "cellpose_42"
+
+
+def test_skip_segmentation_without_seg_name_returns_one(tmp_path, captured):
+    h5 = tmp_path / "movie.h5"
+    h5.write_bytes(b"")
+    rc = cli.main([str(h5), "--skip-segmentation"])
+    assert rc == 1
+    assert "specs" not in captured  # use case never called
+
+
+def test_skip_segmentation_defaults_false(tmp_path, captured):
+    (tmp_path / "dishA").mkdir()
+    rc = cli.main([str(tmp_path / "dishA"), "--output-dir", str(tmp_path / "o")])
+    assert rc == 0
+    assert captured["kwargs"]["skip_segmentation"] is False
+
+
+# --- verbose logging configuration ---
+
+def test_configure_logging_verbose_lifts_dependency_loggers():
+    import logging
+    cli._configure_logging(verbose=True)
+    assert logging.getLogger("cellpose").level == logging.INFO
+    assert logging.getLogger("laptrack").level == logging.INFO
+
+
+def test_configure_logging_quiet_silences_dependency_loggers():
+    import logging
+    cli._configure_logging(verbose=False)
+    assert logging.getLogger("cellpose").level == logging.WARNING
+    assert logging.getLogger("laptrack").level == logging.WARNING

@@ -458,3 +458,110 @@ def test_batch_h5_in_place_seg_name_collision_recorded(tmp_path):
 
     assert report.n_failed == 1
     assert "collides" in (report.items[0].error or "")
+
+
+# --- skip_segmentation (track-only) ---
+
+class RaisingSegmenter:
+    """Fails the test if segmentation is invoked (proves it was skipped)."""
+
+    def run(self, image, **kwargs):
+        raise AssertionError("segmenter.run must not be called when skipping")
+
+
+def _seed_segmentation(h5: Path, seg_channel="ch00") -> str:
+    """Run one segment pass (no tracking) so an existing raw seg layer exists.
+
+    Returns the raw segmentation layer name.
+    """
+    batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],
+        seg_channel=seg_channel, track=False,
+        settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+    labels = [n for n in DatasetStore(h5).list_labels() if not n.endswith("_tracked")]
+    assert labels, "expected a raw segmentation layer to be seeded"
+    return labels[0]
+
+
+def test_skip_segmentation_tracks_existing_without_cellpose(tmp_path):
+    h5 = _make_source_h5(tmp_path, "movie", timelapse=True)
+    seg = _seed_segmentation(h5)
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],
+        seg_name=seg, skip_segmentation=True, track=True,
+        segmenter=RaisingSegmenter(),  # must NOT be called
+        tracker=FakeTracker(),
+    )
+
+    assert report.items[0].succeeded
+    assert report.items[0].tracked is True
+    assert report.items[0].n_tracks > 0
+    assert f"{seg}_tracked" in DatasetStore(h5).list_labels()
+
+
+def test_skip_segmentation_requires_seg_name(tmp_path):
+    h5 = _make_source_h5(tmp_path, "movie", timelapse=True)
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],
+        seg_name=None, skip_segmentation=True, track=True,
+        segmenter=RaisingSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.n_failed == 1
+    assert "requires seg_name" in (report.items[0].error or "")
+
+
+def test_skip_segmentation_nonexistent_layer_recorded(tmp_path):
+    h5 = _make_source_h5(tmp_path, "movie", timelapse=True)
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],
+        seg_name="does_not_exist", skip_segmentation=True, track=True,
+        segmenter=RaisingSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.n_failed == 1
+    assert "not found" in (report.items[0].error or "")
+
+
+def test_skip_segmentation_single_timepoint_recorded(tmp_path):
+    h5 = _make_source_h5(tmp_path, "still")  # single timepoint
+    seg = _seed_segmentation(h5)
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=h5, output_h5=h5)],
+        seg_name=seg, skip_segmentation=True, track=True,
+        segmenter=RaisingSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.n_failed == 1
+    assert "nothing to do" in (report.items[0].error or "")
+
+
+# --- verbose instrumentation (DEBUG progress + timing) ---
+
+def test_batch_emits_debug_progress(tmp_path, caplog):
+    import logging
+
+    h5 = _make_source_h5(tmp_path, "movie", timelapse=True)
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="percell4.application.use_cases.batch_process_datasets",
+    ):
+        batch_process_datasets(
+            [DatasetSpec(source_dir=h5, output_h5=h5)],
+            seg_channel="ch00", track=True,
+            settings=CellposeSettings(saturation_pct=0.0, blur_sigma=0.0),
+            segmenter=FakeSegmenter(), tracker=FakeTracker(),
+        )
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "segmented frame 1/2" in text
+    assert "segmented frame 2/2" in text
+    assert "cellpose inference finished" in text
+    assert "tracking" in text
