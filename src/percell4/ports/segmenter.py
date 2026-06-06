@@ -20,6 +20,14 @@ class Segmenter(Protocol):
         model_type: str = "cyto3",
         diameter: float | None = None,
         gpu: bool = False,
+        flow_threshold: float = 0.4,
+        cellprob_threshold: float = 0.0,
+        min_size: int = 15,
     ) -> NDArray[np.int32]:
-        """Run segmentation on an image. Returns label array."""
+        """Run segmentation on an image. Returns label array.
+
+        ``flow_threshold``, ``cellprob_threshold``, and ``min_size`` carry
+        the full Cellpose inference controls; defaults match
+        :func:`percell4.adapters.cellpose.run_cellpose`.
+        """
         ...

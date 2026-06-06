@@ -166,5 +166,16 @@ class CellposeSegmenter:
         model_type: str = "cyto3",
         diameter: float | None = None,
         gpu: bool = False,
+        flow_threshold: float = 0.4,
+        cellprob_threshold: float = 0.0,
+        min_size: int = 15,
     ) -> NDArray[np.int32]:
-        return run_cellpose(image, model_type=model_type, diameter=diameter, gpu=gpu)
+        return run_cellpose(
+            image,
+            model_type=model_type,
+            diameter=diameter,
+            gpu=gpu,
+            flow_threshold=flow_threshold,
+            cellprob_threshold=cellprob_threshold,
+            min_size=min_size,
+        )

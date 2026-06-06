@@ -57,18 +57,32 @@ class SegmentCells:
         model_type: str = "cyto3",
         diameter: float | None = None,
         gpu: bool = False,
+        flow_threshold: float = 0.4,
+        cellprob_threshold: float = 0.0,
+        min_size: int = 15,
     ) -> NDArray[np.int32]:
         """Run segmentation inference (synchronous, CPU-heavy).
 
         Requires a Segmenter to be injected at construction.
         Call from a worker thread in the GUI, or directly in the CLI.
+        ``flow_threshold``, ``cellprob_threshold``, and ``min_size`` are
+        the full Cellpose inference controls; defaults match
+        :func:`percell4.adapters.cellpose.run_cellpose`.
         """
         if self._segmenter is None:
             raise ValueError(
                 "No segmenter injected. Pass a Segmenter at construction "
                 "(e.g., CellposeSegmenter from adapters/cellpose.py)."
             )
-        return self._segmenter.run(image, model_type=model_type, diameter=diameter, gpu=gpu)
+        return self._segmenter.run(
+            image,
+            model_type=model_type,
+            diameter=diameter,
+            gpu=gpu,
+            flow_threshold=flow_threshold,
+            cellprob_threshold=cellprob_threshold,
+            min_size=min_size,
+        )
 
     def run_inference_stack(
         self,
@@ -76,6 +90,9 @@ class SegmentCells:
         model_type: str = "cyto3",
         diameter: float | None = None,
         gpu: bool = False,
+        flow_threshold: float = 0.4,
+        cellprob_threshold: float = 0.0,
+        min_size: int = 15,
         progress_callback=None,
     ) -> NDArray[np.int32]:
         """Run segmentation on every timepoint of a ``(T, H, W)`` stack.
@@ -83,7 +100,9 @@ class SegmentCells:
         Returns a ``(T, H, W)`` raw-mask stack (per-frame Cellpose ids,
         intentionally inconsistent across frames — tracking unifies them).
         CPU-heavy; call from a worker thread. ``progress_callback(t, n_t)``
-        is invoked after each frame when supplied.
+        is invoked after each frame when supplied. ``flow_threshold``,
+        ``cellprob_threshold``, and ``min_size`` are forwarded to every
+        frame's inference.
         """
         if self._segmenter is None:
             raise ValueError(
@@ -95,7 +114,13 @@ class SegmentCells:
         for t in range(n_t):
             frames.append(
                 self._segmenter.run(
-                    images[t], model_type=model_type, diameter=diameter, gpu=gpu
+                    images[t],
+                    model_type=model_type,
+                    diameter=diameter,
+                    gpu=gpu,
+                    flow_threshold=flow_threshold,
+                    cellprob_threshold=cellprob_threshold,
+                    min_size=min_size,
                 )
             )
             if progress_callback is not None:
