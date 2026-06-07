@@ -31,6 +31,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.config import viewer_presets as vp
+from percell4.domain.io.layout import split_intensity_layers
 from percell4.gui import theme
 from percell4.model import CellDataModel
 
@@ -1179,34 +1180,42 @@ class LauncherWindow(QMainWindow):
         if view_bin is None:
             view_bin = self.data_model.session.active_bin
 
-        # Lazy-first load: show timepoint 0 immediately, fill the rest in the
-        # background. The controller clears the viewer, adds eager (2D /
-        # non-time-lapse) layers in full, and streams time-stacked layers. It
-        # also tears down any previous dataset's background filler + buffer.
-        controller = self._ensure_lazy_controller()
-        viewer_win.set_lazy_controller(controller)
+        # Clear viewer layers
+        viewer_win.clear()
+
+        # Read and display intensity data
         try:
-            controller.load(
-                store,
-                viewer_win,
-                view_bin,
-                status_cb=lambda msg: self.statusBar().showMessage(msg),
-            )
+            with store.open_read() as s:
+                intensity = s.read_array("intensity", view_bin=view_bin)
+                meta = s.metadata
+                channel_names = meta.get("channel_names", [])
+                n_timepoints = int(meta.get("n_timepoints", 1) or 1)
+
+                # Keep any leading time axis so napari builds a single dims
+                # slider; disambiguate a leading T axis from a leading C axis
+                # via n_timepoints (shapes alone are ambiguous).
+                for name, arr in split_intensity_layers(
+                    intensity, channel_names, n_timepoints
+                ):
+                    viewer_win.add_image(arr, name=name)
+
+                # Load existing labels (skip names that are also masks)
+                mask_names = set(s.list_masks())
+                for label_name in s.list_labels():
+                    if label_name not in mask_names:
+                        labels = s.read_labels(label_name, view_bin=view_bin)
+                        viewer_win.add_labels(labels, name=label_name)
+
+                # Load existing masks
+                for mask_name in s.list_masks():
+                    mask = s.read_mask(mask_name, view_bin=view_bin)
+                    viewer_win.add_mask(mask, name=mask_name)
+
         except KeyError:
             self.statusBar().showMessage(
                 f"No intensity data in {Path(h5_path).name}"
             )
             return
-
-    def _ensure_lazy_controller(self):
-        """Return the reused lazy-load controller, creating it on first use."""
-        controller = getattr(self, "_lazy_controller", None)
-        if controller is None:
-            from percell4.gui.lazy_load import LazyLoadController
-
-            controller = LazyLoadController()
-            self._lazy_controller = controller
-        return controller
 
 
     def _update_data_tab_from_store(self) -> None:
@@ -1220,12 +1229,6 @@ class LauncherWindow(QMainWindow):
     def _on_close_dataset(self) -> None:
         from percell4.adapters.napari_viewer import NapariViewerAdapter
         from percell4.application.use_cases.close_dataset import CloseDataset
-
-        # Stop any background frame fill and release the resident buffer before
-        # the viewer/session are cleared (single invalidation point).
-        controller = getattr(self, "_lazy_controller", None)
-        if controller is not None:
-            controller.teardown()
 
         viewer_win = self._windows.get("viewer")
 
@@ -1282,13 +1285,6 @@ class LauncherWindow(QMainWindow):
             return None
 
         session = self.data_model.session
-
-        # If the dataset is still streaming, make the active timepoint resident
-        # before reading the labels layer's data (otherwise an unfilled frame
-        # would read as zeros).
-        controller = getattr(self, "_lazy_controller", None)
-        if controller is not None:
-            controller.ensure_frame_ready(session.active_timepoint)
 
         def _slice_active_frame(data) -> np.ndarray:
             """Return the 2D active-timepoint frame of a (T,H,W) labels layer.
