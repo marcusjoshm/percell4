@@ -628,11 +628,9 @@ class FlimPanel(QWidget):
         handle = self.data_model.session.dataset
         repo = self._get_repo()
         if channel is not None and handle is not None and repo is not None:
-            try:
-                repo.read_array(handle, f"phasor/{channel}/g_filtered")
-                has_wavelet = True
-            except Exception:
-                has_wavelet = False
+            # Existence check only — must not decompress the map (this fires on
+            # every dataset/channel change). array_exists reads metadata only.
+            has_wavelet = repo.array_exists(handle, f"phasor/{channel}/g_filtered")
 
         model = self._lifetime_source_combo.model()
         wavelet_idx = 2  # ("Unfiltered", "Median", "Wavelet")

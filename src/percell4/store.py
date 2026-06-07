@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import h5py
+import hdf5plugin  # noqa: F401 — registers the Blosc filter (read + write)
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -209,10 +210,26 @@ def _choose_chunks(shape: tuple[int, ...], is_decay: bool = False) -> tuple[int,
 
 
 def _compression_kwargs(is_decay: bool = False) -> dict[str, Any]:
-    """Return compression keyword arguments for dataset creation."""
+    """Return compression keyword arguments for dataset creation.
+
+    Images/labels/masks use **Blosc (zstd, clevel 5, bitshuffle)**: measured
+    on real intensity it matches gzip-4+shuffle's ratio (~3.4x, no size penalty
+    on large files) while decoding ~3x faster — which compounds with the
+    parallel decode on load. TCSPC decay keeps ``lzf`` (the existing fast,
+    lighter choice for those large per-pixel stacks).
+
+    Note: Blosc and lzf are h5py/registered-filter codecs (not the universal
+    gzip). PerCell4 imports ``hdf5plugin`` wherever it reads HDF5 (``store``,
+    ``parallel_decode``), so every read path has the Blosc filter registered.
+    Existing gzip files keep reading unchanged (gzip is always available).
+    """
     if is_decay:
         return {"compression": "lzf"}
-    return {"compression": "gzip", "compression_opts": 4, "shuffle": True}
+    return dict(
+        hdf5plugin.Blosc(
+            cname="zstd", clevel=5, shuffle=hdf5plugin.Blosc.BITSHUFFLE
+        )
+    )
 
 
 class DatasetStore:
@@ -484,6 +501,17 @@ class DatasetStore:
             if not isinstance(obj, h5py.Dataset):
                 raise KeyError(f"{hdf5_path} is a group, not a dataset")
             return obj.ndim == 2
+        finally:
+            self._close_if_not_session(f)
+
+    def array_exists(self, hdf5_path: str) -> bool:
+        """True when ``hdf5_path`` is a dataset in the file. Metadata only —
+        **never decompresses**. Use for existence/enablement checks instead of
+        ``try: read_array(...) except`` (which decodes the whole stack).
+        """
+        f = self._open_read()
+        try:
+            return hdf5_path in f and isinstance(f[hdf5_path], h5py.Dataset)
         finally:
             self._close_if_not_session(f)
 

@@ -43,6 +43,18 @@ def test_write_read_array_3d(store):
     np.testing.assert_array_equal(result, data)
 
 
+def test_reads_legacy_gzip_files(store):
+    """Existing gzip-compressed datasets keep reading after the Blosc switch."""
+    data = (np.random.default_rng(1).random((50, 60)) * 10).astype(np.float32)
+    # Simulate an old file: write the dataset with gzip+shuffle directly.
+    with h5py.File(store.path, "a") as f:
+        f.create_dataset(
+            "intensity", data=data, chunks=(50, 60),
+            compression="gzip", compression_opts=4, shuffle=True,
+        )
+    np.testing.assert_array_equal(store.read_array("intensity"), data)
+
+
 def test_write_array_decay_uses_lzf(store):
     """Decay data should use lzf compression, not gzip."""
     data = np.zeros((64, 64, 256), dtype=np.uint16)
@@ -52,14 +64,31 @@ def test_write_array_decay_uses_lzf(store):
         assert f["decay"].compression == "lzf"
 
 
-def test_write_array_spatial_uses_gzip_shuffle(store):
-    """Spatial data should use gzip + shuffle."""
-    data = np.zeros((100, 100), dtype=np.float32)
+def test_write_array_spatial_uses_blosc(store):
+    """Spatial data uses the Blosc filter (faster decode, same ratio as gzip)."""
+    import hdf5plugin
+
+    rng = np.random.default_rng(0)
+    data = (rng.random((100, 100)) * 100).astype(np.float32)
     store.write_array("intensity", data)
 
     with h5py.File(store.path, "r") as f:
-        assert f["intensity"].compression == "gzip"
-        assert f["intensity"].shuffle is True
+        ds = f["intensity"]
+        plist = ds.id.get_create_plist()
+        filter_ids = {plist.get_filter(i)[0] for i in range(plist.get_nfilters())}
+        assert hdf5plugin.Blosc.filter_id in filter_ids
+        # Round-trips byte-identical through the registered filter.
+        np.testing.assert_array_equal(ds[()], data)
+
+
+def test_blosc_roundtrip_preserves_nan_and_reads_back(store):
+    """Blosc is lossless: float32 + NaN survive a write/read cycle."""
+    data = np.full((40, 40), 3.5, dtype=np.float32)
+    data[0, 0] = np.nan
+    store.write_array("intensity", data)
+    back = store.read_array("intensity")
+    np.testing.assert_array_equal(np.isnan(back), np.isnan(data))
+    np.testing.assert_array_equal(np.nan_to_num(back), np.nan_to_num(data))
 
 
 def test_dims_attribute_stored(store):

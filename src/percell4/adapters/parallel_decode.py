@@ -29,6 +29,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import shared_memory
 
 import h5py
+import hdf5plugin  # noqa: F401 — register Blosc filter in spawned workers
 import numpy as np
 from numpy.typing import NDArray
 

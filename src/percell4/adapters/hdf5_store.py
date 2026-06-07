@@ -245,6 +245,10 @@ class Hdf5DatasetRepository:
     ) -> NDArray:
         return self._store(handle).read_array(path, view_bin=view_bin)
 
+    def array_exists(self, handle: DatasetHandle, path: str) -> bool:
+        """True if ``path`` is a dataset. Metadata only — no decompression."""
+        return self._store(handle).array_exists(path)
+
     def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
         """Read /metadata attrs fresh from disk (not the handle's snapshot)."""
         return self._store(handle).metadata
