@@ -487,6 +487,24 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
+    def array_shape(self, hdf5_path: str) -> tuple[int, ...]:
+        """Return a dataset's on-disk shape. Reads HDF5 metadata only — **no
+        array data is decompressed**. Use this instead of
+        ``read_array(path).shape`` for display/inventory: on a large stacked
+        array the latter decompresses the whole stack (gigabytes) just to read
+        a shape tuple. Raises ``KeyError`` when missing or a group.
+        """
+        f = self._open_read()
+        try:
+            if hdf5_path not in f:
+                raise KeyError(f"Dataset not found: {hdf5_path}")
+            obj = f[hdf5_path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{hdf5_path} is a group, not a dataset")
+            return tuple(int(x) for x in obj.shape)
+        finally:
+            self._close_if_not_session(f)
+
     def labels_shape(self, name: str) -> tuple[int, ...]:
         """Return the on-disk shape of ``/labels/<name>`` without loading data.
 

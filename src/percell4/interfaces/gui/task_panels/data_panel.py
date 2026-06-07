@@ -310,9 +310,10 @@ class DataPanel(QWidget):
         try:
             n_labels = len(store.list_labels())
             n_masks = len(store.list_masks())
-            with store.open_read() as s:
-                intensity = s.read_array("intensity")
-                shape = intensity.shape
+            # Shape only — read HDF5 metadata, never the array. Reading the
+            # full intensity here (it ran twice per load) was the dominant
+            # large-file load cost.
+            shape = store.array_shape("intensity")
             session = self.data_model.session
             meta = store.metadata
             native_shape = meta.get("native_shape")

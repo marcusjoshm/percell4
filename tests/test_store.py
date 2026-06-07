@@ -935,3 +935,27 @@ def test_write_read_list_tracks(store):
     assert store.list_tracks() == ["cellpose_tracked"]
     back = store.read_tracks("cellpose_tracked")
     pd.testing.assert_frame_equal(back, df)
+
+
+# ── array_shape: metadata-only shape (no full decode) ─────────
+
+
+def test_array_shape_returns_shape_without_loading(store):
+    """array_shape reads the HDF5 shape and equals read_array().shape."""
+    arr = np.zeros((5, 2, 32, 48), dtype=np.float32)
+    store.write_array("intensity", arr, attrs={"dims": ["T", "C", "H", "W"]})
+    assert store.array_shape("intensity") == (5, 2, 32, 48)
+    assert store.array_shape("intensity") == store.read_array("intensity").shape
+
+
+def test_array_shape_missing_raises(store):
+    with pytest.raises(KeyError):
+        store.array_shape("intensity")
+
+
+def test_array_shape_on_group_raises(store):
+    """A group path (not a dataset) raises KeyError."""
+    store.write_labels("seg", np.zeros((16, 16), dtype=np.int32))
+    # "labels" is a group containing /labels/seg.
+    with pytest.raises(KeyError):
+        store.array_shape("labels")
