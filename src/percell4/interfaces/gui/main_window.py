@@ -1180,42 +1180,131 @@ class LauncherWindow(QMainWindow):
         if view_bin is None:
             view_bin = self.data_model.session.active_bin
 
-        # Clear viewer layers
-        viewer_win.clear()
-
-        # Read and display intensity data
+        # Intensity existence + inventory from metadata only (no decode).
         try:
-            with store.open_read() as s:
-                intensity = s.read_array("intensity", view_bin=view_bin)
-                meta = s.metadata
-                channel_names = meta.get("channel_names", [])
-                n_timepoints = int(meta.get("n_timepoints", 1) or 1)
-
-                # Keep any leading time axis so napari builds a single dims
-                # slider; disambiguate a leading T axis from a leading C axis
-                # via n_timepoints (shapes alone are ambiguous).
-                for name, arr in split_intensity_layers(
-                    intensity, channel_names, n_timepoints
-                ):
-                    viewer_win.add_image(arr, name=name)
-
-                # Load existing labels (skip names that are also masks)
-                mask_names = set(s.list_masks())
-                for label_name in s.list_labels():
-                    if label_name not in mask_names:
-                        labels = s.read_labels(label_name, view_bin=view_bin)
-                        viewer_win.add_labels(labels, name=label_name)
-
-                # Load existing masks
-                for mask_name in s.list_masks():
-                    mask = s.read_mask(mask_name, view_bin=view_bin)
-                    viewer_win.add_mask(mask, name=mask_name)
-
+            store.array_shape("intensity")
         except KeyError:
             self.statusBar().showMessage(
                 f"No intensity data in {Path(h5_path).name}"
             )
             return
+
+        meta = store.metadata
+        channel_names = meta.get("channel_names", [])
+        n_timepoints = int(meta.get("n_timepoints", 1) or 1)
+        mask_names = list(store.list_masks())
+        mask_set = set(mask_names)
+        label_names = [n for n in store.list_labels() if n not in mask_set]
+
+        viewer_win.clear()
+
+        # Native resolution (view_bin == 1) is the heavy case — decode it in
+        # parallel across processes. Binned views (k > 1) are downsampled and
+        # small, so the simple serial read is fine and avoids re-implementing
+        # the per-path binning on the parallel result.
+        if view_bin == 1:
+            self._populate_parallel(
+                h5_path, viewer_win, channel_names, n_timepoints,
+                label_names, mask_names,
+            )
+        else:
+            self._populate_serial(
+                store, viewer_win, view_bin, channel_names, n_timepoints,
+                label_names, mask_names,
+            )
+
+    def _populate_serial(
+        self, store, viewer_win, view_bin, channel_names, n_timepoints,
+        label_names, mask_names,
+    ) -> None:
+        """Read + display every layer serially (binned-view path)."""
+        with store.open_read() as s:
+            intensity = s.read_array("intensity", view_bin=view_bin)
+            for name, arr in split_intensity_layers(
+                intensity, channel_names, n_timepoints
+            ):
+                viewer_win.add_image(arr, name=name)
+            for label_name in label_names:
+                viewer_win.add_labels(
+                    s.read_labels(label_name, view_bin=view_bin), name=label_name
+                )
+            for mask_name in mask_names:
+                viewer_win.add_mask(
+                    s.read_mask(mask_name, view_bin=view_bin), name=mask_name
+                )
+
+    def _populate_parallel(
+        self, h5_path, viewer_win, channel_names, n_timepoints,
+        label_names, mask_names,
+    ) -> None:
+        """Decode every native-resolution layer with the process pool.
+
+        gzip decode is single-threaded per HDF5 call; spreading frames across
+        worker processes (writing into shared memory) is ~5x faster on a large
+        timecourse. A modal progress dialog keeps the UI responsive while the
+        decode runs in subprocesses. Layers are created here on the main thread
+        (napari is not thread-safe); the intensity ``(T,C,H,W)`` block is split
+        into per-channel layers via the same ``split_intensity_layers`` rule.
+        """
+        from qtpy.QtWidgets import QApplication, QProgressDialog
+
+        from percell4.adapters.parallel_decode import (
+            array_meta,
+            decode_array_parallel,
+            default_worker_count,
+            make_executor,
+        )
+
+        # Manifest with per-array frame counts (metadata only) for progress.
+        entries: list[tuple[str, str | None, str, int]] = []
+
+        def _frames(hp: str) -> int:
+            shp, _dtype, is_ts = array_meta(h5_path, hp)
+            return shp[0] if is_ts else 1
+
+        entries.append(("intensity", None, "intensity", _frames("intensity")))
+        for ln in label_names:
+            entries.append(("labels", ln, f"labels/{ln}", _frames(f"labels/{ln}")))
+        for mn in mask_names:
+            entries.append(("mask", mn, f"masks/{mn}", _frames(f"masks/{mn}")))
+        total = sum(e[3] for e in entries)
+
+        progress = QProgressDialog("Loading dataset…", None, 0, total, self)
+        progress.setWindowTitle("Loading")
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+
+        executor = make_executor(default_worker_count())
+        base = 0
+        try:
+            for kind, name, hp, n_frames in entries:
+                def _cb(done: int, _base: int = base) -> None:
+                    progress.setValue(_base + done)
+                    QApplication.processEvents()
+
+                arr = decode_array_parallel(
+                    h5_path, hp, executor=executor, progress_cb=_cb
+                )
+                if kind == "intensity":
+                    for nm, plane in split_intensity_layers(
+                        arr, channel_names, n_timepoints
+                    ):
+                        viewer_win.add_image(plane, name=nm)
+                elif kind == "labels":
+                    viewer_win.add_labels(arr, name=name)
+                else:
+                    viewer_win.add_mask(arr, name=name)
+                base += n_frames
+                del arr
+        except Exception as exc:  # noqa: BLE001 — surface, don't crash the UI
+            self.statusBar().showMessage(f"Load error: {exc}")
+        finally:
+            executor.shutdown(wait=True)
+            progress.close()
+            self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
 
 
     def _update_data_tab_from_store(self) -> None:
