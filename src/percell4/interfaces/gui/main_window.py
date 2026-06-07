@@ -928,7 +928,11 @@ class LauncherWindow(QMainWindow):
                 viewer_empty = len(window.viewer.layers) == 0
             except Exception:
                 viewer_empty = True
-            if viewer_empty and getattr(self, "_current_h5_path", None):
+            if (
+                viewer_empty
+                and getattr(self, "_current_h5_path", None)
+                and not getattr(self, "_loading_dataset", False)
+            ):
                 self._populate_viewer_from_store()
 
         if window.isMinimized():
@@ -1147,8 +1151,15 @@ class LauncherWindow(QMainWindow):
         # Update Data tab info + dropdowns
         self._update_data_tab_from_store()
 
-        # Show viewer and populate with data
-        self._show_window("viewer")
+        # Show viewer and populate with data. Suppress _show_window's
+        # "empty viewer -> auto-populate" safety net during the load so the
+        # explicit populate below is the single decode (otherwise the dataset
+        # is decoded twice — two progress dialogs, ~2x load time).
+        self._loading_dataset = True
+        try:
+            self._show_window("viewer")
+        finally:
+            self._loading_dataset = False
         self._populate_viewer_from_store()
 
         # Show filename in viewer title bar
