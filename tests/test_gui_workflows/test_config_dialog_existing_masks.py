@@ -115,6 +115,25 @@ def test_rounds_mode_still_requires_rounds_when_toggle_off(dialog, tmp_path):
     assert "thresholding round" in warn.call_args[0][0]
 
 
+def test_start_enabled_in_mask_reuse_mode_without_rounds(dialog, tmp_path):
+    """Regression: Start must enable on a mask selection, not require a round."""
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["pbody"])
+    dialog._add_h5_paths([ds1])
+    # Rounds mode, no rounds → Start disabled (the original gate).
+    assert not dialog._start_btn.isEnabled()
+    # Mask-reuse on but nothing selected yet → still disabled.
+    dialog._mask_selection_group.setChecked(True)
+    assert not dialog._start_btn.isEnabled()
+    # Selecting a mask flips Start on without any thresholding round.
+    lw = {pd.display_name: lw for pd, lw, _ in dialog._mask_lists}["DS1"]
+    _select(lw, {"pbody"})
+    assert dialog._start_btn.isEnabled()
+    assert dialog._rounds_table.rowCount() == 0
+    # Toggling back to rounds mode (no rounds) disables Start again.
+    dialog._mask_selection_group.setChecked(False)
+    assert not dialog._start_btn.isEnabled()
+
+
 def test_mask_selections_preserved_across_toggle(dialog, tmp_path):
     ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["pbody", "grouped"])
     dialog._add_h5_paths([ds1])

@@ -664,6 +664,7 @@ class WorkflowConfigDialog(QDialog):
         box = getattr(self, "_rounds_group_box", None)
         if box is not None:
             box.setVisible(not checked)
+        self._update_start_enabled()
 
     def _dataset_masks(self, pd: _PendingDataset) -> list[str]:
         """List a dataset's mask (/masks) resources, or [] if none.
@@ -710,6 +711,8 @@ class WorkflowConfigDialog(QDialog):
                 for i in range(lst.count()):
                     if lst.item(i).text() in keep:
                         lst.item(i).setSelected(True)
+                # Toggling a mask's selection changes whether Start may fire.
+                lst.itemSelectionChanged.connect(self._update_start_enabled)
             else:
                 lst.addItem("No masks found")
                 lst.item(0).setFlags(lst.item(0).flags() & ~Qt.ItemIsSelectable)
@@ -1782,8 +1785,13 @@ class WorkflowConfigDialog(QDialog):
 
     def _update_start_enabled(self) -> None:
         has_datasets = bool(self._pending_datasets)
-        has_rounds = self._rounds_table.rowCount() > 0
-        self._start_btn.setEnabled(has_datasets and has_rounds)
+        if self._mask_selection_group.isChecked():
+            # Mask-reuse mode: the rounds table is hidden, so the gate is
+            # "at least one dataset has a mask selected" instead of rounds.
+            has_work = bool(self.existing_mask_selections)
+        else:
+            has_work = self._rounds_table.rowCount() > 0
+        self._start_btn.setEnabled(has_datasets and has_work)
 
     def _on_start_clicked(self) -> None:
         """Validate the current state and, on success, accept the dialog."""
