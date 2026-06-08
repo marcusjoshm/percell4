@@ -1280,6 +1280,43 @@ class LauncherWindow(QMainWindow):
             entries.append(("mask", mn, f"masks/{mn}", _frames(f"masks/{mn}")))
         total = sum(e[3] for e in entries)
 
+        # --- DEBUG (temporary): dump load environment to the cmd window so a
+        # stall ("bar freezes at 8%") on another machine is diagnosable. The
+        # parallel decode allocates the full stack in shared memory up front,
+        # so low-RAM / Windows shared_memory issues surface here.
+        import platform as _platform
+        import sys as _sys
+
+        try:
+            import psutil as _psutil
+
+            _vm = _psutil.virtual_memory()
+            _mem = (
+                f"RAM total={_vm.total / 1e9:.1f}GB "
+                f"avail={_vm.available / 1e9:.1f}GB used={_vm.percent:.0f}%"
+            )
+        except Exception as _e:  # noqa: BLE001 — debug only
+            _mem = f"RAM=unavailable ({_e})"
+        print(
+            f"[PC4-LOAD] === loading {Path(h5_path).name} ===\n"
+            f"[PC4-LOAD] platform={_platform.platform()} "
+            f"python={_platform.python_version()} "
+            f"cpu_count={default_worker_count()} {_mem}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        for _kind, _name, _hp, _nf in entries:
+            print(
+                f"[PC4-LOAD]   entry kind={_kind} hdf5_path={_hp} frames={_nf}",
+                file=_sys.stderr,
+                flush=True,
+            )
+        print(
+            f"[PC4-LOAD] total progress frames={total}",
+            file=_sys.stderr,
+            flush=True,
+        )
+
         progress = QProgressDialog("Loading dataset…", None, 0, total, self)
         progress.setWindowTitle("Loading")
         progress.setWindowModality(Qt.ApplicationModal)
@@ -1292,6 +1329,13 @@ class LauncherWindow(QMainWindow):
         base = 0
         try:
             for kind, name, hp, n_frames in entries:
+                print(
+                    f"[PC4-LOAD] -> decoding '{hp}' "
+                    f"(progress base={base}/{total})",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+
                 def _cb(done: int, _base: int = base) -> None:
                     progress.setValue(_base + done)
                     QApplication.processEvents()
@@ -1308,9 +1352,25 @@ class LauncherWindow(QMainWindow):
                     viewer_win.add_labels(arr, name=name)
                 else:
                     viewer_win.add_mask(arr, name=name)
+                print(
+                    f"[PC4-LOAD] <- finished '{hp}'",
+                    file=_sys.stderr,
+                    flush=True,
+                )
                 base += n_frames
                 del arr
         except Exception as exc:  # noqa: BLE001 — surface, don't crash the UI
+            # DEBUG (temporary): full traceback to the cmd window, not just the
+            # status bar (which is easy to miss when the bar appears to freeze).
+            import traceback as _tb
+
+            print(
+                f"[PC4-LOAD] LOAD FAILED: {type(exc).__name__}: {exc}",
+                file=_sys.stderr,
+                flush=True,
+            )
+            _tb.print_exc()
+            _sys.stderr.flush()
             self.statusBar().showMessage(f"Load error: {exc}")
         finally:
             executor.shutdown(wait=True)
