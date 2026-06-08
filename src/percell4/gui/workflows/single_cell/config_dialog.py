@@ -29,9 +29,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import Qt, QSettings
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -39,11 +40,13 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QAbstractItemView,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -339,7 +342,9 @@ class WorkflowConfigDialog(QDialog):
         layout.addWidget(self._build_datasets_group(), stretch=3)
         layout.addWidget(self._build_cellpose_group())
         layout.addWidget(self._build_segmentation_group())
-        layout.addWidget(self._build_rounds_group(), stretch=2)
+        layout.addWidget(self._build_mask_selection_group())
+        self._rounds_group_box = self._build_rounds_group()
+        layout.addWidget(self._rounds_group_box, stretch=2)
         layout.addWidget(self._build_particles_group())
         layout.addWidget(self._build_dilute_group())
         layout.addWidget(self._build_columns_group())
@@ -608,6 +613,130 @@ class WorkflowConfigDialog(QDialog):
             if choice and choice != _NO_SEGMENTATION_LABEL:
                 overrides[pd.display_name] = choice
         return overrides
+
+    # ── Existing-mask reuse ───────────────────────────────────
+
+    def _build_mask_selection_group(self) -> QGroupBox:
+        """Checkable group to reuse existing /masks instead of thresholding.
+
+        When checked, the run skips the Threshold Rounds step entirely and
+        measures the selected masks (either/or per run). Mirrors the
+        segmentation-selection group: a per-dataset picker populated from
+        each dataset's ``/masks`` layers. This is a pre-run config control
+        (dialog-local state only); it never touches the live session.
+        """
+        box = QGroupBox("Use existing masks (skip thresholding rounds)")
+        box.setCheckable(True)
+        box.setChecked(False)
+        box.setToolTip(
+            "When checked, the workflow does NOT compute threshold rounds. "
+            "Instead it measures the mask layer(s) you select per dataset, "
+            "running per-cell measurement + particle analysis + export on "
+            "them. Uncheck to configure Threshold Rounds as usual."
+        )
+        self._mask_selection_group = box
+        outer = QVBoxLayout(box)
+        note = QLabel(
+            "Select one or more existing mask layers per dataset. The "
+            "Threshold Rounds section is hidden while this is on."
+        )
+        note.setWordWrap(True)
+        outer.addWidget(note)
+        self._mask_form_host = QWidget()
+        self._mask_form = QFormLayout(self._mask_form_host)
+        self._mask_form.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._mask_form_host)
+        # Each row: (dataset, multi-select list of its /masks, has_masks).
+        # ``has_masks`` is tracked explicitly rather than via the widget's
+        # enabled state, because a checkable QGroupBox disables ALL its
+        # children when unchecked — so isEnabled() can't distinguish
+        # "no masks here" from "mask-reuse mode is currently off".
+        self._mask_lists: list[tuple[_PendingDataset, QListWidget, bool]] = []
+        box.toggled.connect(self._on_mask_reuse_toggled)
+        return box
+
+    def _on_mask_reuse_toggled(self, checked: bool) -> None:
+        """Hide the Threshold Rounds group when reusing existing masks.
+
+        Mask selections in the per-dataset lists are preserved across
+        toggles (the list widgets are not rebuilt here), so toggling is
+        non-destructive.
+        """
+        box = getattr(self, "_rounds_group_box", None)
+        if box is not None:
+            box.setVisible(not checked)
+
+    def _dataset_masks(self, pd: _PendingDataset) -> list[str]:
+        """List a dataset's mask (/masks) resources, or [] if none.
+
+        Only existing ``.h5`` datasets can have masks; tiff-pending
+        datasets have none until a threshold round runs.
+        """
+        if pd.source is not DatasetSource.H5_EXISTING:
+            return []
+        try:
+            return DatasetStore(pd.h5_path).list_masks()
+        except Exception:  # noqa: BLE001 — best-effort; missing/corrupt -> none
+            logger.exception("could not list masks for %s", pd.display_name)
+            return []
+
+    def _refresh_mask_picker(self) -> None:
+        """Rebuild the per-dataset mask multi-select lists from the queue.
+
+        Preserves any still-valid prior selections so a dataset-queue
+        refresh (or a re-open) doesn't silently drop the user's picks.
+        """
+        form = getattr(self, "_mask_form", None)
+        if form is None:
+            return
+        prior = {
+            pd.display_name: {
+                lw.item(i).text() for i in range(lw.count()) if lw.item(i).isSelected()
+            }
+            for pd, lw, has in getattr(self, "_mask_lists", [])
+            if has
+        }
+        while form.rowCount():
+            form.removeRow(0)
+        self._mask_lists = []
+        for pd in self._pending_datasets:
+            masks = self._dataset_masks(pd)
+            lst = QListWidget()
+            lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            # Keep the row compact; the list scrolls if a dataset has many.
+            lst.setMaximumHeight(90)
+            if masks:
+                lst.addItems(masks)
+                keep = prior.get(pd.display_name, set())
+                for i in range(lst.count()):
+                    if lst.item(i).text() in keep:
+                        lst.item(i).setSelected(True)
+            else:
+                lst.addItem("No masks found")
+                lst.item(0).setFlags(lst.item(0).flags() & ~Qt.ItemIsSelectable)
+            self._mask_lists.append((pd, lst, bool(masks)))
+            form.addRow(pd.display_name, lst)
+
+    @property
+    def existing_mask_selections(self) -> dict[str, list[str]]:
+        """Per-dataset selected mask names (only datasets with a selection).
+
+        Keyed by the dataset's display name. Empty when nothing is
+        selected. Independent of the group's checked state — the caller
+        gates on ``use_existing_masks`` separately — so selections survive
+        a non-destructive toggle (Qt disables the lists but keeps the
+        selection model).
+        """
+        selections: dict[str, list[str]] = {}
+        for pd, lst, has in getattr(self, "_mask_lists", []):
+            if not has:
+                continue
+            chosen = [
+                lst.item(i).text() for i in range(lst.count()) if lst.item(i).isSelected()
+            ]
+            if chosen:
+                selections[pd.display_name] = chosen
+        return selections
 
     def _build_rounds_group(self) -> QGroupBox:
         box = QGroupBox("Thresholding Rounds (ordered)")
@@ -1130,8 +1259,9 @@ class WorkflowConfigDialog(QDialog):
                 ]
             )
             self._dataset_tree.addTopLevelItem(item)
-        # Keep the segmentation picker in sync with the dataset queue.
+        # Keep the segmentation + mask pickers in sync with the dataset queue.
         self._refresh_segmentation_picker()
+        self._refresh_mask_picker()
 
     def _toast_add_result(self, added: int, skipped: list[str]) -> None:
         parts: list[str] = []
@@ -1676,8 +1806,12 @@ class WorkflowConfigDialog(QDialog):
             self._warn("Add at least one dataset before starting.")
             return None
 
-        if self._rounds_table.rowCount() == 0:
-            self._warn("Add at least one thresholding round.")
+        use_existing_masks = self._mask_selection_group.isChecked()
+        if not use_existing_masks and self._rounds_table.rowCount() == 0:
+            self._warn(
+                "Add at least one thresholding round, or enable "
+                "'Use existing masks (skip thresholding rounds)'."
+            )
             return None
 
         # Channel intersection — with outlier prompt.
@@ -1697,12 +1831,31 @@ class WorkflowConfigDialog(QDialog):
             )
             return None
 
-        # Build rounds and validate each round's channel is in the intersection.
-        try:
-            rounds = self._rounds_from_table(intersected)
-        except ValueError as e:
-            self._warn(str(e))
-            return None
+        # Existing-mask reuse: skip the rounds entirely and measure the
+        # selected masks instead (either/or per run). Restrict the selection
+        # to datasets that survived the channel-intersection prune.
+        kept_names = {pd.display_name for pd in kept_datasets}
+        existing_mask_selections: dict[str, list[str]] = {}
+        if use_existing_masks:
+            existing_mask_selections = {
+                name: masks
+                for name, masks in self.existing_mask_selections.items()
+                if name in kept_names
+            }
+            if not existing_mask_selections:
+                self._warn(
+                    "Select at least one mask for at least one dataset, "
+                    "or uncheck 'Use existing masks (skip thresholding rounds)'."
+                )
+                return None
+            rounds = []
+        else:
+            # Build rounds and validate each round's channel is in the intersection.
+            try:
+                rounds = self._rounds_from_table(intersected)
+            except ValueError as e:
+                self._warn(str(e))
+                return None
 
         # Cellpose settings — read from the shared form.
         try:
@@ -1721,7 +1874,23 @@ class WorkflowConfigDialog(QDialog):
             self._warn(f"Output parent is not a directory: {output_parent}")
             return None
 
-        selected_cols = self._build_selected_csv_columns(intersected, rounds)
+        if use_existing_masks:
+            # Round names for the CSV columns are the measured mask names.
+            union_masks: list[str] = []
+            for masks in existing_mask_selections.values():
+                for m in masks:
+                    if m not in union_masks:
+                        union_masks.append(m)
+            channels = [ch for ch in intersected if ch in self._selected_csv_channels]
+            selected_cols = build_selected_csv_columns(
+                channels,
+                union_masks,
+                metrics=self._selected_csv_metrics,
+                particle_per_cell=self._selected_csv_particle_per_cell,
+                particle_per_channel=self._selected_csv_particle_per_channel,
+            )
+        else:
+            selected_cols = self._build_selected_csv_columns(intersected, rounds)
 
         seg_channel = self._cp_seg_channel.currentText()
         if not seg_channel or seg_channel.startswith("("):
@@ -1769,6 +1938,8 @@ class WorkflowConfigDialog(QDialog):
                 or "cp_mask",
                 particle_settings=particle_settings,
                 run_seg_qc_on_existing=self._run_seg_qc.isChecked(),
+                use_existing_masks=use_existing_masks,
+                existing_mask_selections=existing_mask_selections,
             )
         except ValueError as e:
             self._warn(f"Configuration invalid: {e}")

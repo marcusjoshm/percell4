@@ -55,6 +55,16 @@ counts:
 #   No new Selectors or Creators. The downstream Apply ROIs as Masks remains
 #   the existing Creator that writes /masks/<roi_name> when GMM-origin ROIs are
 #   committed.
+# 2026-06-08 update (feat/existing-mask-reuse-and-threshold-clis U3):
+#   WorkflowConfigDialog gains a "Use existing masks (skip thresholding
+#   rounds)" checkable group with a per-dataset multi-select mask picker
+#   (_build_mask_selection_group / _refresh_mask_picker /
+#   existing_mask_selections). Like the existing per-dataset segmentation
+#   combos in the same dialog, these are PRE-RUN CONFIG controls, NOT
+#   session Selectors/Creators/Actions: the dialog runs around a batch run
+#   and writes only dialog-local state (later folded into the frozen
+#   WorkflowConfig). It never touches session.active_* / filter_ids /
+#   selection. No new Selectors, Creators, or session mutations.
 
 # Three-class taxonomy:
 #   Selector — reads session, writes session selection fields, no resource write
