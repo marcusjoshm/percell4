@@ -29,6 +29,7 @@ from percell4.workflows.models import (
     DiluteSettings,
     EdgeMode,
     GmmCriterion,
+    IterativeOtsuSettings,
     ParticleSettings,
     PunctaDetectorSettings,
     RunMetadata,
@@ -199,6 +200,28 @@ def _puncta_from_dict(d: dict[str, Any]) -> PunctaDetectorSettings:
     )
 
 
+def _iterative_otsu_to_dict(s: IterativeOtsuSettings) -> dict[str, Any]:
+    return {
+        "scope": s.scope,
+        "dilation_radius_px": s.dilation_radius_px,
+        "max_rounds": s.max_rounds,
+        "stop_criteria": list(s.stop_criteria),
+        "stop_params": dict(s.stop_params),
+        "stop_combine": s.stop_combine,
+    }
+
+
+def _iterative_otsu_from_dict(d: dict[str, Any]) -> IterativeOtsuSettings:
+    return IterativeOtsuSettings(
+        scope=d.get("scope", "per-cell"),
+        dilation_radius_px=d.get("dilation_radius_px", 5),
+        max_rounds=d.get("max_rounds", 10),
+        stop_criteria=tuple(d.get("stop_criteria", ("bg-floor", "positive-fraction-high"))),
+        stop_params=d.get("stop_params", {}),
+        stop_combine=d.get("stop_combine", "any"),
+    )
+
+
 def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
     out: dict[str, Any] = {
         "name": r.name,
@@ -210,16 +233,19 @@ def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
         "kmeans_n_clusters": r.kmeans_n_clusters,
         "gaussian_sigma": r.gaussian_sigma,
     }
-    # Additive: only emitted for puncta rounds so legacy configs round-trip
-    # unchanged and old run_config.json files keep loading (the absent key
-    # reconstructs as a legacy Otsu round via _round_from_dict).
+    # Additive: only emitted for puncta / iterative-otsu rounds so legacy configs
+    # round-trip unchanged and old run_config.json files keep loading (the absent
+    # keys reconstruct as a legacy Otsu round via _round_from_dict).
     if r.puncta is not None:
         out["puncta_detector"] = _puncta_to_dict(r.puncta)
+    if r.iterative_otsu is not None:
+        out["iterative_otsu"] = _iterative_otsu_to_dict(r.iterative_otsu)
     return out
 
 
 def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
     puncta_raw = d.get("puncta_detector")
+    iterative_raw = d.get("iterative_otsu")
     return ThresholdingRound(
         name=d["name"],
         channel=d["channel"],
@@ -230,6 +256,9 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
         kmeans_n_clusters=d.get("kmeans_n_clusters", 3),
         gaussian_sigma=d.get("gaussian_sigma", 1.0),
         puncta=_puncta_from_dict(puncta_raw) if puncta_raw is not None else None,
+        iterative_otsu=(
+            _iterative_otsu_from_dict(iterative_raw) if iterative_raw is not None else None
+        ),
     )
 
 

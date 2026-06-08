@@ -12,6 +12,7 @@ from percell4.workflows.models import (
     DiluteSettings,
     EdgeMode,
     GmmCriterion,
+    IterativeOtsuSettings,
     PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
@@ -179,6 +180,95 @@ def test_puncta_names_validation_is_skimage_free():
     PunctaDetectorSettings(detector_name="log")
     _valid_round()
     assert not any(m.startswith("skimage") for m in sys.modules)
+
+
+# ── IterativeOtsuSettings (U2) ───────────────────────────────
+
+
+def test_round_defaults_iterative_otsu_to_none():
+    assert _valid_round().iterative_otsu is None
+
+
+def test_iterative_otsu_defaults_are_valid():
+    s = IterativeOtsuSettings()
+    assert s.scope == "per-cell"
+    assert s.dilation_radius_px == 5
+    assert s.max_rounds == 10
+    assert s.stop_criteria == ("bg-floor", "positive-fraction-high")
+    assert s.stop_combine == "any"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"scope": "nonsense"},
+        {"dilation_radius_px": 0},
+        {"dilation_radius_px": -3},
+        {"max_rounds": 0},
+        {"stop_criteria": ()},
+        {"stop_criteria": ("not-a-criterion",)},
+        {"stop_combine": "maybe"},
+        {"stop_params": (("bg-floor.k", [1, 2, 3]),)},  # non-scalar value
+        {"stop_params": (("nope.k", 2.0),)},  # unknown criterion prefix
+        {"stop_params": (("undotted", 2.0),)},  # missing dotted prefix
+    ],
+)
+def test_iterative_otsu_rejects_invalid(kwargs):
+    with pytest.raises(ValueError):
+        IterativeOtsuSettings(**kwargs)
+
+
+def test_iterative_otsu_params_namespaced_and_canonical():
+    from percell4.domain.measure.iterative_otsu import params_by_name
+
+    s = IterativeOtsuSettings(
+        stop_criteria=("bg-floor", "peak-prominence"),
+        stop_params=(("peak-prominence.k", 3.0), ("bg-floor.k", 2.5)),
+    )
+    # Canonical sorted tuple (hashable, stable round-trip).
+    assert s.stop_params == (("bg-floor.k", 2.5), ("peak-prominence.k", 3.0))
+    grouped = params_by_name(s.stop_params)
+    assert grouped["bg-floor"] == {"k": 2.5}
+    assert grouped["peak-prominence"] == {"k": 3.0}
+
+
+def test_round_rejects_both_puncta_and_iterative_otsu():
+    with pytest.raises(ValueError, match="not both"):
+        _valid_round(puncta=PunctaDetectorSettings(detector_name="log"),
+                     iterative_otsu=IterativeOtsuSettings())
+
+
+def test_round_with_iterative_otsu_is_hashable():
+    r = _valid_round(iterative_otsu=IterativeOtsuSettings(stop_params=(("bg-floor.k", 2.0),)))
+    hash(r)
+    hash(r.iterative_otsu)
+
+
+def test_iterative_otsu_validation_is_skimage_free():
+    import sys
+
+    for mod in [m for m in sys.modules if m.startswith("skimage")]:
+        del sys.modules[mod]
+    IterativeOtsuSettings(scope="whole-field")
+    _valid_round(iterative_otsu=IterativeOtsuSettings())
+    assert not any(m.startswith("skimage") for m in sys.modules)
+
+
+def test_iterative_otsu_round_config_roundtrip():
+    from percell4.workflows.artifacts import _round_from_dict, _round_to_dict
+
+    r = _valid_round(
+        iterative_otsu=IterativeOtsuSettings(
+            scope="groups",
+            dilation_radius_px=4,
+            max_rounds=8,
+            stop_criteria=("bg-floor", "separability"),
+            stop_params=(("bg-floor.k", 2.5), ("separability.min_eta", 0.8)),
+            stop_combine="all",
+        )
+    )
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
 
 
 # ── CellposeSettings ─────────────────────────────────────────

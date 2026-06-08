@@ -19,6 +19,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from percell4.domain.measure.iterative_otsu_names import (
+    SCOPE_NAMES,
+    STOP_CRITERION_NAMES,
+)
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.domain.measure.puncta_names import (
     BG_ESTIMATOR_NAMES,
@@ -207,6 +211,64 @@ class PunctaDetectorSettings:
 
 
 @dataclass(frozen=True)
+class IterativeOtsuSettings:
+    """Iterative-Otsu *peeling* settings for a thresholding round.
+
+    When a :class:`ThresholdingRound` carries this, the headless apply phase runs
+    iterative Otsu peeling (``percell4.domain.measure.iterative_otsu.peel``)
+    instead of per-group Otsu. ``scope`` and stop-criterion names validate against
+    the skimage-free tuples in ``percell4.domain.measure.iterative_otsu_names`` so
+    constructing a round never imports scikit-image.
+
+    ``stop_criteria`` names the active stopping signals; ``stop_combine`` is
+    ``"any"`` (stop a unit when any fires) or ``"all"``. ``stop_params`` keys are
+    **dotted-namespaced by criterion** (``"bg-floor.k"``,
+    ``"positive-fraction-high.max_frac"``) — the prefix keeps two criteria that
+    share a bare param name (e.g. ``k``) from colliding in the single flat bag.
+    Like ``PunctaDetectorSettings.detector_params``, params canonicalize to a
+    sorted tuple of ``(key, value)`` pairs (JSON scalars only) so the frozen
+    dataclass stays hashable and round-trips through ``run_config.json``
+    byte-for-byte. A hard ``max_rounds`` cap and the degenerate-residual guard
+    always apply on top of the named criteria.
+    """
+
+    scope: str = "per-cell"
+    dilation_radius_px: int = 5
+    max_rounds: int = 10
+    stop_criteria: tuple[str, ...] = ("bg-floor", "positive-fraction-high")
+    stop_params: tuple[tuple[str, Any], ...] = ()
+    stop_combine: str = "any"
+
+    def __post_init__(self) -> None:
+        if self.scope not in SCOPE_NAMES:
+            raise ValueError(f"scope must be one of {SCOPE_NAMES}, got {self.scope!r}")
+        if self.dilation_radius_px <= 0:
+            raise ValueError("dilation_radius_px must be positive")
+        if self.max_rounds < 1:
+            raise ValueError("max_rounds must be >= 1")
+        if not self.stop_criteria:
+            raise ValueError("stop_criteria must be non-empty")
+        for name in self.stop_criteria:
+            if name not in STOP_CRITERION_NAMES:
+                raise ValueError(
+                    f"stop_criteria entries must be one of {STOP_CRITERION_NAMES}, got {name!r}"
+                )
+        if self.stop_combine not in ("any", "all"):
+            raise ValueError(f"stop_combine must be 'any' or 'all', got {self.stop_combine!r}")
+        # Normalize params to canonical sorted tuples and validate the dotted
+        # "<criterion>.<param>" key convention that params_by_name relies on.
+        normalized = _normalize_params(self.stop_params)
+        for key, _ in normalized:
+            if "." not in key or key.split(".", 1)[0] not in STOP_CRITERION_NAMES:
+                raise ValueError(
+                    f"stop_params key {key!r} must be '<criterion>.<param>' with a known "
+                    f"criterion (one of {STOP_CRITERION_NAMES})"
+                )
+        object.__setattr__(self, "stop_criteria", tuple(self.stop_criteria))
+        object.__setattr__(self, "stop_params", normalized)
+
+
+@dataclass(frozen=True)
 class ThresholdingRound:
     """One named round of grouped thresholding.
 
@@ -214,10 +276,12 @@ class ThresholdingRound:
     ``name`` becomes the HDF5 mask/group path component AND a pandas column
     suffix, so it is validated against a strict regex.
 
-    When ``puncta`` is ``None`` (the default), the apply phase uses the legacy
-    per-group Otsu path unchanged. When it carries a
-    :class:`PunctaDetectorSettings`, the headless two-pass spot detector runs
-    instead.
+    When ``puncta`` is ``None`` and ``iterative_otsu`` is ``None`` (the default),
+    the apply phase uses the legacy per-group Otsu path unchanged. When it carries
+    a :class:`PunctaDetectorSettings`, the headless two-pass spot detector runs
+    instead; when it carries an :class:`IterativeOtsuSettings`, iterative Otsu
+    peeling runs instead. ``puncta`` and ``iterative_otsu`` are mutually
+    exclusive on a single round.
     """
 
     name: str
@@ -229,6 +293,7 @@ class ThresholdingRound:
     kmeans_n_clusters: int = 3
     gaussian_sigma: float = 1.0
     puncta: PunctaDetectorSettings | None = None
+    iterative_otsu: IterativeOtsuSettings | None = None
 
     def __post_init__(self) -> None:
         if not _ROUND_NAME_RE.match(self.name):
@@ -245,6 +310,10 @@ class ThresholdingRound:
             raise ValueError("kmeans_n_clusters must be >= 2")
         if self.gaussian_sigma < 0:
             raise ValueError("gaussian_sigma must be >= 0")
+        if self.puncta is not None and self.iterative_otsu is not None:
+            raise ValueError(
+                "a round carries puncta or iterative_otsu, not both"
+            )
 
 
 @dataclass(frozen=True)
