@@ -988,3 +988,46 @@ def test_array_shape_on_group_raises(store):
     # "labels" is a group containing /labels/seg.
     with pytest.raises(KeyError):
         store.array_shape("labels")
+
+
+# ── array_dtype: metadata-only dtype (no full decode) ─────────
+
+
+def test_array_dtype_returns_dtype_without_loading(store):
+    """array_dtype reads the HDF5 dtype and equals read_array().dtype."""
+    store.write_array(
+        "intensity",
+        np.zeros((3, 2, 16, 16), dtype=np.float32),
+        attrs={"dims": ["T", "C", "H", "W"]},
+    )
+    store.write_labels("seg", np.zeros((16, 16), dtype=np.int32))
+    store.write_mask("m", np.zeros((16, 16), dtype=np.uint8))
+    assert store.array_dtype("intensity") == np.float32
+    assert store.array_dtype("labels/seg") == np.int32
+    assert store.array_dtype("masks/m") == np.uint8
+
+
+def test_array_dtype_does_not_decode(store, monkeypatch):
+    """Reading dtype must not trigger a full array read (large-file-load bug)."""
+    store.write_array(
+        "intensity",
+        np.zeros((3, 2, 16, 16), dtype=np.float32),
+        attrs={"dims": ["T", "C", "H", "W"]},
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("array_dtype must not call read_array")
+
+    monkeypatch.setattr(store, "read_array", _boom)
+    assert store.array_dtype("intensity") == np.float32
+
+
+def test_array_dtype_missing_raises(store):
+    with pytest.raises(KeyError):
+        store.array_dtype("intensity")
+
+
+def test_array_dtype_on_group_raises(store):
+    store.write_labels("seg", np.zeros((16, 16), dtype=np.int32))
+    with pytest.raises(KeyError):
+        store.array_dtype("labels")

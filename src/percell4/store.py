@@ -533,6 +533,24 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
+    def array_dtype(self, hdf5_path: str) -> np.dtype:
+        """Return a dataset's on-disk dtype. Reads HDF5 metadata only — **no
+        array data is decompressed**. Sibling of :meth:`array_shape` for
+        display/inventory tools (e.g. the dataset inspector) that need a
+        dtype without paying the cost of decoding a multi-gigabyte stack.
+        Raises ``KeyError`` when the path is missing or is a group.
+        """
+        f = self._open_read()
+        try:
+            if hdf5_path not in f:
+                raise KeyError(f"Dataset not found: {hdf5_path}")
+            obj = f[hdf5_path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{hdf5_path} is a group, not a dataset")
+            return obj.dtype
+        finally:
+            self._close_if_not_session(f)
+
     def labels_shape(self, name: str) -> tuple[int, ...]:
         """Return the on-disk shape of ``/labels/<name>`` without loading data.
 
