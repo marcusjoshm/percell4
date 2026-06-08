@@ -31,6 +31,7 @@ from percell4.workflows.host import WorkflowHost
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    ParticleSettings,
     PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
@@ -410,6 +411,110 @@ def test_runner_records_failure_and_continues_other_datasets(qtbot, fake_host, t
     # run_config.json preserves the failure record
     _cfg, loaded_meta = read_run_config(run_folder)
     assert any(rec.dataset_name == "DS1" for rec in loaded_meta.failures)
+
+
+def _add_mask(path: Path, name: str, size: int = 100, n_cells: int = 12) -> None:
+    """Write a binary /masks/<name> with one small blob inside each cell."""
+    store = DatasetStore(path)
+    mask = np.zeros((size, size), dtype=np.uint8)
+    for i in range(n_cells):
+        row = 5 + (i // 3) * 22
+        col = 5 + (i % 3) * 22
+        mask[row + 2 : row + 4, col + 2 : col + 4] = 1
+    store.write_mask(name, mask)
+
+
+def test_runner_existing_mask_mode_measures_without_thresholding(
+    qtbot, fake_host, tmp_path
+):
+    """use_existing_masks: no threshold phase runs; the existing mask is
+    measured and particle/summary artifacts are produced (plan U2)."""
+    entries = _make_two_datasets(tmp_path)
+    for e in entries:
+        _add_mask(e.h5_path, "pbody")
+
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=entries,
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[],
+        selected_csv_columns=[
+            "pbody_particle_count",
+            "pbody_total_particle_area",
+        ],
+        output_parent=tmp_path / "runs",
+        use_existing_masks=True,
+        existing_mask_selections={"DS1": ["pbody"], "DS2": ["pbody"]},
+        particle_settings=ParticleSettings(min_area=1.0, min_area_unit="px"),
+    )
+    meta = _make_metadata(run_folder)
+
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+    events: list = []
+    runner.workflow_event.connect(lambda e: events.append(e))
+
+    runner.start(cfg, fake_host, meta)
+
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1
+    assert finished[0].success is True, finished[0].message
+
+    # Artifacts produced.
+    assert (run_folder / "measurements.parquet").is_file()
+    assert (run_folder / "combined.csv").is_file()
+    assert (run_folder / "particles.csv").is_file()
+    # summary_groups populated via the export round-name seam.
+    assert (run_folder / "summary_groups.csv").is_file()
+
+    df = pd.read_parquet(run_folder / "measurements.parquet")
+    assert "pbody_particle_count" in df.columns
+    # Every cell has exactly one blob → particle_count == 1.
+    assert df["pbody_particle_count"].sum() == 24
+
+    # n_rounds_thresholding reflects the measured mask (1), not 0.
+    summary_ds = pd.read_csv(run_folder / "summary_datasets.csv")
+    assert set(summary_ds["n_rounds_thresholding"]) == {1}
+
+    # No threshold mask other than the pre-existing pbody was created.
+    for e in entries:
+        assert DatasetStore(e.h5_path).list_masks() == ["pbody"]
+
+
+def test_runner_existing_mask_mode_is_per_dataset(qtbot, fake_host, tmp_path):
+    """Each dataset measures only its own selection — never another
+    dataset's mask that merely happens to also exist on disk (plan U2)."""
+    entries = _make_two_datasets(tmp_path)
+    # DS1 physically carries BOTH masks; DS2 carries only 'grouped'.
+    _add_mask(entries[0].h5_path, "pbody")
+    _add_mask(entries[0].h5_path, "grouped")
+    _add_mask(entries[1].h5_path, "grouped")
+
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=entries,
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[],
+        selected_csv_columns=["pbody_particle_count", "grouped_particle_count"],
+        output_parent=tmp_path / "runs",
+        use_existing_masks=True,
+        # DS1 selects only pbody even though grouped also exists on disk.
+        existing_mask_selections={"DS1": ["pbody"], "DS2": ["grouped"]},
+        particle_settings=ParticleSettings(min_area=1.0, min_area_unit="px"),
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+    events: list = []
+    runner.workflow_event.connect(lambda e: events.append(e))
+    runner.start(cfg, fake_host, meta)
+
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1 and finished[0].success is True
+
+    df = pd.read_parquet(run_folder / "measurements.parquet")
+    ds1 = df[df["dataset"] == "DS1"]
+    # DS1 measured pbody but NOT grouped, despite grouped existing on disk.
+    assert ds1["pbody_particle_count"].notna().all()
+    assert ds1["grouped_particle_count"].isna().all()
 
 
 def test_runner_reentrance_guard(qtbot, fake_host, tmp_path):

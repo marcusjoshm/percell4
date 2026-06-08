@@ -860,6 +860,7 @@ def _build_summary_datasets(
     df: pd.DataFrame,
     config: WorkflowConfig,
     metadata: RunMetadata,
+    round_names: list[str] | None = None,
 ) -> pd.DataFrame:
     """Per-dataset run audit: counts, edge_mode, dilute round counts, failures.
 
@@ -886,7 +887,9 @@ def _build_summary_datasets(
         failures_by_ds.setdefault(f.dataset_name, []).append(f"{f.phase_name}: {f.message}")
 
     dilute_enabled = config.dilute_settings is not None
-    n_rounds_thresholding = len(config.thresholding_rounds)
+    n_rounds_thresholding = (
+        len(round_names) if round_names is not None else len(config.thresholding_rounds)
+    )
     edge_mode_value = config.edge_mode.value
 
     if "is_edge_synthetic" in df.columns:
@@ -1778,8 +1781,15 @@ def export_run(
     run_folder: Path,
     config: WorkflowConfig,
     metadata: RunMetadata,
+    round_names: list[str] | None = None,
 ) -> tuple[DatasetFailure | None, str]:
     """Aggregate per-dataset staging parquets into the final run artifacts.
+
+    ``round_names`` overrides the round names used to build ``summary_groups.csv``
+    and the ``n_rounds_thresholding`` column. It defaults to the names in
+    ``config.thresholding_rounds``; the existing-mask-reuse path passes the
+    measured mask names explicitly, since ``config.thresholding_rounds`` is
+    empty there but masks were nonetheless measured.
 
     Produces, in ``run_folder/``:
       - ``measurements.parquet`` — the full cross-dataset DataFrame
@@ -1808,9 +1818,20 @@ def export_run(
         )
 
     try:
+        import pyarrow as pa
         import pyarrow.dataset as pa_ds
+        import pyarrow.parquet as pq
 
-        ds = pa_ds.dataset([str(p) for p in staging_files], format="parquet")
+        # Datasets may carry DIFFERENT columns — e.g. existing-mask mode
+        # where each dataset measured a different mask, so the per-round
+        # particle columns differ. pyarrow.dataset() otherwise infers the
+        # schema from the FIRST fragment and silently drops columns the
+        # other fragments add. Unify all fragment schemas first (missing
+        # columns become null) so no dataset's measurements are lost.
+        unified = pa.unify_schemas([pq.read_schema(str(p)) for p in staging_files])
+        ds = pa_ds.dataset(
+            [str(p) for p in staging_files], format="parquet", schema=unified
+        )
         table = ds.to_table()
         df = table.to_pandas(types_mapper=None)
     except Exception as e:
@@ -1895,7 +1916,8 @@ def export_run(
     # Summary CSVs (U6) — derived from the same in-memory df.
     # Failures here are recorded but do NOT abort the run: the
     # measurements.parquet and CSVs have already landed.
-    round_names = [r.name for r in config.thresholding_rounds]
+    if round_names is None:
+        round_names = [r.name for r in config.thresholding_rounds]
     try:
         summary_groups = _build_summary_groups(df, round_names)
         write_atomic(
@@ -1920,7 +1942,7 @@ def export_run(
         )
 
     try:
-        summary_datasets = _build_summary_datasets(df, config, metadata)
+        summary_datasets = _build_summary_datasets(df, config, metadata, round_names)
         write_atomic(
             run_folder / "summary_datasets.csv",
             lambda tmp: summary_datasets.to_csv(

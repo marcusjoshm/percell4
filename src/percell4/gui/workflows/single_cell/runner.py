@@ -45,6 +45,8 @@ from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
     DatasetSource,
     RunMetadata,
+    ThresholdAlgorithm,
+    ThresholdingRound,
     WorkflowConfig,
 )
 from percell4.workflows.phases import (
@@ -148,6 +150,50 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         return self._effective_seg.get(
             entry.name, self._config.cellpose_segmentation_name
         )
+
+    def _measure_round_specs_for(self, entry) -> list[ThresholdingRound]:
+        """Round specs the measure phase should use for one dataset.
+
+        Normal runs return ``config.thresholding_rounds`` (the same list
+        for every dataset). In existing-mask mode the rounds are
+        synthesized per dataset from ``existing_mask_selections[entry.name]``
+        — one measure-only :class:`ThresholdingRound` whose ``name`` equals
+        the chosen ``/masks/<name>`` layer. ``measure_one`` reads only
+        ``round.name``, but ``ThresholdingRound.__post_init__`` still
+        validates the placeholder ``channel``/``metric``/``algorithm``, so
+        they must be valid; a mask name that fails the round-name regex
+        records a per-dataset failure rather than aborting the run.
+
+        Per-dataset (not the union of all selections): a dataset measures
+        only the masks the user picked for it, never another dataset's
+        selection that happens to also exist on disk here.
+        """
+        if not self._config.use_existing_masks:
+            return list(self._config.thresholding_rounds)
+        channel = entry.channel_names[0] if entry.channel_names else "channel"
+        specs: list[ThresholdingRound] = []
+        for mask_name in self._config.existing_mask_selections.get(entry.name, []):
+            try:
+                specs.append(
+                    ThresholdingRound(
+                        name=mask_name,
+                        channel=channel,
+                        metric="mean_intensity",
+                        algorithm=ThresholdAlgorithm.KMEANS,
+                    )
+                )
+            except ValueError as e:
+                logger.error(
+                    "cannot measure mask %r on %s: %s", mask_name, entry.name, e
+                )
+                record_failure(
+                    self._metadata,
+                    dataset_name=entry.name,
+                    phase_name="measure",
+                    failure=DatasetFailure.MEASUREMENT_ERROR,
+                    message=f"invalid mask name {mask_name!r}: {e}",
+                )
+        return specs
 
     def _detect_existing_segmentation(self, entry) -> str | None:
         """Pick a pre-existing segmentation for a dataset, or None to segment it.
@@ -1082,9 +1128,10 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
+            round_specs = self._measure_round_specs_for(entry)
             df, failure, msg = measure_one(
                 store,
-                round_specs=list(self._config.thresholding_rounds),
+                round_specs=round_specs,
                 edge_mode=self._config.edge_mode,
                 edge_margin_px=self._config.edge_margin_px,
                 seg_name=self._seg_name_for(entry),
@@ -1141,7 +1188,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
                     particles_df, pfail, pmsg = measure_particles_one(
                         store,
-                        round_specs=list(self._config.thresholding_rounds),
+                        round_specs=round_specs,
                         particle_settings=self._config.particle_settings,
                         seg_name=self._seg_name_for(entry),
                         run_log=self._run_log,
@@ -1178,8 +1225,22 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
     def _make_export_handler(self):
         def handler() -> PhaseResult:
             print("  [export] aggregating measurements...", flush=True)
+            # In existing-mask mode config.thresholding_rounds is empty, so
+            # pass the union of measured mask names as the effective round
+            # names — otherwise summary_groups.csv and n_rounds_thresholding
+            # come out blank despite masks having been measured.
+            round_names = None
+            if self._config.use_existing_masks:
+                names: list[str] = []
+                seen: set[str] = set()
+                for sel in self._config.existing_mask_selections.values():
+                    for m in sel:
+                        if m not in seen:
+                            seen.add(m)
+                            names.append(m)
+                round_names = names
             failure, msg = export_run(
-                self._metadata.run_folder, self._config, self._metadata
+                self._metadata.run_folder, self._config, self._metadata, round_names
             )
             if failure is not None:
                 # Export failure is a run-level failure; record it under
