@@ -102,6 +102,60 @@ def test_batch_threshold_partial_success_exit_zero(tmp_path, capsys):
     assert "GFP_hi" not in DatasetStore(bad).list_masks()
 
 
+def test_batch_threshold_iterative_otsu_writes_binary_mask(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "SG_iter",
+        "--segmentation", "cellpose", "--strategy", "iterative-otsu",
+        "--iterative-scope", "per-cell", "--gaussian-sigma", "0",
+        "--stop-param", "bg-floor.k=2.0",
+    ])
+    assert rc == 0
+    store = DatasetStore(p)
+    mask = store.read_mask("SG_iter")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask).tolist()) <= {0, 1}
+    assert mask.sum() > 0
+    out = capsys.readouterr().out
+    assert "iterative-otsu" in out  # [ok] line names the strategy
+
+
+def test_batch_threshold_iterative_unknown_stop_criterion_exits_1(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "SG_iter",
+        "--segmentation", "cellpose", "--strategy", "iterative-otsu",
+        "--stop-criteria", "not-a-real-criterion",
+    ])
+    assert rc == 1
+    assert "invalid round configuration" in capsys.readouterr().err
+    assert "SG_iter" not in DatasetStore(p).list_masks()
+
+
+def test_batch_threshold_iterative_malformed_stop_param_exits_1(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "SG_iter",
+        "--segmentation", "cellpose", "--strategy", "iterative-otsu",
+        "--stop-param", "bg-floor-k-no-equals",
+    ])
+    assert rc == 1
+    assert "invalid round configuration" in capsys.readouterr().err
+
+
+def test_batch_threshold_grouped_otsu_default_unchanged(tmp_path):
+    # Default strategy still produces the legacy grouped-otsu round (no iterative).
+    p = tmp_path / "DS1.h5"
+    _make_dataset(p)
+    rc = cli.main([str(p), "--channel", "GFP", "--round-name", "GFP_hi",
+                   "--segmentation", "cellpose", "--kmeans-n-clusters", "2"])
+    assert rc == 0
+    assert "GFP_hi" in DatasetStore(p).list_masks()
+
+
 def test_batch_threshold_import_is_qt_free():
     qt_before = {m for m in sys.modules if "PyQt" in m or "qtpy" in m or "napari" in m}
     from percell4.interfaces.cli import batch_threshold  # noqa: F401

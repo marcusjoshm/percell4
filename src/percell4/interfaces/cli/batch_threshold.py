@@ -11,6 +11,10 @@ Usage:
         --round-name GFP_bright --algorithm kmeans --kmeans-n-clusters 3
     percell4-batch-threshold /scratch/dishes/ --channel RFP \\
         --round-name RFP_pos --algorithm gmm --gmm-criterion bic --overwrite
+    percell4-batch-threshold dish_1.h5 --channel RFP --round-name SG_iter \\
+        --strategy iterative-otsu --iterative-scope per-cell \\
+        --stop-criteria bg-floor,positive-fraction-high \\
+        --stop-param bg-floor.k=2.5 --verbose
 
 Exit codes:
     0 -- at least one dataset got a mask written
@@ -37,6 +41,34 @@ def _configure_logging(verbose: bool) -> None:
         level=logging.INFO if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
+
+def _parse_stop_param(spec: str) -> tuple[str, object]:
+    """Parse a ``CRITERION.KEY=VALUE`` stop-param override into a ``(key, value)`` pair.
+
+    The key keeps its dotted ``CRITERION.KEY`` form (validated against the known
+    criteria by ``IterativeOtsuSettings``); the value is coerced to
+    bool/int/float when possible, else kept as a string. Raises ``ValueError`` on
+    a malformed spec so the caller can exit 1 with a clear message.
+    """
+    if "=" not in spec:
+        raise ValueError(f"--stop-param must be CRITERION.KEY=VALUE, got {spec!r}")
+    key, _, raw = spec.partition("=")
+    key, raw = key.strip(), raw.strip()
+    if not key or not raw:
+        raise ValueError(f"--stop-param must be CRITERION.KEY=VALUE, got {spec!r}")
+    low = raw.lower()
+    if low in ("true", "false"):
+        return key, low == "true"
+    try:
+        return key, int(raw)
+    except ValueError:
+        pass
+    try:
+        return key, float(raw)
+    except ValueError:
+        pass
+    return key, raw
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,6 +118,59 @@ def main(argv: list[str] | None = None) -> int:
         "--gaussian-sigma", type=float, default=1.0,
         help="Pre-threshold Gaussian sigma (default 1.0).",
     )
+    grp.add_argument(
+        "--strategy",
+        choices=("grouped-otsu", "iterative-otsu"),
+        default="grouped-otsu",
+        help=(
+            "Thresholding strategy. 'grouped-otsu' (default) is the legacy "
+            "per-group Otsu. 'iterative-otsu' peels the brightest layer each "
+            "round (see the iterative-otsu options group)."
+        ),
+    )
+    itr = parser.add_argument_group(
+        "Iterative Otsu (only used when --strategy iterative-otsu)"
+    )
+    itr.add_argument(
+        "--iterative-scope",
+        choices=("groups", "per-cell", "whole-field"),
+        default="per-cell",
+        help="Iteration unit (default per-cell). 'groups' reuses --algorithm grouping.",
+    )
+    itr.add_argument(
+        "--dilation-radius", type=int, default=5,
+        help="Guard-ring radius (px) removed around each captured layer (default 5).",
+    )
+    itr.add_argument(
+        "--max-rounds", type=int, default=10,
+        help="Hard cap on peel iterations per dataset (default 10).",
+    )
+    itr.add_argument(
+        "--stop-criteria",
+        default="bg-floor,positive-fraction-high",
+        help=(
+            "Comma-separated stopping criteria (default "
+            "'bg-floor,positive-fraction-high'). One of: bg-floor, separability, "
+            "positive-fraction-high, min-positive, diminishing-returns, "
+            "peak-prominence, min-area-components."
+        ),
+    )
+    itr.add_argument(
+        "--stop-combine",
+        choices=("any", "all"),
+        default="any",
+        help="Stop a unit when ANY (default) or ALL active criteria fire.",
+    )
+    itr.add_argument(
+        "--stop-param",
+        action="append",
+        default=[],
+        metavar="CRITERION.KEY=VALUE",
+        help=(
+            "Override a stopping-criterion parameter (repeatable), e.g. "
+            "--stop-param bg-floor.k=2.5 --stop-param positive-fraction-high.max_frac=0.6."
+        ),
+    )
     parser.add_argument(
         "--segmentation",
         default=None,
@@ -104,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     from percell4.store import DatasetStore
     from percell4.workflows.models import (
         GmmCriterion,
+        IterativeOtsuSettings,
         ThresholdAlgorithm,
         ThresholdingRound,
     )
@@ -114,6 +200,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
+        iterative = None
+        if args.strategy == "iterative-otsu":
+            stop_params = tuple(_parse_stop_param(p) for p in args.stop_param)
+            stop_criteria = tuple(c.strip() for c in args.stop_criteria.split(",") if c.strip())
+            iterative = IterativeOtsuSettings(
+                scope=args.iterative_scope,
+                dilation_radius_px=args.dilation_radius,
+                max_rounds=args.max_rounds,
+                stop_criteria=stop_criteria,
+                stop_params=stop_params,
+                stop_combine=args.stop_combine,
+            )
         round_spec = ThresholdingRound(
             name=args.round_name,
             channel=args.channel,
@@ -123,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             gmm_max_components=args.gmm_max_components,
             kmeans_n_clusters=args.kmeans_n_clusters,
             gaussian_sigma=args.gaussian_sigma,
+            iterative_otsu=iterative,
         )
     except ValueError as e:
         print(f"[error] invalid round configuration: {e}", file=sys.stderr)
@@ -175,7 +274,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         n_ok += 1
         written_for.append(name)
-        print(f"[{idx + 1}/{n_total}] [ok] {name}: wrote /masks/{args.round_name}")
+        strat = (
+            f" ({args.strategy}/{args.iterative_scope}; --verbose for peel report)"
+            if args.strategy == "iterative-otsu"
+            else ""
+        )
+        print(f"[{idx + 1}/{n_total}] [ok] {name}: wrote /masks/{args.round_name}{strat}")
 
     print(f"\n{n_ok}/{n_total} datasets thresholded.")
     if n_ok:
