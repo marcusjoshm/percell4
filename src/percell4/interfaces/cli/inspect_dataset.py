@@ -77,7 +77,9 @@ def _layer_rows(store, kind: str, names: list[str]) -> list[dict[str, Any]]:
             # A nested group rather than a dataset (shouldn't normally
             # happen for these layers); record it without shape/dtype.
             shape, dtype = None, "—"
-        rows.append({"name": name, "shape": tuple(shape) if shape is not None else None, "dtype": dtype})
+        rows.append(
+            {"name": name, "shape": tuple(shape) if shape is not None else None, "dtype": dtype}
+        )
     return rows
 
 

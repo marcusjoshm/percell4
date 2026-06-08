@@ -29,7 +29,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from qtpy.QtCore import Qt, QSettings
+from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
@@ -40,7 +40,6 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QAbstractItemView,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -70,7 +69,6 @@ from percell4.workflows.csv_columns import (
     DEFAULT_CSV_PARTICLE_PER_CHANNEL,
     build_selected_csv_columns,
 )
-from percell4.workflows.phases import pick_existing_segmentation
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
@@ -83,6 +81,7 @@ from percell4.workflows.models import (
     WorkflowConfig,
     WorkflowDatasetEntry,
 )
+from percell4.workflows.phases import pick_existing_segmentation
 
 logger = logging.getLogger(__name__)
 

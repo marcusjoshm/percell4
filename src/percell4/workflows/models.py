@@ -443,7 +443,8 @@ class WorkflowConfig:
                 empty = [k for k, v in self.existing_mask_selections.items() if not v]
                 if empty:
                     raise ValueError(
-                        f"existing_mask_selections has empty selection for dataset(s): {sorted(empty)}"
+                        "existing_mask_selections has empty selection for "
+                        f"dataset(s): {sorted(empty)}"
                     )
         names = [r.name for r in self.thresholding_rounds]
         if len(set(names)) != len(names):

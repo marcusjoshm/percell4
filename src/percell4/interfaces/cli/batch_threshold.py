@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 from percell4.interfaces.cli._batch_report import resolve_paths
 
@@ -56,12 +55,14 @@ def main(argv: list[str] | None = None) -> int:
         help="One or more .h5 files, or directories (every *.h5 within, non-recursive).",
     )
     grp = parser.add_argument_group("Thresholding round")
-    grp.add_argument("--round-name", required=True, help="Mask/group name to write (the round name).")
+    grp.add_argument(
+        "--round-name", required=True, help="Mask/group name to write (the round name)."
+    )
     grp.add_argument("--channel", required=True, help="Channel name to threshold.")
     grp.add_argument(
         "--metric",
         default="mean_intensity",
-        help="Per-cell metric used to group cells before thresholding (default mean_intensity).",
+        help="Per-cell metric to group cells before thresholding (default mean_intensity).",
     )
     grp.add_argument(
         "--algorithm",
@@ -75,9 +76,16 @@ def main(argv: list[str] | None = None) -> int:
         default="bic",
         help="GMM component-count criterion (default bic).",
     )
-    grp.add_argument("--gmm-max-components", type=int, default=4, help="Max GMM components (default 4).")
-    grp.add_argument("--kmeans-n-clusters", type=int, default=3, help="K-means cluster count (default 3).")
-    grp.add_argument("--gaussian-sigma", type=float, default=1.0, help="Pre-threshold Gaussian sigma (default 1.0).")
+    grp.add_argument(
+        "--gmm-max-components", type=int, default=4, help="Max GMM components (default 4)."
+    )
+    grp.add_argument(
+        "--kmeans-n-clusters", type=int, default=3, help="K-means cluster count (default 3)."
+    )
+    grp.add_argument(
+        "--gaussian-sigma", type=float, default=1.0,
+        help="Pre-threshold Gaussian sigma (default 1.0).",
+    )
     parser.add_argument(
         "--segmentation",
         default=None,
@@ -160,7 +168,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         failure, msg = apply_threshold_headless(store, round_spec, grouping, seg_name=seg)
         if failure is not None:
-            print(f"[{idx + 1}/{n_total}] [error] {name}: threshold apply failed: {msg}", file=sys.stderr)
+            print(
+                f"[{idx + 1}/{n_total}] [error] {name}: threshold apply failed: {msg}",
+                file=sys.stderr,
+            )
             continue
         n_ok += 1
         written_for.append(name)

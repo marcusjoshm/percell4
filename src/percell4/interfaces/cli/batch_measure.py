@@ -114,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.verbose)
 
     # Defer heavy imports so --help stays fast and Qt-free.
+    from percell4.domain.measure.metrics import BUILTIN_METRICS
     from percell4.store import DatasetStore
     from percell4.workflows.artifacts import (
         create_run_folder,
@@ -128,7 +129,6 @@ def main(argv: list[str] | None = None) -> int:
         DEFAULT_CSV_PARTICLE_PER_CHANNEL,
         build_selected_csv_columns,
     )
-    from percell4.domain.measure.metrics import BUILTIN_METRICS
     from percell4.workflows.failures import DatasetFailure
     from percell4.workflows.models import (
         CellposeSettings,
@@ -181,10 +181,13 @@ def main(argv: list[str] | None = None) -> int:
 
         seg = args.segmentation or pick_existing_segmentation(labels)
         if seg is None or seg not in labels:
+            reason = (
+                f"--segmentation {args.segmentation} absent"
+                if args.segmentation
+                else "no /labels present"
+            )
             print(
-                f"[error] {name}: no usable segmentation "
-                f"({'--segmentation ' + args.segmentation + ' absent' if args.segmentation else 'no /labels present'})"
-                f"; skipping.",
+                f"[error] {name}: no usable segmentation ({reason}); skipping.",
                 file=sys.stderr,
             )
             continue
