@@ -22,6 +22,7 @@ Constraints baked in (macOS ``spawn``):
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import os
 from collections.abc import Callable
@@ -148,7 +149,12 @@ def decode_array_parallel(
             progress_cb(1)
         return arr
 
-    nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+    # NOTE: use math.prod (arbitrary-precision Python int), NOT np.prod —
+    # np.prod defaults to a C-long accumulator, which is int32 on Windows and
+    # silently overflows once the element count exceeds ~2.1e9 (e.g. a 36-tp
+    # (36,2,6686,6567) stack = 3.16e9 elements), yielding a negative nbytes and
+    # "'size' must be a positive integer" from SharedMemory. math.prod is safe.
+    nbytes = math.prod(shape) * np.dtype(dtype).itemsize
     own_executor = executor is None
     n_workers = default_worker_count(n_t)
     print(
