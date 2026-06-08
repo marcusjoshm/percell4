@@ -60,6 +60,13 @@ from percell4.gui._cellpose_settings_form import CellposeSettingsForm
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.store import DatasetStore
 from percell4.workflows.channels import ChannelSource, intersect_channels
+from percell4.workflows.csv_columns import (
+    CORE_OPTIONAL_COLUMNS,
+    DEFAULT_CSV_METRICS,
+    DEFAULT_CSV_PARTICLE_PER_CELL,
+    DEFAULT_CSV_PARTICLE_PER_CHANNEL,
+    build_selected_csv_columns,
+)
 from percell4.workflows.phases import pick_existing_segmentation
 from percell4.workflows.models import (
     CellposeSettings,
@@ -89,16 +96,9 @@ _NO_SEGMENTATION_LABEL = "None — Cellpose will segment"
 # Always-on identity columns prepended to the CSV column picker.
 _ALWAYS_ON_COLUMNS = ("dataset", "cell_id", "label")
 
-# Core per-cell columns the user may opt into.
-_CORE_OPTIONAL_COLUMNS = (
-    "centroid_y",
-    "centroid_x",
-    "bbox_y",
-    "bbox_x",
-    "bbox_h",
-    "bbox_w",
-    "area",
-)
+# Core per-cell columns the user may opt into. Aliased to the shared
+# Qt-free source of truth (also consumed by percell4-batch-measure).
+_CORE_OPTIONAL_COLUMNS = CORE_OPTIONAL_COLUMNS
 
 # Particle-analysis per-cell summary metrics (U7). Single value per cell;
 # the CSV column shape is "<round_name>_<metric>" — one column per
@@ -308,20 +308,15 @@ class WorkflowConfigDialog(QDialog):
         # user makes an explicit choice (tracked by _csv_channels_auto).
         self._selected_csv_channels: set[str] = set()
         self._csv_channels_auto = True
-        self._selected_csv_metrics: set[str] = {
-            "area",
-            "integrated_intensity",
-            "mean_intensity",
-        }
+        self._selected_csv_metrics: set[str] = set(DEFAULT_CSV_METRICS)
         # U7 particle metrics — independent picker state (only applied
         # to CSV columns when particle analysis is enabled at run time).
-        self._selected_csv_particle_per_cell: set[str] = {
-            "particle_count",
-            "total_particle_area",
-        }
-        self._selected_csv_particle_per_channel: set[str] = {
-            "particle_mean_intensity",
-        }
+        self._selected_csv_particle_per_cell: set[str] = set(
+            DEFAULT_CSV_PARTICLE_PER_CELL
+        )
+        self._selected_csv_particle_per_channel: set[str] = set(
+            DEFAULT_CSV_PARTICLE_PER_CHANNEL
+        )
         self._workflow_config: WorkflowConfig | None = None
 
         self._build_ui()
@@ -1915,64 +1910,21 @@ class WorkflowConfigDialog(QDialog):
     ) -> list[str]:
         """Compute the full list of CSV columns from the user's channel + metric selection.
 
-        Returns the cross-product of selected channels × selected metrics,
-        plus core columns, group columns, and per-round in/out columns.
-        Identity columns (dataset, cell_id, label) are always prepended by
-        the export step regardless of what's in this list.
+        Delegates to the shared Qt-free :func:`build_selected_csv_columns`
+        (also used by ``percell4-batch-measure``) so the GUI and CLI exports
+        cannot drift. Identity columns (dataset, cell_id, label) are always
+        prepended by the export step regardless of what's in this list. The
+        ``_out_<round>`` overlap variants are intentionally NOT emitted —
+        measure_one drops them from the parquet too.
         """
-        cols: list[str] = list(_CORE_OPTIONAL_COLUMNS)
         channels = [ch for ch in intersected if ch in self._selected_csv_channels]
-        metrics = sorted(self._selected_csv_metrics)
-        round_names = [r.name for r in rounds]
-
-        # {channel}_{metric} whole-cell columns
-        for ch in channels:
-            for m in metrics:
-                cols.append(f"{ch}_{m}")
-
-        # group_{round_name} columns
-        for rn in round_names:
-            cols.append(f"group_{rn}")
-
-        # {channel}_{metric}_in_{round} columns. The _out_<round>
-        # variants are intentionally NOT emitted in this workflow —
-        # measure_one drops them from the parquet too. See the
-        # iteration-3 feedback in the requirements doc.
-        for ch in channels:
-            for m in metrics:
-                for rn in round_names:
-                    cols.append(f"{ch}_{m}_in_{rn}")
-
-        # U7 particle columns. Per-cell metrics: <round>_<metric>;
-        # per-channel metrics: <round>_<channel>_<metric>.
-        # When particle analysis is disabled at run time, these columns
-        # won't exist in the df and the CSV writer filters them out
-        # (see export_run's `[c for c in config.selected_csv_columns
-        # if c in df.columns]` guard).
-        for rn in round_names:
-            for m in sorted(self._selected_csv_particle_per_cell):
-                cols.append(f"{rn}_{m}")
-            for ch in channels:
-                for m in sorted(self._selected_csv_particle_per_channel):
-                    cols.append(f"{rn}_{ch}_{m}")
-
-        # Emit `<col>_um2` sibling for every area-style column already
-        # in the list. The actual `<col>_um2` value is only produced by
-        # measure_one when /metadata.pixel_size_um is known; if it's
-        # absent the CSV writer's `c in df.columns` guard silently
-        # filters these out, so pre-selecting them is safe.
-        siblings: list[str] = []
-        for c in cols:
-            if (
-                c == "area"
-                or c.endswith("_area")
-                or "_area_in_" in c
-                or c.endswith("_particle_area")
-            ):
-                siblings.append(f"{c}_um2")
-        cols.extend(siblings)
-
-        return cols
+        return build_selected_csv_columns(
+            channels,
+            [r.name for r in rounds],
+            metrics=self._selected_csv_metrics,
+            particle_per_cell=self._selected_csv_particle_per_cell,
+            particle_per_channel=self._selected_csv_particle_per_channel,
+        )
 
     def _save_output_setting(self) -> None:
         out = self._output_edit.text().strip()
