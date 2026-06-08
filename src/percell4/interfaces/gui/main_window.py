@@ -1333,6 +1333,7 @@ class LauncherWindow(QMainWindow):
 
         executor = make_executor(default_worker_count())
         base = 0
+        parallel_exc: Exception | None = None
         try:
             for kind, name, hp, n_frames in entries:
                 print(
@@ -1366,22 +1367,65 @@ class LauncherWindow(QMainWindow):
                 base += n_frames
                 del arr
         except Exception as exc:  # noqa: BLE001 — surface, don't crash the UI
+            parallel_exc = exc
             # DEBUG (temporary): full traceback to the cmd window, not just the
             # status bar (which is easy to miss when the bar appears to freeze).
             import traceback as _tb
 
             print(
-                f"[PC4-LOAD] LOAD FAILED: {type(exc).__name__}: {exc}",
+                f"[PC4-LOAD] PARALLEL LOAD FAILED: {type(exc).__name__}: {exc}",
                 file=_sys.stderr,
                 flush=True,
             )
             _tb.print_exc()
             _sys.stderr.flush()
-            self.statusBar().showMessage(f"Load error: {exc}")
         finally:
             executor.shutdown(wait=True)
             progress.close()
+
+        if parallel_exc is None:
             self.statusBar().showMessage(f"Loaded: {Path(h5_path).name}")
+            return
+
+        # Fallback: the parallel path uses multiprocessing.shared_memory, which
+        # on Windows is pagefile-backed (SEC_COMMIT) and has a transient 2x peak
+        # (the section plus the copied-out result). On a box with a small
+        # pagefile the accumulating commit can hit the system limit
+        # (OSError WinError 1450, "Insufficient system resources"). The serial
+        # decoder reads each array once into ordinary process heap — no named
+        # sections, lower peak — so it loads (slower) where the parallel path
+        # cannot. Reload from scratch to avoid half-populated / duplicate layers.
+        store = getattr(self, "_current_store", None)
+        if store is None:
+            self.statusBar().showMessage(f"Load error: {parallel_exc}")
+            return
+        print(
+            f"[PC4-LOAD] falling back to single-process serial decode "
+            f"(parallel failed: {type(parallel_exc).__name__})",
+            file=_sys.stderr,
+            flush=True,
+        )
+        self.statusBar().showMessage("Parallel load failed; loading serially…")
+        QApplication.processEvents()
+        viewer_win.clear()
+        try:
+            self._populate_serial(
+                store, viewer_win, 1, channel_names, n_timepoints,
+                label_names, mask_names,
+            )
+            print("[PC4-LOAD] serial fallback complete", file=_sys.stderr, flush=True)
+            self.statusBar().showMessage(f"Loaded (serial): {Path(h5_path).name}")
+        except Exception as exc2:  # noqa: BLE001 — surface, don't crash the UI
+            import traceback as _tb2
+
+            print(
+                f"[PC4-LOAD] SERIAL FALLBACK FAILED: {type(exc2).__name__}: {exc2}",
+                file=_sys.stderr,
+                flush=True,
+            )
+            _tb2.print_exc()
+            _sys.stderr.flush()
+            self.statusBar().showMessage(f"Load error: {exc2}")
 
 
     def _update_data_tab_from_store(self) -> None:
