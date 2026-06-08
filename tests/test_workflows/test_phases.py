@@ -19,6 +19,7 @@ from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    IterativeOtsuSettings,
     PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
@@ -501,6 +502,78 @@ def test_apply_threshold_headless_puncta_mode_writes_binary_mask(
     # _merge_group_dfs 2-column guard does not silently drop the group column.
     groups_df = fixture_store_with_labels.read_dataframe("/groups/SG_puncta")
     assert list(groups_df.columns) == ["label", "group_GFP_mean_intensity"]
+
+
+def _iterative_round(scope: str, name: str) -> ThresholdingRound:
+    # Channel RFP has intra-cell structure (a bright center over a dim base), so
+    # there is something to peel within each cell / group. A min-positive stop
+    # criterion keeps the integration deterministic across all three scopes — the
+    # aggressive default positive-fraction-high (max_frac=0.5) would prematurely
+    # stop a whole-field unit on this small synthetic fixture (its stopping
+    # behaviour is exercised directly in tests/test_measure/test_iterative_otsu.py).
+    return ThresholdingRound(
+        name=name,
+        channel="RFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=1.0,
+        iterative_otsu=IterativeOtsuSettings(scope=scope, stop_criteria=("min-positive",)),
+    )
+
+
+@pytest.mark.parametrize("scope", ["per-cell", "whole-field", "groups"])
+def test_apply_threshold_headless_iterative_otsu_writes_binary_mask(
+    fixture_store_with_labels, scope
+):
+    round_spec = _iterative_round(scope, f"SG_iter_{scope.replace('-', '_')}")
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
+    assert grouping is not None
+
+    failure, msg = apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+    assert failure is None, msg
+
+    combined = fixture_store_with_labels.read_mask(round_spec.name)
+    assert combined.dtype == np.uint8
+    assert set(np.unique(combined).tolist()) <= {0, 1}
+    assert combined.sum() > 0  # the bright RFP centers are captured
+
+    # /groups keeps the 2-column contract so _merge_group_dfs doesn't drop it.
+    groups_df = fixture_store_with_labels.read_dataframe(f"/groups/{round_spec.name}")
+    assert list(groups_df.columns) == ["label", "group_RFP_mean_intensity"]
+
+
+def test_iterative_otsu_group_table_honest_per_scope(fixture_store_with_labels):
+    col = "group_RFP_mean_intensity"
+
+    # whole-field / per-cell: grouping did not drive the mask -> degenerate table.
+    wf = _iterative_round("whole-field", "SG_wf")
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, wf)
+    apply_threshold_headless(fixture_store_with_labels, wf, grouping)
+    wf_groups = fixture_store_with_labels.read_dataframe("/groups/SG_wf")
+    assert set(wf_groups[col].unique().tolist()) == {1}
+
+    # groups scope: the real GMM/k-means assignments survive (>1 group on 12 cells).
+    gr = _iterative_round("groups", "SG_gr")
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, gr)
+    apply_threshold_headless(fixture_store_with_labels, gr, grouping)
+    gr_groups = fixture_store_with_labels.read_dataframe("/groups/SG_gr")
+    assert gr_groups[col].nunique() >= 2
+
+
+def test_iterative_otsu_mask_consumable_by_analyze_particles(fixture_store_with_labels):
+    from percell4.domain.measure.particle import analyze_particles
+
+    labels = fixture_store_with_labels.read_labels("cellpose_qc")
+    rfp = fixture_store_with_labels.read_channel("intensity", 1)
+    round_spec = _iterative_round("per-cell", "SG_particles")
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+
+    mask = fixture_store_with_labels.read_mask("SG_particles")
+    df = analyze_particles({"RFP": rfp}, labels, mask, min_area=1)
+    assert len(df) > 0
+    assert df["particle_count"].sum() > 0
 
 
 def test_apply_threshold_headless_handles_unknown_channel(

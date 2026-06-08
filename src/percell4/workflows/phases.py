@@ -600,6 +600,69 @@ def _apply_puncta_groups(
     return ""
 
 
+def _apply_iterative_otsu_groups(
+    smoothed: NDArray,
+    labels: NDArray,
+    grouping: GroupingResult,
+    settings: object,
+    combined: NDArray,
+    round_name: str,
+) -> str:
+    """Iterative-Otsu peeling across one frame's units, into ``combined``.
+
+    Builds the unit masks per ``settings.scope`` — ``groups`` (reuse the existing
+    intensity grouping), ``per-cell`` (one unit per label), or ``whole-field``
+    (a single all-cells unit) — and delegates the peel loop to the pure-domain
+    core. Unions the binary result into ``combined`` in place and logs the
+    convergence report. Returns an error string on failure, else ``""``.
+    """
+    from percell4.domain.measure.iterative_otsu import peel
+
+    scope = settings.scope
+    units: list[NDArray] = []
+    if scope == "groups":
+        for group_id in range(1, grouping.n_groups + 1):
+            cells_in_group = grouping.group_assignments.index[
+                grouping.group_assignments.values == group_id
+            ].to_numpy(dtype=np.int32)
+            if len(cells_in_group) == 0:
+                continue
+            group_label_mask = np.isin(labels, list(cells_in_group))
+            if group_label_mask.any():
+                units.append(group_label_mask)
+    elif scope == "per-cell":
+        for label_id in np.unique(labels):
+            if label_id == 0:
+                continue
+            units.append(labels == label_id)
+    else:  # whole-field
+        field = labels > 0
+        if field.any():
+            units.append(field)
+
+    if not units:
+        return ""  # no labels to threshold — empty mask, not an error
+
+    try:
+        mask, report = peel(smoothed, units, settings)
+    except Exception as e:
+        logger.exception("iterative-otsu peel failed for round %s", round_name)
+        return f"iterative-otsu: {e}"
+
+    np.maximum(combined, mask, out=combined)
+    np.minimum(combined, 1, out=combined)
+    logger.info(
+        "round %s: iterative-otsu (%s) — %d iters, %d/%d units hit the cap, %d px",
+        round_name,
+        scope,
+        report.n_iterations_run,
+        report.units_hit_max_rounds,
+        report.units_total,
+        report.n_positive,
+    )
+    return ""
+
+
 def _apply_threshold_frame(
     image: NDArray,
     labels: NDArray,
@@ -619,13 +682,21 @@ def _apply_threshold_frame(
     else:
         smoothed = image.astype(np.float32)
 
-    # Puncta mode: a configured two-pass spot detector replaces per-group Otsu.
-    # A None / "otsu" sentinel keeps the legacy path byte-identical.
+    # Dispatch precedence: iterative-otsu, then puncta, then legacy per-group
+    # Otsu. A None iterative_otsu / None-or-"otsu" puncta keeps the legacy path
+    # byte-identical.
+    iterative = round_spec.iterative_otsu
     puncta = round_spec.puncta
     use_puncta = puncta is not None and puncta.detector_name != "otsu"
 
     combined = np.zeros(labels.shape, dtype=np.uint8)
-    if use_puncta:
+    if iterative is not None:
+        err = _apply_iterative_otsu_groups(
+            smoothed, labels, grouping, iterative, combined, round_spec.name
+        )
+        if err:
+            return None, None, err
+    elif use_puncta:
         err = _apply_puncta_groups(smoothed, labels, grouping, puncta, combined, round_spec.name)
         if err:
             return None, None, err
@@ -659,6 +730,11 @@ def _apply_threshold_frame(
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
     group_df.columns = ["label", col_name]
+    if iterative is not None and iterative.scope != "groups":
+        # per-cell / whole-field scope did NOT use the intensity grouping to build
+        # the mask, so keep /groups honest with a single degenerate group rather
+        # than implying a clustering that did not drive the result.
+        group_df[col_name] = 1
     return combined, group_df, ""
 
 
