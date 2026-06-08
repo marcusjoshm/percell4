@@ -585,3 +585,35 @@ def test_config_from_dict_defaults_run_seg_qc_true_when_absent():
     data = config_to_dict(cfg)
     data.pop("run_seg_qc_on_existing", None)
     assert config_from_dict(data).run_seg_qc_on_existing is True
+
+
+def test_existing_mask_fields_round_trip():
+    cfg = replace(
+        _sample_config(),
+        use_existing_masks=True,
+        existing_mask_selections={"DS1": ["P-body_mask", "grouped"], "DS2": ["m2"]},
+    )
+    data = config_to_dict(cfg)
+    # The dict must CONTAIN both keys (not merely load without crashing).
+    assert data["use_existing_masks"] is True
+    assert data["existing_mask_selections"] == {
+        "DS1": ["P-body_mask", "grouped"],
+        "DS2": ["m2"],
+    }
+    restored = config_from_dict(data)
+    assert restored.use_existing_masks is True
+    assert restored.existing_mask_selections == {
+        "DS1": ["P-body_mask", "grouped"],
+        "DS2": ["m2"],
+    }
+
+
+def test_config_from_dict_defaults_existing_mask_fields_when_absent():
+    # Legacy (rounds-present) config has neither key → masks-reuse off,
+    # empty selections, and it still loads.
+    data = config_to_dict(_sample_config())
+    data.pop("use_existing_masks", None)
+    data.pop("existing_mask_selections", None)
+    restored = config_from_dict(data)
+    assert restored.use_existing_masks is False
+    assert restored.existing_mask_selections == {}

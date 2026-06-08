@@ -319,6 +319,10 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
             _particle_to_dict(cfg.particle_settings) if cfg.particle_settings is not None else None
         ),
         "run_seg_qc_on_existing": cfg.run_seg_qc_on_existing,
+        "use_existing_masks": cfg.use_existing_masks,
+        "existing_mask_selections": {
+            k: list(v) for k, v in cfg.existing_mask_selections.items()
+        },
     }
 
 
@@ -347,6 +351,15 @@ def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
         ),
         # Absent in pre-feature run folders → default True (checked).
         run_seg_qc_on_existing=bool(data.get("run_seg_qc_on_existing", True)),
+        # Absent in pre-feature run folders → masks-reuse disabled, empty
+        # selections. This preserves the empty-rounds invariant on Resume:
+        # a legacy rounds-present config still loads, and a legacy
+        # rounds-less config (which never existed) would still fail loud.
+        use_existing_masks=bool(data.get("use_existing_masks", False)),
+        existing_mask_selections={
+            k: list(v)
+            for k, v in dict(data.get("existing_mask_selections", {})).items()
+        },
     )
 
 

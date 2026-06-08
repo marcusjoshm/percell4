@@ -407,12 +407,44 @@ class WorkflowConfig:
     # segmented by Cellpose inside the workflow always run seg-QC under
     # the runner's interactive_qc switch, independent of this flag.
     run_seg_qc_on_existing: bool = True
+    # Existing-mask reuse. When ``use_existing_masks`` is True the workflow
+    # skips the Threshold Rounds step entirely (either/or per run) and
+    # measures the masks already present in each dataset.
+    # ``existing_mask_selections`` maps a dataset ``name`` to the list of
+    # ``/masks/<name>`` layers chosen for that dataset. In this mode
+    # ``thresholding_rounds`` may be empty; the runner synthesizes
+    # measure-only round specs from the selections (see runner
+    # ``_measure_round_specs_for``).
+    use_existing_masks: bool = False
+    existing_mask_selections: dict[str, list[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.datasets:
             raise ValueError("at least one dataset is required")
-        if not self.thresholding_rounds:
-            raise ValueError("at least one thresholding round is required")
+        # The Threshold Rounds step is optional only when the run reuses
+        # existing masks AND at least one dataset actually selected a mask.
+        # A config with neither rounds nor mask selections still fails loud.
+        has_mask_selection = self.use_existing_masks and any(
+            self.existing_mask_selections.values()
+        )
+        if not self.thresholding_rounds and not has_mask_selection:
+            raise ValueError(
+                "at least one thresholding round is required "
+                "(or set use_existing_masks with a non-empty mask selection)"
+            )
+        if self.existing_mask_selections:
+            ds_name_set = {d.name for d in self.datasets}
+            unknown = set(self.existing_mask_selections) - ds_name_set
+            if unknown:
+                raise ValueError(
+                    f"existing_mask_selections references unknown dataset(s): {sorted(unknown)}"
+                )
+            if self.use_existing_masks:
+                empty = [k for k, v in self.existing_mask_selections.items() if not v]
+                if empty:
+                    raise ValueError(
+                        f"existing_mask_selections has empty selection for dataset(s): {sorted(empty)}"
+                    )
         names = [r.name for r in self.thresholding_rounds]
         if len(set(names)) != len(names):
             raise ValueError(f"thresholding round names must be unique: {names}")

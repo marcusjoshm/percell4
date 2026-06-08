@@ -263,6 +263,61 @@ def test_config_requires_rounds():
         )
 
 
+def test_config_allows_empty_rounds_with_existing_masks():
+    cfg = WorkflowConfig(
+        datasets=[_valid_entry(name="DS1")],
+        cellpose=CellposeSettings(),
+        thresholding_rounds=[],
+        selected_csv_columns=[],
+        output_parent=Path("/tmp/runs"),
+        use_existing_masks=True,
+        existing_mask_selections={"DS1": ["P-body_mask"]},
+    )
+    assert cfg.use_existing_masks is True
+    assert cfg.existing_mask_selections == {"DS1": ["P-body_mask"]}
+    assert cfg.thresholding_rounds == []
+
+
+def test_config_existing_masks_without_selection_still_requires_rounds():
+    with pytest.raises(ValueError, match="at least one thresholding round"):
+        WorkflowConfig(
+            datasets=[_valid_entry(name="DS1")],
+            cellpose=CellposeSettings(),
+            thresholding_rounds=[],
+            selected_csv_columns=[],
+            output_parent=Path("/tmp/runs"),
+            use_existing_masks=True,
+            existing_mask_selections={},
+        )
+
+
+def test_config_empty_selection_value_rejected():
+    # DS1 has a real selection (so the empty-rounds guard passes), but DS2
+    # is explicitly keyed with an empty list — that is rejected.
+    with pytest.raises(ValueError, match="empty selection"):
+        WorkflowConfig(
+            datasets=[_valid_entry(name="DS1"), _valid_entry(name="DS2")],
+            cellpose=CellposeSettings(),
+            thresholding_rounds=[],
+            selected_csv_columns=[],
+            output_parent=Path("/tmp/runs"),
+            use_existing_masks=True,
+            existing_mask_selections={"DS1": ["m"], "DS2": []},
+        )
+
+
+def test_config_mask_selection_unknown_dataset_rejected():
+    with pytest.raises(ValueError, match="unknown dataset"):
+        WorkflowConfig(
+            datasets=[_valid_entry(name="DS1")],
+            cellpose=CellposeSettings(),
+            thresholding_rounds=[_valid_round()],
+            selected_csv_columns=[],
+            output_parent=Path("/tmp/runs"),
+            existing_mask_selections={"DS_NOPE": ["m"]},
+        )
+
+
 def test_config_rejects_duplicate_round_names():
     with pytest.raises(ValueError, match="unique"):
         WorkflowConfig(
