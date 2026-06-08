@@ -1291,9 +1291,15 @@ class LauncherWindow(QMainWindow):
             import psutil as _psutil
 
             _vm = _psutil.virtual_memory()
+            # On Windows, multiprocessing.shared_memory is paging-file backed,
+            # so the big up-front shm block competes for swap/pagefile, not just
+            # RAM. Report both so a pagefile-commit stall is visible.
+            _sw = _psutil.swap_memory()
             _mem = (
                 f"RAM total={_vm.total / 1e9:.1f}GB "
-                f"avail={_vm.available / 1e9:.1f}GB used={_vm.percent:.0f}%"
+                f"avail={_vm.available / 1e9:.1f}GB used={_vm.percent:.0f}% | "
+                f"SWAP/pagefile total={_sw.total / 1e9:.1f}GB "
+                f"free={_sw.free / 1e9:.1f}GB used={_sw.percent:.0f}%"
             )
         except Exception as _e:  # noqa: BLE001 — debug only
             _mem = f"RAM=unavailable ({_e})"
