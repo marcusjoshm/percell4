@@ -22,6 +22,9 @@
   - [`percell4-batch-whole-field` — whole-field segmentation](#percell4-batch-whole-field--whole-field-segmentation)
   - [`percell4-batch-rename` — rename a resource across datasets](#percell4-batch-rename--rename-a-resource-across-datasets)
   - [`percell4-batch-delete` — delete resources across datasets](#percell4-batch-delete--delete-resources-across-datasets)
+  - [`percell4-batch-threshold` — headless grouped thresholding](#percell4-batch-threshold--headless-grouped-thresholding)
+  - [`percell4-batch-measure` — measure + particle analysis + CSV export](#percell4-batch-measure--measure--particle-analysis--csv-export)
+  - [`percell4-inspect` — print dataset metadata + layers](#percell4-inspect--print-dataset-metadata--layers)
 - [Tech Stack](#tech-stack)
 - [Features](#features)
 - [Installation](#installation)
@@ -385,6 +388,46 @@ percell4-batch-delete /scratch/dishes/ \
 # Delete EVERY resource of a kind
 percell4-batch-delete /scratch/dishes/ --kind mask --all --dry-run
 percell4-batch-delete *.h5 --kind channel --all
+```
+
+---
+
+### `percell4-batch-threshold` — headless grouped thresholding
+
+Runs one grouped-threshold round (k-means/GMM grouping + per-group Otsu) across datasets and writes `/masks/<round>` + `/groups/<round>` back into each `.h5`. Requires each dataset to already carry a segmentation (`/labels`); it does not segment, measure, or export. Pair it with `percell4-batch-measure` to get CSVs (it prints the exact follow-up command on success).
+
+```bash
+percell4-batch-threshold dish_1.h5 dish_2.h5 --channel GFP \
+    --round-name GFP_bright --algorithm kmeans --kmeans-n-clusters 3
+percell4-batch-threshold /scratch/dishes/ --channel RFP \
+    --round-name RFP_pos --algorithm gmm --gmm-criterion bic --overwrite
+```
+
+Every round option is a flag (`--metric`, `--algorithm`, `--gmm-criterion`, `--gmm-max-components`, `--kmeans-n-clusters`, `--gaussian-sigma`, `--segmentation`). It refuses to overwrite an existing same-name mask unless `--overwrite` is passed.
+
+---
+
+### `percell4-batch-measure` — measure + particle analysis + CSV export
+
+Measures per-cell metrics + particle analysis over **existing** masks and writes a timestamped run folder of CSVs/parquet (`combined.csv`, `per_dataset/*.csv`, `particles.csv`, summaries). Requires existing `/labels` + `/masks`; measurements never go back into the `.h5`.
+
+```bash
+percell4-batch-measure dish_1.h5 dish_2.h5 --segmentation cellpose \
+    --mask pbody --min-particle-area 9 --output ~/runs
+percell4-batch-measure /scratch/dishes/ --mask grouped --csv-preset all
+```
+
+`--mask` is repeatable (default: every mask present, with a warning). Particle filtering via `--min-particle-area` + `--particle-unit {px,um2}`; CSV columns via `--csv-preset {default,all}`. Shares its column defaults with the GUI workflow so CLI and GUI exports match.
+
+---
+
+### `percell4-inspect` — print dataset metadata + layers
+
+Read-only triage: prints each dataset's file size, metadata (channels, resolution, pixel size, timepoints), and every layer (intensity, segmentations, masks, groups, tracks) with name/shape/dtype. Shapes/dtypes are read without decoding arrays, so it is fast even on multi-gigabyte stacks.
+
+```bash
+percell4-inspect dish_1.h5 dish_2.h5
+percell4-inspect /scratch/dishes/ --json
 ```
 
 ---
