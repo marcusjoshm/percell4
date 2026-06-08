@@ -134,6 +134,23 @@ def test_start_enabled_in_mask_reuse_mode_without_rounds(dialog, tmp_path):
     assert not dialog._start_btn.isEnabled()
 
 
+def test_mask_can_be_unselected_with_a_click(dialog, tmp_path):
+    """A previously selected mask can be unselected (MultiSelection mode)."""
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["pbody", "grouped"])
+    dialog._add_h5_paths([ds1])
+    dialog._mask_selection_group.setChecked(True)
+    lw = {pd.display_name: lw for pd, lw, _ in dialog._mask_lists}["DS1"]
+    _select(lw, {"pbody"})
+    assert dialog.existing_mask_selections == {"DS1": ["pbody"]}
+    # Toggling the same item off clears the selection — no datasets remain,
+    # which also disables Start.
+    for i in range(lw.count()):
+        if lw.item(i).text() == "pbody":
+            lw.item(i).setSelected(False)
+    assert dialog.existing_mask_selections == {}
+    assert not dialog._start_btn.isEnabled()
+
+
 def test_mask_selections_preserved_across_toggle(dialog, tmp_path):
     ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["pbody", "grouped"])
     dialog._add_h5_paths([ds1])

@@ -702,7 +702,10 @@ class WorkflowConfigDialog(QDialog):
         for pd in self._pending_datasets:
             masks = self._dataset_masks(pd)
             lst = QListWidget()
-            lst.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            # MultiSelection (not ExtendedSelection): a plain click toggles
+            # an item on/off, so a user can unselect a previously chosen mask
+            # with one click — no Ctrl modifier required.
+            lst.setSelectionMode(QAbstractItemView.MultiSelection)
             # Keep the row compact; the list scrolls if a dataset has many.
             lst.setMaximumHeight(90)
             if masks:
