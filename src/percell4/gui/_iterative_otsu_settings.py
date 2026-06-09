@@ -68,6 +68,9 @@ class IterativeOtsuConfig:
     stop_criteria: tuple[str, ...]
     stop_params: tuple[tuple[str, Any], ...]
     stop_combine: str
+    # When set, the peel runs exactly this many iterations per unit and the
+    # stop criteria are blocked. ``None`` keeps the criteria-driven mode.
+    fixed_iterations: int | None = None
 
 
 class IterativeOtsuSettingsWidget(QWidget):
@@ -111,14 +114,22 @@ class IterativeOtsuSettingsWidget(QWidget):
         dil_row.addWidget(self._dilation)
         layout.addLayout(dil_row)
 
-        # ── Max iterations ──
+        # ── Max iterations (relabelled "Iterations:" in fixed-count mode) ──
         mr_row = QHBoxLayout()
-        mr_row.addWidget(QLabel("Max iterations:"))
+        self._mr_label = QLabel("Max iterations:")
+        mr_row.addWidget(self._mr_label)
         self._max_rounds = QSpinBox()
         self._max_rounds.setRange(1, 100)
         self._max_rounds.setValue(10)
         mr_row.addWidget(self._max_rounds)
         layout.addLayout(mr_row)
+
+        # ── Fixed-count mode: blocks the stopping criteria ──
+        fixed_row = QHBoxLayout()
+        self._fixed_mode = QCheckBox("Fixed iteration count (ignore stopping criteria)")
+        fixed_row.addWidget(self._fixed_mode)
+        fixed_row.addStretch()
+        layout.addLayout(fixed_row)
 
         # ── Gaussian sigma ──
         sig_row = QHBoxLayout()
@@ -133,6 +144,7 @@ class IterativeOtsuSettingsWidget(QWidget):
 
         # ── Stopping criteria ──
         crit_group = QGroupBox("Stopping criteria")
+        self._crit_group = crit_group
         crit_layout = QVBoxLayout(crit_group)
 
         combine_row = QHBoxLayout()
@@ -174,9 +186,16 @@ class IterativeOtsuSettingsWidget(QWidget):
         self._max_rounds.valueChanged.connect(self.config_changed)
         self._sigma.valueChanged.connect(self.config_changed)
         self._combine.currentIndexChanged.connect(self.config_changed)
+        self._fixed_mode.toggled.connect(self._on_fixed_toggled)
+        self._fixed_mode.toggled.connect(self.config_changed)
         for cb, spin, _ in self._rows.values():
             cb.toggled.connect(self.config_changed)
             spin.valueChanged.connect(self.config_changed)
+
+    def _on_fixed_toggled(self, checked: bool) -> None:
+        """Fixed-count mode blocks the criteria: grey the group and relabel."""
+        self._crit_group.setEnabled(not checked)
+        self._mr_label.setText("Iterations:" if checked else "Max iterations:")
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -188,6 +207,7 @@ class IterativeOtsuSettingsWidget(QWidget):
             if cb.isChecked():
                 criteria.append(crit)
                 params.append((f"{crit}.{key}", spin.value()))
+        fixed = int(self._max_rounds.value()) if self._fixed_mode.isChecked() else None
         return IterativeOtsuConfig(
             scope=self._scope.currentData(),
             dilation_radius_px=int(self._dilation.value()),
@@ -196,12 +216,16 @@ class IterativeOtsuSettingsWidget(QWidget):
             stop_criteria=tuple(criteria),
             stop_params=tuple(params),
             stop_combine=self._combine.currentText(),
+            fixed_iterations=fixed,
         )
 
     def set_enabled(self, enabled: bool) -> None:
         """Lock/unlock all widgets during a run (preserves each criterion's gate)."""
-        for w in (self._scope, self._dilation, self._max_rounds, self._sigma, self._combine):
+        fixed = self._fixed_mode.isChecked()
+        for w in (self._scope, self._dilation, self._max_rounds, self._sigma, self._fixed_mode):
             w.setEnabled(enabled)
+        # The criteria group (incl. combine) stays greyed in fixed-count mode.
+        self._crit_group.setEnabled(enabled and not fixed)
         for cb, spin, _ in self._rows.values():
-            cb.setEnabled(enabled)
-            spin.setEnabled(enabled and cb.isChecked())
+            cb.setEnabled(enabled and not fixed)
+            spin.setEnabled(enabled and not fixed and cb.isChecked())

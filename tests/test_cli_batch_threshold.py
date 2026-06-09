@@ -121,6 +121,22 @@ def test_batch_threshold_iterative_otsu_writes_binary_mask(tmp_path, capsys):
     assert "iterative-otsu" in out  # [ok] line names the strategy
 
 
+def test_batch_threshold_iterative_fixed_iterations_writes_mask(tmp_path, capsys):
+    # --iterations runs a fixed count and blocks the stop criteria.
+    p = tmp_path / "DS1.h5"
+    _make_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "SG_fixed",
+        "--segmentation", "cellpose", "--strategy", "iterative-otsu",
+        "--iterative-scope", "per-cell", "--gaussian-sigma", "0",
+        "--iterations", "1",
+    ])
+    assert rc == 0
+    mask = DatasetStore(p).read_mask("SG_fixed")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask).tolist()) <= {0, 1}
+
+
 def test_batch_threshold_iterative_unknown_stop_criterion_exits_1(tmp_path, capsys):
     p = tmp_path / "DS1.h5"
     _make_dataset(p)

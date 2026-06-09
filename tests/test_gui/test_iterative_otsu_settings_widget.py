@@ -87,6 +87,50 @@ def test_param_spin_gated_by_checkbox(qtbot):
     assert spin.isEnabled()
 
 
+def test_fixed_mode_defaults_off(qtbot):
+    w = _widget(qtbot)
+    assert not w._fixed_mode.isChecked()
+    assert w.current_config().fixed_iterations is None
+    assert w._mr_label.text() == "Max iterations:"
+    assert w._crit_group.isEnabled()
+
+
+def test_fixed_mode_blocks_criteria_group_and_sets_count(qtbot):
+    w = _widget(qtbot)
+    w._max_rounds.setValue(4)
+    w._fixed_mode.setChecked(True)
+    # Criteria group greys out; the iterations label switches.
+    assert not w._crit_group.isEnabled()
+    assert w._mr_label.text() == "Iterations:"
+    cfg = w.current_config()
+    assert cfg.fixed_iterations == 4
+    # Unchecking returns to criteria-driven mode.
+    w._fixed_mode.setChecked(False)
+    assert w._crit_group.isEnabled()
+    assert w.current_config().fixed_iterations is None
+
+
+def test_fixed_mode_config_constructs_real_settings_with_empty_criteria(qtbot):
+    from percell4.workflows.models import IterativeOtsuSettings
+
+    w = _widget(qtbot)
+    for cb, _, _ in w._rows.values():
+        cb.setChecked(False)  # all criteria off
+    w._fixed_mode.setChecked(True)
+    cfg = w.current_config()
+    assert cfg.stop_criteria == ()
+    s = IterativeOtsuSettings(
+        scope=cfg.scope,
+        dilation_radius_px=cfg.dilation_radius_px,
+        max_rounds=cfg.max_rounds,
+        stop_criteria=cfg.stop_criteria,
+        stop_params=cfg.stop_params,
+        stop_combine=cfg.stop_combine,
+        fixed_iterations=cfg.fixed_iterations,
+    )
+    assert s.fixed_iterations == cfg.fixed_iterations
+
+
 def test_config_changed_fires_on_edits(qtbot):
     w = _widget(qtbot)
     fired = []

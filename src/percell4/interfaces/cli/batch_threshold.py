@@ -146,6 +146,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Hard cap on peel iterations per dataset (default 10).",
     )
     itr.add_argument(
+        "--iterations", type=int, default=None,
+        help=(
+            "Run EXACTLY this many peel iterations per unit, ignoring the stop "
+            "criteria (blocks --max-rounds / --stop-criteria / --stop-combine). "
+            "Omit to use the criteria-driven mode."
+        ),
+    )
+    itr.add_argument(
         "--stop-criteria",
         default="bg-floor,positive-fraction-high",
         help=(
@@ -211,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
                 stop_criteria=stop_criteria,
                 stop_params=stop_params,
                 stop_combine=args.stop_combine,
+                fixed_iterations=args.iterations,
             )
         round_spec = ThresholdingRound(
             name=args.round_name,

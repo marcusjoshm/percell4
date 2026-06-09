@@ -208,6 +208,7 @@ def _iterative_otsu_to_dict(s: IterativeOtsuSettings) -> dict[str, Any]:
         "stop_criteria": list(s.stop_criteria),
         "stop_params": dict(s.stop_params),
         "stop_combine": s.stop_combine,
+        "fixed_iterations": s.fixed_iterations,
     }
 
 
@@ -219,6 +220,8 @@ def _iterative_otsu_from_dict(d: dict[str, Any]) -> IterativeOtsuSettings:
         stop_criteria=tuple(d.get("stop_criteria", ("bg-floor", "positive-fraction-high"))),
         stop_params=d.get("stop_params", {}),
         stop_combine=d.get("stop_combine", "any"),
+        # Absent in pre-feature run folders → criteria-driven mode.
+        fixed_iterations=d.get("fixed_iterations"),
     )
 
 

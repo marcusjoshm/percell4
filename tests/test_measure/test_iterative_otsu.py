@@ -27,6 +27,7 @@ def _settings(
     stop_params=(),
     max_rounds=10,
     dilation_radius_px=5,
+    fixed_iterations=None,
 ):
     """Duck-typed stand-in for IterativeOtsuSettings (U2 owns the real one)."""
     return SimpleNamespace(
@@ -35,6 +36,7 @@ def _settings(
         stop_params=tuple(stop_params),
         max_rounds=max_rounds,
         dilation_radius_px=dilation_radius_px,
+        fixed_iterations=fixed_iterations,
     )
 
 
@@ -131,6 +133,56 @@ def test_peel_terminates_within_max_rounds():
 
     assert report.n_iterations_run <= 4
     assert mask.dtype == np.uint8
+
+
+# ── peel: fixed-iteration mode blocks the stop criteria ───────
+
+
+def test_fixed_iterations_blocks_stop_criteria():
+    img = np.full((60, 60), 20.0, dtype=np.float32)
+    img[20:40, 20:40] = 200.0  # bright square Otsu captures on round 1
+    units = [np.ones(img.shape, dtype=bool)]
+    # min_px huge → this criterion fires on round 1 in *every* run (deterministic,
+    # image-independent), vetoing the capture.
+    crit = ("min-positive",)
+    params = (("min-positive.min_px", 10**9),)
+
+    # Criteria mode: the always-firing stop vetoes round 1 → empty mask.
+    mask_crit, rep_crit = peel(img, units, _settings(stop_criteria=crit, stop_params=params))
+    assert mask_crit.sum() == 0
+    assert rep_crit.criterion_fires["min-positive"] == 1
+
+    # Fixed mode: criteria are blocked, so round 1's foreground is accepted and
+    # no criterion is ever evaluated (all fire counts stay zero).
+    mask_fixed, rep_fixed = peel(
+        img, units, _settings(stop_criteria=crit, stop_params=params, fixed_iterations=1)
+    )
+    assert mask_fixed.sum() > 0
+    assert rep_fixed.n_iterations_run == 1
+    assert rep_fixed.criterion_fires["min-positive"] == 0
+
+
+def test_fixed_iterations_runs_exact_count():
+    # Nested intensity tiers so every round has a brighter layer to peel.
+    img = np.full((80, 80), 10.0, dtype=np.float32)
+    img[10:70, 10:70] = 40.0
+    img[20:60, 20:60] = 90.0
+    img[30:50, 30:50] = 200.0
+    units = [np.ones(img.shape, dtype=bool)]
+
+    mask, rep = peel(img, units, _settings(fixed_iterations=3, dilation_radius_px=1))
+
+    assert rep.n_iterations_run == 3  # exactly the requested count, criteria off
+    assert mask.sum() > 0
+
+
+def test_fixed_iterations_degenerate_guard_still_applies():
+    # Nothing to split: the degenerate guard latches the unit done on round 1
+    # even though 5 fixed iterations were requested.
+    img = np.full((20, 20), 42.0, dtype=np.float32)
+    mask, rep = peel(img, [np.ones(img.shape, dtype=bool)], _settings(fixed_iterations=5))
+    assert mask.sum() == 0
+    assert rep.n_iterations_run == 1
 
 
 # ── peel: dilation re-clamp never bleeds across units (AE4) ───

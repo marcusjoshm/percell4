@@ -211,11 +211,33 @@ def test_iterative_otsu_defaults_are_valid():
         {"stop_params": (("bg-floor.k", [1, 2, 3]),)},  # non-scalar value
         {"stop_params": (("nope.k", 2.0),)},  # unknown criterion prefix
         {"stop_params": (("undotted", 2.0),)},  # missing dotted prefix
+        {"fixed_iterations": 0},  # must be >= 1 when set
+        {"fixed_iterations": -2},
     ],
 )
 def test_iterative_otsu_rejects_invalid(kwargs):
     with pytest.raises(ValueError):
         IterativeOtsuSettings(**kwargs)
+
+
+def test_iterative_otsu_defaults_fixed_iterations_none():
+    assert IterativeOtsuSettings().fixed_iterations is None
+
+
+def test_iterative_otsu_fixed_iterations_allows_empty_criteria():
+    # Fixed-count mode blocks the criteria, so an empty tuple is valid there.
+    s = IterativeOtsuSettings(stop_criteria=(), fixed_iterations=3)
+    assert s.fixed_iterations == 3
+    assert s.stop_criteria == ()
+
+
+def test_iterative_otsu_fixed_iterations_roundtrip():
+    from percell4.workflows.artifacts import _round_from_dict, _round_to_dict
+
+    r = _valid_round(iterative_otsu=IterativeOtsuSettings(stop_criteria=(), fixed_iterations=4))
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
+    assert restored.iterative_otsu.fixed_iterations == 4
 
 
 def test_iterative_otsu_params_namespaced_and_canonical():

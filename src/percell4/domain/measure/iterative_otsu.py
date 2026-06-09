@@ -247,7 +247,9 @@ def peel(
             The core is agnostic to how units were built.
         settings: Duck-typed ``IterativeOtsuSettings`` — reads ``max_rounds``,
             ``dilation_radius_px``, ``stop_criteria``, ``stop_combine``,
-            ``stop_params``.
+            ``stop_params``, and the optional ``fixed_iterations``. When
+            ``fixed_iterations`` is set the loop runs exactly that many rounds
+            per unit and the stop criteria are blocked (never evaluated).
 
     Returns:
         ``(mask, report)`` where ``mask`` is ``{0, 1}`` uint8 with ``smoothed``'s
@@ -262,17 +264,22 @@ def peel(
     done = [False] * n_units
     cumulative_px = [0] * n_units
 
-    max_rounds = int(settings.max_rounds)
     radius = int(settings.dilation_radius_px)
     active = tuple(settings.stop_criteria)
     combine = str(settings.stop_combine)
     params = params_by_name(tuple(settings.stop_params))
     footprint = disk(radius) if radius > 0 else None
 
+    # Fixed-count mode blocks the stop criteria: run exactly ``fixed_iterations``
+    # rounds per unit (the degenerate-residual guard still latches a unit done).
+    # Otherwise loop up to the ``max_rounds`` cap, criteria-gated each round.
+    fixed = getattr(settings, "fixed_iterations", None)
+    n_iterations = int(fixed) if fixed is not None else int(settings.max_rounds)
+
     fires: dict[str, int] = {name: 0 for name in active}
     iterations_run = 0
 
-    for iteration in range(1, max_rounds + 1):
+    for iteration in range(1, n_iterations + 1):
         if all(done):
             break
         iterations_run = iteration
@@ -306,12 +313,13 @@ def peel(
                 cumulative_px=cumulative_px[u],
                 iteration=iteration,
             )
-            stop, fired = _evaluate(ctx, active, combine, params)
-            if stop:
-                for name in fired:
-                    fires[name] += 1
-                done[u] = True
-                continue
+            if fixed is None:
+                stop, fired = _evaluate(ctx, active, combine, params)
+                if stop:
+                    for name in fired:
+                        fires[name] += 1
+                    done[u] = True
+                    continue
 
             # Accept this iteration's foreground.
             np.maximum(combined, candidate.astype(np.uint8), out=combined)

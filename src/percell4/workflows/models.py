@@ -230,6 +230,14 @@ class IterativeOtsuSettings:
     dataclass stays hashable and round-trips through ``run_config.json``
     byte-for-byte. A hard ``max_rounds`` cap and the degenerate-residual guard
     always apply on top of the named criteria.
+
+    ``fixed_iterations`` switches the loop to a *fixed-count* mode: when set, the
+    peel runs exactly that many iterations per unit and the stop criteria are
+    **blocked** (never evaluated) — ``max_rounds``/``stop_criteria``/
+    ``stop_combine`` are ignored. The degenerate-residual guard still applies (a
+    unit with nothing left to split latches done early). ``None`` (the default)
+    keeps the criteria-driven mode. ``stop_criteria`` may be empty only in
+    fixed-count mode.
     """
 
     scope: str = "per-cell"
@@ -238,6 +246,7 @@ class IterativeOtsuSettings:
     stop_criteria: tuple[str, ...] = ("bg-floor", "positive-fraction-high")
     stop_params: tuple[tuple[str, Any], ...] = ()
     stop_combine: str = "any"
+    fixed_iterations: int | None = None
 
     def __post_init__(self) -> None:
         if self.scope not in SCOPE_NAMES:
@@ -246,7 +255,11 @@ class IterativeOtsuSettings:
             raise ValueError("dilation_radius_px must be positive")
         if self.max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
-        if not self.stop_criteria:
+        if self.fixed_iterations is not None and self.fixed_iterations < 1:
+            raise ValueError("fixed_iterations must be >= 1 when set")
+        # Stop criteria are required only in criteria-driven mode; fixed-count
+        # mode blocks them, so an empty tuple is valid there.
+        if not self.stop_criteria and self.fixed_iterations is None:
             raise ValueError("stop_criteria must be non-empty")
         for name in self.stop_criteria:
             if name not in STOP_CRITERION_NAMES:

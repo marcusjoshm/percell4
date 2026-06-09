@@ -73,6 +73,7 @@ class IterativeOtsuPanel(QWidget):
         self._worker = None
         self._pending_name: str | None = None
         self._pending_max_rounds = 0
+        self._pending_fixed: int | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -157,7 +158,7 @@ class IterativeOtsuPanel(QWidget):
             return
 
         config = self._settings.current_config()
-        if not config.stop_criteria:
+        if config.fixed_iterations is None and not config.stop_criteria:
             self._show_status("Enable at least one stopping criterion")
             return
 
@@ -171,6 +172,7 @@ class IterativeOtsuPanel(QWidget):
                 stop_criteria=config.stop_criteria,
                 stop_params=config.stop_params,
                 stop_combine=config.stop_combine,
+                fixed_iterations=config.fixed_iterations,
             )
         except ValueError as e:
             self._show_status(str(e))
@@ -188,13 +190,18 @@ class IterativeOtsuPanel(QWidget):
             return
 
         self._pending_name = mask_name
-        self._pending_max_rounds = config.max_rounds
+        self._pending_fixed = config.fixed_iterations
+        self._pending_max_rounds = (
+            config.fixed_iterations if config.fixed_iterations is not None else config.max_rounds
+        )
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
         frame_note = f" (frame {timepoint})" if timepoint is not None else ""
-        self._show_status(
-            f"Running iterative Otsu — up to {config.max_rounds} iterations/cell…{frame_note}"
-        )
+        if config.fixed_iterations is not None:
+            count_note = f"exactly {config.fixed_iterations} iterations/cell (criteria off)"
+        else:
+            count_note = f"up to {config.max_rounds} iterations/cell"
+        self._show_status(f"Running iterative Otsu — {count_note}…{frame_note}")
 
         from percell4.gui.workers import Worker
 
@@ -230,6 +237,11 @@ class IterativeOtsuPanel(QWidget):
         if report.n_positive == 0:
             self._show_status(
                 f"Saved '{name}': no foreground detected ({report.n_iterations_run} iters)"
+            )
+        elif self._pending_fixed is not None:
+            self._show_status(
+                f"Saved '{name}': {report.n_positive:,} px, {report.n_iterations_run} iters "
+                f"(fixed {self._pending_fixed}/cell, criteria off)"
             )
         else:
             self._show_status(
