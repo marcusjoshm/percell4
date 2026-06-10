@@ -16,6 +16,14 @@ Usage:
     python -m percell4.interfaces.cli.batch_delete_resource dish_1.h5 \\
         --kind channel --all
 
+    # Delete FLIM phasor / wavelet resources (--name is the CHANNEL name).
+    # Full reset (drops base g/s AND the wavelet output) — recompute phasor:
+    python -m percell4.interfaces.cli.batch_delete_resource /scratch/dishes/ \\
+        --kind phasor --name mNG
+    # Wavelet only (keeps base g/s) — re-run Apply Wavelet Filter:
+    python -m percell4.interfaces.cli.batch_delete_resource *.h5 \\
+        --kind wavelet --all --dry-run
+
 For each input .h5 (or every .h5 in a directory argument), the CLI
 either deletes one ``(kind, name)`` pair (``--name``) or every
 resource of ``--kind`` present in that file (``--all``). The two
@@ -29,6 +37,13 @@ Channels go through DatasetStore.delete_channel, which removes
 the per-channel FLIM calibration attrs together. Masks and
 segmentations go through DatasetStore.delete_item against
 /masks/<name> and /labels/<name> respectively.
+
+FLIM phasor resources are keyed by CHANNEL name (``--name mNG``):
+``--kind phasor`` removes the entire /phasor/<channel> group (base
+g/s AND the derived wavelet triple g_filtered/s_filtered/
+lifetime_filtered); ``--kind wavelet`` removes only that triple,
+leaving the base phasor intact so Apply Wavelet Filter can be re-run
+without recomputing the phasor.
 
 Exit codes:
     0 -- at least one dataset was successfully deleted
@@ -48,11 +63,11 @@ import logging
 import sys
 
 from percell4.application.use_cases.batch_delete_resource import (
+    VALID_KINDS,
     batch_delete_resource,
 )
 from percell4.application.use_cases.batch_rename_resource import (
     BatchOperationItemResult,
-    VALID_KINDS,
 )
 from percell4.interfaces.cli._batch_report import (
     print_item_status,
@@ -67,8 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="percell4-batch-delete",
         description=(
-            "Batch-delete a single channel, mask, or segmentation "
-            "across one or more .h5 datasets.\n\n"
+            "Batch-delete a single channel, mask, segmentation, or FLIM "
+            "phasor/wavelet resource across one or more .h5 datasets.\n\n"
             "For each input .h5, deletes (kind, name) in that file. "
             "Datasets that don't have the resource are reported as "
             "skipped, not as failures.\n\n"
@@ -78,6 +93,11 @@ def main(argv: list[str] | None = None) -> int:
             "calibration attrs together. Masks and segmentations go "
             "through DatasetStore.delete_item against /masks/<name> "
             "and /labels/<name>.\n\n"
+            "FLIM phasor resources are keyed by CHANNEL name: "
+            "--kind phasor removes the whole /phasor/<channel> group "
+            "(base g/s AND the wavelet output); --kind wavelet removes "
+            "only the wavelet output (g_filtered/s_filtered/"
+            "lifetime_filtered), keeping the base phasor.\n\n"
             "Recommendation: close any open PerCell4 GUI session "
             "against the target files before running. The batch CLI "
             "writes to the same .h5 files the GUI reads. Use "
@@ -93,6 +113,10 @@ def main(argv: list[str] | None = None) -> int:
             "      --kind mask --name thresh_488 --dry-run\n"
             "  percell4-batch-delete *.h5 \\\n"
             "      --kind channel --name DAPI --quiet\n"
+            "  percell4-batch-delete *.h5 \\\n"
+            "      --kind phasor --name mNG --dry-run\n"
+            "  percell4-batch-delete *.h5 \\\n"
+            "      --kind wavelet --all\n"
         ),
     )
     parser.add_argument(
@@ -112,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     target_group = parser.add_mutually_exclusive_group(required=True)
     target_group.add_argument(
         "--name",
-        help="Name of the resource to delete in each .h5.",
+        help=(
+            "Name of the resource to delete in each .h5. For --kind "
+            "phasor/wavelet this is the CHANNEL name (e.g. mNG)."
+        ),
     )
     target_group.add_argument(
         "--all",

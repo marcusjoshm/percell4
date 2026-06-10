@@ -44,6 +44,7 @@ from percell4.adapters.hdf5_store import Hdf5DatasetRepository
 from percell4.application.session import Session
 from percell4.application.use_cases.apply_wavelet import ApplyWavelet
 from percell4.application.use_cases.compute_phasor import ComputePhasor
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.store import DatasetStore
 
 logger = logging.getLogger(__name__)
@@ -164,8 +165,8 @@ def batch_compute_phasor(
             calibration attrs (``flim_cal_phase_<ch>``,
             ``flim_cal_mod_<ch>``, ``flim_frequency_mhz``). Datasets
             missing these are reported as skipped, not as failures.
-        filter_level: Wavelet filter level (1..9). Same value applied
-            to every channel of every dataset.
+        filter_level: Wavelet filter level (1..MAX_FILTER_LEVEL). Same
+            value applied to every channel of every dataset.
         overwrite: If False (default), channels with an existing
             ``/phasor/<ch>/g`` are skipped. If True, recompute and
             overwrite. ``ComputePhasor`` itself already invalidates
@@ -178,9 +179,9 @@ def batch_compute_phasor(
         A :class:`BatchPhasorReport` with one
         :class:`BatchPhasorItemResult` per input path.
     """
-    if not (1 <= filter_level <= 9):
+    if not (1 <= filter_level <= MAX_FILTER_LEVEL):
         raise ValueError(
-            f"filter_level must be in [1, 9], got {filter_level}"
+            f"filter_level must be in [1, {MAX_FILTER_LEVEL}], got {filter_level}"
         )
 
     repo = Hdf5DatasetRepository()

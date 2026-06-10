@@ -515,6 +515,23 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
+    def read_array_attrs(self, hdf5_path: str) -> dict[str, Any]:
+        """Return a dataset's HDF5 attrs as a plain dict. Metadata only —
+        **never decompresses** the array. Returns ``{}`` when the path is
+        absent or names a group rather than a dataset.
+
+        Used to read writer-stamped scalars on a derived array (e.g. the
+        wavelet ``filter_level`` on ``/phasor/<ch>/g_filtered``) without
+        decoding the array itself.
+        """
+        f = self._open_read()
+        try:
+            if hdf5_path in f and isinstance(f[hdf5_path], h5py.Dataset):
+                return dict(f[hdf5_path].attrs)
+            return {}
+        finally:
+            self._close_if_not_session(f)
+
     def array_shape(self, hdf5_path: str) -> tuple[int, ...]:
         """Return a dataset's on-disk shape. Reads HDF5 metadata only — **no
         array data is decompressed**. Use this instead of

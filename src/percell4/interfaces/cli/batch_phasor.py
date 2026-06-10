@@ -48,6 +48,7 @@ from percell4.application.use_cases.batch_compute_phasor import (
     batch_compute_phasor,
     batch_remove_phasor,
 )
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         "--filter-level",
         type=int,
         default=9,
-        help="Wavelet filter level (1..9, default 9).",
+        help=f"Wavelet filter level (1..{MAX_FILTER_LEVEL}, default 9).",
     )
     parser.add_argument(
         "--overwrite",
@@ -188,11 +189,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.remove and args.overwrite:
         parser.error("--remove and --overwrite are mutually exclusive")
 
-    if not args.remove and not (1 <= args.filter_level <= 9):
+    if not args.remove and not (1 <= args.filter_level <= MAX_FILTER_LEVEL):
         # --filter-level is irrelevant for --remove, so only validate it
         # for the compute path.
         parser.error(
-            f"--filter-level must be in [1, 9], got {args.filter_level}"
+            f"--filter-level must be in [1, {MAX_FILTER_LEVEL}], "
+            f"got {args.filter_level}"
         )
 
     paths = _resolve_paths(args.paths)

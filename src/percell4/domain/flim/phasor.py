@@ -563,10 +563,12 @@ def gmm_fit_phasor(
     and the perf-tuned upper bound (``n_max=4``).
 
     Intensity weighting uses ``np.random.default_rng(seed).choice`` with
-    ``p = intensity / intensity.sum()`` instead of the reference
-    scripts' ``np.repeat`` — same proportional weighting, bounded
-    memory. Subsamples to at most ``max_pixels``. When intensity sums
-    to zero (constant or all-zero), falls back to uniform sampling.
+    ``p = intensity / intensity.sum()`` and ``replace=True`` — a
+    with-replacement bootstrap from the intensity-weighted distribution
+    that reproduces the reference scripts' ``np.repeat`` weighting in
+    expectation, without materializing one sample per photon. Subsamples
+    to at most ``max_pixels`` draws. When intensity sums to zero
+    (constant or all-zero), falls back to uniform sampling.
 
     sklearn is lazy-imported inside this function (matches
     ``domain/measure/grouper.py``).
@@ -596,9 +598,17 @@ def gmm_fit_phasor(
 
     if intensity.sum() > 0:
         p = intensity / intensity.sum()
-        idx = rng.choice(n_valid, size=sample_size, replace=False, p=p)
+        # With-replacement bootstrap so intensity actually weights the fit:
+        # drawing sample_size points from the intensity-weighted
+        # distribution reproduces the reference np.repeat weighting in
+        # expectation. replace=False would draw *distinct* pixels and —
+        # whenever sample_size approaches n_valid — collapse to an
+        # essentially unweighted sample, shifting and inflating the GMM
+        # clusters (the bright condensed-phase pixels stop dominating).
+        idx = rng.choice(n_valid, size=sample_size, replace=True, p=p)
     else:
-        # Constant / zero intensity → uniform sampling.
+        # Constant / zero intensity → uniform sampling (no weights to
+        # honor, so distinct pixels without replacement are fine).
         idx = rng.choice(n_valid, size=sample_size, replace=False)
 
     samples = np.column_stack([g[idx], s[idx]])

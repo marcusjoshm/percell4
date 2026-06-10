@@ -1,9 +1,18 @@
 """DTCWT-based wavelet filtering for FLIM phasor data.
 
-Vectorized port of flimfret's wavelet_filter.py logic. Uses inter-scale
-Wiener-like shrinkage with multi-scale coefficient interaction.
-Vectorized with numpy/scipy for ~100x speedup over the original
-nested Python loops.
+Faithful match to the reference ``ComplexWaveletFilter.py`` (LeeLabBCM):
+Anscombe → DTCWT (``biort='Legall'``, ``qshift='qshift_a'``) → inter-scale
+Wiener-like shrinkage → inverse DTCWT → inverse Anscombe, followed by the
+reference's phasor recovery (divide by filtered intensity, ``nan_to_num``,
+threshold by *unfiltered* intensity, clip to ``[-0.1, 1.1]``). The math is
+vectorized with numpy/scipy for ~100x speedup over the reference's nested
+Python loops, but produces output identical to the reference to float
+precision (verified against ``dataset_CWFlevels=9.npz``: G ~1e-8, S ~1e-5).
+
+Three details are load-bearing for that identity and must not drift from
+the reference: the Anscombe clamp order (``2√(max(data,0)+3/8)``), the
+*unclamped* inverse Anscombe (clamping is deferred to ``nan_to_num`` +
+clip in :func:`denoise_phasor`), and the ``Legall`` biorthogonal basis.
 
 Requires the optional ``dtcwt`` package: ``pip install dtcwt>=0.14.0``
 """
@@ -14,26 +23,50 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import uniform_filter
 
+# Maximum wavelet decomposition depth offered to users. The GUI spinbox and
+# the batch CLIs (percell4-batch-phasor / batch_compute_phasor) share this one
+# ceiling. It is NOT a DTCWT hard limit — dtcwt pads internally and accepts far
+# more — but a generous, sane cap. Real microscopy images saturate their
+# meaningful scales (~log2 of the image dimension) well below this, while it
+# leaves ample headroom above the common default of 9. Verified crash-free and
+# finite up to 35+ on images down to 64x64; raise further if a workflow needs it.
+MAX_FILTER_LEVEL = 30
+
 # ── Transforms ─────────────────────────────────────────────────
 
 
 def anscombe_transform(data):
-    """Anscombe transform to stabilize Poisson noise variance."""
-    return 2 * np.sqrt(np.maximum(data + (3 / 8), 0))
+    """Anscombe transform to stabilize Poisson noise variance.
+
+    Clamps ``data`` to non-negative *before* adding 3/8, matching
+    ``ComplexWaveletFilter.anscombe_transform`` exactly. (Adding 3/8 first
+    and clamping after differs only for ``data < -3/8`` — negative
+    Fourier coordinates ``G*I`` at noisy pixels — but that difference is
+    enough to perturb the filtered phasor by ~0.02, so the order matters.)
+    """
+    return 2 * np.sqrt(np.maximum(data, 0) + (3 / 8))
 
 
 def reverse_anscombe_transform(y):
-    """Inverse Anscombe transform (sixth-order rational approximation)."""
+    """Inverse Anscombe transform (sixth-order rational approximation).
+
+    Faithful to ``ComplexWaveletFilter.reverse_anscombe_transform``: no
+    clamping of ``y`` and no flooring of the result. Small or non-positive
+    reconstructed values therefore yield inf/NaN here, exactly as in the
+    reference; :func:`denoise_phasor` sweeps them up with ``nan_to_num`` +
+    clip during phasor recovery (mirroring the reference's
+    ``process_files``). ``errstate`` only silences the divide/invalid
+    warnings — it does not alter the produced values.
+    """
     y = np.asarray(y, dtype=np.float64)
-    y = np.maximum(y, 1e-6)
-    inverse = (
-        (y**2 / 4)
-        + (np.sqrt(3 / 2) * (1 / y) / 4)
-        - (11 / (8 * y**2))
-        + (np.sqrt(5 / 2) * (1 / y**3) / 8)
-        - (1 / (8 * y**4))
-    )
-    return np.maximum(inverse, 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (
+            (y**2 / 4)
+            + (np.sqrt(3 / 2) * (1 / y) / 4)
+            - (11 / (8 * y**2))
+            + (np.sqrt(5 / 2) * (1 / y**3) / 8)
+            - (1 / (8 * y**4))
+        )
 
 
 # ── Noise estimation (vectorized) ─────────────────────────────
@@ -173,9 +206,13 @@ def _next_pow2(n: int) -> int:
 def _filter_channel(data: NDArray, n_levels: int) -> NDArray:
     """Apply DTCWT denoising to a single 2D channel.
 
-    Uses flimfret's algorithm with vectorized numpy operations:
-    Anscombe → DTCWT → inter-scale Wiener shrinkage → inverse DTCWT
-    → inverse Anscombe.
+    Mirrors ``ComplexWaveletFilter.process_files``' per-channel filtering
+    with vectorized numpy operations:
+    Anscombe → DTCWT (``biort='Legall'``) → inter-scale Wiener shrinkage →
+    inverse DTCWT → inverse Anscombe. The basis matters: with the
+    reference Anscombe transforms in place, ``near_sym_a`` leaves a ~1e-3
+    residual versus the reference output while ``Legall`` matches it to
+    float precision.
     """
     import dtcwt
 
@@ -188,8 +225,8 @@ def _filter_channel(data: NDArray, n_levels: int) -> NDArray:
     # Anscombe transform
     transformed = anscombe_transform(padded)
 
-    # Forward DTCWT
-    xfm = dtcwt.Transform2d(biort="near_sym_a", qshift="qshift_a")
+    # Forward DTCWT — Legall/qshift_a to match ComplexWaveletFilter.py
+    xfm = dtcwt.Transform2d(biort="Legall", qshift="qshift_a")
     coeffs = xfm.forward(transformed, nlevels=n_levels)
 
     # Noise estimation
@@ -222,8 +259,9 @@ def denoise_phasor(
 ) -> dict[str, NDArray]:
     """Apply DTCWT-based wavelet filtering to FLIM phasor data.
 
-    Uses flimfret's inter-scale Wiener shrinkage algorithm, vectorized
-    with numpy for fast execution on large stitched datasets.
+    Uses the reference ComplexWaveletFilter's inter-scale Wiener
+    shrinkage algorithm and phasor recovery, vectorized with numpy for
+    fast execution on large stitched datasets.
 
     Parameters
     ----------
@@ -264,15 +302,20 @@ def denoise_phasor(
     print("  Filtering intensity...")
     intensity_filtered = _filter_channel(intensity, filter_level)
 
-    # Step 6: Recover filtered phasor
-    int_safe = np.where(intensity_filtered > 0, intensity_filtered, 1.0)
-    g_filtered = f_real_filtered / int_safe
-    s_filtered = f_imag_filtered / int_safe
-
-    # Mark zero-intensity pixels
-    zero_mask = intensity_filtered <= 0
-    g_filtered[zero_mask] = 0.0
-    s_filtered[zero_mask] = 0.0
+    # Step 6: Recover filtered phasor — faithful to
+    # ComplexWaveletFilter.process_files. Raw-divide by the *filtered*
+    # intensity (inf/NaN from a non-positive filtered intensity is swept
+    # up by nan_to_num below, exactly as the reference does), then
+    # threshold by the *unfiltered* intensity and clip to the phasor
+    # display range [-0.1, 1.1].
+    with np.errstate(divide="ignore", invalid="ignore"):
+        g_filtered = f_real_filtered / intensity_filtered
+        s_filtered = f_imag_filtered / intensity_filtered
+    g_filtered = np.nan_to_num(g_filtered)
+    s_filtered = np.nan_to_num(s_filtered)
+    thr = intensity > 0
+    g_filtered = np.clip(g_filtered * thr, -0.1, 1.1)
+    s_filtered = np.clip(s_filtered * thr, -0.1, 1.1)
 
     # Lifetime calculation if omega provided
     t_filtered = None

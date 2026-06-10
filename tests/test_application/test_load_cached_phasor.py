@@ -27,15 +27,21 @@ class FakeRepo:
 
     def __init__(self):
         self.arrays: dict[str, np.ndarray] = {}
+        self.attrs: dict[str, dict] = {}
         self.disk_metadata: dict = {}
 
     def write_array(self, handle, path, data, attrs=None):
         self.arrays[path] = data
+        if attrs:
+            self.attrs[path] = dict(attrs)
 
     def read_array(self, handle, path, view_bin=1):
         if path not in self.arrays:
             raise KeyError(f"Array not found: {path}")
         return self.arrays[path]
+
+    def read_array_attrs(self, handle, path):
+        return dict(self.attrs.get(path, {}))
 
     def read_metadata(self, handle):
         return dict(self.disk_metadata)
@@ -65,6 +71,7 @@ def _seed_full_cache(repo: FakeRepo, channel: str = "ch0", shape=(8, 8)):
     repo.arrays[f"phasor/{channel}/s"] = s
     repo.arrays[f"phasor/{channel}/g_filtered"] = gf
     repo.arrays[f"phasor/{channel}/s_filtered"] = sf
+    repo.attrs[f"phasor/{channel}/g_filtered"] = {"filter_level": 9}
     repo.arrays[f"decay/{channel}"] = decay
     return g, s, gf, sf, decay
 
@@ -118,6 +125,58 @@ def test_no_decay_returns_none_intensity(session, repo):
     assert result.s_map is not None
     assert result.intensity is None
     assert result.g_filtered is None
+
+
+# ── Cached filter level (wavelet recompute signal) ────────────
+
+
+def test_cached_filter_level_surfaced(session, repo):
+    """The DTCWT level stamped on g_filtered is read back so the panel can
+    detect a level change and recompute."""
+    _seed_full_cache(repo)  # stamps filter_level=9
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level == 9
+
+
+def test_cached_filter_level_none_without_attr(session, repo):
+    """Filtered cache present but no filter_level attr → None (so the caller
+    treats the level as unknown and recomputes)."""
+    _seed_full_cache(repo)
+    repo.attrs.pop("phasor/ch0/g_filtered", None)
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level is None
+
+
+def test_cached_filter_level_none_when_no_filtered_cache(session, repo):
+    """Raw-only cache (no wavelet) → cached_filter_level is None."""
+    rng = np.random.default_rng(0)
+    repo.arrays["phasor/ch0/g"] = rng.uniform(size=(4, 4)).astype(np.float32)
+    repo.arrays["phasor/ch0/s"] = rng.uniform(size=(4, 4)).astype(np.float32)
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level is None
+
+
+def test_cached_filter_level_none_when_repo_lacks_attr_reader(session):
+    """A repo without read_array_attrs (older fake) → None, no crash."""
+
+    class NoAttrRepo:
+        def __init__(self):
+            self.arrays: dict[str, np.ndarray] = {}
+
+        def read_array(self, handle, path, view_bin=1):
+            if path not in self.arrays:
+                raise KeyError(path)
+            return self.arrays[path]
+
+    repo = NoAttrRepo()
+    z = np.zeros((4, 4), dtype=np.float32)
+    repo.arrays["phasor/ch0/g"] = z
+    repo.arrays["phasor/ch0/s"] = z
+    repo.arrays["phasor/ch0/g_filtered"] = z
+    repo.arrays["phasor/ch0/s_filtered"] = z
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level is None
+    assert result.g_filtered is not None  # cache itself still loads
 
 
 # ── Error paths ───────────────────────────────────────────────

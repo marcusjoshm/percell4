@@ -25,6 +25,7 @@ from qtpy.QtWidgets import (
 
 from percell4.application.session import Event
 from percell4.config import viewer_presets as vp
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.gui import theme
 from percell4.model import CellDataModel
 
@@ -114,7 +115,7 @@ class FlimPanel(QWidget):
         level_row = QHBoxLayout()
         level_row.addWidget(QLabel("Filter Level:"))
         self._wavelet_level = QSpinBox()
-        self._wavelet_level.setRange(1, 15)
+        self._wavelet_level.setRange(1, MAX_FILTER_LEVEL)
         self._wavelet_level.setValue(9)
         level_row.addWidget(self._wavelet_level)
         wavelet_layout.addLayout(level_row)
@@ -426,8 +427,15 @@ class FlimPanel(QWidget):
             self._show_status("Select a channel in the viewer first")
             return
 
+        filter_level = self._wavelet_level.value()
+
         # Cache-check unless Shift forces recompute. We check g_filtered
-        # specifically — wavelet's cache distinct from raw phasor cache.
+        # specifically — wavelet's cache is distinct from the raw phasor
+        # cache. The cached wavelet is reused ONLY when it was computed at
+        # the requested filter level; a different level (or an unknown /
+        # absent cached level) falls through and recomputes, overwriting the
+        # stale result. Without this gate, changing the Filter Level spinbox
+        # would silently no-op against the cache.
         if not self._shift_held():
             try:
                 from percell4.application.use_cases.load_cached_phasor import (
@@ -449,7 +457,11 @@ class FlimPanel(QWidget):
                 self._show_status(str(e))
                 return
             else:
-                if cached.g_filtered is not None and cached.s_filtered is not None:
+                if (
+                    cached.g_filtered is not None
+                    and cached.s_filtered is not None
+                    and cached.cached_filter_level == filter_level
+                ):
                     seg_labels = self._get_active_seg_labels()
                     phasor_win = self._get_phasor_window()
                     if phasor_win is not None:
@@ -460,12 +472,13 @@ class FlimPanel(QWidget):
                             labels=seg_labels,
                         )
                     self._show_status(
-                        f"Loaded cached wavelet (channel: {active_channel})"
+                        f"Loaded cached wavelet (level {filter_level}, "
+                        f"channel: {active_channel})"
                     )
                     return
-                # Raw cache exists but no wavelet — fall through to compute.
+                # No filtered cache, or it was computed at a different level
+                # — fall through to (re)compute at filter_level and overwrite.
 
-        filter_level = self._wavelet_level.value()
         recompute_prefix = (
             "Recomputing wavelet (Shift)" if self._shift_held()
             else f"Applying wavelet filter (level {filter_level}) to {active_channel}"

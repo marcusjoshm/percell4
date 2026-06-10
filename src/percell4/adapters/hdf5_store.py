@@ -249,6 +249,12 @@ class Hdf5DatasetRepository:
         """True if ``path`` is a dataset. Metadata only — no decompression."""
         return self._store(handle).array_exists(path)
 
+    def read_array_attrs(self, handle: DatasetHandle, path: str) -> dict[str, Any]:
+        """Read a dataset's HDF5 attrs (e.g. the wavelet ``filter_level`` on
+        ``/phasor/<ch>/g_filtered``). Metadata only — no decompression.
+        Returns ``{}`` when ``path`` is absent or names a group."""
+        return self._store(handle).read_array_attrs(path)
+
     def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
         """Read /metadata attrs fresh from disk (not the handle's snapshot)."""
         return self._store(handle).metadata

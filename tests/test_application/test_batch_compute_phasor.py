@@ -22,6 +22,7 @@ from percell4.application.use_cases.batch_compute_phasor import (
     BatchPhasorReport,
     batch_compute_phasor,
 )
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -385,12 +386,22 @@ def test_apply_wavelet_receives_configured_filter_level(
 
 
 def test_filter_level_out_of_range_raises(tmp_path: Path) -> None:
-    """filter_level outside [1, 9] is rejected upfront."""
+    """filter_level outside [1, MAX_FILTER_LEVEL] is rejected upfront."""
     h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
     with pytest.raises(ValueError, match=r"filter_level"):
         batch_compute_phasor([h5], filter_level=0)
     with pytest.raises(ValueError, match=r"filter_level"):
-        batch_compute_phasor([h5], filter_level=10)
+        batch_compute_phasor([h5], filter_level=MAX_FILTER_LEVEL + 1)
+
+
+def test_filter_level_above_legacy_cap_is_accepted(tmp_path: Path) -> None:
+    """A level above the old 9/15 caps (but within MAX_FILTER_LEVEL) passes
+    validation and returns a report instead of raising."""
+    h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
+    # 20 was rejected under the old [1, 9] cap; it must be accepted now.
+    report = batch_compute_phasor([h5], filter_level=20)
+    assert isinstance(report, BatchPhasorReport)
+    assert MAX_FILTER_LEVEL >= 20
 
 
 def test_empty_input_list_returns_empty_report() -> None:

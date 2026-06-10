@@ -17,6 +17,7 @@ import h5py
 import numpy as np
 import pytest
 
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.interfaces.cli import batch_phasor as cli
 
 
@@ -229,12 +230,13 @@ def test_main_overwrite_flag_threads_through(
 def test_main_filter_level_out_of_range_errors(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """--filter-level 0 or 10 is rejected via argparse error path."""
+    """--filter-level below 1 or above MAX_FILTER_LEVEL is rejected via the
+    argparse error path."""
     h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
     with pytest.raises(SystemExit):
         cli.main([str(h5), "--filter-level", "0"])
     with pytest.raises(SystemExit):
-        cli.main([str(h5), "--filter-level", "10"])
+        cli.main([str(h5), "--filter-level", str(MAX_FILTER_LEVEL + 1)])
 
 
 def test_main_filter_level_threads_through_to_wavelet(

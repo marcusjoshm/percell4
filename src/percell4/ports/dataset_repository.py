@@ -217,6 +217,18 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def read_array_attrs(
+        self, handle: DatasetHandle, path: str
+    ) -> dict[str, Any]:
+        """Read a dataset's HDF5 attrs without decompressing the array.
+
+        Returns ``{}`` when ``path`` is absent or names a group. Used to
+        read writer-stamped scalars such as the wavelet ``filter_level``
+        on ``/phasor/<ch>/g_filtered`` (so a changed level can trigger a
+        recompute instead of serving a stale cache).
+        """
+        ...
+
     def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
         """Read /metadata attrs FRESH from disk.
 
