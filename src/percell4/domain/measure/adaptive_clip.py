@@ -21,20 +21,29 @@ the workflows layer at runtime.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from percell4.domain.measure.puncta_pipeline import detect_two_pass
+from percell4.domain.measure.puncta_pipeline import (
+    DEFAULT_SCALE_RANGE,
+    compute_seeds,
+    detect_two_pass,
+)
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
+from percell4.domain.measure.window_finders import WINDOW_FINDERS
 
 if TYPE_CHECKING:  # type-only; no runtime import of the workflows layer
     from percell4.workflows.models import PunctaDetectorSettings
 
-# Auto-window calibration. window ~= FACTOR * mean granule diameter, where the
-# mean equivalent diameter (2*sqrt(area/pi)) is taken from the Otsu first-pass
-# mask. FACTOR is the single tunable constant — calibrate so small (As+Noco)
-# granules land near window 15 and matured (WT 90min-wash) granules near 50.
+# Clamp range and Otsu noise floor for the auto-window estimate. The
+# ``otsu-mean`` window-finder (``window ~= FACTOR * mean granule diameter`` over
+# the Otsu first-pass mask) is the *legacy baseline* — it under-estimates badly
+# on black-background images (whole-frame Otsu over-segments, the mean is
+# speck-dominated). The window-finder bake-off supersedes it; ``estimate_adaptive_window``
+# is retained as that baseline. ``AUTO_WINDOW_MAX`` may need raising for matured
+# granules (decided from the bake-off's oracle curve).
 AUTO_WINDOW_FACTOR = 2.0
 AUTO_WINDOW_MIN = 11
 AUTO_WINDOW_MAX = 151
@@ -64,6 +73,67 @@ def detect_adaptive_whole_frame(
     smoothed = apply_gaussian_smoothing(img, gaussian_sigma)
     group = np.ones(smoothed.shape, dtype=bool)
     return detect_two_pass(smoothed, group, settings)
+
+
+def _with_window(settings: PunctaDetectorSettings, window_px: int) -> PunctaDetectorSettings:
+    """Copy of ``settings`` with ``detector_params['window_px']`` set to ``window_px``.
+
+    Uses :func:`dataclasses.replace` so this pure-domain module never imports
+    :class:`PunctaDetectorSettings` at runtime (it is duck-typed); the dataclass
+    ``__post_init__`` re-normalizes ``detector_params`` to its canonical tuple.
+    """
+    params = dict(settings.detector_params)
+    params["window_px"] = int(window_px)
+    return dataclasses.replace(settings, detector_params=params)
+
+
+def auto_window(
+    image: np.ndarray,
+    gaussian_sigma: float | None,
+    settings: PunctaDetectorSettings,
+    method: str,
+    *,
+    cp_mask: np.ndarray | None = None,
+    pixel_size_um: float | None = None,
+    lo: int = AUTO_WINDOW_MIN,
+    hi: int = AUTO_WINDOW_MAX,
+    params: dict | None = None,
+) -> int:
+    """Estimate the adaptive-clipping window via the named window-finder.
+
+    Smooths ``image`` (``gaussian_sigma``), runs ``WINDOW_FINDERS[method]`` on
+    the smoothed image, then applies the odd/clamped contract — this is the
+    **only** place the result is forced odd and clamped to ``[lo, hi]`` (the
+    ``round -> clamp -> make_odd`` order matches the legacy
+    :func:`estimate_adaptive_window`). Outcome-driven finders receive an injected
+    ``detect_at_window(w) -> mask`` closure that runs the production
+    :func:`detect_two_pass` at a candidate window, reusing a cached, window-
+    independent pass-1 ``seeds`` and the round's fixed ``k`` / background
+    estimator from ``settings``. The closure is built lazily, so size/scale/
+    frequency finders that never call it pay no pass-1 cost.
+    """
+    smoothed = apply_gaussian_smoothing(np.asarray(image, dtype=np.float32), gaussian_sigma)
+    group = np.ones(smoothed.shape, dtype=bool)
+    scale_range = settings.spot_scale_prior or DEFAULT_SCALE_RANGE
+
+    seeds_cache: dict[str, object] = {}
+
+    def detect_at_window(window_px: int) -> np.ndarray:
+        if "seeds" not in seeds_cache:
+            seeds_cache["seeds"] = compute_seeds(smoothed, group, settings, scale_range)
+        return detect_two_pass(
+            smoothed, group, _with_window(settings, window_px), seeds=seeds_cache["seeds"]
+        )
+
+    raw = WINDOW_FINDERS[method](
+        smoothed,
+        dict(params or {}),
+        cp_mask=cp_mask,
+        pixel_size_um=pixel_size_um,
+        detect_at_window=detect_at_window,
+    )
+    window = max(int(lo), min(int(hi), int(round(float(raw)))))
+    return _make_odd(window)
 
 
 def otsu_first_pass(smoothed: np.ndarray) -> np.ndarray:

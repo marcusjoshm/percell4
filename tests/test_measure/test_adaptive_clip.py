@@ -9,11 +9,13 @@ from skimage.draw import disk
 from percell4.domain.measure.adaptive_clip import (
     AUTO_WINDOW_MAX,
     AUTO_WINDOW_MIN,
+    auto_window,
     detect_adaptive_whole_frame,
     estimate_adaptive_window,
     otsu_first_pass,
     resolve_min_area_px,
 )
+from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 from percell4.workflows.models import PunctaDetectorSettings
 
 
@@ -116,6 +118,44 @@ def test_estimate_window_clamped_to_max():
     win = estimate_adaptive_window(_disk_mask([(300, 300)], radius=160, shape=(640, 640)))
     assert win == AUTO_WINDOW_MAX
     assert win % 2 == 1
+
+
+# ── auto_window orchestrator (registry dispatch) ─────────────────────────
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_auto_window_otsu_mean_matches_legacy_estimator(seed):
+    """The 'otsu-mean' finder via auto_window reproduces the legacy estimator.
+
+    Characterization parity (registered-analysis Rule 2): the bake-off baseline
+    must be byte-identical to today's estimate_adaptive_window(otsu_first_pass)
+    so the bake-off measures a faithful baseline, not a re-implementation drift.
+    """
+    img = _blobs_image([(50, 50), (50, 150), (150, 100)], radius=7, seed=seed)
+    gs = 1.0
+    smoothed = apply_gaussian_smoothing(img.astype(np.float32), gs)
+    legacy = estimate_adaptive_window(otsu_first_pass(smoothed))
+    new = auto_window(img, gs, _adaptive_settings(), method="otsu-mean")
+    assert new == legacy
+
+
+def test_auto_window_is_odd_and_in_range():
+    img = _blobs_image([(60, 60), (60, 180), (180, 120)], radius=8)
+    win = auto_window(img, 1.0, _adaptive_settings(), method="otsu-mean")
+    assert win % 2 == 1
+    assert AUTO_WINDOW_MIN <= win <= AUTO_WINDOW_MAX
+
+
+def test_auto_window_constant_image_returns_floor():
+    img = np.full((64, 64), 12.0, dtype=np.float32)
+    assert auto_window(img, 1.0, _adaptive_settings(), method="otsu-mean") == (AUTO_WINDOW_MIN | 1)
+
+
+def test_auto_window_respects_clamp_args():
+    img = _blobs_image([(50, 50), (50, 150)], radius=8)
+    # A tight hi clamps the result; still odd.
+    win = auto_window(img, 1.0, _adaptive_settings(), method="otsu-mean", lo=11, hi=21)
+    assert win <= 21 and win % 2 == 1
 
 
 # ── resolve_min_area_px ──────────────────────────────────────────────────

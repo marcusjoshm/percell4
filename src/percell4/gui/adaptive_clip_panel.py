@@ -26,25 +26,23 @@ logger = logging.getLogger(__name__)
 
 
 def run_adaptive_detection(image, gaussian_sigma, settings, auto_window):
-    """Worker body: optionally Otsu-estimate the window, then detect.
+    """Worker body: optionally estimate the window via the finder registry, then detect.
 
     Returns ``(mask uint8, window_used int)``. When ``auto_window`` is True the
-    window is estimated from an Otsu first-pass (mean granule size) and the
-    settings are rebuilt with it; otherwise the settings' window is used as-is.
-    Pure (no Qt) so it is unit-testable and worker-safe.
+    window is estimated by ``adaptive_clip.auto_window`` (the ``otsu-mean``
+    baseline finder for now; the bake-off winner becomes the default later) and
+    the settings are rebuilt with it; otherwise the settings' window is used
+    as-is. Pure (no Qt) so it is unit-testable and worker-safe.
     """
     from percell4.domain.measure.adaptive_clip import (
+        auto_window as compute_auto_window,
         detect_adaptive_whole_frame,
-        estimate_adaptive_window,
-        otsu_first_pass,
     )
-    from percell4.domain.measure.thresholding import apply_gaussian_smoothing
     from percell4.workflows.models import PunctaDetectorSettings
 
     window_used = int(dict(settings.detector_params).get("window_px", 15))
     if auto_window:
-        smoothed = apply_gaussian_smoothing(np.asarray(image, dtype=np.float32), gaussian_sigma)
-        window_used = estimate_adaptive_window(otsu_first_pass(smoothed))
+        window_used = compute_auto_window(image, gaussian_sigma, settings, method="otsu-mean")
         params = dict(settings.detector_params)
         params["window_px"] = window_used
         settings = PunctaDetectorSettings(
