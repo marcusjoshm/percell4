@@ -14,7 +14,6 @@ from percell4.workflows.window_k_sweep import (
     DEFAULT_WINDOWS,
     FixedSettings,
     SweepReport,
-    SweepRow,
     base_settings,
     mask_name,
     parse_mask_name,
