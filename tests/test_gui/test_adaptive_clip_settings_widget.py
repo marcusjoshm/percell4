@@ -23,7 +23,27 @@ def test_default_config(qtbot):
         min_size_value=3.0,
         min_size_unit="px",
         auto_window=False,
+        noise_estimator="mad",
     )
+
+
+def test_noise_estimator_default_is_mad(qtbot):
+    """The Noise (σ) estimate dropdown defaults to MAD (matches the reference)."""
+    w = _widget(qtbot)
+    assert w._noise.currentText() == "MAD (robust)"
+    assert w.current_config().noise_estimator == "mad"
+
+
+def test_noise_estimator_mapping(qtbot):
+    """Each dropdown label maps to its BACKGROUND_ESTIMATORS registry name."""
+    w = _widget(qtbot)
+    for label, code in [
+        ("MAD (robust)", "mad"),
+        ("stddev", "stddev"),
+        ("gaussian-peak", "gaussian-peak"),
+    ]:
+        w._noise.setCurrentText(label)
+        assert w.current_config().noise_estimator == code
 
 
 def test_programmatic_changes_reflected(qtbot):

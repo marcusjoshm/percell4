@@ -27,6 +27,14 @@ from qtpy.QtWidgets import (
 _UNIT_LABELS = ("px²", "µm²")
 _UNIT_CODES = {"px²": "px", "µm²": "um2"}
 
+# Noise (sigma) estimate dropdown labels -> BACKGROUND_ESTIMATORS registry names.
+# MAD is the default (matches the ImageJ reference macro and is robust to the
+# black-background histogram spike that collapses the gaussian-peak fit on a
+# whole frame). gaussian-peak stays available for parity with the per-cell
+# pipeline default.
+_NOISE_LABELS = ("MAD (robust)", "stddev", "gaussian-peak")
+_NOISE_CODES = {"MAD (robust)": "mad", "stddev": "stddev", "gaussian-peak": "gaussian-peak"}
+
 
 @dataclass(frozen=True)
 class AdaptiveClipConfig:
@@ -44,6 +52,7 @@ class AdaptiveClipConfig:
     min_size_value: float
     min_size_unit: str
     auto_window: bool
+    noise_estimator: str = "mad"
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -105,6 +114,19 @@ class AdaptiveClipSettingsWidget(QWidget):
         sig_row.addWidget(self._sigma)
         layout.addLayout(sig_row)
 
+        # ── Noise (sigma) estimate ──
+        noise_row = QHBoxLayout()
+        noise_row.addWidget(QLabel("Noise (σ) estimate:"))
+        self._noise = QComboBox()
+        self._noise.addItems(list(_NOISE_LABELS))
+        self._noise.setToolTip(
+            "How the k·σ contrast margin is scaled. MAD (robust) matches the "
+            "ImageJ reference and resists the black-background histogram spike "
+            "that collapses gaussian-peak on a whole frame."
+        )
+        noise_row.addWidget(self._noise)
+        layout.addLayout(noise_row)
+
         # ── Particle-size filter (value + unit) ──
         size_row = QHBoxLayout()
         size_row.addWidget(QLabel("Min particle size:"))
@@ -126,6 +148,7 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._sigma.valueChanged.connect(self.config_changed)
         self._min_size.valueChanged.connect(self.config_changed)
         self._unit.currentIndexChanged.connect(self.config_changed)
+        self._noise.currentIndexChanged.connect(self.config_changed)
         self._auto.toggled.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
@@ -144,6 +167,7 @@ class AdaptiveClipSettingsWidget(QWidget):
             min_size_value=float(self._min_size.value()),
             min_size_unit=_UNIT_CODES[self._unit.currentText()],
             auto_window=self._auto.isChecked(),
+            noise_estimator=_NOISE_CODES[self._noise.currentText()],
         )
 
     def set_window_value(self, window_px: int) -> None:
@@ -157,7 +181,7 @@ class AdaptiveClipSettingsWidget(QWidget):
 
     def set_enabled(self, enabled: bool) -> None:
         """Lock/unlock all widgets during a run (preserves the auto/window gate)."""
-        for widget in (self._auto, self._k, self._sigma, self._min_size, self._unit):
+        for widget in (self._auto, self._k, self._sigma, self._min_size, self._unit, self._noise):
             widget.setEnabled(enabled)
         # The window field also respects the auto checkbox when re-enabling.
         self._window.setEnabled(enabled and not self._auto.isChecked())

@@ -19,6 +19,11 @@
 // Equivalence to PerCell4: PerCell4 subtracts a global background first, but that
 // constant cancels in the comparison wherever the window sits inside the cell, so
 // it reduces to exactly the rule above — see docs/methods/headless-puncta-thresholding.md.
+// PerCell4's interactive Adaptive Clip module exposes a "Noise (sigma) estimate"
+// selector — MAD (robust) / stddev / gaussian-peak — defaulting to MAD, so the
+// default reproduces this macro. (gaussian-peak fits the background histogram mode;
+// on a whole frame a large black outside-cell region collapses that fit to a tiny
+// sigma and massively over-detects — which is why MAD is the whole-frame default.)
 //
 // Region modes:
 //   * Whole image (or current selection) — one sigma for the region; the LOCAL

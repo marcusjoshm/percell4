@@ -45,6 +45,7 @@ def test_expected_keys_present():
         "gaussian-peak",
         "percentile",
         "mad",
+        "stddev",
         "rolling-ball",
         "donut-surface",
     }
@@ -54,7 +55,7 @@ def test_expected_keys_present():
 # ── Constant background → scalar estimators zero it ───────────
 
 
-@pytest.mark.parametrize("name", ["gaussian-peak", "mad", "percentile"])
+@pytest.mark.parametrize("name", ["gaussian-peak", "mad", "stddev", "percentile"])
 def test_constant_bg_residual_near_zero(name):
     """Scalar estimators' residual ~ 0 within the group on constant background."""
     img = _constant_bg(value=50.0, noise=3.0)
@@ -65,14 +66,31 @@ def test_constant_bg_residual_near_zero(name):
     assert abs(float(np.nanmean(est.residual[gmask]))) < 1.0
 
 
-@pytest.mark.parametrize("name", ["gaussian-peak", "mad"])
+@pytest.mark.parametrize("name", ["gaussian-peak", "mad", "stddev"])
 def test_constant_bg_sigma_near_noise(name):
-    """gaussian-peak / mad recover the noise scale (~3.0)."""
+    """gaussian-peak / mad / stddev recover the noise scale (~3.0)."""
     img = _constant_bg(value=50.0, noise=3.0)
     gmask = np.ones_like(img, dtype=bool)
     est = BACKGROUND_ESTIMATORS[name](img, gmask, None, {})
     assert est.sigma is not None
     assert est.sigma == pytest.approx(3.0, abs=1.5)
+
+
+def test_stddev_is_pulled_up_by_bright_tail_unlike_mad():
+    """stddev (non-robust) inflates on a bright-foci tail; MAD stays near the noise.
+
+    Documents why the two are offered as distinct options: on a frame with a
+    sparse bright tail the standard deviation rises well above the robust MAD
+    scale, so the k·σ contrast margin differs between them.
+    """
+    rng = np.random.RandomState(0)
+    img = 50.0 + rng.normal(0, 3.0, (200, 200))
+    img[:10, :10] = 5000.0  # sparse bright foci (1% area)
+    gmask = np.ones_like(img, dtype=bool)
+    sig_std = BACKGROUND_ESTIMATORS["stddev"](img, gmask, None, {}).sigma
+    sig_mad = BACKGROUND_ESTIMATORS["mad"](img, gmask, None, {}).sigma
+    assert sig_mad == pytest.approx(3.0, abs=1.0)  # robust to the tail
+    assert sig_std > 5 * sig_mad  # non-robust: the bright tail pulls std way up
 
 
 def test_percentile_sigma_is_none():
@@ -195,7 +213,7 @@ def test_donut_uses_float_not_int():
 # ── All-NaN group ─────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("name", ["gaussian-peak", "mad", "percentile", "rolling-ball"])
+@pytest.mark.parametrize("name", ["gaussian-peak", "mad", "stddev", "percentile", "rolling-ball"])
 def test_all_nan_group_is_empty_no_propagation(name):
     """All-NaN group → defined is_empty result; no NaN crash, residual finite."""
     img = np.full((40, 40), np.nan, dtype=float)

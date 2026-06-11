@@ -147,7 +147,8 @@ and an `is_empty` flag that drives the fallback ladder.
 | Name | What it does | Notes |
 |---|---|---|
 | `gaussian-peak` | Fits the background peak (`estimate_bg_threshold`) and subtracts its mode `mu`; exposes `sigma`. | Robust to a bright-foci tail. **Used in validation.** The rung-2 fallback for all methods. Reuses only `(mu, sigma)`, never the baked-in threshold (avoids double-`k`). |
-| `mad` | `bg = median`, `sigma = 1.4826·MAD`. | Robust scalar; cheap. Available. |
+| `mad` | `bg = median`, `sigma = 1.4826·MAD`. | Robust scalar; cheap. **Default of the interactive whole-frame Adaptive Clip module** (matches the ImageJ reference macro; resists the black-background histogram spike that collapses `gaussian-peak` on a whole frame). |
+| `stddev` | `bg = mean`, `sigma = std` (non-robust). | The non-robust counterpart of `mad`; mirrors the ImageJ macro's `stddev` noise option. Pulled up by a bright-foci tail. Available. |
 | `percentile` | `bg = p-th percentile` (default 50). | Available. |
 | `donut-median` / `donut-mean` | Per-seed Euclidean-distance donut rings (reusing `region_and_donut_masks`), aggregated by median / mean. | A declared **float fork** of the per-particle-donut analysis (no integer rounding, no Cap-specific zero exclusion). Available. |
 | `rolling-ball` | `skimage.restoration.rolling_ball(..., nansafe=True)` surface subtraction. | For smoothly-varying background. Available. |

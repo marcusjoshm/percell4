@@ -41,6 +41,7 @@ BG_ESTIMATOR_NAMES: tuple[str, ...] = (
     "gaussian-peak",
     "percentile",
     "mad",
+    "stddev",
     "rolling-ball",
     "donut-surface",
 )

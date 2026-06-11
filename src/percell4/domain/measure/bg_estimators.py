@@ -124,6 +124,24 @@ def _mad(image: np.ndarray, group_mask: np.ndarray, seeds, params: dict) -> Back
     return BackgroundEstimate(residual, sigma, False)
 
 
+def _stddev(image: np.ndarray, group_mask: np.ndarray, seeds, params: dict) -> BackgroundEstimate:
+    """Mean background, plain standard-deviation noise scale (non-robust).
+
+    The non-robust counterpart of :func:`_mad` — ``bg = mean``, ``sigma = std``
+    of the finite group pixels. Mirrors the ImageJ adaptive-clip macro's
+    ``stddev`` noise option (``getStatistics`` standard deviation); unlike MAD it
+    is pulled up by a bright-foci tail, so it is the less robust of the two.
+    """
+    vals = _finite_group_values(image, group_mask)
+    if vals.size == 0:
+        return BackgroundEstimate(_zero_residual_like(image), None, True)
+
+    bg = float(np.mean(vals))
+    sigma = float(np.std(vals))
+    residual = image - bg
+    return BackgroundEstimate(residual, sigma, False)
+
+
 def _percentile(
     image: np.ndarray, group_mask: np.ndarray, seeds, params: dict
 ) -> BackgroundEstimate:
@@ -276,6 +294,7 @@ BACKGROUND_ESTIMATORS: dict[str, Callable[..., BackgroundEstimate]] = {
     "gaussian-peak": _gaussian_peak,
     "percentile": _percentile,
     "mad": _mad,
+    "stddev": _stddev,
     "rolling-ball": _rolling_ball,
     "donut-surface": _donut_surface,
 }

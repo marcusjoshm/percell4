@@ -520,7 +520,7 @@ class AdaptiveClipPanel(QWidget):
         settings = PunctaDetectorSettings(
             detector_name="adaptive",
             seed_detector_name="otsu",
-            background_estimator_name="gaussian-peak",
+            background_estimator_name=config.noise_estimator,  # MAD default; user-selectable
             detector_params={"window_px": config.window_px, "k": config.k},
             min_spot_px=max(1, int(min_spot_px)),
             spot_scale_prior=(1.0, 4.0),

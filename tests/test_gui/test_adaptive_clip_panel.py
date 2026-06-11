@@ -53,7 +53,11 @@ class FakeRepo:
 
 
 def _blob_image(shape=(120, 120)) -> np.ndarray:
-    img = np.full(shape, 10.0, dtype=np.float32)
+    # Deterministic faint noise so a robust (MAD) noise scale is well-defined —
+    # the default estimator is MAD, and a perfectly flat background gives MAD=0
+    # (no scale, empty mask), which real microscopy data never does.
+    rng = np.random.RandomState(0)
+    img = (10.0 + rng.normal(0.0, 1.0, shape)).astype(np.float32)
     for c in [(30, 30), (30, 90), (90, 60)]:
         rr, cc = disk(c, 6, shape=shape)
         img[rr, cc] = 200.0
@@ -134,6 +138,23 @@ def test_manual_config_reaches_detector(qtbot, monkeypatch):
     params = dict(settings.detector_params)
     assert params["window_px"] == 31
     assert params["k"] == 2.5
+
+
+def test_default_noise_estimator_is_mad(qtbot, monkeypatch):
+    """Out of the box the panel detects with the MAD noise estimate (matches ImageJ)."""
+    panel, *_ = _build(qtbot, monkeypatch)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    assert panel._worker._args[2].background_estimator_name == "mad"
+
+
+def test_noise_estimator_selection_reaches_detector(qtbot, monkeypatch):
+    """The Noise (σ) estimate dropdown drives settings.background_estimator_name."""
+    panel, *_ = _build(qtbot, monkeypatch)
+    panel._settings._noise.setCurrentText("gaussian-peak")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    assert panel._worker._args[2].background_estimator_name == "gaussian-peak"
 
 
 def test_auto_window_estimates_and_writes_back(qtbot, monkeypatch):
