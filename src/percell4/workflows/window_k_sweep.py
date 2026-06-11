@@ -20,6 +20,7 @@ or napari. The pure detection logic lives in :mod:`percell4.domain.measure`.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -34,7 +35,6 @@ from percell4.domain.measure.puncta_pipeline import (
 )
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 from percell4.workflows.models import PunctaDetectorSettings
-from percell4.workflows.phases import _channel_index
 
 if TYPE_CHECKING:
     from percell4.store import DatasetStore
@@ -167,8 +167,8 @@ def run_sweep(
     store: DatasetStore,
     channel: str,
     segmentation: str,
-    windows,
-    ks,
+    windows: Sequence[int],
+    ks: Sequence[float],
     fixed: FixedSettings,
     *,
     prefix: str = "sweep",
@@ -184,9 +184,14 @@ def run_sweep(
     Any load/detection error is captured into ``SweepReport.failure`` (rows left
     empty) instead of raising, so a batch run isolates a bad dataset.
 
-    ``clear`` deletes prior ``<prefix>_*`` masks first (the user's own masks are
-    untouched); ``dry_run`` computes the report and the intended names without
-    writing.
+    ``clear`` deletes prior ``<prefix>_*`` masks that parse as sweep masks first
+    (a hand-curated mask sharing the prefix but not the ``wWWW_kKK`` shape is
+    left untouched); ``dry_run`` computes the report and the intended names
+    without writing.
+
+    Writes go through the store. Do **not** run against a ``.h5`` currently open
+    in a live PerCell4 session — the session caches the mask inventory, so new
+    masks only appear after the dataset is reopened.
     """
     dataset = Path(str(store.path)).stem
     windows = tuple(int(w) | 1 for w in windows)  # the detector forces odd; mirror it
@@ -202,6 +207,11 @@ def run_sweep(
 
     try:
         from skimage import measure
+
+        # Deferred (mirrors window_bakeoff / puncta_validation): importing
+        # phases at module top would eagerly pull in percell4.store, eroding the
+        # workflows package's lightweight-import contract.
+        from percell4.workflows.phases import _channel_index
 
         meta = store.metadata
         report.pixel_size_um = meta.get("pixel_size_um")
@@ -219,8 +229,11 @@ def run_sweep(
         seeds = compute_seeds(smoothed, group, base, scale_range)
 
         if clear and not dry_run:
+            # Delete only masks that both carry the prefix AND round-trip as a
+            # sweep mask, so a hand-curated mask sharing the prefix (e.g.
+            # ``sweep_final``) is never destroyed.
             for existing in list(store.list_masks()):
-                if existing.startswith(f"{prefix}_"):
+                if existing.startswith(f"{prefix}_") and parse_mask_name(existing) is not None:
                     store.delete_item(f"masks/{existing}")
 
         for w in windows:
@@ -228,16 +241,16 @@ def run_sweep(
                 settings = settings_with(fixed, w, k)
                 # Inlined (not via detect_adaptive_in_group) to reuse the single
                 # smoothing + the shared seeds across every grid point.
-                mask = detect_two_pass(smoothed, group, settings, seeds=seeds)
+                mask = np.asarray(detect_two_pass(smoothed, group, settings, seeds=seeds))
                 name = mask_name(prefix, w, k)
                 if not dry_run:
                     store.write_mask(
                         name,
-                        np.asarray(mask, dtype=np.uint8),
+                        mask.astype(np.uint8, copy=False),
                         attrs={"window_px": int(w), "k": float(k), "sweep_prefix": prefix},
                     )
-                pos = int(np.asarray(mask).sum())
-                count = int(measure.label(np.asarray(mask) > 0).max())
+                pos = int(mask.sum())
+                count = int(measure.label(mask > 0).max())
                 frac = (pos / cell_px) if cell_px > 0 else 0.0
                 report.rows.append(SweepRow(name, int(w), float(k), count, pos, frac))
 
@@ -258,7 +271,7 @@ def run_sweep(
 # ── manifest serialization ────────────────────────────────────────────────
 
 
-def report_to_dict(report: SweepReport) -> dict:
+def report_to_dict(report: SweepReport) -> dict[str, object]:
     """JSON-friendly manifest for one dataset (the self-describing sidecar)."""
     return {
         "dataset": report.dataset,

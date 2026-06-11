@@ -188,6 +188,28 @@ def test_run_sweep_idempotent_and_clear(tmp_path):
     assert sweep_masks == {mask_name("sweep", 15, 2.0)}
 
 
+def test_run_sweep_clear_spares_non_sweep_prefixed_mask(tmp_path):
+    # A hand-curated mask that shares the prefix but is NOT a wWWW_kKK sweep
+    # mask must survive --clear (it does not round-trip via parse_mask_name).
+    store = _make_store(tmp_path / "T.h5")
+    store.write_mask("sweep_final", np.ones((160, 160), dtype=np.uint8))
+    run_sweep(store, "Channel", "Cellpose", (15, 31), (2.0,), _fixed())
+    run_sweep(store, "Channel", "Cellpose", (15,), (2.0,), _fixed(), clear=True)
+    remaining = set(store.list_masks())
+    assert "sweep_final" in remaining  # curated mask preserved
+    assert {m for m in remaining if parse_mask_name(m) is not None} == {
+        mask_name("sweep", 15, 2.0)
+    }
+
+
+def test_run_sweep_forces_even_windows_odd(tmp_path):
+    store = _make_store(tmp_path / "T.h5")
+    report = run_sweep(store, "Channel", "Cellpose", (30, 50), (2.0,), _fixed())
+    assert {r.window for r in report.rows} == {31, 51}  # 30|1=31, 50|1=51
+    assert mask_name("sweep", 31, 2.0) in store.list_masks()
+    assert mask_name("sweep", 51, 2.0) in store.list_masks()
+
+
 def test_run_sweep_dry_run_writes_nothing(tmp_path):
     store = _make_store(tmp_path / "T.h5")
     report = run_sweep(

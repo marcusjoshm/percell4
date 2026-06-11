@@ -23,12 +23,19 @@ import argparse
 import json
 import logging
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from percell4.workflows.window_k_sweep import SweepReport
 
 logger = logging.getLogger(__name__)
 
 
-def _build_parser(default_windows, default_ks) -> argparse.ArgumentParser:
+def _build_parser(
+    default_windows: Sequence[int], default_ks: Sequence[float]
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="percell4-window-k-sweep",
         description=(
@@ -93,10 +100,11 @@ def _build_parser(default_windows, default_ks) -> argparse.ArgumentParser:
     return parser
 
 
-def _print_report(report) -> None:
+def _print_report(report: SweepReport) -> None:
     """Per-dataset table: the masks, knobs, and navigation stats."""
     if report.failure is not None:
-        print(f"\n=== {report.dataset}: FAILED — {report.failure} ===")
+        # Failures go to stderr so an agent piping stdout gets clean table data.
+        print(f"\n=== {report.dataset}: FAILED — {report.failure} ===", file=sys.stderr)
         return
     print(
         f"\n=== {report.dataset}  shape={report.shape}  "
@@ -115,7 +123,7 @@ def _print_report(report) -> None:
         )
 
 
-def _print_summary(reports) -> None:
+def _print_summary(reports: Sequence[SweepReport]) -> None:
     """Cross-dataset summary so the datasets compare side by side."""
     print("\n=== Cross-dataset summary ===")
     print(
@@ -136,7 +144,9 @@ def _print_summary(reports) -> None:
         )
 
 
-def _write_manifest(out_dir: Path, report, report_to_dict) -> None:
+def _write_manifest(
+    out_dir: Path, report: SweepReport, report_to_dict: Callable[[SweepReport], dict]
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{report.dataset}.sweep.json").write_text(
         json.dumps(report_to_dict(report), indent=2), encoding="utf-8"

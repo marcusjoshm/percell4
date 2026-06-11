@@ -122,4 +122,5 @@ def test_cli_unknown_noise_estimator_errors_cleanly(tmp_path, capsys):
     rc = cli.main([str(p), "--noise-estimator", "bogus", "--windows", "15", "--ks", "2.0"])
     assert rc != 0
     assert DatasetStore(p).list_masks() == []  # nothing written
-    assert "bogus" in (capsys.readouterr().err + capsys.readouterr().out)
+    captured = capsys.readouterr()  # capture once — a second call returns empty
+    assert "bogus" in (captured.err + captured.out)
