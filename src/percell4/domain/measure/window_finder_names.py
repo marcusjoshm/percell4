@@ -23,4 +23,6 @@ WINDOW_FINDER_NAMES: tuple[str, ...] = (
     "sweep-knee",
     "fixed-point",
     "autocorr",
+    "log-scale",
+    "granulometry",
 )

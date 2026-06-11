@@ -306,3 +306,51 @@ def test_autocorr_downsample_path_runs():
     img = _many_granules(8, shape=(256, 256), seed=3)
     w = WINDOW_FINDERS["autocorr"](img, {"max_dim": 96})
     assert w > 0.0
+
+
+# ── scale-space finders (log-scale + granulometry) ────────────────────────
+
+
+def test_scale_space_are_registered():
+    assert "log-scale" in WINDOW_FINDERS
+    assert "granulometry" in WINDOW_FINDERS
+
+
+def test_log_scale_positive_and_scales_with_granule_size():
+    small = WINDOW_FINDERS["log-scale"](_many_granules(4, seed=1), {})
+    large = WINDOW_FINDERS["log-scale"](_many_granules(11, seed=1), {})
+    assert small > 0.0
+    assert large > small  # LoG response peaks at a larger scale for bigger granules
+
+
+def test_log_scale_recovers_radius_order_of_magnitude():
+    # radius-8 granules -> window = c * 2R ~ 6 * 16 = 96; allow a broad band.
+    w = WINDOW_FINDERS["log-scale"](_many_granules(8, seed=4), {"c": 6.0})
+    assert 40 < w < 200
+
+
+def test_log_scale_constant_returns_zero():
+    assert WINDOW_FINDERS["log-scale"](np.full((128, 128), 7.0, dtype=np.float32), {}) == 0.0
+
+
+def test_granulometry_positive_and_scales_with_granule_size():
+    small = WINDOW_FINDERS["granulometry"](_many_granules(4, n=30, shape=(160, 160), seed=1), {"r_max": 20})
+    large = WINDOW_FINDERS["granulometry"](_many_granules(9, n=30, shape=(160, 160), seed=1), {"r_max": 20})
+    assert small > 0.0
+    assert large > small  # opening size-spectrum peak at the dominant granule radius
+
+
+def test_granulometry_constant_returns_zero():
+    assert WINDOW_FINDERS["granulometry"](np.full((128, 128), 7.0, dtype=np.float32), {"r_max": 15}) == 0.0
+
+
+def test_granulometry_all_nan_returns_zero_no_raise():
+    assert WINDOW_FINDERS["granulometry"](np.full((64, 64), np.nan, dtype=np.float32), {"r_max": 10}) == 0.0
+
+
+def test_all_seven_finders_registered_and_match_names():
+    assert set(WINDOW_FINDERS) == set(WINDOW_FINDER_NAMES)
+    assert set(WINDOW_FINDERS) == {
+        "otsu-mean", "granule-size", "sweep-knee", "fixed-point",
+        "autocorr", "log-scale", "granulometry",
+    }

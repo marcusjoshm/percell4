@@ -359,12 +359,105 @@ def _autocorr(
     return c * (2.0 * hwhm_ds) * factor  # diameter ~ 2*HWHM, back to original px
 
 
+# ── Scale-space finders (object scale without thresholding) ────────────────
+
+
+def _log_scale(
+    image: np.ndarray,
+    params: dict,
+    *,
+    cp_mask: np.ndarray | None = None,
+    pixel_size_um: float | None = None,
+    detect_at_window: Callable[[int], np.ndarray] | None = None,
+) -> float:
+    """Multiscale Laplacian-of-Gaussian: window = c * diameter at the response peak.
+
+    For each scale ``s`` the normalized LoG response ``s^2 * LoG(image, s)`` is
+    strongly negative at a bright blob and is maximized (in magnitude) when ``s``
+    matches the blob scale; a blob of radius ``R`` peaks at ``s = R / sqrt(2)``.
+    The peak scale gives the granule radius with no thresholding. ``window = c *
+    diameter``. ``params``: ``c`` (6.0), ``sigma_lo`` (1.0), ``sigma_hi`` (40.0),
+    ``n_scales`` (12), ``max_dim`` (1024).
+    """
+    from scipy.ndimage import gaussian_laplace
+
+    c = float(params.get("c", 6.0))
+    sig_lo = float(params.get("sigma_lo", 1.0))
+    sig_hi = float(params.get("sigma_hi", 40.0))
+    n = max(3, int(params.get("n_scales", 12)))
+
+    small, factor = _downsample(image, int(params.get("max_dim", 1024)))
+    finite = np.isfinite(small)
+    if not finite.any():
+        return 0.0
+    fin = small[finite]
+    if float(fin.min()) == float(fin.max()):
+        return 0.0
+    filled = np.where(finite, small, float(np.median(fin))).astype(np.float32)
+
+    sigmas = np.linspace(max(0.75, sig_lo / factor), max(1.5, sig_hi / factor), n)
+    resp = np.array(
+        [float(np.percentile(-((s * s) * gaussian_laplace(filled, s)), 99.5)) for s in sigmas]
+    )
+    if resp.max() <= 0:
+        return 0.0
+    peak_s = float(sigmas[int(np.argmax(resp))]) * factor  # back to original scale
+    radius = peak_s * np.sqrt(2.0)  # LoG peak: s = R / sqrt(2)
+    return c * (2.0 * radius)
+
+
+def _granulometry(
+    image: np.ndarray,
+    params: dict,
+    *,
+    cp_mask: np.ndarray | None = None,
+    pixel_size_um: float | None = None,
+    detect_at_window: Callable[[int], np.ndarray] | None = None,
+) -> float:
+    """Morphological granulometry: window = c * diameter at the size-spectrum peak.
+
+    Sieve the (high-passed, downsampled) image through openings with growing
+    disks; the *pattern spectrum* — the volume removed at each radius — peaks at
+    the dominant object radius. No thresholding. ``window = c * diameter``.
+    ``params``: ``c`` (6.0), ``r_max`` (30), ``max_dim`` (256).
+    """
+    from scipy.ndimage import gaussian_filter
+    from skimage.morphology import disk, opening
+
+    c = float(params.get("c", 6.0))
+    r_max = int(params.get("r_max", 30))
+
+    small, factor = _downsample(image, int(params.get("max_dim", 256)))
+    finite = np.isfinite(small)
+    if not finite.any():
+        return 0.0
+    fin = small[finite]
+    if float(fin.min()) == float(fin.max()):
+        return 0.0
+    filled = np.where(finite, small, float(np.median(fin))).astype(np.float32)
+    # High-pass so the opening sieves bright granules, not the dilute background.
+    hp = np.clip(filled - gaussian_filter(filled, max(2.0, r_max / factor), mode="reflect"), 0.0, None)
+    total = float(hp.sum())
+    if total <= 0:
+        return 0.0
+
+    radii = list(range(1, max(2, int(round(r_max / factor))) + 1))
+    removed = np.array([total - float(opening(hp, disk(r)).sum()) for r in radii])
+    spectrum = np.diff(np.concatenate([[0.0], removed]))  # volume removed at each radius
+    if spectrum.max() <= 0:
+        return 0.0
+    peak_r = radii[int(np.argmax(spectrum))] * factor  # back to original scale
+    return c * (2.0 * peak_r)
+
+
 WINDOW_FINDERS: dict[str, Callable[..., float]] = {
     "otsu-mean": _otsu_mean,
     "granule-size": _granule_size,
     "sweep-knee": _sweep_knee,
     "fixed-point": _fixed_point,
     "autocorr": _autocorr,
+    "log-scale": _log_scale,
+    "granulometry": _granulometry,
 }
 
 # Drift guard: registry keys are exactly the single-source-of-truth tuple.
