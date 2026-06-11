@@ -93,6 +93,7 @@ percell4-window-bakeoff     = "percell4.interfaces.cli.window_bakeoff:main"
 percell4-batch-threshold    = "percell4.interfaces.cli.batch_threshold:main"
 percell4-batch-measure      = "percell4.interfaces.cli.batch_measure:main"
 percell4-window-k-sweep     = "percell4.interfaces.cli.window_k_sweep:main"
+percell4-per-cell-sweep     = "percell4.interfaces.cli.per_cell_sweep:main"
 percell4-inspect            = "percell4.interfaces.cli.inspect_dataset:main"
 
 [tool.setuptools.packages.find]
