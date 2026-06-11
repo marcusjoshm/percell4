@@ -54,6 +54,23 @@ __all__ = [
 # Background-threshold estimation (Cap channel, pre-region analysis)
 # ---------------------------------------------------------------------------
 
+# The background histograms below bin from 0 to a percentile of the data with a
+# fixed bin WIDTH (5, or 1 in the HWHM fallback). That width suits low-count
+# images, but makes the bin COUNT scale with pixel magnitude: a high-intensity
+# FLIM / 32-bit image with a median of 1e8 yields arange(0, 1e8, 5) == 2e7 bins
+# (1e10 -> 2e9 bins -> OOM), and np.histogram then hangs the whole detection for
+# minutes. Cap the bin count so cost is bounded by the data, not its scale. The
+# width only ever WIDENS past this cap, so any image whose percentile is
+# <= MAX_BINS*width keeps its original binning byte-for-byte (no behavior change
+# for the low-count regime these estimators were tuned on).
+_BG_HIST_MAX_BINS = 4096
+
+
+def _bg_hist_bins(hi: float, width: float) -> np.ndarray:
+    """Bin edges from 0 to ``hi`` at ``width``, widening to cap the bin count."""
+    step = max(float(width), hi / _BG_HIST_MAX_BINS)
+    return np.arange(0, hi, step)
+
 
 def _estimate_bg_hwhm(flat: np.ndarray, k_sigma: float,
                       log: Callable[[str], None] | None = None
@@ -64,7 +81,9 @@ def _estimate_bg_hwhm(flat: np.ndarray, k_sigma: float,
     from the half-width at half-maximum (HWHM) of the background peak.
     """
     upper = max(np.percentile(flat, 75), 20)
-    hist, edges = np.histogram(flat, bins=np.arange(0, upper + 1, 1))
+    bins = _bg_hist_bins(upper + 1, width=1.0)
+    step = float(bins[1] - bins[0]) if len(bins) > 1 else 1.0
+    hist, edges = np.histogram(flat, bins=bins)
     centers = (edges[:-1] + edges[1:]) / 2
 
     mode_idx = np.argmax(hist)
@@ -75,8 +94,10 @@ def _estimate_bg_hwhm(flat: np.ndarray, k_sigma: float,
     hwhm_idx = np.argmax(right_side < half_max)
     if hwhm_idx == 0:
         hwhm_idx = len(right_side) - 1
-    # HWHM -> sigma: FWHM = 2.355*sigma, so HWHM = 1.177*sigma
-    sigma = hwhm_idx / 1.177
+    # HWHM -> sigma: FWHM = 2.355*sigma, so HWHM = 1.177*sigma. hwhm_idx counts
+    # bins, so scale by the bin width to recover value units (width is 1 in the
+    # low-count regime, identical to before; it only widens once capped).
+    sigma = (hwhm_idx * step) / 1.177
 
     mu = mode_val
     threshold = mu + k_sigma * sigma
@@ -98,9 +119,9 @@ def estimate_bg_threshold(cap_img: np.ndarray, k_sigma: float = 2.5,
     is too low-signal for reliable Gaussian fitting.
     """
     flat = cap_img[~np.isnan(cap_img)]
-    bins = np.arange(0, np.percentile(flat, 50), 5)
+    bins = _bg_hist_bins(float(np.percentile(flat, 50)), width=5.0)
     if len(bins) < 10:
-        bins = np.arange(0, np.percentile(flat, 75), 5)
+        bins = _bg_hist_bins(float(np.percentile(flat, 75)), width=5.0)
 
     if len(bins) < 3:
         return _estimate_bg_hwhm(flat, k_sigma, log)

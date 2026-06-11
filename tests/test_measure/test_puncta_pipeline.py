@@ -250,3 +250,65 @@ def test_compute_seeds_and_sigmas_on_spots():
     sigmas = seed_sigmas(seeds)
     assert len(sigmas) >= 1  # found at least one seed
     assert all(s > 0 for s in sigmas)
+
+
+# ── size filter (whole-frame perf regression) ────────────────────────────────
+
+
+def test_size_filter_keeps_and_drops_by_area():
+    """Components below ``min_spot_px`` are dropped; those at/above are kept."""
+    mask = np.zeros((20, 20), dtype=np.uint8)
+    mask[2, 2] = 1  # 1-px speck -> dropped (area 1 < 3)
+    mask[5:7, 5:7] = 1  # 4-px blob -> kept (area 4 >= 3)
+    mask[10:13, 10:13] = 1  # 9-px blob -> kept
+
+    out = puncta_pipeline._size_filter(mask, min_spot_px=3, max_spot_px=None)
+
+    assert out.dtype == np.uint8
+    assert set(np.unique(out)).issubset({0, 1})
+    assert out[2, 2] == 0  # speck removed
+    assert out[5:7, 5:7].sum() == 4  # blob survives intact
+    assert out[10:13, 10:13].sum() == 9
+
+
+def test_size_filter_respects_max_spot_px():
+    """``max_spot_px`` drops components larger than the cap."""
+    mask = np.zeros((20, 20), dtype=np.uint8)
+    mask[5:7, 5:7] = 1  # area 4 -> within [3, 5], kept
+    mask[10:14, 10:14] = 1  # area 16 -> exceeds 5, dropped
+
+    out = puncta_pipeline._size_filter(mask, min_spot_px=3, max_spot_px=5)
+
+    assert out[5:7, 5:7].sum() == 4
+    assert out[10:14, 10:14].sum() == 0
+
+
+def test_size_filter_all_zero_mask_returns_all_zero():
+    out = puncta_pipeline._size_filter(np.zeros((16, 16), dtype=np.uint8), 3, None)
+    assert out.dtype == np.uint8
+    assert out.sum() == 0
+
+
+def test_size_filter_scales_to_many_components():
+    """Whole-frame regression: thousands of components must filter quickly.
+
+    The old per-region ``out[lab == prop.label] = 1`` loop is ``O(P*H*W)`` and
+    takes far longer than this bound on this input; the vectorized filter is
+    ``O(H*W)`` and returns near-instantly. The generous ceiling catches a
+    regression to the quadratic form without being flaky on slow CI.
+    """
+    import time
+
+    # ~10k isolated 1-px specks (dropped) on a 1000x1000 frame, plus a handful
+    # of larger blobs that survive — the worst case for a per-region rescan.
+    mask = np.zeros((1000, 1000), dtype=np.uint8)
+    mask[::10, ::10] = 1  # 100x100 == 10_000 single-pixel components
+    mask[500:505, 500:505] = 1  # one 25-px blob that must survive
+
+    start = time.perf_counter()
+    out = puncta_pipeline._size_filter(mask, min_spot_px=3, max_spot_px=None)
+    elapsed = time.perf_counter() - start
+
+    assert out[500:505, 500:505].sum() == 25  # large blob kept
+    assert out[0, 0] == 0  # a 1-px speck dropped
+    assert elapsed < 5.0, f"_size_filter too slow ({elapsed:.1f}s) — quadratic regression?"

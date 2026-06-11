@@ -17,6 +17,9 @@ import pytest
 from skimage.draw import disk
 
 from percell4.domain.analysis._impl.per_particle_donut import (
+    _BG_HIST_MAX_BINS,
+    _bg_hist_bins,
+    estimate_bg_threshold,
     run_one_image_set,
 )
 
@@ -300,3 +303,54 @@ def test_error_single_cell_without_cp_mask_raises() -> None:
             cap=cap, pbody_mask=pbody_mask, pnorm=pnorm, cp_mask=None,
             **{**DEFAULT_PARAMS, "single_cell": True},
         )
+
+
+# ---------------------------------------------------------------------------
+# Background-histogram bin-count cap (high-intensity hang regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hi", [50.0, 500.0, 10_000.0, 5.0 * _BG_HIST_MAX_BINS])
+def test_bg_hist_bins_identical_for_low_value_images(hi):
+    """Below the cap the bins are byte-identical to the old ``arange(0, hi, 5)``.
+
+    Guarantees the fix changes nothing for 8-bit / typical-16-bit data (median
+    <= 5*MAX_BINS), so the estimators stay calibrated on their tuned regime.
+    """
+    assert np.array_equal(_bg_hist_bins(hi, width=5.0), np.arange(0, hi, 5))
+
+
+@pytest.mark.parametrize("hi", [1e6, 1e8, 1e10])
+def test_bg_hist_bins_capped_for_high_value_images(hi):
+    """Above the cap the bin COUNT stays bounded instead of scaling with value.
+
+    The old ``arange(0, median, 5)`` reached 2e7 bins at median 1e8 (2e9 at
+    1e10) and made ``np.histogram`` hang/OOM for minutes — the reported bug.
+    """
+    bins = _bg_hist_bins(hi, width=5.0)
+    assert len(bins) <= _BG_HIST_MAX_BINS
+    assert len(bins) < hi / 5  # strictly fewer than the old fixed-width count
+
+
+def test_estimate_bg_threshold_is_fast_on_high_intensity_image():
+    """End-to-end guard: the estimator must not hang on large pixel values.
+
+    Same background+noise content at two magnitudes; the high-value call ran
+    >30s (millions of histogram bins) before the cap and is sub-second after.
+    The generous ceiling catches a regression to magnitude-scaled binning
+    without being flaky.
+    """
+    import time
+
+    rng = np.random.RandomState(0)
+    base = rng.normal(1000.0, 50.0, 400_000).astype(np.float64)
+    high = base * 1e5  # median ~1e8 -> 2e7 bins under the old formula
+
+    start = time.perf_counter()
+    _thr, mu, sigma = estimate_bg_threshold(high)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 5.0, f"estimate_bg_threshold too slow ({elapsed:.1f}s) on high-value image"
+    assert np.isfinite(mu) and np.isfinite(sigma) and sigma > 0
+    # The fitted background peak still tracks the true mean (~1e8) within a few sigma.
+    assert abs(mu - 1e8) < 10 * sigma

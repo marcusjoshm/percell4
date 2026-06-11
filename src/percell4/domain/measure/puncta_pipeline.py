@@ -165,20 +165,27 @@ def calibrate_scale_range(
 
 
 def _size_filter(mask: np.ndarray, min_spot_px: int, max_spot_px: int | None) -> np.ndarray:
-    """Drop connected components outside ``[min_spot_px, max_spot_px]`` area."""
+    """Drop connected components outside ``[min_spot_px, max_spot_px]`` area.
+
+    Vectorized via ``np.bincount`` + a per-label boolean lookup, so the whole
+    filter is ``O(H*W)`` regardless of component count. A naive per-region
+    ``out[lab == prop.label] = 1`` loop is ``O(P*H*W)`` — fine for a small
+    per-cell bbox crop, but catastrophic on a whole frame where ``P`` (granules
+    **plus** the noise specks this filter exists to strip) reaches tens of
+    thousands and each region rescans the entire frame.
+    """
     if min_spot_px <= 1 and max_spot_px is None:
         return mask
     from skimage import measure
 
     lab = measure.label(mask > 0)
-    out = np.zeros_like(mask)
-    for prop in measure.regionprops(lab):
-        if prop.area < min_spot_px:
-            continue
-        if max_spot_px is not None and prop.area > max_spot_px:
-            continue
-        out[lab == prop.label] = 1
-    return out
+    # counts[label] == that component's pixel area (counts[0] == background).
+    counts = np.bincount(lab.ravel())
+    keep = counts >= min_spot_px
+    if max_spot_px is not None:
+        keep &= counts <= max_spot_px
+    keep[0] = False  # background is never a kept component
+    return keep[lab].astype(np.uint8)
 
 
 def detect_two_pass(
