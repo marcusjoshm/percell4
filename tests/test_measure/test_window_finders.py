@@ -261,3 +261,48 @@ def test_outcome_driven_run_end_to_end_through_auto_window(method):
     w = auto_window(img, 1.0, _real_settings(), method, params=params)
     assert w % 2 == 1
     assert AUTO_WINDOW_MIN <= w <= AUTO_WINDOW_MAX
+
+
+# ── autocorrelation / spectrum finder ─────────────────────────────────────
+
+
+def _many_granules(radius, n=40, *, dilute=50.0, fg=220.0, shape=(256, 256), seed=0):
+    rng = np.random.default_rng(seed)
+    img = dilute + rng.normal(0.0, 2.0, size=shape).astype(np.float32)
+    for _ in range(n):
+        cy = int(rng.integers(radius + 2, shape[0] - radius - 2))
+        cx = int(rng.integers(radius + 2, shape[1] - radius - 2))
+        rr, cc = disk((cy, cx), radius, shape=shape)
+        img[rr, cc] = fg
+    return img.astype(np.float32)
+
+
+def test_autocorr_is_registered():
+    assert "autocorr" in WINDOW_FINDERS
+
+
+def test_autocorr_positive_and_scales_with_granule_size():
+    small = WINDOW_FINDERS["autocorr"](_many_granules(4, seed=1), {})
+    large = WINDOW_FINDERS["autocorr"](_many_granules(10, seed=1), {})
+    assert small > 0.0
+    assert large > small  # bigger granules -> wider autocorrelation -> bigger window
+
+
+def test_autocorr_spectrum_mode_runs():
+    w = WINDOW_FINDERS["autocorr"](_many_granules(8, seed=2), {"mode": "spectrum"})
+    assert w > 0.0
+
+
+def test_autocorr_constant_image_returns_zero():
+    assert WINDOW_FINDERS["autocorr"](np.full((128, 128), 7.0, dtype=np.float32), {}) == 0.0
+
+
+def test_autocorr_all_nan_returns_zero_no_raise():
+    assert WINDOW_FINDERS["autocorr"](np.full((64, 64), np.nan, dtype=np.float32), {}) == 0.0
+
+
+def test_autocorr_downsample_path_runs():
+    # Force downsampling (max_dim < image) and confirm a sane positive window.
+    img = _many_granules(8, shape=(256, 256), seed=3)
+    w = WINDOW_FINDERS["autocorr"](img, {"max_dim": 96})
+    assert w > 0.0

@@ -267,11 +267,104 @@ def _fixed_point(
     return float(w)  # did not converge within the cap -> last estimate (non-result)
 
 
+# ── Texture / frequency finder (no segmentation, no counting) ──────────────
+
+
+def _downsample(image: np.ndarray, max_dim: int) -> tuple[np.ndarray, float]:
+    """Block-mean downsample so the largest dim <= ``max_dim``; return (small, factor).
+
+    A feature of size ``D`` in the original is ``D / factor`` in the result, so a
+    scale measured on the downsampled image is multiplied by ``factor`` to return
+    to original pixels. Keeps FFT / morphology tractable on 33 MP frames.
+    """
+    sm = np.asarray(image, dtype=np.float32)
+    if max(sm.shape) <= max_dim:
+        return sm, 1.0
+    from skimage.transform import downscale_local_mean
+
+    factor = int(np.ceil(max(sm.shape) / float(max_dim)))
+    return np.asarray(downscale_local_mean(sm, (factor, factor)), dtype=np.float32), float(factor)
+
+
+def _radial_profile(arr: np.ndarray) -> np.ndarray:
+    """Mean of ``arr`` as a function of integer radius from its center."""
+    h, w = arr.shape
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    yy, xx = np.ogrid[:h, :w]
+    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2).astype(int)
+    counts = np.bincount(r.ravel())
+    sums = np.bincount(r.ravel(), weights=arr.ravel())
+    return sums / np.maximum(counts, 1)
+
+
+def _autocorr(
+    image: np.ndarray,
+    params: dict,
+    *,
+    cp_mask: np.ndarray | None = None,
+    pixel_size_um: float | None = None,
+    detect_at_window: Callable[[int], np.ndarray] | None = None,
+) -> float:
+    """Characteristic scale from image texture — no segmentation, no counting.
+
+    High-pass the (downsampled) image to drop the large-scale background, then
+    read its dominant granule scale from the frequency domain: ``mode="autocorr"``
+    (default) takes the half-width-at-half-max of the radial autocorrelation
+    (≈ granule radius); ``mode="spectrum"`` takes the radial power-spectrum peak
+    wavelength. ``window = c * scale`` — a completely different *signal* from
+    Otsu/measuring, though it still maps a scale to a window via ``c``. ``params``:
+    ``c`` (6.0), ``mode``, ``hp_sigma`` (25.0), ``max_dim`` (1024).
+    """
+    from scipy.ndimage import gaussian_filter
+
+    c = float(params.get("c", 6.0))
+    mode = str(params.get("mode", "autocorr"))
+    hp_sigma = float(params.get("hp_sigma", 25.0))
+
+    small, factor = _downsample(image, int(params.get("max_dim", 1024)))
+    finite = np.isfinite(small)
+    if not finite.any():
+        return 0.0
+    fin_vals = small[finite]
+    if float(fin_vals.min()) == float(fin_vals.max()):
+        return 0.0
+    filled = np.where(finite, small, float(np.median(fin_vals))).astype(np.float32)
+    hp = filled - gaussian_filter(filled, max(1.0, hp_sigma / factor), mode="reflect")
+    hp = hp - float(hp.mean())
+    if not np.any(hp):
+        return 0.0
+
+    if mode == "spectrum":
+        ps = np.fft.fftshift(np.abs(np.fft.fft2(hp)) ** 2)
+        prof = _radial_profile(ps)
+        if prof.size < 3:
+            return 0.0
+        prof[0] = 0.0  # kill DC
+        k_peak = int(np.argmax(prof))
+        if k_peak <= 0:
+            return 0.0
+        wavelength_ds = float(min(hp.shape)) / float(k_peak)  # px per cycle
+        return c * wavelength_ds * factor
+
+    # autocorr HWHM
+    ac = np.fft.fftshift(np.fft.irfft2(np.abs(np.fft.rfft2(hp)) ** 2, s=hp.shape))
+    peak = float(ac.max())
+    if peak <= 0:
+        return 0.0
+    prof = _radial_profile(ac) / peak
+    below = np.where(prof < 0.5)[0]
+    if below.size == 0 or below[0] <= 0:
+        return 0.0
+    hwhm_ds = float(below[0])
+    return c * (2.0 * hwhm_ds) * factor  # diameter ~ 2*HWHM, back to original px
+
+
 WINDOW_FINDERS: dict[str, Callable[..., float]] = {
     "otsu-mean": _otsu_mean,
     "granule-size": _granule_size,
     "sweep-knee": _sweep_knee,
     "fixed-point": _fixed_point,
+    "autocorr": _autocorr,
 }
 
 # Drift guard: registry keys are exactly the single-source-of-truth tuple.
