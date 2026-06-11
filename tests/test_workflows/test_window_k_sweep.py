@@ -232,6 +232,36 @@ def test_run_sweep_empty_cell_is_all_zero(tmp_path):
         assert int(store.read_mask(row.name).sum()) == 0
 
 
+def test_run_sweep_midgrid_write_failure_preserves_progress_and_prior(tmp_path, monkeypatch):
+    # A wider prior grid exists; a new --clear run fails on its 2nd write.
+    store = _make_store(tmp_path / "T.h5")
+    run_sweep(store, "Channel", "Cellpose", (15, 31, 51), (2.0,), _fixed())  # prior masks
+    prior = {m for m in store.list_masks() if m.startswith("sweep_")}
+    assert prior == {mask_name("sweep", w, 2.0) for w in (15, 31, 51)}
+
+    real_write = store.write_mask
+    calls = {"n": 0}
+
+    def _flaky_write(name, array, attrs=None):
+        calls["n"] += 1
+        if calls["n"] == 2:  # fail the 2nd grid point
+            raise OSError("disk full (simulated)")
+        return real_write(name, array, attrs=attrs)
+
+    monkeypatch.setattr(store, "write_mask", _flaky_write)
+    report = run_sweep(store, "Channel", "Cellpose", (15, 31), (2.0,), _fixed(), clear=True)
+
+    # Setup succeeded → not a total failure; the failure is per-point.
+    assert report.failure is None
+    assert len(report.point_failures) == 1
+    # The point that wrote is preserved as a row (progress not blanked).
+    assert len(report.rows) == 1
+    assert report.rows[0].name == mask_name("sweep", 15, 2.0)
+    # Clear-after-success was skipped: prior wider-grid masks are NOT destroyed.
+    remaining = {m for m in store.list_masks() if m.startswith("sweep_")}
+    assert mask_name("sweep", 51, 2.0) in remaining  # prior result survives the failed run
+
+
 def test_run_sweep_missing_segmentation_is_failure_row(tmp_path):
     store = _make_store(tmp_path / "T.h5")
     report = run_sweep(store, "Channel", "DoesNotExist", (15,), (2.0,), _fixed())

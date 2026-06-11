@@ -103,6 +103,10 @@ class SweepReport:
     auto_picks: list[AutoPick] = field(default_factory=list)
     cell_px: int = 0
     failure: str | None = None
+    # Per-grid-point errors (e.g. a mid-grid write/detect failure). Distinct from
+    # ``failure``, which is a setup-level error that wrote nothing. When non-empty
+    # the already-completed rows in ``rows`` are still valid and on disk.
+    point_failures: list[str] = field(default_factory=list)
 
 
 # ── name helpers ──────────────────────────────────────────────────────────
@@ -205,6 +209,10 @@ def run_sweep(
         ks=ks,
     )
 
+    # ── Setup: load, smooth, seed, and auto-finder picks — NO writes. ──
+    # A failure here means nothing was written, so the dataset is isolated as a
+    # clean setup failure (``failure`` set, no rows). Auto-picks are computed
+    # before any write so a finder error never discards written masks.
     try:
         from skimage import measure
 
@@ -228,21 +236,31 @@ def run_sweep(
         scale_range = base.spot_scale_prior or DEFAULT_SCALE_RANGE
         seeds = compute_seeds(smoothed, group, base, scale_range)
 
-        if clear and not dry_run:
-            # Delete only masks that both carry the prefix AND round-trip as a
-            # sweep mask, so a hand-curated mask sharing the prefix (e.g.
-            # ``sweep_final``) is never destroyed.
-            for existing in list(store.list_masks()):
-                if existing.startswith(f"{prefix}_") and parse_mask_name(existing) is not None:
-                    store.delete_item(f"masks/{existing}")
+        # R4: record what each auto finder would pick (restricted to the cell).
+        for method in _AUTO_FINDERS:
+            raw = int(auto_window(image, fixed.gaussian_sigma, base, method=method, cp_mask=group))
+            nearest = min(windows, key=lambda ww: (abs(ww - raw), ww))
+            report.auto_picks.append(AutoPick(method, raw, int(nearest)))
+    except Exception as exc:  # noqa: BLE001 — per-dataset isolation, recorded not raised
+        report.rows = []
+        report.auto_picks = []
+        report.failure = f"{type(exc).__name__}: {exc}"
+        return report
 
-        for w in windows:
-            for k in ks:
+    # ── Grid: write a mask per point, isolating each point. ──
+    # A single point's detect/write failure is recorded in ``point_failures``
+    # and the loop continues; already-completed rows (and their on-disk masks)
+    # are preserved rather than blanked.
+    written: list[str] = []
+    expected = len(windows) * len(ks)
+    for w in windows:
+        for k in ks:
+            name = mask_name(prefix, w, k)
+            try:
                 settings = settings_with(fixed, w, k)
                 # Inlined (not via detect_adaptive_in_group) to reuse the single
                 # smoothing + the shared seeds across every grid point.
                 mask = np.asarray(detect_two_pass(smoothed, group, settings, seeds=seeds))
-                name = mask_name(prefix, w, k)
                 if not dry_run:
                     store.write_mask(
                         name,
@@ -253,17 +271,23 @@ def run_sweep(
                 count = int(measure.label(mask > 0).max())
                 frac = (pos / cell_px) if cell_px > 0 else 0.0
                 report.rows.append(SweepRow(name, int(w), float(k), count, pos, frac))
+                written.append(name)
+            except Exception as exc:  # noqa: BLE001 — per-point isolation
+                report.point_failures.append(f"{name}: {type(exc).__name__}: {exc}")
 
-        # R4: record what each auto finder would pick (restricted to the cell).
-        for method in _AUTO_FINDERS:
-            raw = int(auto_window(image, fixed.gaussian_sigma, base, method=method, cp_mask=group))
-            nearest = min(windows, key=lambda ww: (abs(ww - raw), ww))
-            report.auto_picks.append(AutoPick(method, raw, int(nearest)))
-
-    except Exception as exc:  # noqa: BLE001 — per-dataset isolation, recorded not raised
-        report.rows = []
-        report.auto_picks = []
-        report.failure = f"{type(exc).__name__}: {exc}"
+    # ── Clear-after-success: remove stale sweep masks only once a COMPLETE new
+    # grid is on disk. On a partial failure (or dry-run) the prior masks are left
+    # intact, so a failed sweep can never destroy a user's previous results. ──
+    grid_complete = not dry_run and not report.point_failures and len(written) == expected
+    if clear and grid_complete:
+        keep = set(written)
+        for existing in list(store.list_masks()):
+            if (
+                existing.startswith(f"{prefix}_")
+                and parse_mask_name(existing) is not None
+                and existing not in keep
+            ):
+                store.delete_item(f"masks/{existing}")
 
     return report
 
@@ -307,6 +331,7 @@ def report_to_dict(report: SweepReport) -> dict[str, object]:
             for r in report.rows
         ],
         "failure": report.failure,
+        "point_failures": list(report.point_failures),
         "note": (
             "particle_count / in_cell_positive_px / in_cell_fraction are a "
             "navigation aid only — inspect the masks visually to judge "

@@ -114,6 +114,14 @@ def _print_report(report: SweepReport) -> None:
         f"{p.method}={p.raw_window}px(~{p.nearest_grid_window})" for p in report.auto_picks
     )
     print(f"auto-window picks: {picks}")
+    if report.point_failures:
+        # Partial failure: some points wrote, some didn't. Warn on stderr; the
+        # successful rows below are still valid.
+        print(
+            f"WARNING: {len(report.point_failures)} grid point(s) failed: "
+            + "; ".join(report.point_failures),
+            file=sys.stderr,
+        )
     print(f"{'mask':<20}{'window':>7}{'k':>6}{'count':>8}{'in_cell_px':>12}{'fraction':>10}")
     print("-" * 63)
     for r in report.rows:
@@ -138,9 +146,10 @@ def _print_summary(reports: Sequence[SweepReport]) -> None:
         picks = {p.method: p.raw_window for p in rep.auto_picks}
         shape_s = "x".join(str(d) for d in (rep.shape or ()))
         px = f"{rep.pixel_size_um:.4g}" if rep.pixel_size_um is not None else "-"
+        status = "partial" if rep.point_failures else "ok"
         print(
             f"{rep.dataset:<16}{shape_s:>14}{px:>8}{len(rep.rows):>7}"
-            f"{picks.get('otsu-mean', '-'):>11}{picks.get('granule-size', '-'):>9}{'ok':>9}"
+            f"{picks.get('otsu-mean', '-'):>11}{picks.get('granule-size', '-'):>9}{status:>9}"
         )
 
 
