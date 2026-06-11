@@ -90,8 +90,77 @@ def _otsu_mean(
     return factor * float(diameters.mean())
 
 
+def _granule_size(
+    image: np.ndarray,
+    params: dict,
+    *,
+    cp_mask: np.ndarray | None = None,
+    pixel_size_um: float | None = None,
+    detect_at_window: Callable[[int], np.ndarray] | None = None,
+) -> float:
+    """``c * robust granule diameter``, isolating granules without whole-frame Otsu.
+
+    Fixes all three failure modes of ``otsu-mean``: (1) isolate granules with a
+    Gaussian **high-pass** (``image - gaussian(image, hp_sigma)``) + a robust
+    ``k * MAD`` threshold instead of whole-frame Otsu — the high-pass removes the
+    black outside-cell region and dilute gradients, so it does not over-segment;
+    (2) restrict to in-cell pixels when ``cp_mask`` is given (harness-supplied;
+    the interactive GUI passes ``None`` and still works whole-frame because the
+    high-pass is background-invariant); (3) size by an **area-weighted** (or
+    ``p90``) equivalent-diameter so large granules drive the window, not the
+    speck median. ``window = c * diameter`` (``c`` ~ 4–5, the local-background
+    window wants to be several times the focus). Returns ``0.0`` on degenerate
+    input (orchestrator floors it).
+
+    ``params``: ``c`` (default 4.5), ``k`` (default 3.0), ``hp_sigma`` (default
+    12.0), ``stat`` (``"area_weighted"`` | ``"p90"``).
+    """
+    from scipy.ndimage import gaussian_filter
+    from skimage import measure
+
+    c = float(params.get("c", 4.5))
+    k = float(params.get("k", 3.0))
+    hp_sigma = float(params.get("hp_sigma", 12.0))
+    stat = str(params.get("stat", "area_weighted"))
+
+    sm = np.asarray(image, dtype=np.float32)
+    finite = np.isfinite(sm)
+    sel = ((np.asarray(cp_mask) > 0) & finite) if cp_mask is not None else finite
+    if not sel.any():
+        return 0.0
+
+    # NaN-safe fill (gaussian_filter is not NaN-safe); the high-pass removes a
+    # constant fill anyway, so the in-sel median is a neutral choice.
+    fill = float(np.median(sm[sel]))
+    filled = np.where(finite, sm, fill).astype(np.float32)
+    hp = filled - gaussian_filter(filled, hp_sigma, mode="reflect")
+
+    vals = hp[sel]
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med)))
+    sigma = 1.4826 * mad
+    if sigma <= 0:
+        return 0.0
+    granules = sel & (hp > med + k * sigma)
+    if not granules.any():
+        return 0.0
+
+    labels = measure.label(granules)
+    areas = np.array([p.area for p in measure.regionprops(labels)], dtype=float)
+    areas = areas[areas >= _NOISE_FLOOR_PX]
+    if areas.size == 0:
+        return 0.0
+    diameters = 2.0 * np.sqrt(areas / np.pi)
+    if stat == "p90":
+        diam = float(np.percentile(diameters, 90))
+    else:  # area-weighted: big granules count more
+        diam = float((diameters * areas).sum() / areas.sum())
+    return c * diam
+
+
 WINDOW_FINDERS: dict[str, Callable[..., float]] = {
     "otsu-mean": _otsu_mean,
+    "granule-size": _granule_size,
 }
 
 # Drift guard: registry keys are exactly the single-source-of-truth tuple.
