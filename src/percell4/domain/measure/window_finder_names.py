@@ -20,4 +20,6 @@ __all__ = ["WINDOW_FINDER_NAMES"]
 WINDOW_FINDER_NAMES: tuple[str, ...] = (
     "otsu-mean",
     "granule-size",
+    "sweep-knee",
+    "fixed-point",
 )

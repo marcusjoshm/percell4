@@ -158,9 +158,120 @@ def _granule_size(
     return c * diam
 
 
+def _mask_diameter(mask: np.ndarray, *, stat: str = "area_weighted") -> float:
+    """Robust equivalent-diameter of a binary mask's components (>= noise floor)."""
+    from skimage import measure
+
+    labels = measure.label(np.asarray(mask) > 0)
+    areas = np.array([p.area for p in measure.regionprops(labels)], dtype=float)
+    areas = areas[areas >= _NOISE_FLOOR_PX]
+    if areas.size == 0:
+        return 0.0
+    diameters = 2.0 * np.sqrt(areas / np.pi)
+    if stat == "p90":
+        return float(np.percentile(diameters, 90))
+    return float((diameters * areas).sum() / areas.sum())  # area-weighted
+
+
+# ── Outcome-driven finders (no particle size measured to set the window) ────
+
+
+def _sweep_knee(
+    image: np.ndarray,
+    params: dict,
+    *,
+    cp_mask: np.ndarray | None = None,
+    pixel_size_um: float | None = None,
+    detect_at_window: Callable[[int], np.ndarray] | None = None,
+) -> float:
+    """The window where the detection result saturates — no size, no multiplier.
+
+    Runs the production detector (injected ``detect_at_window``) at an ascending
+    ladder of windows and tracks a detection metric — total foreground ``area``
+    (default) or component ``count``. As the window grows the detector captures
+    granules better until the metric saturates; the **knee** (the point of
+    greatest deviation from the straight chord joining the first and last grid
+    points) is the smallest window past which detection stops improving. The
+    window is read straight off detection behavior. ``params``: ``grid_lo`` (21),
+    ``grid_hi`` (201), ``n`` (10), ``metric`` (``"area"`` | ``"count"``).
+    """
+    if detect_at_window is None:
+        return 0.0
+    lo = int(params.get("grid_lo", 21))
+    hi = int(params.get("grid_hi", 201))
+    n = max(2, int(params.get("n", 10)))
+    metric = str(params.get("metric", "area"))
+
+    windows = sorted({int(w) | 1 for w in np.linspace(lo, hi, n)})
+    vals: list[float] = []
+    for w in windows:
+        mask = np.asarray(detect_at_window(int(w))) > 0
+        if metric == "count":
+            from skimage import measure
+
+            vals.append(float(measure.label(mask).max()))
+        else:
+            vals.append(float(np.count_nonzero(mask)))
+
+    v = np.array(vals, dtype=float)
+    x = np.array(windows, dtype=float)
+    if v.max() <= v.min():  # flat / empty across the grid -> no knee
+        return 0.0
+    # Knee = point of greatest deviation from the first->last chord (normalized),
+    # robust whether the metric saturates upward (area) or downward (count).
+    xn = (x - x[0]) / (x[-1] - x[0] + 1e-12)
+    vn = (v - v.min()) / (v.max() - v.min() + 1e-12)
+    chord = vn[0] + (vn[-1] - vn[0]) * xn
+    knee_idx = int(np.argmax(np.abs(vn - chord)))
+    return float(windows[knee_idx])
+
+
+def _fixed_point(
+    image: np.ndarray,
+    params: dict,
+    *,
+    cp_mask: np.ndarray | None = None,
+    pixel_size_um: float | None = None,
+    detect_at_window: Callable[[int], np.ndarray] | None = None,
+) -> float:
+    """Self-consistent window where the detection and its granule scale agree.
+
+    Iterate: detect at the current window, measure the detected granule diameter,
+    set ``window = c * diameter``, repeat until the window stops moving (or a
+    cap). Unlike ``granule-size`` (which measures size once at a *fixed*
+    isolation scale — chicken-and-egg), the granules are defined by the detector
+    AT the current window each round, so it self-corrects toward a fixed point.
+    It carries a consistency ratio ``c`` (the window/granule ratio the local
+    background needs), but converges without a hand-picked answer. Monotonic-
+    merge failure mode: a too-large window merges granules, inflating the
+    measured diameter and driving the window up — a run that does not converge
+    and lands pinned near the clamp ceiling is a non-result, not a score.
+    ``params``: ``c`` (5.0), ``seed`` (31), ``max_iter`` (8), ``tol`` (4 px).
+    """
+    if detect_at_window is None:
+        return 0.0
+    c = float(params.get("c", 5.0))
+    w = int(params.get("seed", 31)) | 1
+    max_iter = int(params.get("max_iter", 8))
+    tol = float(params.get("tol", 4.0))
+    stat = str(params.get("stat", "area_weighted"))
+
+    for _ in range(max_iter):
+        diam = _mask_diameter(detect_at_window(w), stat=stat)
+        if diam <= 0:
+            return 0.0
+        new_w = int(round(c * diam)) | 1
+        if abs(new_w - w) <= tol:
+            return float(new_w)  # converged
+        w = new_w
+    return float(w)  # did not converge within the cap -> last estimate (non-result)
+
+
 WINDOW_FINDERS: dict[str, Callable[..., float]] = {
     "otsu-mean": _otsu_mean,
     "granule-size": _granule_size,
+    "sweep-knee": _sweep_knee,
+    "fixed-point": _fixed_point,
 }
 
 # Drift guard: registry keys are exactly the single-source-of-truth tuple.

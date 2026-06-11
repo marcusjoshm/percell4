@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from skimage.draw import disk
 
 from percell4.domain.measure.window_finder_names import WINDOW_FINDER_NAMES
@@ -152,3 +153,111 @@ def test_granule_size_beats_otsu_mean_floor_intuition():
     img = _black_bg_image([(120, 120), (120, 150), (150, 135)], radius=10, cell_box=(90, 180, 90, 180))
     gs = WINDOW_FINDERS["granule-size"](img, {"c": 4.5})
     assert gs > 0.0
+
+
+# ── outcome-driven finders (sweep-knee + fixed-point) ─────────────────────
+
+
+def test_outcome_driven_are_registered():
+    assert "sweep-knee" in WINDOW_FINDERS
+    assert "fixed-point" in WINDOW_FINDERS
+
+
+def test_outcome_driven_need_the_closure():
+    # No injected detector -> defined 0.0 (orchestrator floors), never raises.
+    assert WINDOW_FINDERS["sweep-knee"](np.zeros((50, 50), np.float32), {}) == 0.0
+    assert WINDOW_FINDERS["fixed-point"](np.zeros((50, 50), np.float32), {}) == 0.0
+
+
+def _ramp_then_flat_closure(w_star, max_area=2000, shape=(200, 200)):
+    """Fake detector whose foreground area rises to ``w_star`` then saturates."""
+    def fn(w):
+        frac = min(float(w), float(w_star)) / float(w_star)
+        m = np.zeros(shape, dtype=np.uint8)
+        m.flat[: int(frac * max_area)] = 1
+        return m
+    return fn
+
+
+def test_sweep_knee_finds_the_saturation_corner():
+    img = np.zeros((200, 200), np.float32)
+    w = WINDOW_FINDERS["sweep-knee"](
+        img, {"grid_lo": 21, "grid_hi": 201, "n": 10},
+        detect_at_window=_ramp_then_flat_closure(81),
+    )
+    assert w == 81  # the knee lands at the corner where area saturates
+
+
+def test_sweep_knee_flat_response_returns_zero():
+    img = np.zeros((50, 50), np.float32)
+    w = WINDOW_FINDERS["sweep-knee"](img, {}, detect_at_window=lambda _w: np.zeros((50, 50), np.uint8))
+    assert w == 0.0  # nothing detected at any window -> no knee, floored by orchestrator
+
+
+def _const_disk_closure(diameter, shape=(220, 220)):
+    """Fake detector returning one disk of fixed diameter regardless of window."""
+    def fn(w):
+        m = np.zeros(shape, dtype=np.uint8)
+        rr, cc = disk((110, 110), diameter / 2.0, shape=shape)
+        m[rr, cc] = 1
+        return m
+    return fn
+
+
+def test_fixed_point_converges_to_c_times_diameter():
+    # Detected diameter is constant (~24) regardless of window -> fixed point at
+    # c * diameter = 5 * 24 = 120 (odd-ized).
+    w = WINDOW_FINDERS["fixed-point"](
+        np.zeros((220, 220), np.float32), {"c": 5.0, "seed": 31},
+        detect_at_window=_const_disk_closure(24),
+    )
+    assert 110 <= w <= 130  # ~ 5 * 24, allowing for disk rasterization
+
+
+def test_fixed_point_non_convergence_terminates_bounded():
+    # Diameter grows with the window -> the fixed point drifts up and never
+    # settles; it must terminate at the cap (no infinite loop) and report a
+    # large last estimate (the non-result signal).
+    def growing(w):
+        m = np.zeros((400, 400), np.uint8)
+        rr, cc = disk((200, 200), max(1.0, w / 2.0), shape=(400, 400))
+        m[rr, cc] = 1
+        return m
+
+    w = WINDOW_FINDERS["fixed-point"](
+        np.zeros((400, 400), np.float32), {"c": 5.0, "seed": 31, "max_iter": 6},
+        detect_at_window=growing,
+    )
+    assert np.isfinite(w) and w > 31  # bounded, and clearly drifted upward
+
+
+def test_fixed_point_empty_detection_returns_zero():
+    w = WINDOW_FINDERS["fixed-point"](
+        np.zeros((50, 50), np.float32), {}, detect_at_window=lambda _w: np.zeros((50, 50), np.uint8)
+    )
+    assert w == 0.0
+
+
+# ── real-closure integration via auto_window ──────────────────────────────
+
+
+def _real_settings():
+    from percell4.workflows.models import PunctaDetectorSettings
+
+    return PunctaDetectorSettings(
+        detector_name="adaptive", seed_detector_name="otsu",
+        background_estimator_name="mad", detector_params={"window_px": 31, "k": 3.0},
+        min_spot_px=3, spot_scale_prior=(1.0, 4.0),
+    )
+
+
+@pytest.mark.parametrize("method", ["sweep-knee", "fixed-point"])
+def test_outcome_driven_run_end_to_end_through_auto_window(method):
+    """The real detect_two_pass closure wiring works: odd, in-range window."""
+    from percell4.domain.measure.adaptive_clip import AUTO_WINDOW_MAX, AUTO_WINDOW_MIN, auto_window
+
+    img = _blobs_image([(70, 70), (70, 150), (150, 110)], radius=8)
+    params = {"grid_lo": 21, "grid_hi": 101, "n": 5} if method == "sweep-knee" else {"max_iter": 5}
+    w = auto_window(img, 1.0, _real_settings(), method, params=params)
+    assert w % 2 == 1
+    assert AUTO_WINDOW_MIN <= w <= AUTO_WINDOW_MAX
