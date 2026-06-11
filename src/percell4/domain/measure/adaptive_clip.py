@@ -75,6 +75,32 @@ def detect_adaptive_whole_frame(
     return detect_two_pass(smoothed, group, settings)
 
 
+def detect_adaptive_in_group(
+    image: np.ndarray,
+    gaussian_sigma: float | None,
+    settings: PunctaDetectorSettings,
+    group_mask: np.ndarray,
+    *,
+    seeds: tuple | None = None,
+) -> np.ndarray:
+    """Run the ``adaptive`` detector **inside a cell mask** (one sigma).
+
+    Sibling of :func:`detect_adaptive_whole_frame`: smooths ``image``
+    (``gaussian_sigma``), then runs :func:`detect_two_pass` with
+    ``group = group_mask > 0`` so the local background normalizes *within* the
+    cell and out-of-cell pixels are excluded. ``seeds`` is an optional
+    precomputed pass-1 cache (window- and k-independent) so a caller sweeping
+    many ``(window, k)`` settings on the same cell computes pass-1 exactly once;
+    when ``None`` :func:`detect_two_pass` computes it internally. Returns the
+    detector's ``{0, 1}`` ``uint8`` mask; the size filter is applied inside
+    :func:`detect_two_pass` via ``settings.min_spot_px``.
+    """
+    img = np.asarray(image, dtype=np.float32)
+    smoothed = apply_gaussian_smoothing(img, gaussian_sigma)
+    group = np.asarray(group_mask) > 0
+    return detect_two_pass(smoothed, group, settings, seeds=seeds)
+
+
 def _with_window(settings: PunctaDetectorSettings, window_px: int) -> PunctaDetectorSettings:
     """Copy of ``settings`` with ``detector_params['window_px']`` set to ``window_px``.
 

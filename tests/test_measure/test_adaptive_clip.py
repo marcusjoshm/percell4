@@ -10,10 +10,16 @@ from percell4.domain.measure.adaptive_clip import (
     AUTO_WINDOW_MAX,
     AUTO_WINDOW_MIN,
     auto_window,
+    detect_adaptive_in_group,
     detect_adaptive_whole_frame,
     estimate_adaptive_window,
     otsu_first_pass,
     resolve_min_area_px,
+)
+from percell4.domain.measure.puncta_pipeline import (
+    DEFAULT_SCALE_RANGE,
+    compute_seeds,
+    detect_two_pass,
 )
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 from percell4.workflows.models import PunctaDetectorSettings
@@ -69,6 +75,72 @@ def test_detect_whole_frame_constant_image_is_empty():
     img = np.full((64, 64), 12.0, dtype=np.float32)
     mask = detect_adaptive_whole_frame(img, 1.0, _adaptive_settings())
     assert mask.dtype == np.uint8
+    assert int(mask.sum()) == 0
+
+
+# ── detect_adaptive_in_group ─────────────────────────────────────────────
+
+
+def _half_cell_mask(shape=(200, 200)) -> np.ndarray:
+    """A cell occupying the left half of the frame."""
+    mask = np.zeros(shape, dtype=bool)
+    mask[:, : shape[1] // 2] = True
+    return mask
+
+
+def test_detect_in_group_restricts_to_cell_and_is_binary():
+    # One blob inside the left-half cell, one outside it (right half).
+    img = _blobs_image([(60, 50), (60, 150)], radius=6)
+    cell = _half_cell_mask()
+    mask = detect_adaptive_in_group(img, 1.0, _adaptive_settings(), cell)
+
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    assert mask.shape == img.shape
+    # In-cell blob detected; out-of-cell blob excluded; no positives outside cell.
+    assert mask[60, 50] == 1
+    assert mask[60, 150] == 0
+    assert int(mask[~cell].sum()) == 0
+
+
+def test_detect_in_group_equivalent_to_detect_two_pass():
+    img = _blobs_image([(60, 50), (140, 60)], radius=6)
+    cell = _half_cell_mask()
+    settings = _adaptive_settings()
+
+    via_helper = detect_adaptive_in_group(img, 1.0, settings, cell)
+    smoothed = apply_gaussian_smoothing(img.astype(np.float32), 1.0)
+    direct = detect_two_pass(smoothed, cell, settings)
+
+    assert np.array_equal(via_helper, direct)
+
+
+def test_detect_in_group_seeds_reuse_matches_internal():
+    img = _blobs_image([(60, 50), (140, 60)], radius=6)
+    cell = _half_cell_mask()
+    settings = _adaptive_settings()
+    smoothed = apply_gaussian_smoothing(img.astype(np.float32), 1.0)
+    scale_range = settings.spot_scale_prior or DEFAULT_SCALE_RANGE
+    seeds = compute_seeds(smoothed, cell, settings, scale_range)
+
+    with_seeds = detect_adaptive_in_group(img, 1.0, settings, cell, seeds=seeds)
+    without = detect_adaptive_in_group(img, 1.0, settings, cell)
+
+    assert np.array_equal(with_seeds, without)
+
+
+def test_detect_in_group_empty_cell_is_empty():
+    img = _blobs_image([(60, 50)], radius=6)
+    empty = np.zeros(img.shape, dtype=bool)
+    mask = detect_adaptive_in_group(img, 1.0, _adaptive_settings(), empty)
+    assert mask.dtype == np.uint8
+    assert int(mask.sum()) == 0
+
+
+def test_detect_in_group_constant_image_is_empty():
+    img = np.full((64, 64), 12.0, dtype=np.float32)
+    cell = np.ones(img.shape, dtype=bool)
+    mask = detect_adaptive_in_group(img, 1.0, _adaptive_settings(), cell)
     assert int(mask.sum()) == 0
 
 
