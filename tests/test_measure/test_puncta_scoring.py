@@ -10,13 +10,22 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from skimage import measure
+from skimage.draw import disk
+
+from percell4.workflows.models import PunctaDetectorSettings
 
 from percell4.domain.measure.puncta_scoring import (
+    FinderScore,
     MatchCounts,
     MicroScore,
+    WindowOracle,
     accumulate,
+    mask_iou,
+    mask_recall,
     mask_to_centroids,
     match_detections,
+    score_finder,
+    sweep_ideal_window,
 )
 
 
@@ -201,3 +210,108 @@ def test_accumulate_sums_across_fields():
     assert score.fn == 3
     assert score.tp_components == 5
     assert score.fp_components == 1
+
+
+# ── Window-size oracle (U6) ───────────────────────────────────────────────
+
+
+def _disk_image(centers, radius, *, dilute=50.0, fg=220.0, shape=(160, 160), seed=0):
+    rng = np.random.default_rng(seed)
+    img = dilute + rng.normal(0.0, 2.0, size=shape).astype(np.float32)
+    for cy, cx in centers:
+        rr, cc = disk((cy, cx), radius, shape=shape)
+        img[rr, cc] = fg
+    return img.astype(np.float32)
+
+
+def _disk_mask(centers, radius, shape=(160, 160)):
+    m = np.zeros(shape, dtype=np.uint8)
+    for cy, cx in centers:
+        rr, cc = disk((cy, cx), radius, shape=shape)
+        m[rr, cc] = 1
+    return m
+
+
+def _adaptive_settings(window_px=31, k=3.0):
+    return PunctaDetectorSettings(
+        detector_name="adaptive",
+        seed_detector_name="otsu",
+        background_estimator_name="mad",
+        detector_params={"window_px": window_px, "k": k},
+        min_spot_px=3,
+        spot_scale_prior=(1.0, 4.0),
+    )
+
+
+def test_mask_iou_identities():
+    a = _disk_mask([(80, 80)], 12)
+    assert mask_iou(a, a) == 1.0
+    assert mask_iou(a, _disk_mask([(20, 20)], 5)) == 0.0  # disjoint
+    assert mask_iou(np.zeros((10, 10)), np.zeros((10, 10))) == 0.0  # empty union guarded
+
+
+def test_mask_iou_encoding_invariant():
+    a = _disk_mask([(80, 80)], 12)
+    a255 = (a * 255).astype(np.uint8)
+    assert mask_iou(a255, a) == 1.0  # {0,255} vs {0,1} score identically
+
+
+def test_mask_iou_half_overlap():
+    a = np.zeros((10, 20), dtype=np.uint8); a[:, :10] = 1
+    b = np.zeros((10, 20), dtype=np.uint8); b[:, 5:15] = 1
+    # intersection 50 px, union 150 px
+    assert mask_iou(a, b) == pytest.approx(50 / 150)
+
+
+def test_mask_recall_ignores_over_coverage():
+    sg = _disk_mask([(80, 80)], 10)
+    exact = _disk_mask([(80, 80)], 10)
+    over = _disk_mask([(80, 80)], 20)  # covers all of sg AND more
+    assert mask_recall(exact, sg) == 1.0
+    assert mask_recall(over, sg) == 1.0  # recall ignores the over-coverage
+    assert mask_recall(np.zeros_like(sg), sg) == 0.0
+    assert mask_recall(sg, np.zeros_like(sg)) == 0.0  # empty SG guarded
+
+
+def test_iou_and_recall_rank_windows_differently():
+    """The boundary guard's basis: IoU penalizes over-coverage, recall does not.
+
+    An exactly-matching mask and an over-covering mask have identical recall but
+    different IoU — so an IoU peak can reflect boundary tightness, not capture.
+    """
+    sg = _disk_mask([(80, 80)], 10)
+    exact = _disk_mask([(80, 80)], 10)
+    over = _disk_mask([(80, 80)], 20)
+    assert mask_iou(exact, sg) > mask_iou(over, sg)  # IoU prefers the tight match
+    assert mask_recall(exact, sg) == mask_recall(over, sg)  # recall cannot tell them apart
+
+
+def test_sweep_ideal_window_structure_and_peak():
+    img = _disk_image([(80, 80), (80, 40), (40, 100)], radius=8)
+    sg = _disk_mask([(80, 80), (80, 40), (40, 100)], radius=8)
+    grid = [11, 21, 41]
+    oracle = sweep_ideal_window(img, 1.0, _adaptive_settings(), sg, grid)
+    assert isinstance(oracle, WindowOracle)
+    assert len(oracle.windows) == len(grid) == len(oracle.iou_curve) == len(oracle.recall_curve)
+    assert all(w % 2 == 1 for w in oracle.windows)  # detector forces odd
+    assert max(oracle.iou_curve) > 0.0  # detection overlaps the granules somewhere
+    assert oracle.ideal_window == oracle.windows[int(np.argmax(oracle.iou_curve))]
+    assert all(0.0 <= r <= 1.0 for r in oracle.recall_curve)
+
+
+def test_sweep_ideal_window_empty_grid():
+    oracle = sweep_ideal_window(_disk_image([(80, 80)], 8), 1.0, _adaptive_settings(), _disk_mask([(80, 80)], 8), [])
+    assert oracle == WindowOracle(0, (), (), ())
+
+
+def test_score_finder_fields():
+    sg = _disk_mask([(80, 80)], 10)
+    finder_mask = _disk_mask([(80, 80)], 10)
+    oracle = WindowOracle(ideal_window=91, windows=(11, 91), iou_curve=(0.1, 0.9), recall_curve=(0.2, 1.0))
+    fs = score_finder("granule-size", 71, oracle, finder_mask, sg, k=3.0, in_sample=True)
+    assert isinstance(fs, FinderScore)
+    assert fs.window_error == abs(71 - 91)
+    assert fs.iou == 1.0
+    assert fs.recall == 1.0
+    assert fs.k == 3.0
+    assert fs.in_sample is True
