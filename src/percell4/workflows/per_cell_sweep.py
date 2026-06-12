@@ -50,6 +50,7 @@ __all__ = [
     "normalize_grid",
     "select_cell_ids",
     "sweep_one_cell",
+    "compute_display_range",
     "render_contact_sheet",
     "write_index_and_template",
     "run_per_cell_sweep",
@@ -91,6 +92,7 @@ class PerCellReport:
     windows: tuple[int, ...]
     ks: tuple[float, ...]
     rows: list[CellIndexRow] = field(default_factory=list)
+    display_range: tuple[float, float] | None = None
     failure: str | None = None
 
 
@@ -198,17 +200,50 @@ def sweep_one_cell(
     )
 
 
+def compute_display_range(
+    image: np.ndarray,
+    labels: np.ndarray,
+    *,
+    low_pct: float = 1.0,
+    high_pct: float = 99.5,
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> tuple[float, float]:
+    """A single grayscale display range for the **whole image**, used by every crop.
+
+    The range is taken from all in-cell pixels (``labels > 0``) across the entire
+    image — not per crop — so every cell and every tile shares one consistent
+    intensity mapping, matching a fixed napari contrast. Bright granules above
+    ``high_pct`` clip to white, leaving the dilute/condensed-phase mid-tones the
+    full range. ``vmin`` / ``vmax`` override the percentiles when given.
+    """
+    img = np.asarray(image, dtype=np.float32)
+    inside = img[np.asarray(labels) > 0]
+    if inside.size == 0:
+        inside = img.ravel()
+    lo = float(vmin) if vmin is not None else float(np.percentile(inside, low_pct))
+    hi = float(vmax) if vmax is not None else float(np.percentile(inside, high_pct))
+    if hi <= lo:
+        hi = lo + 1.0
+    return lo, hi
+
+
 def render_contact_sheet(
     cell: CellSweep,
     windows: Sequence[int],
     ks: Sequence[float],
     out_path: Path,
+    *,
+    vmin: float,
+    vmax: float,
 ) -> None:
-    """Render a ``len(windows)`` × ``len(ks)`` montage PNG for one cell.
+    """Render a per-cell montage PNG: each tile is **channel-only | channel+mask**.
 
-    Rows = windows, columns = ``k``. Each tile shows the cell crop (percentile-
-    stretched so dim granules are visible) with that tile's mask overlaid in
-    yellow, titled ``wWWW kK.K``. Uses the Agg backend (headless).
+    Rows = windows; each ``k`` becomes a side-by-side pair of panels — the raw
+    grayscale crop on the left (no overlay, for reference) and the same crop with
+    that tile's mask painted **opaque** yellow on the right. Both panels use the
+    shared ``(vmin, vmax)`` display range so the grayscale is identical and
+    comparable across every cell. Uses the Agg backend (headless).
     """
     import matplotlib
 
@@ -216,32 +251,30 @@ def render_contact_sheet(
     import matplotlib.pyplot as plt
 
     crop = np.asarray(cell.crop, dtype=np.float32)
-    inside = crop[cell.cell_mask] if cell.cell_mask.any() else crop.ravel()
-    if inside.size and float(inside.min()) != float(inside.max()):
-        vmin, vmax = (float(np.percentile(inside, 1.0)), float(np.percentile(inside, 99.5)))
-    else:
-        vmin, vmax = float(crop.min()), float(crop.max()) or 1.0
-
-    nrows, ncols = len(windows), len(ks)
+    nrows, ncols = len(windows), len(ks) * 2
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=(2.2 * ncols, 2.2 * nrows), squeeze=False
+        nrows, ncols, figsize=(2.1 * ncols, 2.3 * nrows), squeeze=False
     )
     for r, win in enumerate(windows):
         for c, k in enumerate(ks):
-            ax = axes[r][c]
-            ax.imshow(crop, cmap="gray", vmin=vmin, vmax=vmax, interpolation="nearest")
+            ax_raw = axes[r][2 * c]
+            ax_mask = axes[r][2 * c + 1]
+            for ax in (ax_raw, ax_mask):
+                ax.imshow(crop, cmap="gray", vmin=vmin, vmax=vmax, interpolation="nearest")
+                ax.set_xticks([])
+                ax.set_yticks([])
             mask = cell.masks.get((int(win), float(k)))
             if mask is not None and mask.any():
                 overlay = np.zeros((*mask.shape, 4), dtype=np.float32)
-                overlay[mask > 0] = (1.0, 1.0, 0.0, 0.85)  # yellow
-                ax.imshow(overlay, interpolation="nearest")
+                overlay[mask > 0] = (1.0, 1.0, 0.0, 1.0)  # opaque yellow
+                ax_mask.imshow(overlay, interpolation="nearest")
             count, pos = cell.stats.get((int(win), float(k)), (0, 0))
-            ax.set_title(f"w{win} k{k:.1f}\n{count} obj / {pos}px", fontsize=7)
-            ax.set_xticks([])
-            ax.set_yticks([])
+            ax_raw.set_title(f"w{win} k{k:.1f} — raw", fontsize=7)
+            ax_mask.set_title(f"w{win} k{k:.1f} — mask\n{count} obj / {pos}px", fontsize=7)
     fig.suptitle(
         f"cell {cell.cell_id}  (area {cell.area_px:,} px, centroid "
-        f"y={cell.centroid[0]:.0f} x={cell.centroid[1]:.0f})",
+        f"y={cell.centroid[0]:.0f} x={cell.centroid[1]:.0f})  "
+        f"[display {vmin:.0f}–{vmax:.0f}]",
         fontsize=10,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.98))
@@ -291,13 +324,19 @@ def run_per_cell_sweep(
     padding: int = 8,
     min_cell_px: int = 50,
     max_cells: int | None = None,
+    display_low_pct: float = 1.0,
+    display_high_pct: float = 99.5,
+    display_min: float | None = None,
+    display_max: float | None = None,
 ) -> PerCellReport:
     """Sweep every cell of one dataset and render a contact sheet per cell.
 
-    Loads ``channel`` + the ``segmentation`` instance labels, sweeps each cell
-    via :func:`sweep_one_cell`, renders its contact sheet into ``out_dir``, and
-    writes ``cells.csv`` + ``labels.csv``. Read-only with respect to the ``.h5``.
-    A load error is captured into ``PerCellReport.failure`` (no raise).
+    Loads ``channel`` + the ``segmentation`` instance labels, computes **one**
+    grayscale display range over all in-cell pixels of the whole image (so every
+    cell/tile shares the same intensity mapping), sweeps each cell via
+    :func:`sweep_one_cell`, renders its contact sheet into ``out_dir``, and writes
+    ``cells.csv`` + ``labels.csv``. Read-only with respect to the ``.h5``. A load
+    error is captured into ``PerCellReport.failure`` (no raise).
     """
     dataset = Path(str(store.path)).stem
     nwindows, nks = normalize_grid(windows, ks)
@@ -310,11 +349,21 @@ def run_per_cell_sweep(
         labels = np.asarray(store.read_labels(segmentation))
         cell_ids = select_cell_ids(labels, min_cell_px=min_cell_px, max_cells=max_cells)
 
+        vmin, vmax = compute_display_range(
+            image,
+            labels,
+            low_pct=display_low_pct,
+            high_pct=display_high_pct,
+            vmin=display_min,
+            vmax=display_max,
+        )
+        report.display_range = (vmin, vmax)
+
         out_dir.mkdir(parents=True, exist_ok=True)
         for cid in cell_ids:
             cell = sweep_one_cell(image, labels, cid, nwindows, nks, fixed, padding=padding)
             sheet = f"cell{cid:03d}_contactsheet.png"
-            render_contact_sheet(cell, nwindows, nks, out_dir / sheet)
+            render_contact_sheet(cell, nwindows, nks, out_dir / sheet, vmin=vmin, vmax=vmax)
             report.rows.append(
                 CellIndexRow(
                     cell_id=cid,

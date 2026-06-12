@@ -85,6 +85,30 @@ def _build_parser(default_windows, default_ks) -> argparse.ArgumentParser:
         help="Cap to the N largest cells per dataset (default: all).",
     )
     parser.add_argument(
+        "--display-low-pct",
+        type=float,
+        default=1.0,
+        help="Low percentile (over in-cell pixels) for the shared grayscale vmin (default 1.0).",
+    )
+    parser.add_argument(
+        "--display-high-pct",
+        type=float,
+        default=99.5,
+        help="High percentile for the shared grayscale vmax (default: 99.5).",
+    )
+    parser.add_argument(
+        "--display-min",
+        type=float,
+        default=None,
+        help="Absolute grayscale vmin (raw intensity); overrides --display-low-pct.",
+    )
+    parser.add_argument(
+        "--display-max",
+        type=float,
+        default=None,
+        help="Absolute grayscale vmax (raw intensity); overrides --display-high-pct.",
+    )
+    parser.add_argument(
         "--gaussian-sigma", type=float, default=1.0, help="Pre-smoothing sigma (default: 1.0)."
     )
     parser.add_argument(
@@ -145,14 +169,21 @@ def main(argv: list[str] | None = None) -> int:
             padding=args.padding,
             min_cell_px=args.min_cell_px,
             max_cells=args.max_cells,
+            display_low_pct=args.display_low_pct,
+            display_high_pct=args.display_high_pct,
+            display_min=args.display_min,
+            display_max=args.display_max,
         )
         if report.failure is not None:
             print(f"{report.dataset}: FAILED — {report.failure}", file=sys.stderr)
             continue
         any_ok = True
+        rng = report.display_range
+        rng_s = f"display {rng[0]:.0f}–{rng[1]:.0f}" if rng else "display auto"
         print(
             f"{report.dataset}: {len(report.rows)} cell sheet(s) -> {out_dir}/  "
-            f"(grid {len(report.windows)}×{len(report.ks)}; fill in {out_dir}/labels.csv)"
+            f"(grid {len(report.windows)}×{len(report.ks)}, {rng_s}; "
+            f"fill in {out_dir}/labels.csv)"
         )
 
     return 0 if any_ok else 1

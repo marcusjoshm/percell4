@@ -8,6 +8,7 @@ from skimage.draw import disk
 from percell4.store import DatasetStore
 from percell4.workflows.per_cell_sweep import (
     CellSweep,
+    compute_display_range,
     normalize_grid,
     render_contact_sheet,
     run_per_cell_sweep,
@@ -111,12 +112,24 @@ def test_sweep_one_cell_unknown_id_raises():
 # ── render_contact_sheet ──────────────────────────────────────────────────
 
 
+def test_compute_display_range_is_global_and_overridable():
+    img, labels = _two_cell_dataset()
+    lo, hi = compute_display_range(img, labels, low_pct=1.0, high_pct=99.5)
+    # Range is taken over in-cell pixels of the whole image.
+    inside = img[labels > 0]
+    assert lo == float(np.percentile(inside, 1.0))
+    assert hi == float(np.percentile(inside, 99.5))
+    assert hi > lo
+    # Absolute overrides win.
+    assert compute_display_range(img, labels, vmin=10.0, vmax=200.0) == (10.0, 200.0)
+
+
 def test_render_contact_sheet_writes_png(tmp_path):
     img, labels = _two_cell_dataset()
     windows, ks = (15, 31), (2.0, 3.0)
     cell = sweep_one_cell(img, labels, 1, windows, ks, _fixed())
     out = tmp_path / "cell001.png"
-    render_contact_sheet(cell, windows, ks, out)
+    render_contact_sheet(cell, windows, ks, out, vmin=45.0, vmax=230.0)
     assert out.exists() and out.stat().st_size > 0
 
 
