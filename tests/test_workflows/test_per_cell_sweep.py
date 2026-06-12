@@ -155,6 +155,26 @@ def test_run_per_cell_sweep_end_to_end(tmp_path):
     assert len(lines) == 3  # header + 2 cells
 
 
+def test_run_per_cell_sweep_never_clobbers_filled_labels(tmp_path):
+    store = _make_store(tmp_path / "Test1.h5")
+    out = tmp_path / "sheets"
+    run_per_cell_sweep(store, "Channel", "Cellpose", (15,), (2.0,), _fixed(), out, min_cell_px=50)
+    labels = out / "labels.csv"
+    assert labels.exists() and (out / "labels_template.csv").exists()
+
+    # User fills it in.
+    filled = labels.read_text().replace("1,,,,", "1,31,1.5,,my pick")
+    labels.write_text(filled)
+
+    # Re-running the sweep into the same dir must NOT overwrite the filled labels.
+    run_per_cell_sweep(
+        store, "Channel", "Cellpose", (15, 31), (2.0,), _fixed(), out, min_cell_px=50
+    )
+    assert "my pick" in labels.read_text()  # preserved
+    # The blank template still refreshes on every run.
+    assert (out / "labels_template.csv").read_text().splitlines()[1].endswith(",,,,")
+
+
 def test_run_per_cell_sweep_missing_segmentation_is_failure(tmp_path):
     store = _make_store(tmp_path / "T.h5", with_seg=False)
     out = tmp_path / "sheets"

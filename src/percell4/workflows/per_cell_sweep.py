@@ -283,10 +283,15 @@ def render_contact_sheet(
 
 
 def write_index_and_template(rows: Sequence[CellIndexRow], out_dir: Path) -> tuple[Path, Path]:
-    """Write ``cells.csv`` (index) and ``labels.csv`` (empty pick template).
+    """Write ``cells.csv`` (index) and a blank ``labels_template.csv``.
 
-    ``cells.csv`` locates every cell + its sheet; ``labels.csv`` is the form the
-    user fills in (``best_window, best_k`` blank) and hands back for analysis.
+    ``cells.csv`` locates every cell + its sheet. The blank pick form is written
+    to ``labels_template.csv`` (always refreshed), and copied to ``labels.csv``
+    **only when ``labels.csv`` does not already exist** — so re-running the sweep
+    into a directory that already holds a hand-filled ``labels.csv`` never
+    overwrites the user's work. Returns ``(cells_path, labels_path)`` where
+    ``labels_path`` is the existing ``labels.csv`` if present, else the freshly
+    created one.
     """
     cells_path = out_dir / "cells.csv"
     with cells_path.open("w", newline="", encoding="utf-8") as f:
@@ -303,12 +308,22 @@ def write_index_and_template(rows: Sequence[CellIndexRow], out_dir: Path) -> tup
                     r.sheet,
                 ]
             )
-    labels_path = out_dir / "labels.csv"
-    with labels_path.open("w", newline="", encoding="utf-8") as f:
+
+    header = ["cell_id", "best_window", "best_k", "none_acceptable", "notes"]
+    template_path = out_dir / "labels_template.csv"
+    with template_path.open("w", newline="", encoding="utf-8") as f:
         wtr = csv.writer(f)
-        wtr.writerow(["cell_id", "best_window", "best_k", "none_acceptable", "notes"])
+        wtr.writerow(header)
         for r in rows:
             wtr.writerow([r.cell_id, "", "", "", ""])
+
+    labels_path = out_dir / "labels.csv"
+    if not labels_path.exists():  # never clobber a hand-filled labels.csv
+        with labels_path.open("w", newline="", encoding="utf-8") as f:
+            wtr = csv.writer(f)
+            wtr.writerow(header)
+            for r in rows:
+                wtr.writerow([r.cell_id, "", "", "", ""])
     return cells_path, labels_path
 
 
