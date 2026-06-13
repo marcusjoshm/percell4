@@ -53,6 +53,13 @@ class AdaptiveClipConfig:
     min_size_unit: str
     auto_window: bool
     noise_estimator: str = "mad"
+    # Particle-size mode. When ``particle_mode`` is True the run derives the
+    # window + size filter from ``d_min_um`` (smallest particle Ø, µm) and uses
+    # the per-cell detector with a robust per-cell MAD σ. ``k`` is still honored
+    # (the sensitivity knob, default 1.0); ``window_px`` / ``min_size_*`` /
+    # ``auto_window`` / ``noise_estimator`` are ignored in that mode.
+    particle_mode: bool = False
+    d_min_um: float = 0.40
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -82,6 +89,30 @@ class AdaptiveClipSettingsWidget(QWidget):
         )
         self._auto.toggled.connect(self._on_auto_toggled)
         layout.addWidget(self._auto)
+
+        # ── Particle-size mode (the one-knob "just works" detector) ──
+        self._particle = QCheckBox("Detect by smallest particle size")
+        self._particle.setToolTip(
+            "Drive the detector from ONE physical knob — the smallest particle "
+            "diameter (µm) you want to detect. Window and size filter are derived "
+            "from it and the noise floor is a robust per-cell MAD (so one setting "
+            "transfers across cells/datasets). k stays adjustable (defaults to 1; "
+            "raise it to be conservative). Needs an active segmentation and a "
+            "known pixel size."
+        )
+        self._particle.toggled.connect(self._on_particle_toggled)
+        layout.addWidget(self._particle)
+
+        dmin_row = QHBoxLayout()
+        dmin_row.addWidget(QLabel("Smallest particle Ø (µm):"))
+        self._d_min = QDoubleSpinBox()
+        self._d_min.setRange(0.02, 50.0)
+        self._d_min.setDecimals(3)
+        self._d_min.setSingleStep(0.05)
+        self._d_min.setValue(0.40)
+        self._d_min.setEnabled(False)  # off until particle mode is checked
+        dmin_row.addWidget(self._d_min)
+        layout.addLayout(dmin_row)
 
         # ── Adaptive window (px) ──
         win_row = QHBoxLayout()
@@ -150,11 +181,37 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._unit.currentIndexChanged.connect(self.config_changed)
         self._noise.currentIndexChanged.connect(self.config_changed)
         self._auto.toggled.connect(self.config_changed)
+        self._particle.toggled.connect(self.config_changed)
+        self._d_min.valueChanged.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
 
-    def _on_auto_toggled(self, checked: bool) -> None:
-        self._window.setEnabled(not checked)
+    def _on_auto_toggled(self, checked: bool) -> None:  # noqa: ARG002
+        self._apply_mode_gating()
+
+    def _on_particle_toggled(self, checked: bool) -> None:
+        # Adopt the validated one-knob default (k=1) when entering particle mode;
+        # it stays editable so the user can raise k to be conservative (fewer
+        # false positives, at the cost of missing dim sub-threshold particles).
+        if checked:
+            self._k.setValue(1.0)
+        self._apply_mode_gating()
+
+    def _apply_mode_gating(self) -> None:
+        """Enable/disable fields for the active mode.
+
+        Particle-size mode derives the spatial scale from ``d_min``, so window,
+        the size filter, the noise estimate and auto-window go disabled. ``k``
+        stays live in BOTH modes (the sensitivity knob), as do ``d_min`` and
+        Gaussian σ. Outside particle mode the window respects the auto-window
+        checkbox exactly as before.
+        """
+        particle = self._particle.isChecked()
+        self._d_min.setEnabled(particle)
+        for w in (self._min_size, self._unit, self._noise, self._auto):
+            w.setEnabled(not particle)
+        self._k.setEnabled(True)
+        self._window.setEnabled(not particle and not self._auto.isChecked())
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -168,6 +225,8 @@ class AdaptiveClipSettingsWidget(QWidget):
             min_size_unit=_UNIT_CODES[self._unit.currentText()],
             auto_window=self._auto.isChecked(),
             noise_estimator=_NOISE_CODES[self._noise.currentText()],
+            particle_mode=self._particle.isChecked(),
+            d_min_um=float(self._d_min.value()),
         )
 
     def set_window_value(self, window_px: int) -> None:
@@ -180,8 +239,19 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._window.setValue(int(window_px) | 1)
 
     def set_enabled(self, enabled: bool) -> None:
-        """Lock/unlock all widgets during a run (preserves the auto/window gate)."""
-        for widget in (self._auto, self._k, self._sigma, self._min_size, self._unit, self._noise):
+        """Lock/unlock all widgets during a run (preserves the active-mode gating)."""
+        for widget in (
+            self._auto,
+            self._k,
+            self._sigma,
+            self._min_size,
+            self._unit,
+            self._noise,
+            self._particle,
+            self._d_min,
+            self._window,
+        ):
             widget.setEnabled(enabled)
-        # The window field also respects the auto checkbox when re-enabling.
-        self._window.setEnabled(enabled and not self._auto.isChecked())
+        if enabled:
+            # Re-apply particle-mode / auto-window gating on top of the unlock.
+            self._apply_mode_gating()

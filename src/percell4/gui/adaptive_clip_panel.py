@@ -81,6 +81,35 @@ def run_adaptive_detection_stack(image, gaussian_sigma, settings, auto_window):
     return np.stack(frames, axis=0), windows
 
 
+def run_adaptive_detection_by_particle_size(
+    image, labels, pixel_size_um, d_min_um, k, presmooth_sigma_px
+):
+    """Worker body for the one-knob particle-size detector (per-cell).
+
+    Derives the window from ``d_min`` (returned for the status note) and runs the
+    eye-validated per-cell adaptive clip: window + size filter follow ``d_min``,
+    the noise floor is each cell's own robust MAD, and ``k`` is the caller's
+    sensitivity setting (defaults to 1 in the panel; raise to be conservative).
+    Returns ``(mask uint8, window_used int)``. Pure (no Qt) so it is worker-safe
+    and unit-testable.
+    """
+    from percell4.domain.measure.adaptive_clip import (
+        detect_adaptive_by_particle_size,
+        window_min_spot_for_particle,
+    )
+
+    window_used, _ = window_min_spot_for_particle(d_min_um, pixel_size_um)
+    mask = detect_adaptive_by_particle_size(
+        image,
+        labels,
+        pixel_size_um,
+        d_min_um,
+        k=k,
+        presmooth_sigma_px=presmooth_sigma_px,
+    )
+    return mask, window_used
+
+
 class AdaptiveClipPanel(QWidget):
     """Interactive Adaptive Local Clipping panel (Creator)."""
 
@@ -103,6 +132,8 @@ class AdaptiveClipPanel(QWidget):
         self._worker = None
         self._pending_name: str | None = None
         self._pending_auto = False
+        self._pending_particle = False
+        self._pending_d_min = 0.0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -171,6 +202,12 @@ class AdaptiveClipPanel(QWidget):
 
         config = self._settings.current_config()
 
+        # One-knob particle-size mode runs the per-cell detector (needs labels +
+        # a known pixel size); the manual path below stays whole-frame.
+        if config.particle_mode:
+            self._run_particle_mode(config, image, is_timelapse, store, viewer_win)
+            return
+
         # Resolve the particle-size filter to a px area (µm² needs calibration).
         from percell4.domain.measure.adaptive_clip import resolve_min_area_px
 
@@ -229,6 +266,80 @@ class AdaptiveClipPanel(QWidget):
         self._worker.error.connect(self._on_detect_error)
         self._worker.start()
 
+    def _run_particle_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
+        """Creator path for the one-knob particle-size detector (per-cell).
+
+        Requires a known pixel size (the window is physical) and an active
+        segmentation (σ is per-cell). Restricted to single-frame channels — the
+        per-cell loop expects 2D image + 2D labels.
+        """
+        if is_timelapse:
+            self._show_status("Particle-size mode supports single-frame channels only")
+            return
+
+        pixel_size_um = None
+        try:
+            pixel_size_um = store.metadata.get("pixel_size_um")
+        except Exception:  # noqa: BLE001 — missing/garbled metadata -> treat as absent
+            pixel_size_um = None
+        if not pixel_size_um or float(pixel_size_um) <= 0:
+            self._show_status(
+                "Particle-size mode needs a known pixel size (µm/px) on this dataset"
+            )
+            return
+
+        seg = self.data_model.session.active_segmentation
+        if not seg:
+            self._show_status("Particle-size mode needs an active segmentation")
+            return
+        labels = None
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == "Labels" and layer.name == seg:
+                labels = np.asarray(layer.data)
+                break
+        if labels is None:
+            self._show_status(f"Segmentation '{seg}' not found in viewer")
+            return
+        if labels.shape != image.shape:
+            self._show_status("Segmentation and channel shapes differ")
+            return
+
+        existing = store.list_masks() if hasattr(store, "list_masks") else []
+        mask_name = prompt_for_resource_name(
+            self,
+            title="Save Adaptive Clipping Mask",
+            label="Mask name:",
+            default="adaptive",
+            existing_names=existing,
+        )
+        if mask_name is None:
+            return
+
+        self._pending_name = mask_name
+        self._pending_auto = False
+        self._pending_particle = True
+        self._pending_d_min = float(config.d_min_um)
+        self._run_btn.setEnabled(False)
+        self._settings.set_enabled(False)
+        self._show_status(
+            f"Detecting (smallest particle {config.d_min_um:g} µm, per-cell)..."
+        )
+
+        from percell4.gui.workers import Worker
+
+        self._worker = Worker(
+            run_adaptive_detection_by_particle_size,
+            image,
+            labels,
+            float(pixel_size_um),
+            float(config.d_min_um),
+            float(config.k),  # sensitivity knob (defaults to 1; raise to be conservative)
+            config.gaussian_sigma,
+        )
+        self._worker.finished.connect(self._on_detect_done)
+        self._worker.error.connect(self._on_detect_error)
+        self._worker.start()
+
     def _on_detect_error(self, err) -> None:
         self._run_btn.setEnabled(True)
         self._settings.set_enabled(True)
@@ -260,10 +371,15 @@ class AdaptiveClipPanel(QWidget):
         if viewer_win is not None:
             viewer_win.add_mask(np.asarray(mask, dtype=np.uint8), name=name)
 
-        if self._pending_auto:
+        # Surface the window that was used (auto-estimated, or derived from d_min).
+        if self._pending_auto or self._pending_particle:
             self._settings.set_window_value(window_display)
 
-        if self._pending_auto:
+        if self._pending_particle:
+            win_note = (
+                f" (Ø {self._pending_d_min:g} µm → window {window_display} px, per-cell)"
+            )
+        elif self._pending_auto:
             win_note = (
                 f" (auto window {window_display}, per frame)"
                 if is_stack
@@ -271,4 +387,5 @@ class AdaptiveClipPanel(QWidget):
             )
         else:
             win_note = ""
+        self._pending_particle = False
         self._show_status(f"Saved '{name}': {res.n_positive:,} px{win_note}")

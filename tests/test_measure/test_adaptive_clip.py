@@ -9,11 +9,14 @@ from skimage.draw import disk
 from percell4.domain.measure.adaptive_clip import (
     AUTO_WINDOW_MAX,
     AUTO_WINDOW_MIN,
+    PARTICLE_WINDOW_MIN,
     auto_window,
+    detect_adaptive_by_particle_size,
     detect_adaptive_whole_frame,
     estimate_adaptive_window,
     otsu_first_pass,
     resolve_min_area_px,
+    window_min_spot_for_particle,
 )
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 from percell4.workflows.models import PunctaDetectorSettings
@@ -180,3 +183,117 @@ def test_resolve_min_area_px_um2_without_calibration_raises():
 def test_resolve_min_area_px_unknown_unit_raises():
     with pytest.raises(ValueError):
         resolve_min_area_px(1.0, "inches", 0.5)
+
+
+# ── particle-size knob: window_min_spot_for_particle ─────────────────────
+
+def test_window_min_spot_for_particle_eye_validated_values():
+    # The two condensate types validated 2026-06-12 @ 0.120369 µm/px.
+    # Stress granules: d_min 0.40 µm -> 21 px window, 9 px size filter (ON).
+    assert window_min_spot_for_particle(0.40, 0.120369) == (21, 9)
+    # P-bodies: d_min 0.14 µm -> 7 px window, 1 px size filter (OFF: keeps all).
+    assert window_min_spot_for_particle(0.14, 0.120369) == (7, 1)
+
+
+def test_window_min_spot_for_particle_scales_with_pixel_size():
+    # Same physical d_min at a 2x coarser pixel -> ~half the pixel window.
+    w_fine, _ = window_min_spot_for_particle(0.40, 0.120369)
+    w_coarse, ms_coarse = window_min_spot_for_particle(0.40, 0.240738)
+    assert w_coarse < w_fine
+    assert w_coarse % 2 == 1  # always odd
+    # min_spot scales with area (1/px^2): ~4x smaller at 2x coarser px.
+    assert ms_coarse == 2
+
+
+def test_window_min_spot_for_particle_window_floor_and_oddness():
+    # A sub-resolution d_min cannot drive the window below the self-subtraction
+    # floor, and the window is always odd.
+    w, ms = window_min_spot_for_particle(0.01, 0.120369)
+    assert w == PARTICLE_WINDOW_MIN
+    assert w % 2 == 1
+    assert ms == 1  # area of a 0.01 µm particle is sub-pixel -> filter OFF
+
+
+def test_window_min_spot_for_particle_rejects_bad_inputs():
+    with pytest.raises(ValueError):
+        window_min_spot_for_particle(0.40, 0.0)
+    with pytest.raises(ValueError):
+        window_min_spot_for_particle(0.0, 0.12)
+
+
+# ── particle-size knob: detect_adaptive_by_particle_size ─────────────────
+
+def _two_cells_different_scales():
+    """Two disk cells whose intensity scale differs ~6x, each with one blob.
+
+    The per-cell σ is the whole point: a single k must light up the blob in the
+    dim cell AND the bright cell despite their different noise scales.
+    """
+    shape = (160, 200)
+    rng = np.random.default_rng(7)
+    img = np.zeros(shape, dtype=np.float32)
+    labels = np.zeros(shape, dtype=np.int32)
+    # Cell 1 (dim): bg 20, noise 2, blob +40.
+    c1 = _disk_mask([(80, 55)], 45, shape=shape)
+    img[c1] = 20.0 + rng.normal(0.0, 2.0, size=int(c1.sum())).astype(np.float32)
+    labels[c1] = 1
+    # Cell 2 (bright): bg 120, noise 12, blob +240.
+    c2 = _disk_mask([(80, 150)], 45, shape=shape)
+    img[c2] = 120.0 + rng.normal(0.0, 12.0, size=int(c2.sum())).astype(np.float32)
+    labels[c2] = 2
+    for cy, cx, fg in [(80, 55, 60.0), (80, 150, 360.0)]:
+        rr, cc = disk((cy, cx), 5, shape=shape)
+        img[rr, cc] = fg
+    return img, labels, (80, 55), (80, 150)
+
+
+def test_detect_by_particle_size_is_binary_and_per_cell():
+    img, labels, blob1, blob2 = _two_cells_different_scales()
+    mask = detect_adaptive_by_particle_size(img, labels, 0.120369, 0.40)
+
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    assert mask.shape == img.shape
+    # Both blobs detected despite the ~6x intensity-scale gap (per-cell σ).
+    assert mask[blob1] == 1
+    assert mask[blob2] == 1
+    # Nothing detected outside the cells, and the dilute phase stays mostly off.
+    assert mask[2, 2] == 0
+    assert mask.mean() < 0.15
+
+
+def test_filter_by_area_keeps_components_at_or_above_min_spot():
+    # The size filter the d_min knob drives: keep area >= min_spot (so a particle
+    # exactly the smallest size is KEPT), drop smaller specks, no-op when off.
+    from percell4.domain.measure.adaptive_clip import _filter_by_area
+
+    m = np.zeros((20, 20), dtype=bool)
+    m[2:5, 2:5] = True  # 3x3 = 9 px component
+    m[10, 10] = True  # 1 px speck
+
+    off = _filter_by_area(m, 1)  # min_spot 1 -> filter OFF, both survive
+    assert off[3, 3] and off[10, 10]
+
+    keep9 = _filter_by_area(m, 9)  # keep area >= 9: block stays, speck goes
+    assert keep9[3, 3] and not keep9[10, 10]
+
+    keep10 = _filter_by_area(m, 10)  # 9-block now below threshold -> removed
+    assert not keep10[3, 3]
+
+
+def test_filter_by_area_uses_4_connectivity():
+    # Diagonal-touching pixels are SEPARATE components (matches the eye-validated
+    # remove_small_objects path), so two diagonal singletons are each < 2 and drop.
+    from percell4.domain.measure.adaptive_clip import _filter_by_area
+
+    m = np.zeros((10, 10), dtype=bool)
+    m[3, 3] = m[4, 4] = True  # diagonal neighbors
+    assert _filter_by_area(m, 2).sum() == 0
+
+
+def test_detect_by_particle_size_empty_labels_is_empty():
+    img = _blobs_image([(50, 50)], radius=6)
+    labels = np.zeros(img.shape, dtype=np.int32)
+    mask = detect_adaptive_by_particle_size(img, labels, 0.120369, 0.40)
+    assert mask.dtype == np.uint8
+    assert int(mask.sum()) == 0

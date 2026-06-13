@@ -64,8 +64,21 @@ def _blob_image(shape=(120, 120)) -> np.ndarray:
     return img
 
 
+def _labels_one_cell(shape=(120, 120)) -> np.ndarray:
+    # One cell covering the frame so the blobs fall inside it (per-cell σ).
+    return np.ones(shape, dtype=np.int32)
+
+
 def _build(
-    qtbot, monkeypatch, *, channel="mNG", pixel_size_um=None, existing=None, with_channel=True
+    qtbot,
+    monkeypatch,
+    *,
+    channel="mNG",
+    pixel_size_um=None,
+    existing=None,
+    with_channel=True,
+    segmentation=None,
+    labels=None,
 ):
     from percell4.domain.dataset import DatasetHandle
     from percell4.gui.adaptive_clip_panel import AdaptiveClipPanel
@@ -75,6 +88,8 @@ def _build(
     model.session.set_dataset(DatasetHandle(path=Path("/tmp/t.h5"), metadata={}))
     if channel:
         model.session.set_active_channel(channel)
+    if segmentation:
+        model.session.set_active_segmentation(segmentation)
 
     repo = FakeRepo()
     store = MagicMock()
@@ -89,6 +104,13 @@ def _build(
         layer.name = channel
         layer.data = _blob_image()
         layers.append(layer)
+    if segmentation:
+        lab_layer = MagicMock()
+        lab_layer.__class__ = type("Labels", (MagicMock,), {})
+        lab_layer.__class__.__name__ = "Labels"
+        lab_layer.name = segmentation
+        lab_layer.data = _labels_one_cell() if labels is None else labels
+        layers.append(lab_layer)
     viewer = MagicMock()
     viewer.layers = layers
     viewer_win = MagicMock()
@@ -221,3 +243,106 @@ def test_cancel_prompt_writes_nothing(qtbot, monkeypatch):
     panel._on_run()
     assert repo.masks == {}
     viewer_win.add_mask.assert_not_called()
+
+
+# ── particle-size (one-knob) mode ───────────────────────────────────────
+
+def test_particle_mode_creates_mask_via_per_cell_detector(qtbot, monkeypatch):
+    panel, model, repo, viewer_win = _build(
+        qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells"
+    )
+    panel._settings._particle.setChecked(True)
+    panel._settings._d_min.setValue(0.40)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "pbody")
+
+    panel._on_run()
+
+    # Ran the per-cell particle detector, not the whole-frame path.
+    assert panel._worker._fn is panel_module.run_adaptive_detection_by_particle_size
+    assert "pbody" in repo.masks
+    stored = repo.masks["pbody"]
+    assert stored.dtype == np.uint8
+    assert set(np.unique(stored)).issubset({0, 1})
+    assert int(stored.sum()) > 0
+    viewer_win.add_mask.assert_called_once()
+    assert model.session.active_mask == "pbody"
+
+
+def test_particle_mode_passes_d_min_pixel_size_and_k_to_worker(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    panel._settings._particle.setChecked(True)  # adopts the default k=1
+    panel._settings._d_min.setValue(0.14)
+    panel._settings._k.setValue(2.5)  # raise k to be conservative
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    # Worker args: (image, labels, pixel_size_um, d_min_um, k, presmooth).
+    args = panel._worker._args
+    assert args[2] == 0.120369
+    assert args[3] == 0.14
+    assert args[4] == 2.5  # the user's k flows through (not locked)
+
+
+def test_particle_mode_default_k_is_one(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    panel._settings._particle.setChecked(True)  # validated default
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    assert panel._worker._args[4] == 1.0
+
+
+def test_particle_mode_without_pixel_size_aborts(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(
+        qtbot, monkeypatch, pixel_size_um=None, segmentation="cells"
+    )
+    panel._settings._particle.setChecked(True)
+    called = []
+    monkeypatch.setattr(
+        panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
+    )
+
+    panel._on_run()
+
+    assert called == []  # aborted before the name prompt
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
+
+
+def test_particle_mode_without_segmentation_aborts(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(
+        qtbot, monkeypatch, pixel_size_um=0.120369, segmentation=None
+    )
+    panel._settings._particle.setChecked(True)
+    called = []
+    monkeypatch.setattr(
+        panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
+    )
+
+    panel._on_run()
+
+    assert called == []
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
+
+
+def test_particle_mode_timelapse_aborts(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(
+        qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells"
+    )
+    # Make the channel a (T, H, W) time-lapse; particle mode is single-frame only.
+    img3d = np.stack([_blob_image(), _blob_image()], axis=0)
+    for layer in viewer_win.viewer.layers:
+        if layer.__class__.__name__ == "Image":
+            layer.data = img3d
+    panel._get_store().metadata["n_timepoints"] = 2
+    panel._settings._particle.setChecked(True)
+    called = []
+    monkeypatch.setattr(
+        panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
+    )
+
+    panel._on_run()
+
+    assert called == []
+    assert repo.masks == {}

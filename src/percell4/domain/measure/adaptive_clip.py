@@ -22,6 +22,7 @@ the workflows layer at runtime.
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -51,10 +52,45 @@ AUTO_WINDOW_MAX = 151
 # excluded from the mean-diameter estimate.
 AUTO_WINDOW_NOISE_FLOOR_PX = 3
 
+# Eye-validated (2026-06-12, four datasets / two condensate types) ratio between
+# the local-background window and the smallest particle to detect. A pixel only
+# stands out from a Gaussian-blur local background once the blur scale (~window)
+# is several times the particle, so window ~= 6 * d_min: stress granules
+# (G3BP1) d_min ~= 0.40 um -> 21 px, P-bodies (DDX6) d_min ~= 0.14 um -> 7 px,
+# both @ 0.120369 um/px. See the project_adaptive_clip_per_cell_params memory.
+PARTICLE_WINDOW_FACTOR = 6.0
+# Window never drops below this (px): below ~3 px the local-background blur
+# starts subtracting the particle from itself (self-subtraction floor).
+PARTICLE_WINDOW_MIN = 3
+
 
 def _make_odd(n: int) -> int:
     """Nearest odd integer >= ``n`` (forces the local window to be odd)."""
     return int(n) | 1
+
+
+def _filter_by_area(mask: np.ndarray, min_spot_px: int) -> np.ndarray:
+    """Keep only connected components with area ``>= min_spot_px`` (boolean out).
+
+    Vectorized via ``np.bincount`` + a per-label boolean lookup (``O(H*W)``),
+    matching :func:`percell4.domain.measure.puncta_pipeline._size_filter`. A
+    ``min_spot_px <= 1`` request is a no-op (every component survives), which is
+    how the size filter auto-disables for sub-pixel particles.
+    """
+    m = np.asarray(mask) > 0
+    if min_spot_px <= 1:
+        return m
+    from skimage import measure
+
+    # connectivity=1 (face/4-connectivity) matches skimage.remove_small_objects,
+    # the eye-validated size-filter path. The puncta-pipeline _size_filter uses
+    # label's 8-connectivity default; here fidelity to the validated mask wins
+    # (diagonal-touching specks must NOT merge into a kept component).
+    lab = measure.label(m, connectivity=1)
+    counts = np.bincount(lab.ravel())
+    keep = counts >= min_spot_px
+    keep[0] = False  # background is never a kept component
+    return keep[lab]
 
 
 def detect_adaptive_whole_frame(
@@ -73,6 +109,116 @@ def detect_adaptive_whole_frame(
     smoothed = apply_gaussian_smoothing(img, gaussian_sigma)
     group = np.ones(smoothed.shape, dtype=bool)
     return detect_two_pass(smoothed, group, settings)
+
+
+def window_min_spot_for_particle(
+    d_min_um: float,
+    pixel_size_um: float,
+    *,
+    factor: float = PARTICLE_WINDOW_FACTOR,
+) -> tuple[int, int]:
+    """Derive the adaptive-clip ``(window_px, min_spot_px)`` from one physical knob.
+
+    ``d_min_um`` is the diameter (µm) of the *smallest* particle to detect — the
+    single parameter that distinguishes condensate types (stress granules vs the
+    much smaller P-bodies). Both spatial outputs follow from it:
+
+    * ``window_px = odd(round(factor * d_min / pixel))``, floored at
+      :data:`PARTICLE_WINDOW_MIN` — the local-background scale, ~``factor`` (6)×
+      the particle (a Gaussian-blur background must be several × the particle or
+      it subtracts the particle from itself).
+    * ``min_spot_px = round(area of one d_min particle) = round(pi*(d_min/2)^2 /
+      pixel^2)`` — the size filter. It falls to ``1`` (i.e. **OFF**, every
+      component kept) once ``d_min`` reaches the pixel/diffraction scale, so
+      diffraction-limited P-bodies are never deleted by a size filter that can't
+      tell a sub-pixel spot from a noise pixel anyway.
+
+    Specifying the rule in microns (not pixels) is what lets it transfer across
+    magnifications; ``pixel_size_um`` converts per image. Raises on a
+    non-positive pixel size.
+    """
+    if pixel_size_um <= 0:
+        raise ValueError(f"pixel_size_um must be > 0 µm/px, got {pixel_size_um}")
+    if d_min_um <= 0:
+        raise ValueError(f"d_min_um must be > 0 µm, got {d_min_um}")
+    window_px = max(
+        PARTICLE_WINDOW_MIN,
+        _make_odd(round(float(factor) * float(d_min_um) / float(pixel_size_um))),
+    )
+    min_spot_px = max(
+        1, int(round(math.pi * (float(d_min_um) / 2.0) ** 2 / float(pixel_size_um) ** 2))
+    )
+    return window_px, min_spot_px
+
+
+def detect_adaptive_by_particle_size(
+    image: np.ndarray,
+    labels: np.ndarray,
+    pixel_size_um: float,
+    d_min_um: float,
+    *,
+    k: float = 1.0,
+    presmooth_sigma_px: float = 1.0,
+    factor: float = PARTICLE_WINDOW_FACTOR,
+) -> np.ndarray:
+    """Per-cell adaptive local clip driven by one physical knob, ``d_min_um``.
+
+    The "just works" puncta detector: tell it the smallest particle you want
+    (µm) and it thresholds every Cellpose cell against *its own* noise floor.
+    ``d_min_um`` sets the local-background ``window`` and the size filter via
+    :func:`window_min_spot_for_particle`; everything else is fixed —
+
+    * **presmooth** ``sigma=1 px`` (noise suppression; a *fixed pixel* scale, not
+      physical, since pixel/shot noise does not scale with magnification),
+    * **background** = Gaussian local mean at ``sigma=(window-1)/6`` (the skimage
+      ``threshold_local('gaussian')`` / ``adaptive``-detector convention),
+    * **noise floor** = robust ``1.4826*MAD`` of the smoothed image, computed
+      **per cell** — the per-cell σ is what lets one ``k`` hold across cells whose
+      intensity scale varies many-fold (observed 3× within a field, 40× across
+      datasets),
+    * **k = 1**.
+
+    The local background (hence ``diff = work - background``) is computed over the
+    **whole frame once**; only σ is per-cell. Computing it per cell-crop instead
+    would distort the background within a window of each cell's bounding box —
+    exactly at the cell-edge granules. A pixel is foreground iff
+    ``diff > k*σ_cell`` inside its cell; components smaller than ``min_spot_px``
+    are dropped (a no-op for sub-pixel ``d_min``).
+
+    Eye-validated (2026-06-12) across four datasets / two condensate types:
+    stress granules (G3BP1) at ``d_min≈0.40 µm`` (window 21 px, size filter on)
+    and P-bodies (DDX6) at ``d_min≈0.14 µm`` (window 7 px, size filter off).
+    Returns a whole-frame ``{0, 1}`` ``uint8`` mask.
+    """
+    from scipy.ndimage import find_objects, gaussian_filter
+
+    img = np.asarray(image, dtype=np.float32)
+    lab = np.asarray(labels)
+    window_px, min_spot_px = window_min_spot_for_particle(
+        d_min_um, pixel_size_um, factor=factor
+    )
+
+    work = apply_gaussian_smoothing(img, presmooth_sigma_px)
+    # Local background = Gaussian mean at the threshold_local('gaussian') sigma.
+    # The constant global offset cancels in `diff`, so the per-cell comparison
+    # reduces to image > local_background + k*sigma (see adaptive_local_clip.ijm).
+    diff = work - gaussian_filter(work, (window_px - 1) / 6.0)
+
+    out = np.zeros(img.shape, dtype=bool)
+    for idx, sl in enumerate(find_objects(lab)):
+        if sl is None:
+            continue
+        cell = lab[sl] == (idx + 1)
+        if not cell.any():
+            continue
+        vals = work[sl][cell]
+        med = float(np.median(vals))
+        sigma = 1.4826 * float(np.median(np.abs(vals - med)))
+        if not np.isfinite(sigma) or sigma <= 0.0:
+            continue
+        out[sl] |= (diff[sl] > float(k) * sigma) & cell
+
+    return _filter_by_area(out, min_spot_px).astype(np.uint8)
 
 
 def _with_window(settings: PunctaDetectorSettings, window_px: int) -> PunctaDetectorSettings:

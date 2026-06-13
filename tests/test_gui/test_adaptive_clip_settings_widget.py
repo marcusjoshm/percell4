@@ -114,3 +114,63 @@ def test_set_enabled_respects_auto_gate(qtbot):
     assert w._k.isEnabled()
     w.set_enabled(False)
     assert not w._k.isEnabled()
+
+
+# ── particle-size (one-knob) mode ───────────────────────────────────────
+
+def test_particle_mode_defaults_and_snapshot(qtbot):
+    w = _widget(qtbot)
+    assert w.current_config().particle_mode is False
+    assert w.current_config().d_min_um == 0.40
+    w._particle.setChecked(True)
+    w._d_min.setValue(0.14)
+    cfg = w.current_config()
+    assert cfg.particle_mode is True
+    assert cfg.d_min_um == 0.14
+
+
+def test_particle_mode_gates_fields(qtbot):
+    w = _widget(qtbot)
+    assert not w._d_min.isEnabled()  # off until particle mode is checked
+    w._particle.setChecked(True)
+    assert w._d_min.isEnabled()
+    # window / size / unit / noise / auto are derived or fixed -> disabled.
+    for widget in (w._window, w._min_size, w._unit, w._noise, w._auto):
+        assert not widget.isEnabled()
+    # k and Gaussian σ stay live (sensitivity + noise-suppression knobs).
+    assert w._k.isEnabled()
+    assert w._sigma.isEnabled()
+    # Unchecking restores manual gating (window live, k live).
+    w._particle.setChecked(False)
+    assert not w._d_min.isEnabled()
+    assert w._k.isEnabled()
+    assert w._window.isEnabled()
+
+
+def test_particle_mode_adopts_default_k_one_but_stays_editable(qtbot):
+    w = _widget(qtbot)
+    w._k.setValue(2.25)
+    w._particle.setChecked(True)
+    assert w.current_config().k == 1.0  # validated one-knob default on entry
+    w._k.setValue(3.0)  # raise to be conservative
+    assert w.current_config().k == 3.0
+
+
+def test_set_enabled_respects_particle_gate(qtbot):
+    w = _widget(qtbot)
+    w._particle.setChecked(True)
+    w.set_enabled(True)
+    assert w._d_min.isEnabled()
+    assert not w._window.isEnabled()
+    assert w._k.isEnabled()  # k is a live knob in particle mode
+    w.set_enabled(False)
+    assert not w._d_min.isEnabled()
+
+
+def test_config_changed_fires_on_particle_edits(qtbot):
+    w = _widget(qtbot)
+    fired = []
+    w.config_changed.connect(lambda: fired.append(1))
+    w._particle.setChecked(True)
+    w._d_min.setValue(0.2)
+    assert len(fired) >= 2
