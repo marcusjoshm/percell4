@@ -17,6 +17,7 @@ from percell4.domain.measure.grouper import GroupingResult
 from percell4.store import DatasetStore
 from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
     CellposeSettings,
     DatasetSource,
     IterativeOtsuSettings,
@@ -431,6 +432,55 @@ def test_threshold_compute_empty_labels(tmp_path):
         kmeans_n_clusters=2,
     )
     result, failure, msg = threshold_compute_one(store, round_spec)
+    assert result is None
+    assert failure is DatasetFailure.THRESHOLD_EMPTY
+
+
+# ── threshold_compute_one: adaptive-clip trivial grouping (U7) ───────────
+
+
+def _adaptive_round(**overrides) -> ThresholdingRound:
+    defaults = dict(
+        name="ac",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.40),
+    )
+    defaults.update(overrides)
+    return ThresholdingRound(**defaults)
+
+
+def test_threshold_compute_adaptive_trivial_grouping(fixture_store_with_labels):
+    """An adaptive round returns a single-group result over all cells."""
+    result, failure, msg = threshold_compute_one(fixture_store_with_labels, _adaptive_round())
+    assert failure is None
+    assert isinstance(result, GroupingResult)
+    assert result.n_groups == 1
+    # Every cell is assigned to group 1.
+    assert set(result.group_assignments.unique()) == {1}
+    assert len(result.group_assignments) == 12
+
+
+def test_threshold_compute_adaptive_bypasses_cluster_gate(tmp_path):
+    """Adaptive rounds are not gated by clustering — a single-cell dataset that
+    grouped-Otsu would drop as THRESHOLD_EMPTY still yields a trivial grouping."""
+    store = _make_fixture_h5(tmp_path / "one_cell.h5", n_cells=1)
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[5:11, 5:11] = 1
+    store.write_labels("cellpose_qc", labels)
+    result, failure, msg = threshold_compute_one(store, _adaptive_round())
+    assert failure is None
+    assert result.n_groups == 1
+    assert set(result.group_assignments.unique()) == {1}
+
+
+def test_threshold_compute_adaptive_empty_labels(tmp_path):
+    """No cells is still THRESHOLD_EMPTY even for an adaptive round."""
+    store = _make_fixture_h5(tmp_path / "empty.h5")
+    store.write_labels("cellpose_qc", np.zeros((60, 60), dtype=np.int32))
+    result, failure, msg = threshold_compute_one(store, _adaptive_round())
     assert result is None
     assert failure is DatasetFailure.THRESHOLD_EMPTY
 

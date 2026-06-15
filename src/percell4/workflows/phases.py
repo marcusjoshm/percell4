@@ -444,6 +444,24 @@ def track_one(
 # ── Phase 3/5/...: Threshold compute + headless apply ──────────────────
 
 
+def _trivial_grouping(cell_labels: NDArray) -> GroupingResult:
+    """A single-group :class:`GroupingResult` placing every cell in group 1.
+
+    Used by adaptive-clip rounds, which threshold per cell and do not use
+    intensity grouping at all. Building this lets such a round populate the
+    grouping cache (so the apply phase always runs) without spending — or being
+    gated by — GMM/k-means clustering on an unused metric. ``group_means`` is a
+    placeholder (the per-cell detector never reads it).
+    """
+    ids = np.asarray(cell_labels, dtype=np.int32)
+    assignments = pd.Series(
+        data=np.ones(len(ids), dtype=int),
+        index=pd.Index(ids, name="label"),
+        name="group",
+    )
+    return GroupingResult(group_assignments=assignments, n_groups=1, group_means=[0.0])
+
+
 def _group_image_labels(
     image: NDArray, labels: NDArray, round_spec: ThresholdingRound
 ) -> tuple[GroupingResult | None, DatasetFailure | None, str]:
@@ -451,9 +469,18 @@ def _group_image_labels(
 
     Returns ``(GroupingResult | None, failure, message)``. Shared by the
     single-frame and per-timepoint threshold-compute paths.
+
+    Adaptive-clip rounds short-circuit to a trivial single-group result (the
+    per-cell detector ignores grouping) so a clustering/measure failure on an
+    unused metric can never drop a dataset or timepoint the detector would have
+    thresholded.
     """
     if int(labels.max()) == 0:
         return None, DatasetFailure.THRESHOLD_EMPTY, "no cells"
+    if round_spec.adaptive_clip is not None:
+        ids = np.unique(labels)
+        ids = ids[ids != 0]
+        return _trivial_grouping(ids), None, "adaptive: trivial single group"
     try:
         measure_df = measure_cells(image, labels, metrics=[round_spec.metric])
     except Exception as e:
