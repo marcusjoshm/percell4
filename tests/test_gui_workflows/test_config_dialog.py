@@ -16,6 +16,14 @@ import pytest
 from qtpy.QtWidgets import QMessageBox
 
 from percell4.gui.workflows.single_cell.config_dialog import (
+    _METHOD_ADAPTIVE,
+    _METHOD_GROUPED,
+    _ROUND_COL_ALGO,
+    _ROUND_COL_DMIN,
+    _ROUND_COL_GMM_MAX,
+    _ROUND_COL_K,
+    _ROUND_COL_KMEANS_K,
+    _ROUND_COL_METHOD,
     WorkflowConfigDialog,
     _PendingDataset,
 )
@@ -241,9 +249,9 @@ def test_round_name_valid_regex_clears_tooltip(dialog, h5_ds1):
 def test_algo_toggles_enabled_spinboxes(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    algo_combo = dialog._rounds_table.cellWidget(0, 3)
-    gmm_spin = dialog._rounds_table.cellWidget(0, 4)
-    kmeans_spin = dialog._rounds_table.cellWidget(0, 5)
+    algo_combo = dialog._rounds_table.cellWidget(0, _ROUND_COL_ALGO)
+    gmm_spin = dialog._rounds_table.cellWidget(0, _ROUND_COL_GMM_MAX)
+    kmeans_spin = dialog._rounds_table.cellWidget(0, _ROUND_COL_KMEANS_K)
 
     # Default: GMM → gmm_max enabled, kmeans_k disabled
     assert gmm_spin.isEnabled() is True
@@ -252,6 +260,82 @@ def test_algo_toggles_enabled_spinboxes(dialog, h5_ds1):
     algo_combo.setCurrentText(ThresholdAlgorithm.KMEANS.value)
     assert gmm_spin.isEnabled() is False
     assert kmeans_spin.isEnabled() is True
+
+
+# ── Method picker: adaptive sigma clipping (U5) ─────────────────────────
+
+
+def _make_h5_with_pixel_size(tmp_path, name, channels, pixel_size_um=0.12):
+    path = tmp_path / f"{name}.h5"
+    store = DatasetStore(path)
+    meta = {"channel_names": channels}
+    if pixel_size_um is not None:
+        meta["pixel_size_um"] = pixel_size_um
+    store.create(metadata=meta)
+    store.write_array(
+        "intensity", np.ones((len(channels), 16, 16), dtype=np.float32),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+    return path
+
+
+def test_method_default_builds_legacy_round(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].adaptive_clip is None
+
+
+def test_adaptive_method_builds_adaptive_round(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.40)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_K).setValue(1.5)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].adaptive_clip is not None
+    assert rounds[0].adaptive_clip.d_min_um == 0.40
+    assert rounds[0].adaptive_clip.k == 1.5
+    # The other two method sentinels stay clear (no mutual-exclusion trip).
+    assert rounds[0].puncta is None
+    assert rounds[0].iterative_otsu is None
+
+
+def test_method_switch_toggles_columns_and_retains_values(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    gmm = dialog._rounds_table.cellWidget(0, _ROUND_COL_GMM_MAX)
+    dmin = dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN)
+    gmm.setValue(7)  # user input on the grouping side
+
+    method.setCurrentText(_METHOD_ADAPTIVE)
+    assert dmin.isEnabled() is True
+    assert gmm.isEnabled() is False  # grouping greyed under adaptive
+    assert gmm.value() == 7  # value retained while greyed
+
+    method.setCurrentText(_METHOD_GROUPED)
+    assert dmin.isEnabled() is False
+    assert gmm.value() == 7  # still retained
+
+
+def test_adaptive_dmin_minimum_is_positive(dialog, h5_ds1):
+    """d_min can never be set to <= 0, so the AdaptiveClipSettings invariant
+    cannot be violated from the UI."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dmin = dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN)
+    assert dmin.minimum() > 0
+    dmin.setValue(0.0)  # clamped to the minimum
+    assert dmin.value() > 0
+
+
+def test_datasets_without_pixel_size_flags_missing(dialog, tmp_path):
+    with_ps = _make_h5_with_pixel_size(tmp_path, "HasPS", ["GFP"], pixel_size_um=0.12)
+    no_ps = _make_h5_with_pixel_size(tmp_path, "NoPS", ["GFP"], pixel_size_um=None)
+    dialog._add_h5_paths([with_ps, no_ps])
+    missing = dialog._datasets_without_pixel_size(dialog._pending_datasets)
+    assert missing == ["NoPS"]
 
 
 # ── Column picker ───────────────────────────────────────────────────────

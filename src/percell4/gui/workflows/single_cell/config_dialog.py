@@ -70,6 +70,7 @@ from percell4.workflows.csv_columns import (
     build_selected_csv_columns,
 )
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
     CellposeSettings,
     DatasetSource,
     DiluteSettings,
@@ -143,20 +144,31 @@ _ROUND_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{0,39}$")
 _ROUND_COL_NAME = 0
 _ROUND_COL_CHANNEL = 1
 _ROUND_COL_METRIC = 2
-_ROUND_COL_ALGO = 3
-_ROUND_COL_GMM_MAX = 4
-_ROUND_COL_KMEANS_K = 5
-_ROUND_COL_SIGMA = 6
-_ROUND_COL_COUNT = 7
+_ROUND_COL_METHOD = 3
+_ROUND_COL_ALGO = 4
+_ROUND_COL_GMM_MAX = 5
+_ROUND_COL_KMEANS_K = 6
+_ROUND_COL_SIGMA = 7
+_ROUND_COL_DMIN = 8
+_ROUND_COL_K = 9
+_ROUND_COL_COUNT = 10
 _ROUND_COL_HEADERS = (
     "Name",
     "Channel",
     "Metric",
+    "Method",
     "Algorithm",
     "GMM max",
     "K-means K",
     "σ",
+    "d_min (µm)",
+    "k",
 )
+
+# Method dropdown labels. "Grouped Otsu" is the default (the legacy per-group
+# path); "Adaptive sigma clipping" carries an AdaptiveClipSettings sentinel.
+_METHOD_GROUPED = "Grouped Otsu"
+_METHOD_ADAPTIVE = "Adaptive sigma clipping"
 
 
 # ── Internal per-dataset record ──────────────────────────────────────────
@@ -759,10 +771,13 @@ class WorkflowConfigDialog(QDialog):
             _ROUND_COL_NAME: 110,
             _ROUND_COL_CHANNEL: 150,
             _ROUND_COL_METRIC: 190,
+            _ROUND_COL_METHOD: 170,
             _ROUND_COL_ALGO: 110,
             _ROUND_COL_GMM_MAX: 100,
             _ROUND_COL_KMEANS_K: 100,
             _ROUND_COL_SIGMA: 90,
+            _ROUND_COL_DMIN: 100,
+            _ROUND_COL_K: 70,
         }
         for col, width in _initial_round_col_widths.items():
             self._rounds_table.setColumnWidth(col, width)
@@ -1306,6 +1321,22 @@ class WorkflowConfigDialog(QDialog):
         metric_combo.setCurrentText("median_intensity")
         self._rounds_table.setCellWidget(row, _ROUND_COL_METRIC, metric_combo)
 
+        # Method combo — Grouped Otsu vs per-cell Adaptive sigma clipping.
+        # Selecting Adaptive greys the grouping columns (GMM/K-means) and enables
+        # the d_min/k columns; Grouped Otsu does the inverse.
+        method_combo = QComboBox()
+        method_combo.addItems([_METHOD_GROUPED, _METHOD_ADAPTIVE])
+        method_combo.setToolTip(
+            "Grouped Otsu: per-intensity-group Otsu (uses Algorithm/GMM/K-means).\n"
+            "Adaptive sigma clipping: per-cell detector driven by the smallest "
+            "particle diameter (d_min, µm) and a robust per-cell noise floor; "
+            "ignores grouping and needs a pixel size on each dataset."
+        )
+        method_combo.currentTextChanged.connect(
+            lambda _text, r=row: self._update_method_columns_enabled(r)
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_METHOD, method_combo)
+
         # Algorithm combo — toggles which of gmm_max / kmeans_k is enabled.
         algo_combo = QComboBox()
         algo_combo.addItems(
@@ -1328,14 +1359,31 @@ class WorkflowConfigDialog(QDialog):
         kmeans_spin.setValue(3)
         self._rounds_table.setCellWidget(row, _ROUND_COL_KMEANS_K, kmeans_spin)
 
-        # Gaussian sigma
+        # Gaussian sigma (shared: pre-threshold smoothing for grouped Otsu; the
+        # detector's presmooth for adaptive clipping).
         sigma_spin = QDoubleSpinBox()
         sigma_spin.setRange(0.0, 20.0)
         sigma_spin.setSingleStep(0.1)
         sigma_spin.setValue(0.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_SIGMA, sigma_spin)
 
-        self._update_algo_columns_enabled(row)
+        # d_min (µm) — smallest particle diameter for adaptive clipping. The
+        # positive minimum makes an invalid (<= 0) value structurally impossible.
+        dmin_spin = QDoubleSpinBox()
+        dmin_spin.setRange(0.02, 50.0)
+        dmin_spin.setDecimals(3)
+        dmin_spin.setSingleStep(0.05)
+        dmin_spin.setValue(0.40)
+        self._rounds_table.setCellWidget(row, _ROUND_COL_DMIN, dmin_spin)
+
+        # k — adaptive sigma multiplier.
+        k_spin = QDoubleSpinBox()
+        k_spin.setRange(0.0, 20.0)
+        k_spin.setSingleStep(0.25)
+        k_spin.setValue(1.0)
+        self._rounds_table.setCellWidget(row, _ROUND_COL_K, k_spin)
+
+        self._update_method_columns_enabled(row)
         self._refresh_column_picker()
         self._update_start_enabled()
 
@@ -1396,6 +1444,9 @@ class WorkflowConfigDialog(QDialog):
             "algorithm": self._rounds_table.cellWidget(
                 row, _ROUND_COL_ALGO
             ).currentText(),
+            "method": self._rounds_table.cellWidget(
+                row, _ROUND_COL_METHOD
+            ).currentText(),
             "gmm_max": self._rounds_table.cellWidget(
                 row, _ROUND_COL_GMM_MAX
             ).value(),
@@ -1404,6 +1455,12 @@ class WorkflowConfigDialog(QDialog):
             ).value(),
             "sigma": self._rounds_table.cellWidget(
                 row, _ROUND_COL_SIGMA
+            ).value(),
+            "d_min_um": self._rounds_table.cellWidget(
+                row, _ROUND_COL_DMIN
+            ).value(),
+            "k": self._rounds_table.cellWidget(
+                row, _ROUND_COL_K
             ).value(),
         }
 
@@ -1421,6 +1478,9 @@ class WorkflowConfigDialog(QDialog):
             row, _ROUND_COL_ALGO
         ).setCurrentText(data["algorithm"])
         self._rounds_table.cellWidget(
+            row, _ROUND_COL_METHOD
+        ).setCurrentText(data.get("method", _METHOD_GROUPED))
+        self._rounds_table.cellWidget(
             row, _ROUND_COL_GMM_MAX
         ).setValue(int(data["gmm_max"]))
         self._rounds_table.cellWidget(
@@ -1429,19 +1489,49 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.cellWidget(
             row, _ROUND_COL_SIGMA
         ).setValue(float(data["sigma"]))
-        self._update_algo_columns_enabled(row)
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_DMIN
+        ).setValue(float(data.get("d_min_um", 0.40)))
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_K
+        ).setValue(float(data.get("k", 1.0)))
+        self._update_method_columns_enabled(row)
+
+    def _is_adaptive_row(self, row: int) -> bool:
+        method_combo = self._rounds_table.cellWidget(row, _ROUND_COL_METHOD)
+        return method_combo is not None and method_combo.currentText() == _METHOD_ADAPTIVE
 
     def _update_algo_columns_enabled(self, row: int) -> None:
+        """Grey GMM-max / K-means-K per the Algorithm combo — but only when the
+        round is a Grouped Otsu round. Adaptive rounds keep both greyed (the
+        per-cell detector ignores intensity grouping). Values are retained either
+        way, so switching back restores prior input."""
         algo_combo = self._rounds_table.cellWidget(row, _ROUND_COL_ALGO)
         if algo_combo is None:
             return
+        adaptive = self._is_adaptive_row(row)
         is_gmm = algo_combo.currentText() == ThresholdAlgorithm.GMM.value
         gmm_spin = self._rounds_table.cellWidget(row, _ROUND_COL_GMM_MAX)
         kmeans_spin = self._rounds_table.cellWidget(row, _ROUND_COL_KMEANS_K)
         if gmm_spin is not None:
-            gmm_spin.setEnabled(is_gmm)
+            gmm_spin.setEnabled(not adaptive and is_gmm)
         if kmeans_spin is not None:
-            kmeans_spin.setEnabled(not is_gmm)
+            kmeans_spin.setEnabled(not adaptive and not is_gmm)
+
+    def _update_method_columns_enabled(self, row: int) -> None:
+        """Gate columns by the Method combo. Adaptive greys Algorithm + grouping
+        columns and enables d_min/k; Grouped Otsu does the inverse. Cell values
+        are retained when greyed so toggling Method back restores prior input."""
+        adaptive = self._is_adaptive_row(row)
+        algo_combo = self._rounds_table.cellWidget(row, _ROUND_COL_ALGO)
+        if algo_combo is not None:
+            algo_combo.setEnabled(not adaptive)
+        for col in (_ROUND_COL_DMIN, _ROUND_COL_K):
+            w = self._rounds_table.cellWidget(row, col)
+            if w is not None:
+                w.setEnabled(adaptive)
+        # GMM/K-means enablement depends on both Method and Algorithm.
+        self._update_algo_columns_enabled(row)
 
     def _on_round_item_changed(self, item: QTableWidgetItem) -> None:
         """Live-validate the Name column against the round-name regex."""
@@ -1867,6 +1957,23 @@ class WorkflowConfigDialog(QDialog):
                 self._warn(str(e))
                 return None
 
+            # Pre-flight: the per-cell adaptive window is physical (µm), so any
+            # adaptive round needs a pixel size on each dataset. Catch it now
+            # rather than as a per-dataset failure after a long run. Only h5
+            # datasets can be checked up front (tiff_pending datasets are
+            # compressed during the run); their pixel size is enforced by the
+            # runtime backstop in apply_threshold_headless.
+            if any(r.adaptive_clip is not None for r in rounds):
+                missing = self._datasets_without_pixel_size(kept_datasets)
+                if missing:
+                    self._warn(
+                        "Adaptive sigma clipping needs a pixel size (µm/px) on every "
+                        "dataset, but it is missing on: " + ", ".join(missing) + ". "
+                        "Set the pixel size on these datasets, or remove the adaptive "
+                        "round."
+                    )
+                    return None
+
         # Cellpose settings — read from the shared form.
         try:
             cellpose = self._cp_form.settings()
@@ -2067,6 +2174,14 @@ class WorkflowConfigDialog(QDialog):
                 algo = ThresholdAlgorithm(data["algorithm"])
             except ValueError as e:
                 raise ValueError(f"Round {row + 1}: {e}") from e
+            # Selecting Adaptive carries an AdaptiveClipSettings sentinel and
+            # explicitly clears the other method fields, so a row reconfigured
+            # from another method does not trip the mutual-exclusion check.
+            adaptive = None
+            if data.get("method") == _METHOD_ADAPTIVE:
+                adaptive = AdaptiveClipSettings(
+                    d_min_um=float(data["d_min_um"]), k=float(data["k"])
+                )
             try:
                 rounds.append(
                     ThresholdingRound(
@@ -2078,11 +2193,29 @@ class WorkflowConfigDialog(QDialog):
                         gmm_max_components=int(data["gmm_max"]),
                         kmeans_n_clusters=int(data["kmeans_k"]),
                         gaussian_sigma=float(data["sigma"]),
+                        adaptive_clip=adaptive,
                     )
                 )
             except ValueError as e:
                 raise ValueError(f"Round {row + 1}: {e}") from e
         return rounds
+
+    def _datasets_without_pixel_size(self, kept_datasets: list[Any]) -> list[str]:
+        """Names of h5_existing datasets that lack a usable pixel_size_um.
+
+        tiff_pending datasets are skipped (no h5 yet); a dataset whose store
+        cannot be opened is reported as missing so the user investigates."""
+        missing: list[str] = []
+        for pd_ in kept_datasets:
+            if pd_.source is not DatasetSource.H5_EXISTING:
+                continue
+            try:
+                ps = DatasetStore(pd_.h5_path).metadata.get("pixel_size_um")
+            except Exception:
+                ps = None
+            if not ps or float(ps) <= 0:
+                missing.append(pd_.display_name)
+        return missing
 
     def _build_selected_csv_columns(
         self,
