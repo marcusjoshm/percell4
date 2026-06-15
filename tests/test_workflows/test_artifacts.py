@@ -21,6 +21,7 @@ from percell4.workflows.artifacts import (
 )
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
     CellposeSettings,
     DatasetSource,
     GmmCriterion,
@@ -493,6 +494,64 @@ def test_pre_evolution_round_without_puncta_loads_as_otsu() -> None:
     }
     r = _round_from_dict(legacy_round)
     assert r.puncta is None
+
+
+def test_adaptive_clip_round_round_trips() -> None:
+    """An adaptive-clip round survives to_dict → from_dict with params intact."""
+    r = ThresholdingRound(
+        name="SG",
+        channel="RFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        gaussian_sigma=2.0,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.40, k=1.5),
+    )
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
+    assert restored.adaptive_clip is not None
+    assert restored.adaptive_clip.d_min_um == 0.40
+    assert restored.adaptive_clip.k == 1.5
+    # gaussian_sigma (the presmooth) survives too.
+    assert restored.gaussian_sigma == 2.0
+
+
+def test_legacy_round_omits_adaptive_clip_key() -> None:
+    r = ThresholdingRound(
+        name="GFP_bright",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.GMM,
+    )
+    assert "adaptive_clip" not in _round_to_dict(r)
+    assert _round_from_dict(_round_to_dict(r)).adaptive_clip is None
+
+
+def test_adaptive_clip_mixed_with_legacy_round_round_trips() -> None:
+    """A config mixing an adaptive round and a legacy Otsu round round-trips both."""
+    from percell4.workflows.artifacts import config_from_dict, config_to_dict
+
+    cfg = _sample_config()
+    cfg = replace(
+        cfg,
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="ac",
+                channel="GFP",
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.KMEANS,
+                adaptive_clip=AdaptiveClipSettings(d_min_um=0.14),
+            ),
+            ThresholdingRound(
+                name="otsu",
+                channel="GFP",
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.GMM,
+            ),
+        ],
+    )
+    restored = config_from_dict(config_to_dict(cfg))
+    assert restored.thresholding_rounds[0].adaptive_clip.d_min_um == 0.14
+    assert restored.thresholding_rounds[1].adaptive_clip is None
 
 
 def test_puncta_round_round_trips_with_real_tuple_and_dict_params() -> None:

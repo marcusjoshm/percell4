@@ -24,6 +24,7 @@ from typing import Any
 
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
     CellposeSettings,
     DatasetSource,
     DiluteSettings,
@@ -225,6 +226,14 @@ def _iterative_otsu_from_dict(d: dict[str, Any]) -> IterativeOtsuSettings:
     )
 
 
+def _adaptive_clip_to_dict(s: AdaptiveClipSettings) -> dict[str, Any]:
+    return {"d_min_um": s.d_min_um, "k": s.k}
+
+
+def _adaptive_clip_from_dict(d: dict[str, Any]) -> AdaptiveClipSettings:
+    return AdaptiveClipSettings(d_min_um=d["d_min_um"], k=d.get("k", 1.0))
+
+
 def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
     out: dict[str, Any] = {
         "name": r.name,
@@ -236,19 +245,22 @@ def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
         "kmeans_n_clusters": r.kmeans_n_clusters,
         "gaussian_sigma": r.gaussian_sigma,
     }
-    # Additive: only emitted for puncta / iterative-otsu rounds so legacy configs
-    # round-trip unchanged and old run_config.json files keep loading (the absent
-    # keys reconstruct as a legacy Otsu round via _round_from_dict).
+    # Additive: only emitted for puncta / iterative-otsu / adaptive-clip rounds so
+    # legacy configs round-trip unchanged and old run_config.json files keep
+    # loading (the absent keys reconstruct as a legacy Otsu round).
     if r.puncta is not None:
         out["puncta_detector"] = _puncta_to_dict(r.puncta)
     if r.iterative_otsu is not None:
         out["iterative_otsu"] = _iterative_otsu_to_dict(r.iterative_otsu)
+    if r.adaptive_clip is not None:
+        out["adaptive_clip"] = _adaptive_clip_to_dict(r.adaptive_clip)
     return out
 
 
 def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
     puncta_raw = d.get("puncta_detector")
     iterative_raw = d.get("iterative_otsu")
+    adaptive_raw = d.get("adaptive_clip")
     return ThresholdingRound(
         name=d["name"],
         channel=d["channel"],
@@ -261,6 +273,9 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
         puncta=_puncta_from_dict(puncta_raw) if puncta_raw is not None else None,
         iterative_otsu=(
             _iterative_otsu_from_dict(iterative_raw) if iterative_raw is not None else None
+        ),
+        adaptive_clip=(
+            _adaptive_clip_from_dict(adaptive_raw) if adaptive_raw is not None else None
         ),
     )
 
