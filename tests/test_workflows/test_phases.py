@@ -485,6 +485,118 @@ def test_threshold_compute_adaptive_empty_labels(tmp_path):
     assert failure is DatasetFailure.THRESHOLD_EMPTY
 
 
+# ── apply_threshold_headless: adaptive-clip (U2) ─────────────────────────
+
+
+def _make_adaptive_store(path: Path, pixel_size_um: float | None = 0.12) -> DatasetStore:
+    """One large cell with a non-constant background (so per-cell MAD > 0) and a
+    bright blob that the per-cell adaptive detector should pick up."""
+    store = DatasetStore(path)
+    meta = {"channel_names": ["GFP"]}
+    if pixel_size_um is not None:
+        meta["pixel_size_um"] = pixel_size_um
+    store.create(metadata=meta)
+
+    img = np.zeros((1, 100, 100), dtype=np.float32)
+    rows = np.arange(100).reshape(-1, 1)
+    # Low-level structured background (10/11/12) so MAD is non-zero inside cells.
+    img[0, 20:60, 20:60] = 10 + (rows[20:60] % 3)
+    img[0, 35:45, 35:45] = 200.0  # bright blob well above k*sigma
+    store.write_array("intensity", img, attrs={"dims": ["C", "H", "W"]})
+
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[20:60, 20:60] = 1
+    store.write_labels("cellpose_qc", labels)
+    return store
+
+
+def _adaptive_apply_round(**overrides) -> ThresholdingRound:
+    defaults = dict(
+        name="ac",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=1.0,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.12),
+    )
+    defaults.update(overrides)
+    return ThresholdingRound(**defaults)
+
+
+def test_apply_adaptive_clip_writes_binary_mask_and_degenerate_groups(tmp_path):
+    store = _make_adaptive_store(tmp_path / "ac.h5")
+    round_spec = _adaptive_apply_round()
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+
+    mask = store.read_mask("ac")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    assert mask.sum() > 0  # the bright blob is detected
+    # Foreground only inside the cell.
+    assert mask[:20].sum() == 0 and mask[60:].sum() == 0
+    # /groups is a single degenerate group.
+    groups = store.read_dataframe("/groups/ac")
+    assert set(groups["group_GFP_mean_intensity"].unique()) == {1}
+
+
+def test_apply_adaptive_clip_missing_pixel_size_fails_dataset(tmp_path):
+    store = _make_adaptive_store(tmp_path / "no_ps.h5", pixel_size_um=None)
+    round_spec = _adaptive_apply_round()
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is DatasetFailure.THRESHOLD_ERROR
+    assert "pixel size" in msg
+    assert "ac" not in store.list_masks()
+
+
+def test_apply_adaptive_clip_zero_pixel_size_fails_dataset(tmp_path):
+    store = _make_adaptive_store(tmp_path / "zero_ps.h5", pixel_size_um=0.0)
+    round_spec = _adaptive_apply_round()
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is DatasetFailure.THRESHOLD_ERROR
+
+
+def test_apply_adaptive_clip_is_bit_identical_to_bare_detector(tmp_path):
+    """Guards panel parity: the apply branch must equal a direct detector call
+    with the round's gaussian_sigma as presmooth — including a sigma != 1 case."""
+    from percell4.domain.measure.adaptive_clip import detect_adaptive_by_particle_size
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    store = _make_adaptive_store(tmp_path / "parity.h5")
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    ps = float(store.metadata["pixel_size_um"])
+
+    for sigma in (1.0, 2.0):  # sigma != 1 would diverge if presmooth were fixed
+        round_spec = _adaptive_apply_round(gaussian_sigma=sigma)
+        grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+        mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, ps)
+        assert err == ""
+        expected = detect_adaptive_by_particle_size(
+            image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=sigma
+        )
+        assert np.array_equal(mask, expected)
+
+
+def test_apply_adaptive_clip_empty_labels_yields_zero_mask(tmp_path):
+    """An all-zero label frame yields an all-zero mask, no error (apply level)."""
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    store = _make_adaptive_store(tmp_path / "empty.h5")
+    image = store.read_channel("intensity", 0)
+    labels = np.zeros((100, 100), dtype=np.int32)
+    round_spec = _adaptive_apply_round()
+    grouping = _trivial_grouping(np.array([], dtype=np.int32))
+    mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, 0.12)
+    assert err == ""
+    assert mask.sum() == 0
+
+
 # ── apply_threshold_headless ────────────────────────────────────────────
 
 

@@ -690,11 +690,59 @@ def _apply_iterative_otsu_groups(
     return ""
 
 
+def _apply_adaptive_clip_cells(
+    image: NDArray,
+    labels: NDArray,
+    settings: object,
+    combined: NDArray,
+    pixel_size_um: float | None,
+    presmooth_sigma_px: float,
+    round_name: str,
+) -> str:
+    """Per-cell Adaptive Local Clipping over one frame, into ``combined``.
+
+    Runs the eye-validated ``detect_adaptive_by_particle_size`` on the **raw**
+    image (it does its own presmoothing at ``presmooth_sigma_px`` — sourced from
+    the round's ``gaussian_sigma`` so the workflow reproduces a standalone-panel
+    run). Unions the ``{0,1}`` result into ``combined`` in place. Returns an
+    error string on failure, else ``""``. The detector ignores intensity
+    grouping (it thresholds each Cellpose cell against its own MAD noise floor).
+    """
+    if pixel_size_um is None or pixel_size_um <= 0:
+        return "adaptive clip: dataset has no pixel size (µm/px)"
+    from percell4.domain.measure.adaptive_clip import detect_adaptive_by_particle_size
+
+    try:
+        mask = detect_adaptive_by_particle_size(
+            image,
+            labels,
+            float(pixel_size_um),
+            float(settings.d_min_um),
+            k=float(settings.k),
+            presmooth_sigma_px=float(presmooth_sigma_px),
+        )
+    except Exception as e:
+        logger.exception("adaptive clip failed for round %s", round_name)
+        return f"adaptive clip: {e}"
+
+    np.maximum(combined, mask.astype(np.uint8), out=combined)
+    np.minimum(combined, 1, out=combined)
+    logger.info(
+        "round %s: adaptive clip (d_min=%.3g µm, k=%.3g) — %d positive px",
+        round_name,
+        settings.d_min_um,
+        settings.k,
+        int(combined.sum()),
+    )
+    return ""
+
+
 def _apply_threshold_frame(
     image: NDArray,
     labels: NDArray,
     grouping: GroupingResult,
     round_spec: ThresholdingRound,
+    pixel_size_um: float | None = None,
 ) -> tuple[NDArray | None, pd.DataFrame | None, str]:
     """Per-group Otsu threshold on one 2D frame.
 
@@ -703,21 +751,34 @@ def _apply_threshold_frame(
     the message describes the failure. The ``group_df`` has columns
     ``["label", "group_<channel>_<metric>"]`` (the same shape the interactive
     controller writes). No store writes — the caller persists.
+
+    ``pixel_size_um`` is required only by the adaptive-clip branch (the per-cell
+    window is physical); other methods ignore it.
     """
     if round_spec.gaussian_sigma > 0:
         smoothed = apply_gaussian_smoothing(image.astype(np.float32), round_spec.gaussian_sigma)
     else:
         smoothed = image.astype(np.float32)
 
-    # Dispatch precedence: iterative-otsu, then puncta, then legacy per-group
-    # Otsu. A None iterative_otsu / None-or-"otsu" puncta keeps the legacy path
+    # Dispatch precedence: adaptive-clip, then iterative-otsu, then puncta, then
+    # legacy per-group Otsu. All three sentinels None keeps the legacy path
     # byte-identical.
+    adaptive = round_spec.adaptive_clip
     iterative = round_spec.iterative_otsu
     puncta = round_spec.puncta
     use_puncta = puncta is not None and puncta.detector_name != "otsu"
 
     combined = np.zeros(labels.shape, dtype=np.uint8)
-    if iterative is not None:
+    if adaptive is not None:
+        # The detector presmooths the RAW image itself; feeding `smoothed` would
+        # double-smooth. `gaussian_sigma` IS the presmooth (panel parity).
+        err = _apply_adaptive_clip_cells(
+            image, labels, adaptive, combined, pixel_size_um,
+            round_spec.gaussian_sigma, round_spec.name,
+        )
+        if err:
+            return None, None, err
+    elif iterative is not None:
         err = _apply_iterative_otsu_groups(
             smoothed, labels, grouping, iterative, combined, round_spec.name
         )
@@ -757,10 +818,11 @@ def _apply_threshold_frame(
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
     group_df.columns = ["label", col_name]
-    if iterative is not None and iterative.scope != "groups":
-        # per-cell / whole-field scope did NOT use the intensity grouping to build
-        # the mask, so keep /groups honest with a single degenerate group rather
-        # than implying a clustering that did not drive the result.
+    if adaptive is not None or (iterative is not None and iterative.scope != "groups"):
+        # Adaptive (per-cell) and per-cell/whole-field iterative scopes did NOT
+        # use the intensity grouping to build the mask, so keep /groups honest
+        # with a single degenerate group rather than implying a clustering that
+        # did not drive the result.
         group_df[col_name] = 1
     return combined, group_df, ""
 
@@ -790,6 +852,16 @@ def apply_threshold_headless(
     except (KeyError, ValueError) as e:
         return DatasetFailure.THRESHOLD_ERROR, str(e)
 
+    # The per-cell adaptive window is physical (µm), so adaptive rounds need a
+    # pixel size. Fail this dataset cleanly rather than producing garbage.
+    raw_ps = store.metadata.get("pixel_size_um")
+    pixel_size_um = float(raw_ps) if raw_ps else None
+    if round_spec.adaptive_clip is not None and (pixel_size_um is None or pixel_size_um <= 0):
+        return (
+            DatasetFailure.THRESHOLD_ERROR,
+            "adaptive sigma clipping needs a pixel size (µm/px) on this dataset",
+        )
+
     n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
 
     if n_timepoints > 1:
@@ -807,7 +879,7 @@ def apply_threshold_headless(
                 # No groups for this frame — empty mask, no group rows.
                 mask_frames.append(np.zeros(labels.shape, dtype=np.uint8))
                 continue
-            mask, gdf, err = _apply_threshold_frame(image, labels, g, round_spec)
+            mask, gdf, err = _apply_threshold_frame(image, labels, g, round_spec, pixel_size_um)
             if err:
                 return DatasetFailure.THRESHOLD_ERROR, err
             mask_frames.append(mask)
@@ -840,7 +912,7 @@ def apply_threshold_headless(
         labels = store.read_labels(seg_name)
     except (KeyError, ValueError) as e:
         return DatasetFailure.THRESHOLD_ERROR, str(e)
-    mask, group_df, err = _apply_threshold_frame(image, labels, grouping, round_spec)
+    mask, group_df, err = _apply_threshold_frame(image, labels, grouping, round_spec, pixel_size_um)
     if err:
         return DatasetFailure.THRESHOLD_ERROR, err
     try:
