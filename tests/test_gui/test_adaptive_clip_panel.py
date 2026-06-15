@@ -179,9 +179,30 @@ def test_noise_estimator_selection_reaches_detector(qtbot, monkeypatch):
     assert panel._worker._args[2].background_estimator_name == "gaussian-peak"
 
 
+def test_default_window_method_is_granule_size(qtbot, monkeypatch):
+    """Out of the box the worker receives the granule-size window method."""
+    panel, *_ = _build(qtbot, monkeypatch)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    # Worker args: (image, gaussian_sigma, settings, auto_window, window_method)
+    assert panel._worker._args[4] == "granule-size"
+
+
+def test_window_method_selection_reaches_worker(qtbot, monkeypatch):
+    """The Auto window method dropdown drives the method passed to the worker."""
+    panel, *_ = _build(qtbot, monkeypatch)
+    panel._settings._window_method.setCurrentText("Otsu mean (baseline)")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    assert panel._worker._args[4] == "otsu-mean"
+
+
 def test_auto_window_estimates_and_writes_back(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch)
     panel._settings._auto.setChecked(True)
+    # Pin the baseline method so the surfaced window matches the otsu-mean expected
+    # below (the dropdown defaults to granule-size).
+    panel._settings._window_method.setCurrentText("Otsu mean (baseline)")
     panel._settings._window.setValue(15)  # ignored under auto
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
 

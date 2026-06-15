@@ -23,6 +23,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.domain.measure.window_finder_names import WINDOW_FINDER_NAMES
+
 # Unit dropdown labels -> internal codes used by resolve_min_area_px.
 _UNIT_LABELS = ("px²", "µm²")
 _UNIT_CODES = {"px²": "px", "µm²": "um2"}
@@ -34,6 +36,28 @@ _UNIT_CODES = {"px²": "px", "µm²": "um2"}
 # pipeline default.
 _NOISE_LABELS = ("MAD (robust)", "stddev", "gaussian-peak")
 _NOISE_CODES = {"MAD (robust)": "mad", "stddev": "stddev", "gaussian-peak": "gaussian-peak"}
+
+# Auto-window method dropdown labels -> WINDOW_FINDERS registry names. Only shown
+# when "Auto adaptive window size" is on. Lists only the finders actually
+# registered in the current phase (the drift guard below enforces this); bake-off
+# candidates (sweep-knee / fixed-point / autocorr / log-scale / granulometry) are
+# added here together with their registry entries when they land. The default is
+# `granule-size` (isolates the granules and sizes the window to them);
+# `otsu-mean` is the legacy baseline.
+_WINDOW_METHOD_LABELS = (
+    "Granule size",
+    "Otsu mean (baseline)",
+)
+_WINDOW_METHOD_CODES = {
+    "Granule size": "granule-size",
+    "Otsu mean (baseline)": "otsu-mean",
+}
+
+# Drift guard: every dropdown code must be a real registered finder.
+assert set(_WINDOW_METHOD_CODES.values()) <= set(WINDOW_FINDER_NAMES), (
+    "window-method dropdown codes drifted from WINDOW_FINDER_NAMES: "
+    f"{set(_WINDOW_METHOD_CODES.values()) - set(WINDOW_FINDER_NAMES)}"
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +77,10 @@ class AdaptiveClipConfig:
     min_size_unit: str
     auto_window: bool
     noise_estimator: str = "mad"
+    # Which window-finder estimates the window when ``auto_window`` is True
+    # (a WINDOW_FINDERS registry name). Ignored when ``auto_window`` is False or
+    # ``particle_mode`` is True. Default ``granule-size`` (granule-isolating).
+    window_method: str = "granule-size"
     # Particle-size mode. When ``particle_mode`` is True the run derives the
     # window + size filter from ``d_min_um`` (smallest particle Ø, µm) and uses
     # the per-cell detector with a robust per-cell MAD σ. ``k`` is still honored
@@ -89,6 +117,20 @@ class AdaptiveClipSettingsWidget(QWidget):
         )
         self._auto.toggled.connect(self._on_auto_toggled)
         layout.addWidget(self._auto)
+
+        # ── Auto-window method (only used when "Auto adaptive window size" is on) ──
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Auto window method:"))
+        self._window_method = QComboBox()
+        self._window_method.addItems(list(_WINDOW_METHOD_LABELS))
+        self._window_method.setToolTip(
+            "How the window is found when Auto is on. Granule size isolates the "
+            "granules and sizes the window to them; Otsu mean (baseline) is the "
+            "legacy first-pass estimate."
+        )
+        self._window_method.setEnabled(False)  # off until Auto is checked
+        method_row.addWidget(self._window_method)
+        layout.addLayout(method_row)
 
         # ── Particle-size mode (the one-knob "just works" detector) ──
         self._particle = QCheckBox("Detect by smallest particle size")
@@ -180,6 +222,7 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._min_size.valueChanged.connect(self.config_changed)
         self._unit.currentIndexChanged.connect(self.config_changed)
         self._noise.currentIndexChanged.connect(self.config_changed)
+        self._window_method.currentIndexChanged.connect(self.config_changed)
         self._auto.toggled.connect(self.config_changed)
         self._particle.toggled.connect(self.config_changed)
         self._d_min.valueChanged.connect(self.config_changed)
@@ -212,6 +255,8 @@ class AdaptiveClipSettingsWidget(QWidget):
             w.setEnabled(not particle)
         self._k.setEnabled(True)
         self._window.setEnabled(not particle and not self._auto.isChecked())
+        # The auto-window method only matters when auto is on and not in particle mode.
+        self._window_method.setEnabled(not particle and self._auto.isChecked())
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -225,6 +270,7 @@ class AdaptiveClipSettingsWidget(QWidget):
             min_size_unit=_UNIT_CODES[self._unit.currentText()],
             auto_window=self._auto.isChecked(),
             noise_estimator=_NOISE_CODES[self._noise.currentText()],
+            window_method=_WINDOW_METHOD_CODES[self._window_method.currentText()],
             particle_mode=self._particle.isChecked(),
             d_min_um=float(self._d_min.value()),
         )
@@ -247,6 +293,7 @@ class AdaptiveClipSettingsWidget(QWidget):
             self._min_size,
             self._unit,
             self._noise,
+            self._window_method,
             self._particle,
             self._d_min,
             self._window,

@@ -25,13 +25,13 @@ from percell4.model import CellDataModel
 logger = logging.getLogger(__name__)
 
 
-def run_adaptive_detection(image, gaussian_sigma, settings, auto_window):
+def run_adaptive_detection(image, gaussian_sigma, settings, auto_window, window_method="otsu-mean"):
     """Worker body: optionally estimate the window via the finder registry, then detect.
 
     Returns ``(mask uint8, window_used int)``. When ``auto_window`` is True the
-    window is estimated by ``adaptive_clip.auto_window`` (the ``otsu-mean``
-    baseline finder for now; the bake-off winner becomes the default later) and
-    the settings are rebuilt with it; otherwise the settings' window is used
+    window is estimated by ``adaptive_clip.auto_window`` using the named
+    ``window_method`` (a ``WINDOW_FINDERS`` registry key, e.g. ``granule-size``)
+    and the settings are rebuilt with it; otherwise the settings' window is used
     as-is. Pure (no Qt) so it is unit-testable and worker-safe.
     """
     from percell4.domain.measure.adaptive_clip import (
@@ -42,7 +42,7 @@ def run_adaptive_detection(image, gaussian_sigma, settings, auto_window):
 
     window_used = int(dict(settings.detector_params).get("window_px", 15))
     if auto_window:
-        window_used = compute_auto_window(image, gaussian_sigma, settings, method="otsu-mean")
+        window_used = compute_auto_window(image, gaussian_sigma, settings, method=window_method)
         params = dict(settings.detector_params)
         params["window_px"] = window_used
         settings = PunctaDetectorSettings(
@@ -59,22 +59,23 @@ def run_adaptive_detection(image, gaussian_sigma, settings, auto_window):
     return mask, window_used
 
 
-def run_adaptive_detection_stack(image, gaussian_sigma, settings, auto_window):
+def run_adaptive_detection_stack(image, gaussian_sigma, settings, auto_window, window_method="otsu-mean"):
     """Worker body for a time-lapse ``(T, H, W)`` channel: detect each frame.
 
     Loops over the leading time axis, runs :func:`run_adaptive_detection` on each
     frame, and stacks the per-frame masks into ``(T, H, W)``. The auto window is
-    estimated per frame (contract D3), so frames with different intensity stats
-    get their own window. Mirrors ``segmentation_panel.run_cellpose_stack``'s
-    per-frame dispatch. Returns ``(mask (T,H,W) uint8, windows list[int])``.
-    Pure (no Qt) so it is unit-testable and worker-safe.
+    estimated per frame (contract D3) with the named ``window_method``, so frames
+    with different intensity stats get their own window. Mirrors
+    ``segmentation_panel.run_cellpose_stack``'s per-frame dispatch. Returns
+    ``(mask (T,H,W) uint8, windows list[int])``. Pure (no Qt) so it is
+    unit-testable and worker-safe.
     """
     image = np.asarray(image)
     frames: list[np.ndarray] = []
     windows: list[int] = []
     for t in range(image.shape[0]):
         mask_t, window_t = run_adaptive_detection(
-            image[t], gaussian_sigma, settings, auto_window
+            image[t], gaussian_sigma, settings, auto_window, window_method
         )
         frames.append(np.asarray(mask_t, dtype=np.uint8))
         windows.append(int(window_t))
@@ -251,7 +252,11 @@ class AdaptiveClipPanel(QWidget):
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
         n_frames = image.shape[0] if is_timelapse else 1
-        detecting = "Detecting (auto window)..." if config.auto_window else "Detecting..."
+        detecting = (
+            f"Detecting (auto window: {config.window_method})..."
+            if config.auto_window
+            else "Detecting..."
+        )
         if is_timelapse:
             detecting = f"Detecting across {n_frames} timepoints..."
         self._show_status(detecting)
@@ -260,7 +265,7 @@ class AdaptiveClipPanel(QWidget):
 
         worker_fn = run_adaptive_detection_stack if is_timelapse else run_adaptive_detection
         self._worker = Worker(
-            worker_fn, image, config.gaussian_sigma, settings, config.auto_window
+            worker_fn, image, config.gaussian_sigma, settings, config.auto_window, config.window_method
         )
         self._worker.finished.connect(self._on_detect_done)
         self._worker.error.connect(self._on_detect_error)

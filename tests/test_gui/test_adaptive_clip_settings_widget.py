@@ -46,6 +46,47 @@ def test_noise_estimator_mapping(qtbot):
         assert w.current_config().noise_estimator == code
 
 
+def test_window_method_default_is_granule_size(qtbot):
+    """The Auto window method dropdown defaults to the granule-isolating finder."""
+    w = _widget(qtbot)
+    assert w._window_method.currentText() == "Granule size"
+    assert w.current_config().window_method == "granule-size"
+
+
+def test_window_method_mapping(qtbot):
+    """Each dropdown label maps to its WINDOW_FINDERS registry name."""
+    w = _widget(qtbot)
+    for label, code in [
+        ("Granule size", "granule-size"),
+        ("Otsu mean (baseline)", "otsu-mean"),
+    ]:
+        w._window_method.setCurrentText(label)
+        assert w.current_config().window_method == code
+
+
+def test_window_method_gated_by_auto_and_particle(qtbot):
+    """The method dropdown is active only when Auto is on and particle mode is off."""
+    w = _widget(qtbot)
+    assert not w._window_method.isEnabled()  # auto off by default
+    w._auto.setChecked(True)
+    assert w._window_method.isEnabled()  # auto on, not particle
+    w._particle.setChecked(True)
+    assert not w._window_method.isEnabled()  # particle mode derives the window
+    w._particle.setChecked(False)
+    assert w._window_method.isEnabled()
+    w._auto.setChecked(False)
+    assert not w._window_method.isEnabled()
+
+
+def test_set_enabled_respects_window_method_gate(qtbot):
+    w = _widget(qtbot)
+    w._auto.setChecked(True)
+    w.set_enabled(True)
+    assert w._window_method.isEnabled()  # auto on -> method live after global enable
+    w.set_enabled(False)
+    assert not w._window_method.isEnabled()
+
+
 def test_programmatic_changes_reflected(qtbot):
     w = _widget(qtbot)
     w._window.setValue(31)
