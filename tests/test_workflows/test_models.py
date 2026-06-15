@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
     CellposeSettings,
     DatasetSource,
     DiluteSettings,
@@ -255,9 +256,69 @@ def test_iterative_otsu_params_namespaced_and_canonical():
 
 
 def test_round_rejects_both_puncta_and_iterative_otsu():
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(ValueError, match="at most one"):
         _valid_round(puncta=PunctaDetectorSettings(detector_name="log"),
                      iterative_otsu=IterativeOtsuSettings())
+
+
+# ── AdaptiveClipSettings (U1) ─────────────────────────────────
+
+
+def test_round_defaults_adaptive_clip_to_none():
+    assert _valid_round().adaptive_clip is None
+
+
+def test_adaptive_clip_defaults_are_valid():
+    s = AdaptiveClipSettings(d_min_um=0.40)
+    assert s.k == 1.0
+    assert s.d_min_um == 0.40
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"d_min_um": 0.0},
+        {"d_min_um": -0.1},
+        {"d_min_um": 0.40, "k": -1.0},
+    ],
+)
+def test_adaptive_clip_rejects_invalid(kwargs):
+    with pytest.raises(ValueError):
+        AdaptiveClipSettings(**kwargs)
+
+
+def test_round_accepts_adaptive_clip():
+    r = _valid_round(adaptive_clip=AdaptiveClipSettings(d_min_um=0.40))
+    assert r.adaptive_clip.d_min_um == 0.40
+    assert r.puncta is None
+    assert r.iterative_otsu is None
+
+
+def test_round_with_adaptive_clip_is_hashable():
+    r = _valid_round(adaptive_clip=AdaptiveClipSettings(d_min_um=0.40, k=1.5))
+    hash(r)
+    hash(r.adaptive_clip)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"puncta": PunctaDetectorSettings(detector_name="log")},
+        {"iterative_otsu": IterativeOtsuSettings()},
+    ],
+)
+def test_round_rejects_adaptive_clip_with_another_method(other):
+    with pytest.raises(ValueError, match="at most one"):
+        _valid_round(adaptive_clip=AdaptiveClipSettings(d_min_um=0.40), **other)
+
+
+def test_adaptive_clip_validation_is_skimage_free():
+    import sys
+
+    for mod in [m for m in sys.modules if m.startswith("skimage")]:
+        del sys.modules[mod]
+    AdaptiveClipSettings(d_min_um=0.40)
+    assert not any(m.startswith("skimage") for m in sys.modules)
 
 
 def test_round_with_iterative_otsu_is_hashable():

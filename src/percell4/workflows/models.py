@@ -282,6 +282,36 @@ class IterativeOtsuSettings:
 
 
 @dataclass(frozen=True)
+class AdaptiveClipSettings:
+    """Per-cell Adaptive Local Clipping settings for a thresholding round.
+
+    When a :class:`ThresholdingRound` carries this, the headless apply phase runs
+    the eye-validated per-cell detector
+    (``percell4.domain.measure.adaptive_clip.detect_adaptive_by_particle_size``)
+    instead of grouped Otsu / puncta / iterative-Otsu. The detector is driven by
+    one physical knob, ``d_min_um`` (the smallest particle diameter, in µm, to
+    detect): it derives the local-background window and size filter, while the
+    noise floor is a robust per-cell ``1.4826*MAD`` so a fixed ``k`` transfers
+    across cells/datasets whose intensity scale varies many-fold.
+
+    The presmooth σ is **not** stored here — the apply branch sources it from the
+    round's existing ``gaussian_sigma`` so a single GUI σ control drives both the
+    grouped and adaptive paths and the workflow reproduces a standalone-panel run
+    (the panel threads its σ spinbox into the same detector argument). ``k``
+    defaults to 1 (the validated value); raise it to be more conservative.
+    """
+
+    d_min_um: float
+    k: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.d_min_um <= 0:
+            raise ValueError(f"d_min_um must be > 0 µm, got {self.d_min_um}")
+        if self.k < 0:
+            raise ValueError(f"k must be >= 0, got {self.k}")
+
+
+@dataclass(frozen=True)
 class ThresholdingRound:
     """One named round of grouped thresholding.
 
@@ -289,12 +319,12 @@ class ThresholdingRound:
     ``name`` becomes the HDF5 mask/group path component AND a pandas column
     suffix, so it is validated against a strict regex.
 
-    When ``puncta`` is ``None`` and ``iterative_otsu`` is ``None`` (the default),
-    the apply phase uses the legacy per-group Otsu path unchanged. When it carries
-    a :class:`PunctaDetectorSettings`, the headless two-pass spot detector runs
-    instead; when it carries an :class:`IterativeOtsuSettings`, iterative Otsu
-    peeling runs instead. ``puncta`` and ``iterative_otsu`` are mutually
-    exclusive on a single round.
+    When ``puncta``, ``iterative_otsu``, and ``adaptive_clip`` are all ``None``
+    (the default), the apply phase uses the legacy per-group Otsu path unchanged.
+    When it carries a :class:`PunctaDetectorSettings`, the headless two-pass spot
+    detector runs instead; an :class:`IterativeOtsuSettings` runs iterative Otsu
+    peeling; an :class:`AdaptiveClipSettings` runs the per-cell adaptive clip
+    detector. The three sentinel fields are mutually exclusive on a single round.
     """
 
     name: str
@@ -307,6 +337,7 @@ class ThresholdingRound:
     gaussian_sigma: float = 1.0
     puncta: PunctaDetectorSettings | None = None
     iterative_otsu: IterativeOtsuSettings | None = None
+    adaptive_clip: AdaptiveClipSettings | None = None
 
     def __post_init__(self) -> None:
         if not _ROUND_NAME_RE.match(self.name):
@@ -323,9 +354,9 @@ class ThresholdingRound:
             raise ValueError("kmeans_n_clusters must be >= 2")
         if self.gaussian_sigma < 0:
             raise ValueError("gaussian_sigma must be >= 0")
-        if self.puncta is not None and self.iterative_otsu is not None:
+        if sum(s is not None for s in (self.puncta, self.iterative_otsu, self.adaptive_clip)) > 1:
             raise ValueError(
-                "a round carries puncta or iterative_otsu, not both"
+                "a round carries at most one of puncta / iterative_otsu / adaptive_clip"
             )
 
 
