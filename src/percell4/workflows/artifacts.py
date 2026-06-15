@@ -227,11 +227,15 @@ def _iterative_otsu_from_dict(d: dict[str, Any]) -> IterativeOtsuSettings:
 
 
 def _adaptive_clip_to_dict(s: AdaptiveClipSettings) -> dict[str, Any]:
-    return {"d_min_um": s.d_min_um, "k": s.k}
+    return {"d_min_um": s.d_min_um, "k": s.k, "presmooth_sigma_px": s.presmooth_sigma_px}
 
 
 def _adaptive_clip_from_dict(d: dict[str, Any]) -> AdaptiveClipSettings:
-    return AdaptiveClipSettings(d_min_um=d["d_min_um"], k=d.get("k", 1.0))
+    return AdaptiveClipSettings(
+        d_min_um=d["d_min_um"],
+        k=d.get("k", 1.0),
+        presmooth_sigma_px=d.get("presmooth_sigma_px", 1.0),
+    )
 
 
 def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:

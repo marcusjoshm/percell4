@@ -7,7 +7,12 @@ from pathlib import Path
 import numpy as np
 
 from percell4.store import DatasetStore
-from percell4.workflows.models import ThresholdAlgorithm, ThresholdingRound
+from percell4.workflows.failures import DatasetFailure
+from percell4.workflows.models import (
+    AdaptiveClipSettings,
+    ThresholdAlgorithm,
+    ThresholdingRound,
+)
 from percell4.workflows.phases import apply_threshold_headless, threshold_compute_one
 
 
@@ -67,6 +72,64 @@ def test_apply_threshold_timelapse_writes_THW_mask_and_timepoint_groups(tmp_path
     groups = store.read_dataframe("/groups/GFP_split")
     assert "timepoint" in groups.columns
     assert set(groups["timepoint"].unique()) == {0, 1}
+
+
+def _adaptive_frame():
+    """One large cell with structured background (per-cell MAD > 0) + a blob."""
+    img = np.zeros((100, 100), dtype=np.float32)
+    rows = np.arange(100).reshape(-1, 1)
+    img[20:60, 20:60] = 10 + (rows[20:60] % 3)
+    img[35:45, 35:45] = 200.0
+    lab = np.zeros((100, 100), dtype=np.int32)
+    lab[20:60, 20:60] = 1
+    return img, lab
+
+
+def _adaptive_timelapse_store(path: Path, n_t=2, pixel_size_um=0.12) -> DatasetStore:
+    imgs, labs = zip(*[_adaptive_frame() for _ in range(n_t)])
+    store = DatasetStore(path)
+    meta = {"channel_names": ["GFP"]}
+    if pixel_size_um is not None:
+        meta["pixel_size_um"] = pixel_size_um
+    store.create(metadata=meta)
+    store.write_array("intensity", np.stack(imgs, 0), attrs={"dims": ["T", "H", "W"]})
+    store.write_labels("cellpose_qc", np.stack(labs, 0).astype(np.int32))
+    return store
+
+
+def _adaptive_round():
+    return ThresholdingRound(
+        name="ac", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS, kmeans_n_clusters=2,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.12),
+    )
+
+
+def test_apply_adaptive_clip_timelapse_writes_THW_mask(tmp_path):
+    store = _adaptive_timelapse_store(tmp_path / "ac_tl.h5", n_t=2)
+    grouping, failure, _ = threshold_compute_one(store, _adaptive_round())
+    assert failure is None
+    assert isinstance(grouping, dict)  # per-frame trivial groupings
+
+    failure, msg = apply_threshold_headless(store, _adaptive_round(), grouping)
+    assert failure is None, msg
+    mask = store.read_mask("ac")
+    assert mask.shape == (2, 100, 100)
+    assert set(np.unique(mask).tolist()) <= {0, 1}
+    assert int(mask.sum()) > 0  # blob detected in each frame
+    groups = store.read_dataframe("/groups/ac")
+    assert "timepoint" in groups.columns
+    # Degenerate single group per frame.
+    assert set(groups["group_GFP_mean_intensity"].unique()) == {1}
+
+
+def test_apply_adaptive_clip_timelapse_missing_pixel_size_fails(tmp_path):
+    store = _adaptive_timelapse_store(tmp_path / "ac_tl_nops.h5", n_t=2, pixel_size_um=None)
+    grouping, _, _ = threshold_compute_one(store, _adaptive_round())
+    failure, msg = apply_threshold_headless(store, _adaptive_round(), grouping)
+    assert failure is DatasetFailure.THRESHOLD_ERROR
+    assert "pixel size" in msg
+    assert "ac" not in store.list_masks()
 
 
 def test_single_timepoint_threshold_unchanged(tmp_path):

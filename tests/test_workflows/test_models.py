@@ -272,6 +272,8 @@ def test_adaptive_clip_defaults_are_valid():
     s = AdaptiveClipSettings(d_min_um=0.40)
     assert s.k == 1.0
     assert s.d_min_um == 0.40
+    # Presmooth defaults to the validated 1 px (NOT 0 / the grouped sigma default).
+    assert s.presmooth_sigma_px == 1.0
 
 
 @pytest.mark.parametrize(
@@ -280,6 +282,7 @@ def test_adaptive_clip_defaults_are_valid():
         {"d_min_um": 0.0},
         {"d_min_um": -0.1},
         {"d_min_um": 0.40, "k": -1.0},
+        {"d_min_um": 0.40, "presmooth_sigma_px": -0.5},
     ],
 )
 def test_adaptive_clip_rejects_invalid(kwargs):

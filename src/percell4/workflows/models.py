@@ -294,21 +294,26 @@ class AdaptiveClipSettings:
     noise floor is a robust per-cell ``1.4826*MAD`` so a fixed ``k`` transfers
     across cells/datasets whose intensity scale varies many-fold.
 
-    The presmooth σ is **not** stored here — the apply branch sources it from the
-    round's existing ``gaussian_sigma`` so a single GUI σ control drives both the
-    grouped and adaptive paths and the workflow reproduces a standalone-panel run
-    (the panel threads its σ spinbox into the same detector argument). ``k``
-    defaults to 1 (the validated value); raise it to be more conservative.
+    ``presmooth_sigma_px`` is the detector's fixed-pixel presmooth (noise
+    suppression); it defaults to ``1.0`` — the eye-validated value. It is stored
+    here rather than borrowed from the round's ``gaussian_sigma`` because that
+    field defaults to ``0`` (no smoothing) for the grouped-Otsu path, and an
+    adaptive round must not silently inherit ``0`` (which collapses detection on
+    noisy data). ``k`` defaults to 1 (the validated value); raise it to be more
+    conservative.
     """
 
     d_min_um: float
     k: float = 1.0
+    presmooth_sigma_px: float = 1.0
 
     def __post_init__(self) -> None:
         if self.d_min_um <= 0:
             raise ValueError(f"d_min_um must be > 0 µm, got {self.d_min_um}")
         if self.k < 0:
             raise ValueError(f"k must be >= 0, got {self.k}")
+        if self.presmooth_sigma_px < 0:
+            raise ValueError(f"presmooth_sigma_px must be >= 0, got {self.presmooth_sigma_px}")
 
 
 @dataclass(frozen=True)

@@ -116,7 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     grp.add_argument(
         "--gaussian-sigma", type=float, default=1.0,
-        help="Pre-threshold Gaussian sigma (default 1.0).",
+        help=(
+            "Pre-threshold Gaussian sigma (default 1.0). For --strategy "
+            "adaptive-clip this is the detector's per-cell presmooth sigma (px)."
+        ),
     )
     grp.add_argument(
         "--strategy",
@@ -250,7 +253,9 @@ def main(argv: list[str] | None = None) -> int:
                 fixed_iterations=args.iterations,
             )
         elif args.strategy == "adaptive-clip":
-            adaptive = AdaptiveClipSettings(d_min_um=args.d_min_um, k=args.k)
+            adaptive = AdaptiveClipSettings(
+                d_min_um=args.d_min_um, k=args.k, presmooth_sigma_px=args.gaussian_sigma
+            )
         round_spec = ThresholdingRound(
             name=args.round_name,
             channel=args.channel,

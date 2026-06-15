@@ -409,6 +409,53 @@ def test_mixed_rounds_route_independently(tmp_path):
     assert "threshold_apply:otsu" not in names
 
 
+def _make_adaptive_h5(path: Path, pixel_size_um: float = 0.12) -> None:
+    """One large cell, structured background (per-cell MAD > 0), bright blob."""
+    store = DatasetStore(path)
+    store.create(metadata={"channel_names": ["GFP"], "pixel_size_um": pixel_size_um})
+    img = np.zeros((1, 100, 100), dtype=np.float32)
+    rows = np.arange(100).reshape(-1, 1)
+    img[0, 20:60, 20:60] = 10 + (rows[20:60] % 3)
+    img[0, 35:45, 35:45] = 200.0
+    store.write_array("intensity", img, attrs={"dims": ["C", "H", "W"]})
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[20:60, 20:60] = 1
+    store.write_labels("cellpose_qc", labels)
+
+
+def test_adaptive_apply_handler_emits_no_qc_status(qtbot, tmp_path):
+    """In an interactive run, the adaptive round's headless apply emits a status
+    line so the user knows the round applied without a QC pause."""
+    from percell4.workflows.phases import threshold_compute_one
+
+    p = tmp_path / "ac.h5"
+    _make_adaptive_h5(p)
+    entry = WorkflowDatasetEntry(
+        name="ac", source=DatasetSource.H5_EXISTING, h5_path=p, channel_names=["GFP"]
+    )
+    round_spec = _round("acr", adaptive_clip=AdaptiveClipSettings(d_min_um=0.12))
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=[entry],
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[round_spec],
+        selected_csv_columns=["GFP_mean_intensity"],
+        output_parent=tmp_path / "runs",
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=True)
+    runner._effective_seg["ac"] = "cellpose_qc"
+    grouping, failure, _ = threshold_compute_one(DatasetStore(p), round_spec, seg_name="cellpose_qc")
+    assert failure is None
+    runner._grouping_cache[("ac", "acr")] = grouping
+
+    handler = runner._make_threshold_apply_headless_handler(entry, round_spec)
+    result = handler()
+    assert result.success, result.message
+    assert "applied headlessly (no QC step)" in result.message
+    assert "acr" in DatasetStore(p).list_masks()
+
+
 def test_runner_records_failure_and_continues_other_datasets(qtbot, fake_host, tmp_path):
     """Per-dataset failure doesn't crash the run — other datasets proceed."""
     import percell4.gui.workflows.single_cell.runner as runner_mod

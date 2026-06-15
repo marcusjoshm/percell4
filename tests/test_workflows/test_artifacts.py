@@ -504,15 +504,14 @@ def test_adaptive_clip_round_round_trips() -> None:
         metric="mean_intensity",
         algorithm=ThresholdAlgorithm.KMEANS,
         gaussian_sigma=2.0,
-        adaptive_clip=AdaptiveClipSettings(d_min_um=0.40, k=1.5),
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.40, k=1.5, presmooth_sigma_px=1.5),
     )
     restored = _round_from_dict(_round_to_dict(r))
     assert restored == r
     assert restored.adaptive_clip is not None
     assert restored.adaptive_clip.d_min_um == 0.40
     assert restored.adaptive_clip.k == 1.5
-    # gaussian_sigma (the presmooth) survives too.
-    assert restored.gaussian_sigma == 2.0
+    assert restored.adaptive_clip.presmooth_sigma_px == 1.5
 
 
 def test_legacy_round_omits_adaptive_clip_key() -> None:

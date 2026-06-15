@@ -58,6 +58,7 @@ from percell4.store import DatasetStore
 from percell4.workflows.artifacts import write_atomic
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
     CellposeSettings,
     DatasetSource,
     EdgeMode,
@@ -693,20 +694,20 @@ def _apply_iterative_otsu_groups(
 def _apply_adaptive_clip_cells(
     image: NDArray,
     labels: NDArray,
-    settings: object,
+    settings: AdaptiveClipSettings,
     combined: NDArray,
     pixel_size_um: float | None,
-    presmooth_sigma_px: float,
     round_name: str,
 ) -> str:
     """Per-cell Adaptive Local Clipping over one frame, into ``combined``.
 
     Runs the eye-validated ``detect_adaptive_by_particle_size`` on the **raw**
-    image (it does its own presmoothing at ``presmooth_sigma_px`` — sourced from
-    the round's ``gaussian_sigma`` so the workflow reproduces a standalone-panel
-    run). Unions the ``{0,1}`` result into ``combined`` in place. Returns an
-    error string on failure, else ``""``. The detector ignores intensity
-    grouping (it thresholds each Cellpose cell against its own MAD noise floor).
+    image (the detector does its own presmoothing at ``settings.presmooth_sigma_px``,
+    default 1 px — the validated value; it is NOT the round's grouped-Otsu
+    ``gaussian_sigma``, which defaults to 0). Unions the ``{0,1}`` result into
+    ``combined`` in place. Returns an error string on failure, else ``""``. The
+    detector ignores intensity grouping (it thresholds each Cellpose cell against
+    its own MAD noise floor).
     """
     if pixel_size_um is None or pixel_size_um <= 0:
         return "adaptive clip: dataset has no pixel size (µm/px)"
@@ -719,7 +720,7 @@ def _apply_adaptive_clip_cells(
             float(pixel_size_um),
             float(settings.d_min_um),
             k=float(settings.k),
-            presmooth_sigma_px=float(presmooth_sigma_px),
+            presmooth_sigma_px=float(settings.presmooth_sigma_px),
         )
     except Exception as e:
         logger.exception("adaptive clip failed for round %s", round_name)
@@ -727,13 +728,25 @@ def _apply_adaptive_clip_cells(
 
     np.maximum(combined, mask.astype(np.uint8), out=combined)
     np.minimum(combined, 1, out=combined)
+    n_pos = int(combined.sum())
     logger.info(
         "round %s: adaptive clip (d_min=%.3g µm, k=%.3g) — %d positive px",
         round_name,
         settings.d_min_um,
         settings.k,
-        int(combined.sum()),
+        n_pos,
     )
+    if n_pos == 0:
+        # Adaptive rounds apply headlessly (no QC), so a no-detection result would
+        # otherwise be invisible. Surface it — usually a too-large d_min, too-high
+        # k, or a wrong pixel size.
+        logger.warning(
+            "round %s: adaptive clip detected 0 pixels — check d_min_um (%.3g µm), "
+            "k (%.3g), and the dataset pixel size",
+            round_name,
+            settings.d_min_um,
+            settings.k,
+        )
     return ""
 
 
@@ -770,11 +783,12 @@ def _apply_threshold_frame(
 
     combined = np.zeros(labels.shape, dtype=np.uint8)
     if adaptive is not None:
-        # The detector presmooths the RAW image itself; feeding `smoothed` would
-        # double-smooth. `gaussian_sigma` IS the presmooth (panel parity).
+        # The detector presmooths the RAW image itself (at its own validated
+        # presmooth_sigma_px, default 1 px) — feeding `smoothed` would double-smooth,
+        # and the round's grouped-Otsu `gaussian_sigma` (default 0) is not the
+        # adaptive presmooth.
         err = _apply_adaptive_clip_cells(
-            image, labels, adaptive, combined, pixel_size_um,
-            round_spec.gaussian_sigma, round_spec.name,
+            image, labels, adaptive, combined, pixel_size_um, round_spec.name,
         )
         if err:
             return None, None, err

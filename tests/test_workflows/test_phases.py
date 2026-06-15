@@ -559,11 +559,36 @@ def test_apply_adaptive_clip_zero_pixel_size_fails_dataset(tmp_path):
     grouping, _, _ = threshold_compute_one(store, round_spec)
     failure, msg = apply_threshold_headless(store, round_spec, grouping)
     assert failure is DatasetFailure.THRESHOLD_ERROR
+    assert "pixel size" in msg  # pins the adaptive guard, not some unrelated failure
+
+
+def test_apply_adaptive_clip_presmooth_defaults_to_one_not_round_sigma(tmp_path):
+    """Regression: the adaptive presmooth comes from AdaptiveClipSettings
+    (default 1.0), NOT the round's grouped-Otsu gaussian_sigma (default 0). A
+    round with gaussian_sigma=0 must still presmooth at 1 px."""
+    from percell4.domain.measure.adaptive_clip import detect_adaptive_by_particle_size
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    store = _make_adaptive_store(tmp_path / "presmooth.h5")
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    ps = float(store.metadata["pixel_size_um"])
+
+    # gaussian_sigma=0 (the grouped default) but adaptive presmooth defaults to 1.
+    round_spec = _adaptive_apply_round(gaussian_sigma=0.0)
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+    mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, ps)
+    assert err == ""
+    expected = detect_adaptive_by_particle_size(image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=1.0)
+    assert np.array_equal(mask, expected)
+    # And NOT the sigma=0 (no-presmooth) result, which differs on noisy data.
+    no_presmooth = detect_adaptive_by_particle_size(image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=0.0)
+    assert not np.array_equal(expected, no_presmooth)
 
 
 def test_apply_adaptive_clip_is_bit_identical_to_bare_detector(tmp_path):
-    """Guards panel parity: the apply branch must equal a direct detector call
-    with the round's gaussian_sigma as presmooth — including a sigma != 1 case."""
+    """Guards parity: the apply branch must equal a direct detector call with the
+    settings' presmooth_sigma_px — including a presmooth != 1 case."""
     from percell4.domain.measure.adaptive_clip import detect_adaptive_by_particle_size
     from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
 
@@ -572,13 +597,15 @@ def test_apply_adaptive_clip_is_bit_identical_to_bare_detector(tmp_path):
     labels = store.read_labels("cellpose_qc")
     ps = float(store.metadata["pixel_size_um"])
 
-    for sigma in (1.0, 2.0):  # sigma != 1 would diverge if presmooth were fixed
-        round_spec = _adaptive_apply_round(gaussian_sigma=sigma)
+    for presmooth in (1.0, 2.0):  # presmooth != 1 would diverge if it were fixed
+        round_spec = _adaptive_apply_round(
+            adaptive_clip=AdaptiveClipSettings(d_min_um=0.12, presmooth_sigma_px=presmooth)
+        )
         grouping = _trivial_grouping(np.array([1], dtype=np.int32))
         mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, ps)
         assert err == ""
         expected = detect_adaptive_by_particle_size(
-            image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=sigma
+            image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=presmooth
         )
         assert np.array_equal(mask, expected)
 
