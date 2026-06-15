@@ -29,6 +29,7 @@ from percell4.store import DatasetStore
 from percell4.workflows.artifacts import create_run_folder, read_run_config
 from percell4.workflows.host import WorkflowHost
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
     CellposeSettings,
     DatasetSource,
     ParticleSettings,
@@ -335,6 +336,77 @@ def test_runner_headless_puncta_round_writes_binary_mask(qtbot, fake_host, tmp_p
     mask = store.read_mask("SG")
     assert mask.dtype == np.uint8
     assert set(np.unique(mask).tolist()) <= {0, 1}
+
+
+# ── U4: adaptive rounds route through headless apply even in interactive runs ──
+
+
+def _round(name, **overrides):
+    defaults = dict(
+        name=name,
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    defaults.update(overrides)
+    return ThresholdingRound(**defaults)
+
+
+def _threshold_phase_names(rounds, tmp_path) -> list[str]:
+    """Drive _phase_generator directly (interactive_qc=True) and collect the
+    threshold apply/qc phase names. Pre-populates the grouping cache and an
+    effective segmentation so generation never touches disk for QC."""
+    p = tmp_path / "DS1.h5"
+    _make_dataset(p, "DS1")
+    entry = WorkflowDatasetEntry(
+        name="DS1", source=DatasetSource.H5_EXISTING, h5_path=p,
+        channel_names=["GFP", "RFP"],
+    )
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=[entry],
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=rounds,
+        selected_csv_columns=["GFP_mean_intensity"],
+        output_parent=tmp_path / "runs",
+        run_seg_qc_on_existing=False,  # avoid the disk-touching seg-QC branch
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=True)
+    # Pretend segmentation already exists and grouping already computed so the
+    # apply phase yields without us executing any handler.
+    runner._effective_seg["DS1"] = "cellpose_qc"
+    for r in rounds:
+        runner._grouping_cache[("DS1", r.name)] = object()
+    names = [req.phase_name for req in runner._phase_generator()]
+    return [n for n in names if n.startswith("threshold_apply:") or n.startswith("threshold_qc:")]
+
+
+def test_adaptive_round_applies_headlessly_in_interactive_run(tmp_path):
+    names = _threshold_phase_names(
+        [_round("ac", adaptive_clip=AdaptiveClipSettings(d_min_um=0.40))], tmp_path
+    )
+    assert "threshold_apply:ac" in names
+    assert "threshold_qc:ac" not in names
+
+
+def test_legacy_round_still_uses_interactive_qc(tmp_path):
+    names = _threshold_phase_names([_round("otsu")], tmp_path)
+    assert "threshold_qc:otsu" in names
+    assert "threshold_apply:otsu" not in names
+
+
+def test_mixed_rounds_route_independently(tmp_path):
+    names = _threshold_phase_names(
+        [_round("ac", adaptive_clip=AdaptiveClipSettings(d_min_um=0.40)), _round("otsu")],
+        tmp_path,
+    )
+    assert "threshold_apply:ac" in names
+    assert "threshold_qc:ac" not in names
+    assert "threshold_qc:otsu" in names
+    assert "threshold_apply:otsu" not in names
 
 
 def test_runner_records_failure_and_continues_other_datasets(qtbot, fake_host, tmp_path):

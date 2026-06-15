@@ -456,7 +456,13 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 # standard single-timepoint workflow; the per-frame masks are
                 # stacked into the (T,H,W) /masks resource at the end. The
                 # handler picks the right wrapper from _is_timelapse(entry).
-                if self._interactive_qc:
+                #
+                # Adaptive-clip rounds are per-cell (no intensity grouping) and
+                # cannot be previewed by the per-group ThresholdQCController, so
+                # they ALWAYS apply headlessly — even in an interactive run. The
+                # headless handler emits a status line so the user knows the round
+                # applied without a QC pause.
+                if self._interactive_qc and round_spec.adaptive_clip is None:
                     yield PhaseRequest(
                         kind=PhaseKind.INTERACTIVE,
                         phase_name=f"threshold_qc:{round_spec.name}",
@@ -1019,8 +1025,18 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                           failure=failure.value, message=msg)
                 return PhaseResult(success=False, message=msg)
 
+            # Adaptive rounds skip the interactive QC pause every other round
+            # gets; make that explicit so the user is not silently handed
+            # unreviewed masks.
+            if round_spec.adaptive_clip is not None and self._interactive_qc:
+                msg = (
+                    f"adaptive sigma clipping — applied headlessly (no QC step): {msg}"
+                )
+                event = "done_no_qc"
+            else:
+                event = "done"
             self._log(phase=f"threshold_apply:{round_spec.name}",
-                      dataset=entry.name, event="done", message=msg)
+                      dataset=entry.name, event=event, message=msg)
             return PhaseResult(success=True, message=msg)
 
         return handler
