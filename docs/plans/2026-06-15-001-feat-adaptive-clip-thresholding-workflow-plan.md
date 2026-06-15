@@ -1,7 +1,7 @@
 ---
 title: "feat: Adaptive sigma clipping as a single-cell thresholding workflow method"
 type: feat
-status: active
+status: completed
 date: 2026-06-15
 ---
 
