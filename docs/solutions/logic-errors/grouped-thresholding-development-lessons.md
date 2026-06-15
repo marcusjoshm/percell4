@@ -19,6 +19,8 @@ root_cause: "pyqtgraph stepMode array length contract, napari shapes layer event
 
 Seven issues encountered and solved during development of the grouped thresholding feature (expression-level cell grouping + per-group interactive thresholding).
 
+> **Note (2026-06-15):** interactive per-group QC is no longer the only thresholding path. The single-cell workflow now also runs *headless* thresholding methods (puncta two-pass, iterative-Otsu, adaptive sigma clipping) as mutually-exclusive sentinels on `ThresholdingRound`, applied without a per-group QC pause. The lessons below remain accurate for the interactive QC path. See [adding-thresholding-method-to-single-cell-workflow](../architecture-patterns/adding-thresholding-method-to-single-cell-workflow-2026-06-15.md) for the headless-method pattern.
+
 ## 1. pyqtgraph stepMode Histogram Crash
 
 **Symptom:** `Exception: len(X) must be len(Y)+1 since stepMode=True` when plotting histograms.
@@ -183,6 +185,7 @@ thresholding, with cells grouped by expression level for polyclonal data.
 
 ## Related Documentation
 
+- `docs/solutions/architecture-patterns/adding-thresholding-method-to-single-cell-workflow-2026-06-15.md` -- the headless thresholding-method pattern (sentinel on `ThresholdingRound`) that complements this interactive-QC workflow
 - `docs/solutions/ui-bugs/napari-mask-layer-misclassified-as-segmentation.md` -- mask/segmentation classification confusion
 - `docs/solutions/ui-bugs/percell4-phasor-plot-axis-desync.md` -- pyqtgraph SI prefix and auto-range issues
 - `docs/solutions/logic-errors/numpy-isin-fails-with-python-sets.md` -- NumPy 2.x silent failures with Python sets
