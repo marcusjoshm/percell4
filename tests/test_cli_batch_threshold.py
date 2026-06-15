@@ -147,6 +147,68 @@ def test_batch_threshold_iterative_unknown_stop_criterion_exits_1(tmp_path, caps
     ])
     assert rc == 1
     assert "invalid round configuration" in capsys.readouterr().err
+
+
+# ── adaptive-clip strategy (U8) ──────────────────────────────────────────
+
+
+def _make_adaptive_dataset(path: Path, *, pixel_size_um: float | None = 0.12) -> None:
+    """One large cell with a non-constant background (so per-cell MAD > 0) and a
+    bright blob the per-cell adaptive detector can find."""
+    store = DatasetStore(path)
+    meta = {"channel_names": ["GFP", "RFP"]}
+    if pixel_size_um is not None:
+        meta["pixel_size_um"] = pixel_size_um
+    store.create(metadata=meta)
+    img = np.zeros((2, 100, 100), dtype=np.float32)
+    rows = np.arange(100).reshape(-1, 1)
+    img[0, 20:60, 20:60] = 10 + (rows[20:60] % 3)  # structured background
+    img[0, 35:45, 35:45] = 200.0  # bright blob
+    store.write_array("intensity", img, attrs={"dims": ["C", "H", "W"]})
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[20:60, 20:60] = 1
+    store.write_labels("cellpose", labels)
+
+
+def test_batch_threshold_adaptive_clip_writes_mask(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ac",
+        "--segmentation", "cellpose", "--strategy", "adaptive-clip",
+        "--d-min-um", "0.12", "--gaussian-sigma", "1",
+    ])
+    assert rc == 0
+    store = DatasetStore(p)
+    mask = store.read_mask("ac")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask).tolist()) <= {0, 1}
+    assert mask.sum() > 0
+    assert "adaptive-clip" in capsys.readouterr().out  # [ok] line names the strategy
+
+
+def test_batch_threshold_adaptive_clip_requires_d_min(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ac",
+        "--segmentation", "cellpose", "--strategy", "adaptive-clip",
+    ])
+    assert rc == 1
+    assert "--d-min-um" in capsys.readouterr().err
+
+
+def test_batch_threshold_adaptive_clip_missing_pixel_size_fails(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p, pixel_size_um=None)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ac",
+        "--segmentation", "cellpose", "--strategy", "adaptive-clip",
+        "--d-min-um", "0.12",
+    ])
+    assert rc == 1  # the only dataset fails → no successes
+    assert "pixel size" in capsys.readouterr().err
+    assert "ac" not in DatasetStore(p).list_masks()
     assert "SG_iter" not in DatasetStore(p).list_masks()
 
 

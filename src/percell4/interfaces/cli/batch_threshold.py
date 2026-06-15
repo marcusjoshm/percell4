@@ -120,13 +120,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     grp.add_argument(
         "--strategy",
-        choices=("grouped-otsu", "iterative-otsu"),
+        choices=("grouped-otsu", "iterative-otsu", "adaptive-clip"),
         default="grouped-otsu",
         help=(
             "Thresholding strategy. 'grouped-otsu' (default) is the legacy "
             "per-group Otsu. 'iterative-otsu' peels the brightest layer each "
-            "round (see the iterative-otsu options group)."
+            "round (see the iterative-otsu options group). 'adaptive-clip' runs "
+            "the per-cell adaptive sigma-clipping detector (see the adaptive-clip "
+            "options group); it ignores --algorithm/--metric grouping and needs a "
+            "pixel size on each dataset."
         ),
+    )
+    ac = parser.add_argument_group(
+        "Adaptive sigma clipping (only used when --strategy adaptive-clip)"
+    )
+    ac.add_argument(
+        "--d-min-um", type=float, default=None,
+        help=(
+            "Smallest particle diameter to detect, in µm (REQUIRED for "
+            "--strategy adaptive-clip). Sets the local-background window and size "
+            "filter; the noise floor is a robust per-cell MAD."
+        ),
+    )
+    ac.add_argument(
+        "--k", type=float, default=1.0,
+        help="Adaptive-clip sigma multiplier (default 1.0; raise to be more conservative).",
     )
     itr = parser.add_argument_group(
         "Iterative Otsu (only used when --strategy iterative-otsu)"
@@ -196,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     # Defer heavy imports so --help stays fast and Qt-free.
     from percell4.store import DatasetStore
     from percell4.workflows.models import (
+        AdaptiveClipSettings,
         GmmCriterion,
         IterativeOtsuSettings,
         ThresholdAlgorithm,
@@ -207,8 +226,17 @@ def main(argv: list[str] | None = None) -> int:
         threshold_compute_one,
     )
 
+    if args.strategy == "adaptive-clip" and args.d_min_um is None:
+        print(
+            "[error] --strategy adaptive-clip requires --d-min-um (smallest "
+            "particle diameter, µm).",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         iterative = None
+        adaptive = None
         if args.strategy == "iterative-otsu":
             stop_params = tuple(_parse_stop_param(p) for p in args.stop_param)
             stop_criteria = tuple(c.strip() for c in args.stop_criteria.split(",") if c.strip())
@@ -221,6 +249,8 @@ def main(argv: list[str] | None = None) -> int:
                 stop_combine=args.stop_combine,
                 fixed_iterations=args.iterations,
             )
+        elif args.strategy == "adaptive-clip":
+            adaptive = AdaptiveClipSettings(d_min_um=args.d_min_um, k=args.k)
         round_spec = ThresholdingRound(
             name=args.round_name,
             channel=args.channel,
@@ -231,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
             kmeans_n_clusters=args.kmeans_n_clusters,
             gaussian_sigma=args.gaussian_sigma,
             iterative_otsu=iterative,
+            adaptive_clip=adaptive,
         )
     except ValueError as e:
         print(f"[error] invalid round configuration: {e}", file=sys.stderr)
@@ -283,11 +314,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         n_ok += 1
         written_for.append(name)
-        strat = (
-            f" ({args.strategy}/{args.iterative_scope}; --verbose for peel report)"
-            if args.strategy == "iterative-otsu"
-            else ""
-        )
+        if args.strategy == "iterative-otsu":
+            strat = f" ({args.strategy}/{args.iterative_scope}; --verbose for peel report)"
+        elif args.strategy == "adaptive-clip":
+            strat = f" (adaptive-clip; d_min={args.d_min_um:g} µm, k={args.k:g})"
+        else:
+            strat = ""
         print(f"[{idx + 1}/{n_total}] [ok] {name}: wrote /masks/{args.round_name}{strat}")
 
     print(f"\n{n_ok}/{n_total} datasets thresholded.")
