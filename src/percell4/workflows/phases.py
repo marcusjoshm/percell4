@@ -711,7 +711,23 @@ def _apply_adaptive_clip_cells(
     """
     if pixel_size_um is None or pixel_size_um <= 0:
         return "adaptive clip: dataset has no pixel size (µm/px)"
-    from percell4.domain.measure.adaptive_clip import detect_adaptive_by_particle_size
+    from percell4.domain.measure.adaptive_clip import (
+        detect_adaptive_by_particle_size,
+        window_min_spot_for_particle,
+    )
+
+    # Plausibility guard: an absurd (but positive) pixel size or oversized d_min
+    # makes the local-background window exceed the frame, degenerating the "local"
+    # clip to a global one — detection silently collapses to an empty mask. Fail
+    # the dataset with a clear message instead.
+    window_px, _ = window_min_spot_for_particle(float(settings.d_min_um), float(pixel_size_um))
+    if window_px > min(image.shape[-2:]):
+        return (
+            f"adaptive clip: derived window {window_px}px exceeds the image "
+            f"({'x'.join(str(d) for d in image.shape[-2:])}) for d_min_um="
+            f"{settings.d_min_um:g} µm at pixel size {pixel_size_um:g} µm/px — "
+            "check the dataset pixel size and d_min"
+        )
 
     try:
         mask = detect_adaptive_by_particle_size(

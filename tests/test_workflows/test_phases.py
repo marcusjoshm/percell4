@@ -562,6 +562,18 @@ def test_apply_adaptive_clip_zero_pixel_size_fails_dataset(tmp_path):
     assert "pixel size" in msg  # pins the adaptive guard, not some unrelated failure
 
 
+def test_apply_adaptive_clip_absurd_pixel_size_fails_dataset(tmp_path):
+    """An absurd-but-positive pixel size blows the window past the frame; fail
+    the dataset rather than silently writing an empty mask."""
+    store = _make_adaptive_store(tmp_path / "absurd.h5", pixel_size_um=1e-3)
+    round_spec = _adaptive_apply_round()
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is DatasetFailure.THRESHOLD_ERROR
+    assert "window" in msg
+    assert "ac" not in store.list_masks()
+
+
 def test_apply_adaptive_clip_presmooth_defaults_to_one_not_round_sigma(tmp_path):
     """Regression: the adaptive presmooth comes from AdaptiveClipSettings
     (default 1.0), NOT the round's grouped-Otsu gaussian_sigma (default 0). A
