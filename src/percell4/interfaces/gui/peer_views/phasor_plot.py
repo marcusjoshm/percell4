@@ -266,10 +266,15 @@ class PhasorPlotWindow(QMainWindow):
         self,
         session: Session,
         get_repo: Callable[[], Any] | None = None,
+        get_seg_labels: Callable[[], Any | None] | None = None,
     ) -> None:
         super().__init__()
         self._session = session
         self._get_repo = get_repo
+        # Provider for the active segmentation's per-pixel labels. Lets the
+        # auto-load path supply labels so the cell-selection filter engages
+        # live, without forcing the user to re-click Compute Phasor.
+        self._get_seg_labels = get_seg_labels
         self.setWindowTitle("PerCell4 — Phasor Plot")
         self.resize(850, 600)
 
@@ -326,19 +331,13 @@ class PhasorPlotWindow(QMainWindow):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(150)
         self._filter_timer.timeout.connect(self._refresh_histogram)
-        self._unsubs = [
-            self._session.subscribe(Event.FILTER_CHANGED, self._on_filter_changed),
-            self._session.subscribe(
-                Event.ACTIVE_MASK_CHANGED, self._on_active_mask_changed
-            ),
-            self._session.subscribe(Event.DATASET_CHANGED, self._on_dataset_changed),
-            self._session.subscribe(
-                Event.ACTIVE_CHANNEL_CHANGED, self._on_active_channel_changed,
-            ),
-            self._session.subscribe(
-                Event.ACTIVE_BIN_CHANGED, self._on_active_bin_changed,
-            ),
-        ]
+        # Session subscriptions are (re)established through an idempotent
+        # helper so closeEvent can tear them down and showEvent can rebuild
+        # them — the window is only hidden on close, never destroyed, so a
+        # reopened window must re-subscribe or it goes deaf to every
+        # session-state change and only repaints on in-window actions.
+        self._unsubs: list[Callable[[], None]] = []
+        self._subscribe_session()
         # Sync checkbox state for whatever mask is already active when the
         # window is created (e.g., re-opening the phasor plot after a
         # mask was set elsewhere).
@@ -355,6 +354,29 @@ class PhasorPlotWindow(QMainWindow):
         # via set_phasor_data). The single-source helper drives them so a
         # missed mutation site cannot leave the buttons stale.
         self._refresh_apply_buttons_enabled()
+
+    def _subscribe_session(self) -> None:
+        """(Re)establish Session subscriptions. Idempotent.
+
+        Called from ``__init__`` and ``showEvent``. ``closeEvent`` clears
+        ``_unsubs`` after unsubscribing, so a hidden→reshown window rebinds
+        its handlers here. A no-op when already subscribed.
+        """
+        if self._unsubs:
+            return
+        self._unsubs = [
+            self._session.subscribe(Event.FILTER_CHANGED, self._on_filter_changed),
+            self._session.subscribe(
+                Event.ACTIVE_MASK_CHANGED, self._on_active_mask_changed
+            ),
+            self._session.subscribe(Event.DATASET_CHANGED, self._on_dataset_changed),
+            self._session.subscribe(
+                Event.ACTIVE_CHANNEL_CHANGED, self._on_active_channel_changed,
+            ),
+            self._session.subscribe(
+                Event.ACTIVE_BIN_CHANGED, self._on_active_bin_changed,
+            ),
+        ]
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -2137,6 +2159,9 @@ class PhasorPlotWindow(QMainWindow):
                 unsub()
             except ValueError:
                 pass  # already unsubscribed
+        # Clear the list so showEvent's _subscribe_session rebinds rather
+        # than skipping (its idempotency guard keys off a non-empty list).
+        self._unsubs = []
         # Phasor preview layers belong to the phasor window — hide the
         # window, hide the previews. Reopening the window re-emits via
         # showEvent → _preview_timer.
@@ -2147,6 +2172,10 @@ class PhasorPlotWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # Rebind Session subscriptions torn down by the last closeEvent so
+        # the reopened window tracks filter / mask / channel / bin changes
+        # again. Idempotent on a first show (already subscribed in __init__).
+        self._subscribe_session()
         # Auto-load cached phasor for the active channel if no compute is
         # in flight. Guard with `_g_map is None` so an in-progress compute
         # is not clobbered (the existing FlimPanel path writes _g_map via
@@ -2154,6 +2183,12 @@ class PhasorPlotWindow(QMainWindow):
         # auto-load from racing against it).
         if self._g_map is None:
             self._try_auto_load_cached()
+        else:
+            # Data already loaded but events may have fired while the window
+            # was hidden+unsubscribed; resync the mask checkbox and repaint
+            # against current session filter state.
+            self._on_active_mask_changed()
+            self._filter_timer.start()
         # Re-render preview layers when the window is reopened, since
         # closeEvent cleared them.
         if self._roi_widgets and self._g_map is not None:
@@ -2262,6 +2297,12 @@ class PhasorPlotWindow(QMainWindow):
                 self._clear_phasor_display()
             return
 
+        # Pull the active segmentation's labels so the cell-selection filter
+        # engages live on the auto-loaded phasor. Shape-gated: a bin/timepoint
+        # mismatch falls back to None (the previous degraded behavior) rather
+        # than feeding misaligned labels into the filter.
+        labels = self._seg_labels_matching(cached.g_map)
+
         # Cache hit — choose call shape based on whether wavelet is cached.
         if cached.g_filtered is not None and cached.s_filtered is not None:
             # Unfiltered raw maps are canonical; wavelet is the optional view.
@@ -2269,18 +2310,39 @@ class PhasorPlotWindow(QMainWindow):
                 cached.g_map, cached.s_map,
                 intensity=cached.intensity,
                 g_wavelet=cached.g_filtered, s_wavelet=cached.s_filtered,
-                labels=None,  # cell filter degraded; user re-clicks Compute to re-engage
+                labels=labels,
             )
         else:
             # No wavelet cached: unfiltered only.
             self.set_phasor_data(
                 cached.g_map, cached.s_map,
                 intensity=cached.intensity,
-                labels=None,
+                labels=labels,
             )
         self._status.showMessage(
             f"Auto-loaded cached phasor (channel: {active_channel})"
         )
+
+    def _seg_labels_matching(self, g_map: np.ndarray) -> np.ndarray | None:
+        """Return the active segmentation labels iff they align with ``g_map``.
+
+        Returns None when no provider is wired, the provider yields nothing,
+        or the labels' shape does not match the phasor maps (e.g. a binning /
+        timepoint mismatch). A None result degrades the cell-selection filter
+        exactly as before — it just no longer happens on the common path.
+        """
+        if self._get_seg_labels is None:
+            return None
+        try:
+            labels = self._get_seg_labels()
+        except Exception:  # noqa: BLE001 — a label-read failure must not break auto-load
+            return None
+        if labels is None:
+            return None
+        labels = np.asarray(labels)
+        if labels.shape != g_map.shape:
+            return None
+        return labels
 
     def _clear_phasor_display(self) -> None:
         """Clear the displayed phasor data without touching ROIs or signals.
