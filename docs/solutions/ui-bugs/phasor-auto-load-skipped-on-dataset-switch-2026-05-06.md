@@ -1,6 +1,7 @@
 ---
 title: "Phasor window auto-load skipped on dataset switch when channel name is unchanged"
 date: 2026-05-06
+last_refreshed: 2026-06-18
 category: ui-bugs
 module: percell4.interfaces.gui.peer_views, percell4.application
 problem_type: ui_bug
@@ -30,6 +31,7 @@ canonical_source: src/percell4/interfaces/gui/peer_views/phasor_plot.py
 related_learnings:
   - docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md
   - docs/solutions/architecture-decisions/session-bridge-event-forwarding.md
+  - docs/solutions/ui-bugs/phasor-plot-deaf-to-session-after-close-reopen-2026-06-18.md
 ---
 
 # Phasor window auto-load skipped on dataset switch when channel name is unchanged
@@ -67,10 +69,10 @@ that loaded cached phasor data via the existing
 
 **Why it was wrong**: a closer read of
 [`src/percell4/interfaces/gui/peer_views/phasor_plot.py`](../../../src/percell4/interfaces/gui/peer_views/phasor_plot.py)
-revealed that `_try_auto_load_cached` already existed (line 1937) and was
-already wired to two triggers — `showEvent` (line 1911) and
-`_on_active_channel_changed` (line 1925). The infrastructure was complete;
-only one wiring edge was missing in `_on_dataset_changed` (line 1508).
+revealed that `_try_auto_load_cached` already existed (line 2262) and was
+already wired to two triggers — `showEvent` (line 2173) and
+`_on_active_channel_changed` (line 2197). The infrastructure was complete;
+only one wiring edge was missing in `_on_dataset_changed` (line 1665).
 
 **Lesson**: when a feature appears absent, search for the existing
 primitive (`grep` for plausible function names like `_try_auto_load`,
@@ -111,7 +113,7 @@ def _on_dataset_changed(self) -> None:
 1. `test_dataset_switch_same_channel_name_auto_loads_new_cache` — the bug
    case. Asserts that after `Session.set_dataset` to a dataset with
    cached phasor + wavelet under the same channel name, the phasor
-   window's `_g_map`, `_s_map`, and `_g_map_unfiltered` populate without
+   window's `_g_map`, `_s_map`, and `_g_map_wavelet` populate without
    any user click.
 2. `test_dataset_switch_different_channel_name_still_auto_loads` —
    idempotency. Confirms the explicit `_try_auto_load_cached()` call plus
@@ -124,12 +126,12 @@ def _on_dataset_changed(self) -> None:
 ## Why This Works
 
 The root cause is an **event suppression pattern** in `Session.set_dataset`
-(`src/percell4/application/session.py:129`, emit block at lines 162-175).
+(`src/percell4/application/session.py:178`, emit block at lines 215-221).
 After `DATASET_CHANGED`, the per-slot `ACTIVE_*_CHANGED` events emit only
 when the slot value actually transitioned:
 
 ```python
-# session.py:162-175
+# session.py:215-221
 self._emit(Event.DATASET_CHANGED)
 self._emit(Event.CHANNEL_LIST_CHANGED)
 self._emit(Event.SEGMENTATION_LIST_CHANGED)
@@ -148,17 +150,26 @@ is equal-by-value and the event is suppressed — even though the
 
 `PhasorPlotWindow` had two auto-load triggers, both blocked in this case:
 
-- `showEvent` (`phasor_plot.py:1911`) only fires when the window
+- `showEvent` (`phasor_plot.py:2173`) only fires when the window
   transitions to visible. Across a dataset switch the phasor window
   typically stays open, so this never re-fires.
-- `_on_active_channel_changed` (`phasor_plot.py:1925`) is the per-channel
+- `_on_active_channel_changed` (`phasor_plot.py:2197`) is the per-channel
   auto-load — gated on the very event that gets suppressed.
 
-`_on_dataset_changed` (`phasor_plot.py:1508`) did fire on every switch
+`_on_dataset_changed` (`phasor_plot.py:1665`) did fire on every switch
 and cleared per-dataset caches, but never re-populated.
 
+> **Lifecycle update (2026-06-18):** `showEvent` no longer just auto-loads —
+> it now also re-establishes the window's Session subscriptions via the
+> idempotent `_subscribe_session()` (and resyncs filter/mask state), because
+> `closeEvent` tears those subscriptions down on a hide-not-destroy close.
+> See [`phasor-plot-deaf-to-session-after-close-reopen-2026-06-18.md`](phasor-plot-deaf-to-session-after-close-reopen-2026-06-18.md).
+> The equal-by-name suppression root cause documented here is unaffected:
+> the explicit `_try_auto_load_cached()` call in `_on_dataset_changed` is
+> still the fix, and the dataset-switch handler still fires on every switch.
+
 The fix mirrors an **existing precedent in the same handler** at
-`phasor_plot.py:1572-1578`, where `_on_dataset_changed` already calls
+`phasor_plot.py:1741`, where `_on_dataset_changed` already calls
 `self._on_active_mask_changed()` explicitly to handle the same
 equal-by-name suppression for the mask-filter checkbox state. The
 original author had encountered and solved this pattern for masks but
@@ -204,7 +215,7 @@ grep -rn "Event\.ACTIVE_.*_CHANGED" src/percell4/interfaces/gui/
 ```
 
 **Parallel precedent in PRs**: cite the mask-checkbox handling at
-`src/percell4/interfaces/gui/peer_views/phasor_plot.py:1572-1578`. New
+`src/percell4/interfaces/gui/peer_views/phasor_plot.py:1741`. New
 auto-load / refresh logic in any window should follow the same template
 — `_on_dataset_changed` ends by explicitly invoking every
 `ACTIVE_*_CHANGED` handler whose side-effect is dataset-relevant.
