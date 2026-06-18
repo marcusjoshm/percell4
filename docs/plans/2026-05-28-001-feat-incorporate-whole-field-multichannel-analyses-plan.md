@@ -10,7 +10,7 @@ deepened: 2026-05-28
 
 ## Overview
 
-Add two more standalone scripts from `/Users/leelab/mask-intensity-analysis-repo`
+Add two more standalone scripts from `~/mask-intensity-analysis-repo`
 to PerCell4 as **registered analyses**, following the `per_particle_donut`
 pattern shipped in `docs/plans/2026-05-27-004-feat-analysis-integration-plan.md`:
 
@@ -1125,9 +1125,9 @@ globs for analysis-package paths.
   `src/percell4/gui/analysis_widgets.py`
 - Dynamic-row UI: `src/percell4/gui/workflows/single_cell/config_dialog.py`
   (Threshold Rounds), `src/percell4/gui/phasor_masks_dialog.py`
-- Source scripts: `/Users/leelab/mask-intensity-analysis-repo/per_particle_multichannel.py`,
-  `/Users/leelab/mask-intensity-analysis-repo/whole_field_analysis.py`,
-  `/Users/leelab/mask-intensity-analysis-repo/README.md`
+- Source scripts: `~/mask-intensity-analysis-repo/per_particle_multichannel.py`,
+  `~/mask-intensity-analysis-repo/whole_field_analysis.py`,
+  `~/mask-intensity-analysis-repo/README.md`
 - Institutional learnings: `docs/solutions/architecture-patterns/gui-action-contract-exhaustiveness.md`,
   `.../sibling-dialog-extract-shared-widget-2026-05-12.md`,
   `.../atomic-write-contract.md`, `docs/solutions/ui-bugs/dialog-scroll-when-tall.md`,

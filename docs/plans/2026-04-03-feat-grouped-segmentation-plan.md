@@ -585,8 +585,8 @@ def _on_measurement_done(self, new_df):
 ## References
 
 - Brainstorm: `docs/brainstorms/2026-04-03-grouped-segmentation-brainstorm.md`
-- PerCell3 grouped segmentation: `/Users/leelab/percell3/src/percell3/measure/cell_grouper.py`, `threshold_viewer.py`, `thresholding.py`
-- PerCell v1 GMM: `/Users/leelab/percell/percell/application/image_processing_tasks.py:734-836`
+- PerCell3 grouped segmentation: `~/percell3/src/percell3/measure/cell_grouper.py`, `threshold_viewer.py`, `thresholding.py`
+- PerCell v1 GMM: `~/percell/percell/application/image_processing_tasks.py:734-836`
 - Mask classification gotcha: `docs/solutions/ui-bugs/napari-mask-layer-misclassified-as-segmentation.md`
 - NumPy isin gotcha: `docs/solutions/logic-errors/numpy-isin-fails-with-python-sets.md`
 - DirectLabelColormap gotcha: `docs/solutions/ui-bugs/napari-direct-label-colormap-rendering-blocked-by-events.md`

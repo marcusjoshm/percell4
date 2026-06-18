@@ -38,7 +38,7 @@ an algorithm."
 ## Problem Frame
 
 A user loads a multi-timepoint dataset (e.g. the senescence time-lapse at
-`/Volumes/KGW/Senescense_Experiments/tiffs/New Folder With Items`, imported via Compress
+`/Volumes/<lab-server>/<experiments>/tiffs/<folder>`, imported via Compress
 into a `(T,C,H,W)` `.h5`). The viewer shows a working time slider. Then:
 
 - **Add Layer to Dataset** loads a single plane to *all* timepoints — it ignores the

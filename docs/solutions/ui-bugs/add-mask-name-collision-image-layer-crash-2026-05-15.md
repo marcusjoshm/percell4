@@ -115,8 +115,8 @@ The full add_mask-consumer suite (64 tests) continues to pass.
 ```python
 import h5py
 for p in [
-    "/Volumes/NX-01-A/NP_datasets/datasets/UT_WT_1B-Dcp2_Split_Halo_Sensor.h5",
-    "/Volumes/NX-01-A/NP_datasets/datasets/As_WT_1B-Dcp2_Split_Halo_Sensor.h5",
+    "/Volumes/<lab-server>/<datasets>/<dataset-1>.h5",
+    "/Volumes/<lab-server>/<datasets>/<dataset-2>.h5",
 ]:
     with h5py.File(p, "a") as f:
         del f["masks/CA-SiR"]   # collided with channel CA-SiR

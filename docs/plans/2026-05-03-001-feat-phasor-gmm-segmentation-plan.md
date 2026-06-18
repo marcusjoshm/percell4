@@ -18,7 +18,7 @@ The downstream "Apply Visible as Mask" flow is unchanged: each visible ROI (manu
 
 ## Problem Frame
 
-Manual ROI placement on the phasor plot is slow, subjective, and irreproducible for datasets with multiple overlapping populations (condensed vs. dilute phase, autofluorescence vs. label, multiple metabolic states). The reference scripts at `/Users/leelab/ComplexWaveletFilter/{Circular_ROI_lifetime.py,CondensedPhaseGMM.py}` show the intended automation: filter the phasor by intensity / a tau-anchored circle / a binary mask, fit a Gaussian mixture, and place ROIs whose center, axes, and angle come from each component's mean and covariance — then refine per-cluster via cov_f scaling and shift along the principal axis. None of this exists in PerCell4 today.
+Manual ROI placement on the phasor plot is slow, subjective, and irreproducible for datasets with multiple overlapping populations (condensed vs. dilute phase, autofluorescence vs. label, multiple metabolic states). The reference scripts at `~/ComplexWaveletFilter/{Circular_ROI_lifetime.py,CondensedPhaseGMM.py}` show the intended automation: filter the phasor by intensity / a tau-anchored circle / a binary mask, fit a Gaussian mixture, and place ROIs whose center, axes, and angle come from each component's mean and covariance — then refine per-cluster via cov_f scaling and shift along the principal axis. None of this exists in PerCell4 today.
 
 (see origin: `docs/brainstorms/2026-05-03-phasor-gmm-segmentation-requirements.md`)
 
@@ -848,7 +848,7 @@ Selected-ROI panel (existing) + new spinboxes (R4)
 ## Sources & References
 
 - **Origin document:** `docs/brainstorms/2026-05-03-phasor-gmm-segmentation-requirements.md`
-- **Reference implementations** (read-only context, in another repo): `/Users/leelab/ComplexWaveletFilter/Circular_ROI_lifetime.py`, `/Users/leelab/ComplexWaveletFilter/CondensedPhaseGMM.py`
+- **Reference implementations** (read-only context, in another repo): `~/ComplexWaveletFilter/Circular_ROI_lifetime.py`, `~/ComplexWaveletFilter/CondensedPhaseGMM.py`
 - **Related brainstorms:** `docs/brainstorms/2026-04-17-phasor-roi-separate-masks-brainstorm.md`, `docs/brainstorms/2026-04-30-phasor-mask-filter-requirements.md`
 - **Related code:**
   - `src/percell4/application/use_cases/compute_phasor.py` — use-case shape

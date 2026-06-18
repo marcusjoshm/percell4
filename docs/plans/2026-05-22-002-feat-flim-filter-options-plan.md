@@ -66,7 +66,7 @@ The user wants explicit, user-controlled filtering: a true unfiltered baseline, 
 
 ### Institutional Learnings
 
-- `docs/solutions/ui-bugs/percell4-flim-phasor-troubleshooting.md` (Issue #7): the 3×3 median was deliberately added to match `flimfret`'s "unfiltered" output (`/Users/leelab/flimfret/docs/phasor_plot_pipeline_reference.md` §2.5). Removing it intentionally breaks that equivalence — surfaced in Risks.
+- `docs/solutions/ui-bugs/percell4-flim-phasor-troubleshooting.md` (Issue #7): the 3×3 median was deliberately added to match `flimfret`'s "unfiltered" output (`~/flimfret/docs/phasor_plot_pipeline_reference.md` §2.5). Removing it intentionally breaks that equivalence — surfaced in Risks.
 - `docs/solutions/integration-issues/phasor-view-bin-not-forwarded-from-gui-callers-2026-05-18.md`: the exact precedent for threading a new param (here: `median_size`, lifetime `source`) from GUI → use case. Rules: a receiver-side kwarg with no sender wiring is dead code; forward explicitly at every call site (never default silently); **capture session/widget values into the worker kwargs dict before constructing the QThread Worker.**
 - `docs/solutions/ui-bugs/phasor-apply-visible-as-mask-ignored-filters-2026-05-03.md`: any new filter checkbox on the plot must flow through the shared `_compute_visible_valid_2d()` helper so histogram, napari preview, and apply-as-mask stay pixel-identical. Pin with a structural-equality test.
 - `docs/solutions/logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md`: derive intensity as `decay.sum(axis=-1)` from `/decay/<ch>` — never `/intensity[ch_idx]` — for any intensity-weighted operation.
@@ -343,4 +343,4 @@ FlimPanel "Compute Lifetime"
 
 - Related code: `src/percell4/application/use_cases/compute_phasor.py:116-118`, `compute_lifetime.py:62-83`, `src/percell4/interfaces/gui/peer_views/phasor_plot.py` (`_get_active_gs_maps`, `_compute_visible_valid_2d`, `set_phasor_data`), `src/percell4/interfaces/gui/task_panels/flim_panel.py` (`_on_compute_lifetime`), `src/percell4/domain/flim/phasor.py`.
 - Learnings: `docs/solutions/ui-bugs/percell4-flim-phasor-troubleshooting.md`, `docs/solutions/integration-issues/phasor-view-bin-not-forwarded-from-gui-callers-2026-05-18.md`, `docs/solutions/ui-bugs/phasor-apply-visible-as-mask-ignored-filters-2026-05-03.md`, `docs/solutions/logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md`, `docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md`.
-- External reference (rationale of record): `/Users/leelab/flimfret/docs/phasor_plot_pipeline_reference.md` §2.5.
+- External reference (rationale of record): `~/flimfret/docs/phasor_plot_pipeline_reference.md` §2.5.

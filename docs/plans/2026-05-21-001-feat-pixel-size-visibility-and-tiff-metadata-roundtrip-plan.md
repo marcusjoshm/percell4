@@ -326,7 +326,7 @@ view-bin pixel size when `view_bin > 1`.
 
 **Verification:**
 - Load the test fixture used in research
-  (`/Volumes/NX-01-A/2026-05-21_export/datasets/60min_As_Merged.h5` once
+  (`/Volumes/<lab-server>/<export>/datasets/<dataset>.h5` once
   it carries a `pixel_size_um=0.12034`) — Dataset Info reports
   `Pixel size: 0.1203 µm/px (0.01449 µm²/px)`.
 
@@ -522,10 +522,10 @@ to a per-dataset integer pixel threshold using that dataset's
 ## Sources & References
 
 - TIFF metadata evidence:
-  `/Volumes/NX-01-A/2026-05-21_export/2026-05-19_A549_mNG11-G3BP1_KI_stress_granule_EU_labeling/*.tif`
+  `/Volumes/<lab-server>/<export>/<dataset>/*.tif`
   (`XResolution=(4294967295, 51698)`, `ResolutionUnit=3` → 0.12034 µm/px).
 - Workflow run that motivated the plan:
-  `/Volumes/NX-01-A/2026-05-21_export/analysis/run_2026-05-21T181854Z_b9812c6d/`.
+  `/Volumes/<lab-server>/<export>/analysis/<run-id>/`.
 - Related plan (not modified by this one):
   `docs/plans/2026-05-19-001-feat-binned-tif-export-option-plan.md`.
 - I/O principles audit:

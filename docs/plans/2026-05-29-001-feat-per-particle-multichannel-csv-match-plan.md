@@ -49,7 +49,7 @@ user picks which channels get a `cell_<ch>_mean` column (one, several, or all).
 ## Problem Frame
 
 The lab has an original Python script (`make_csv.py`, on a Box drive **not mounted
-on this machine** — confirmed `/Users/leelab/Library/CloudStorage` is absent) that
+on this machine** — confirmed `~/Library/CloudStorage` is absent) that
 emits a per-particle condensate CSV with this exact header for a 3-channel dataset:
 
 ```

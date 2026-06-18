@@ -2376,7 +2376,7 @@ widgets:
     reads: []
     writes: []
     keystroke: null
-    notes: "Zero `bind_key` registrations exist in gui/viewer.py today (grep -n 'bind_key' /Users/leelab/percell4/src/percell4/gui/viewer.py returns empty). Recorded as an explicit absence per U2 task spec; matches plan §Problem Frame point 3 ('PerCell4 has zero `viewer.bind_key` registrations'). U11 will add a `Labels.bind_key('M', …)` here."
+    notes: "Zero `bind_key` registrations exist in gui/viewer.py today (grep -n 'bind_key' ~/percell4/src/percell4/gui/viewer.py returns empty). Recorded as an explicit absence per U2 task spec; matches plan §Problem Frame point 3 ('PerCell4 has zero `viewer.bind_key` registrations'). U11 will add a `Labels.bind_key('M', …)` here."
 
   # ── interfaces/gui/main_window.py — events.active closure (out of tree) ──
   # Note: the _wire_viewer_layer_selection / _on_layer_selection_changed

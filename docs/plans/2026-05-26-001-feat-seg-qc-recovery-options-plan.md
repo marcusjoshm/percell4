@@ -42,7 +42,7 @@ still auto-skips the QC window when `labels.max() == 0`. Either way,
 the researcher has no in-workflow recovery: they have to
 preprocess in ImageJ, change the workflow config, and restart the
 batch from scratch. Empirical evidence from the
-`/Volumes/NX-01-A/2026-05-25_FRET_export` dataset (see origin doc):
+`/Volumes/<lab-server>/<export>` dataset (see origin doc):
 Cellpose at diameter=300 on `mNG` finds 0 cells; the same channel
 after an ImageJ "Apply LUT" with `hi≈1000` finds 19 ROIs.
 

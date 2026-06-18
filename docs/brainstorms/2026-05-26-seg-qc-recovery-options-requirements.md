@@ -26,7 +26,7 @@ workflow dialog, and re-run the entire workflow. That is the cost
 of every misclassified dataset in a batch.
 
 Empirical evidence captured during diagnosis on the
-`/Volumes/NX-01-A/2026-05-25_FRET_export` dataset: Cellpose at
+`/Volumes/<lab-server>/<export>` dataset: Cellpose at
 diameter=300 on `mNG` finds 0 cells; the same channel after an ImageJ
 "Apply LUT" with `hi≈1000` (everything above 1000 saturated to max)
 finds 19 ROIs at the same diameter. The user empirically tested

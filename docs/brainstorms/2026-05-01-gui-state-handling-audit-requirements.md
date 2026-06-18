@@ -64,7 +64,7 @@ preserved here because abstract invariants drift; anchored ones do not.
 
 **Repro.**
 1. `python main.py`, Load Dataset
-   `/Volumes/NX-01-A/2026-04-27_percell4_datasets/Dish_1_WT_As_60min.h5`.
+   `/Volumes/<lab-server>/<datasets>/<dataset>.h5`.
 2. Data tab → Active Channel = `mNG`.
 3. FLIM tab → Compute Phasor → Apply Wavelet Filter → check `Filter by active
    mask` (active mask was auto-selected on dataset load; user never set it).

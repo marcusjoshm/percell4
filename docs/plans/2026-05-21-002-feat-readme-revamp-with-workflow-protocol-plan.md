@@ -19,7 +19,7 @@ This plan rewrites `README.md` end to end. The result is a single document that 
 
 New users currently arrive at `README.md` and immediately get install instructions. There is no app introduction, no logo, no description of what the workflow looks like, and no guidance on file-naming contracts that other parts of the system rely on. Linux install is omitted entirely, even though the stack runs on Linux. The batch-export CLI is documented but buried; researchers who only want headless TIFF dumps have to scroll past the GUI install to find it.
 
-The user pointed at `/Users/leelab/percell/README.md` as a structural reference: logo header → TOC → typical use case → install per OS → troubleshooting. We adopt that shape but rewrite the body for PerCell4's Qt+napari multi-window architecture and HDF5-per-experiment data model.
+The user pointed at `~/percell/README.md` as a structural reference: logo header → TOC → typical use case → install per OS → troubleshooting. We adopt that shape but rewrite the body for PerCell4's Qt+napari multi-window architecture and HDF5-per-experiment data model.
 
 ---
 
@@ -38,7 +38,7 @@ The user pointed at `/Users/leelab/percell/README.md` as a structural reference:
 - R11. Existing Windows-specific content (PyTorch/Cellpose, MSVC redist, PowerShell vs Command Prompt vs Git Bash, troubleshooting bullets) is preserved verbatim or near-verbatim. No regressions on accuracy.
 - R12. A "Troubleshooting" section retained at the tail; existing Windows triage list is preserved.
 - R13. License + repo metadata (author, links) end the README.
-- R14. The logo file is added to the repo at `art/percell4_logo.png` (copied from `/Users/leelab/Downloads/percell_logo.png`). README references it via a relative path so GitHub renders it.
+- R14. The logo file is added to the repo at `art/percell4_logo.png` (copied from `~/Downloads/percell_logo.png`). README references it via a relative path so GitHub renders it.
 
 ---
 
@@ -72,7 +72,7 @@ The user pointed at `/Users/leelab/percell/README.md` as a structural reference:
 - `src/percell4/interfaces/cli/batch_export.py` — the CLI surface documented in the Batch TIFF Export section.
 - `docs/brainstorms/2026-05-20-end-to-end-single-cell-workflow-requirements.md` — phase ordering (compress → segment → seg-QC → thresh × N → thresh-QC × N → dilute → measure → aggregate). Walkthrough phases mirror this.
 - `docs/solutions/logic-errors/tiff-pending-channel-name-prefix-mismatch-2026-05-21.md` — codifies the `chNN` prefix contract; cite as the canonical reason channel names look the way they do.
-- `/Users/leelab/percell/README.md` — structural reference for header layout, TOC placement, "Typical Use Case" voice, and per-OS install organization.
+- `~/percell/README.md` — structural reference for header layout, TOC placement, "Typical Use Case" voice, and per-OS install organization.
 
 ### Institutional Learnings
 
@@ -125,7 +125,7 @@ This plan does not create a new directory hierarchy. The two artifacts are:
 
     README.md            (rewritten in place)
     art/
-        percell4_logo.png  (new, copied from /Users/leelab/Downloads/percell_logo.png)
+        percell4_logo.png  (new, copied from ~/Downloads/percell_logo.png)
 
 ---
 
@@ -223,11 +223,11 @@ One-sentence tagline.
 **Dependencies:** none
 
 **Files:**
-- Create: `art/percell4_logo.png` (copy of `/Users/leelab/Downloads/percell_logo.png`, 834×834 PNG with alpha)
+- Create: `art/percell4_logo.png` (copy of `~/Downloads/percell_logo.png`, 834×834 PNG with alpha)
 
 **Approach:**
 - Create `art/` at the repo root (does not exist yet).
-- Copy the file via `cp /Users/leelab/Downloads/percell_logo.png art/percell4_logo.png` — no resizing, no format change. GitHub will scale it down via the `<img width="...">` attribute in the README.
+- Copy the file via `cp ~/Downloads/percell_logo.png art/percell4_logo.png` — no resizing, no format change. GitHub will scale it down via the `<img width="...">` attribute in the README.
 - Verify with `file art/percell4_logo.png` that the PNG header is intact.
 
 **Patterns to follow:**
@@ -556,9 +556,9 @@ One-sentence tagline.
 ## Sources & References
 
 - Origin: none (direct user request, no upstream brainstorm document).
-- Reference: `/Users/leelab/percell/README.md` — structural model for header, TOC, per-OS install.
+- Reference: `~/percell/README.md` — structural model for header, TOC, per-OS install.
 - End-to-end workflow phases: `docs/brainstorms/2026-05-20-end-to-end-single-cell-workflow-requirements.md`.
 - Channel-naming contract: `docs/solutions/logic-errors/tiff-pending-channel-name-prefix-mismatch-2026-05-21.md`.
 - Launcher panel inventory: `src/percell4/interfaces/gui/main_window.py:206-216`.
 - Dependency versions: `pyproject.toml`.
-- Logo: `/Users/leelab/Downloads/percell_logo.png` (834×834 PNG with alpha) → `art/percell4_logo.png`.
+- Logo: `~/Downloads/percell_logo.png` (834×834 PNG with alpha) → `art/percell4_logo.png`.

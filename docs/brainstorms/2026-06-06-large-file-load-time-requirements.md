@@ -20,7 +20,7 @@ viewer. The wait — not viewability — is the entire problem. Once loaded, the
 resident-everything interaction.
 
 Trigger class: whole-slide live timecourses, e.g. `Nutlin3a_Merged.h5` / `Nutlin3a_batch.h5`
-(3.89 GB on disk, `/Volumes/KGW/Senescense_Experiments/LIVE/datasets_h5/`):
+(3.89 GB on disk, `/Volumes/<lab-server>/<experiments>/datasets_h5/`):
 
 | Dataset | Shape | dtype | Uncompressed |
 |---|---|---|---|

@@ -81,5 +81,5 @@ Option A. Cheapest fix, matches existing `WorkflowHost` pattern.
 
 ## Resources
 
-- `/Users/leelab/percell4/CLAUDE.md` — "windows never talk to each other directly" rule
+- `~/percell4/CLAUDE.md` — "windows never talk to each other directly" rule
 - `src/percell4/workflows/host.py:24-60` — `WorkflowHost` Protocol precedent

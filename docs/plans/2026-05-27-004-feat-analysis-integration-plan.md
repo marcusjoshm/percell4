@@ -409,14 +409,14 @@ Inside run_analysis():
 **Dependencies:** None (independent of the framework; can land before U1–U3 if desired, but listed here in phased order).
 
 **Files:**
-- Create: `per_particle_analysis.py` (at percell4 repo root — **copied from** `/Users/leelab/mask-intensity-analysis-repo/per_particle_analysis.py`)
+- Create: `per_particle_analysis.py` (at percell4 repo root — **copied from** `~/mask-intensity-analysis-repo/per_particle_analysis.py`)
 - Create: `src/percell4/domain/analysis/_impl/__init__.py`
 - Create: `src/percell4/domain/analysis/_impl/per_particle_donut.py`
 - Create: `tests/test_domain/test_per_particle_donut_pure.py`
 - Create: `tests/fixtures/per_particle/` (input TIFFs + expected CSV files for regression test)
 
 **Approach:**
-- **Step 0 (acquire):** COPY `per_particle_analysis.py` from `/Users/leelab/mask-intensity-analysis-repo/` to `percell4/per_particle_analysis.py` (repo root, alongside `main.py`). Add a deprecation note to the README of the external repo pointing to the new location. From this point forward, the canonical home of the script is the percell4 repo.
+- **Step 0 (acquire):** COPY `per_particle_analysis.py` from `~/mask-intensity-analysis-repo/` to `percell4/per_particle_analysis.py` (repo root, alongside `main.py`). Add a deprecation note to the README of the external repo pointing to the new location. From this point forward, the canonical home of the script is the percell4 repo.
 - **Step 0.5 (regression fixture, BEFORE any refactor):** Create `tests/fixtures/per_particle/` with 2 small image sets (`group_a/{Cap.tif, P-body_mask.tif, pnorm.tif}` for P-body-only, `group_b/{Cap.tif, P-body_mask.tif, pnorm.tif, SG_mask.tif, sgnorm.tif, cp_mask.tif}` for both modes + single-cell). Generate expected CSV files by running the just-copied CLI against the fixture and committing the outputs. The regression test invokes `python per_particle_analysis.py --data-dir tests/fixtures/per_particle/group_a --output-pbody /tmp/out_p.csv --output-sg /tmp/out_s.csv` (via subprocess), compares against the committed expected files using the **numeric parity test** (drop the `group` column, sort rows by `pbody_id`/`sg_id`, integer columns exact-equal, float columns `np.allclose(rtol=1e-10)`). Run this test before and after every subsequent step.
 - **Step 1 (refactor — no behavior change):** Move `mask_img = tifffile.imread(mask_path)` out of `analyze_regions` and `assign_particles_to_cells`. They now take `mask_img: np.ndarray` directly. The CLI reads the TIFF before calling them.
 - **Step 2 (refactor — no behavior change):** Move the donut-TIFF write OUT of `analyze_regions`. The function returns `{"rows": [...], "donut_mask": np.ndarray | None}` instead. The CLI writes the TIFF when `--export-donuts` is set.
@@ -758,4 +758,4 @@ Each phase is a natural commit-and-review boundary. Within phase 1, U4 is indepe
   - `src/percell4/gui/phasor_masks_dialog.py` — secondary dialog pattern (multi-dataset, refresh-on-change)
   - `src/percell4/workflows/artifacts.py` — `RunMetadata` + `run_config.json` shape
   - `src/percell4/application/use_cases/batch_fit_phasor_masks.py` — per-dataset isolation pattern
-- **Existing script being migrated:** `per_particle_analysis.py` — currently at `/Users/leelab/mask-intensity-analysis-repo/per_particle_analysis.py` (external repo); U4 Step 0 copies it into the percell4 repo at `per_particle_analysis.py` (repo root). The external copy becomes deprecated.
+- **Existing script being migrated:** `per_particle_analysis.py` — currently at `~/mask-intensity-analysis-repo/per_particle_analysis.py` (external repo); U4 Step 0 copies it into the percell4 repo at `per_particle_analysis.py` (repo root). The external copy becomes deprecated.

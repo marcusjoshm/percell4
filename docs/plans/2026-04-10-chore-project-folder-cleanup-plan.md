@@ -22,7 +22,7 @@ only.
 
 ## Problem Statement / Motivation
 
-A scan of `/Users/leelab/percell4` surfaces four classes of rot:
+A scan of `~/percell4` surfaces four classes of rot:
 
 1. **Test-output artifacts at the repo root.** Running the measurement and
    particle export flows during feature testing dropped five CSVs next to
@@ -363,7 +363,7 @@ Commit: `docs: refresh README, add per-module CLAUDE.md stubs`.
 - Branch audit: all 10 feature/fix/refactor branches return empty from
   `git branch --no-merged main`, and each has
   `git merge-base <b> main == git rev-parse <b>`
-- `.gitignore` current contents: `/Users/leelab/percell4/.gitignore:1-44`
+- `.gitignore` current contents: `~/percell4/.gitignore:1-44`
 
 ### Internal conventions
 
