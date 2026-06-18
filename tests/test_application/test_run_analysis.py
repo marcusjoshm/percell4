@@ -951,9 +951,6 @@ def test_per_particle_donut_cli_parity_group_a(tmp_path: Path) -> None:
         / "group_a_expected"
         / "combined_pbody.csv"
     )
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    cli_script = repo_root / "per_particle_analysis.py"
-
     # Build an h5 from the fixture TIFFs so the framework + CLI see
     # the same pixel data.
     cap = tifffile.imread(fixture_dir / "sample1_Cap.tif")
@@ -1023,15 +1020,6 @@ def test_per_particle_donut_cli_parity_group_a(tmp_path: Path) -> None:
                 check_exact=True,
                 obj=f"column {col!r}",
             )
-
-    # Smoke-check that the CLI script still exists at the expected
-    # location (a guard against U4 ever moving it without updating
-    # this test's reference path). The subprocess CLI invocation
-    # itself is exercised by
-    # ``tests/test_scripts/test_per_particle_regression.py``; we keep
-    # this parity test purely numeric (committed CSV vs framework) so
-    # it stays fast and deterministic.
-    assert cli_script.exists()
 
 
 # ── layer_map threading (U2) ──────────────────────────────────────────

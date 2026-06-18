@@ -57,8 +57,14 @@ Thumbs.db
 .cursor/
 CLAUDE.md
 compound-engineering.local.md
-scripts/claude_code_hooks/
 .worktrees
+
+# Developer scratch: one-off data-propagation scripts, ImageJ macros, and
+# tool hooks. Kept on disk for reuse but never part of the tracked platform.
+scripts/
+
+# Retired development artifact (adaptive SG puncta recipe), archived but untracked.
+docs/archive/locked_SG.json
 
 # Agent / tool context caches
 .context/
