@@ -31,9 +31,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.ndimage import find_objects
+from scipy.ndimage import label as ndlabel
+from skimage.measure import regionprops
 
 from percell4.domain.analysis._impl._shared import (
-    assign_particles_to_cells,
+    donut_for_region_mask,
     label_and_filter,
     nan_safe_ratio,
     region_and_donut_masks,
@@ -123,6 +126,139 @@ def analyze_particles(
     return results, donut_export
 
 
+def analyze_particles_per_cell(
+    *,
+    mask_img: np.ndarray,
+    cp_mask_img: np.ndarray,
+    channel_images: dict[str, np.ndarray],
+    buffer_px: int,
+    donut_px: int,
+    min_size: int,
+    capture_donut_mask: bool = False,
+    log: Callable[[str], None] | None = None,
+) -> tuple[list[dict[str, Any]], np.ndarray | None]:
+    """Per-cell particle measurement matching the single-cell thresholding table.
+
+    A *particle* here is a connected component of ``(cp_mask == cell) & mask``
+    — i.e. the particle mask **clipped to each cell**, labeled independently
+    inside every cell. This reproduces the particle identity and area of
+    :func:`percell4.domain.measure.particle.analyze_particles_detail` exactly,
+    so the two analyses share ``cell_id`` / ``particle_id`` / area as a join
+    key:
+
+    * labeling uses ``scipy.ndimage.label`` (4-connectivity), **not**
+      skimage's 8-connected ``measure.label``;
+    * ``particle_id`` is a per-cell sequential index (``1..n`` within each
+      cell, in raster order, assigned **before** the size filter — so a
+      surviving particle keeps the index it would have had with the dropped
+      ones present);
+    * ``particle_area_px`` is the cell-clipped component area;
+    * the size filter keeps components with ``area >= min_size`` (matching
+      single-cell's ``prop.area < min_area → skip``), unlike the whole-image
+      path's strict ``area > min_size``.
+
+    The donut ring is then measured around each **clipped** particle (so a
+    particle touching a cell edge has its dilute ring computed from the
+    clipped shape). Unlike the whole-image path, a particle whose donut is
+    empty is **still emitted** (with ``donut_area_px == 0`` and NaN dilute
+    metrics) so the row set matches single-cell one-for-one. Particles
+    outside every cell are absent, exactly as in single-cell.
+
+    Returns ``(rows, donut_export)`` — one row dict per particle and the
+    uint8 union donut mask when ``capture_donut_mask`` is True (else None).
+    """
+    h, w = mask_img.shape
+    for name, img in channel_images.items():
+        if img.shape != (h, w):
+            raise ValueError(
+                f"Channel '{name}' shape {img.shape} does not match mask "
+                f"shape {(h, w)}"
+            )
+
+    binary_mask = mask_img > 0
+    labels = cp_mask_img
+    donut_export = (
+        np.zeros((h, w), dtype=np.uint8) if capture_donut_mask else None
+    )
+
+    results: list[dict[str, Any]] = []
+    max_label = int(labels.max())
+    if max_label == 0:
+        if log is not None:
+            log("  No cells in cp_mask — 0 particles")
+        return results, donut_export
+
+    slices = find_objects(labels)
+    n_particles = 0
+    for cell_val in range(1, max_label + 1):
+        sl = slices[cell_val - 1]
+        if sl is None:
+            continue
+        label_crop = labels[sl]
+        cell_mask = label_crop == cell_val
+        if not cell_mask.any():
+            continue
+        particle_mask = cell_mask & binary_mask[sl]
+        particle_labels, n_components = ndlabel(particle_mask)
+        if n_components == 0:
+            continue
+
+        props = regionprops(particle_labels)
+        row0, col0 = sl[0].start, sl[1].start
+        for pid, prop in enumerate(props, start=1):
+            # pid assigned before the size filter so a surviving particle
+            # keeps the same index it would have had with dropped ones
+            # present — identical to single-cell's enumerate-then-skip.
+            if prop.area < min_size:
+                continue
+
+            region_mask = np.zeros((h, w), dtype=bool)
+            region_view = region_mask[sl]
+            region_view[particle_labels == prop.label] = True
+
+            full_bbox = (
+                row0 + prop.bbox[0],
+                col0 + prop.bbox[1],
+                row0 + prop.bbox[2],
+                col0 + prop.bbox[3],
+            )
+            donut_mask = donut_for_region_mask(
+                region_mask, binary_mask, full_bbox, buffer_px, donut_px
+            )
+            if donut_export is not None:
+                donut_export[donut_mask] = 255
+
+            row: dict[str, Any] = {
+                'particle_id': int(pid),
+                'cell_id': int(cell_val),
+                'particle_area_px': int(prop.area),
+                'donut_area_px': int(donut_mask.sum()),
+            }
+            for ch_name, ch_img in channel_images.items():
+                region_vals = ch_img[region_mask]
+                donut_vals = ch_img[donut_mask]
+                c_mean = (
+                    float(np.mean(region_vals))
+                    if region_vals.size else np.nan
+                )
+                d_mean = (
+                    float(np.mean(donut_vals)) if donut_vals.size else np.nan
+                )
+                row[f'condensed_{ch_name}_mean'] = c_mean
+                row[f'dilute_{ch_name}_mean'] = d_mean
+                row[f'condensed_{ch_name}_integ'] = float(np.sum(region_vals))
+                row[f'dilute_{ch_name}_integ'] = float(np.sum(donut_vals))
+                row[f'{ch_name}_condensed_over_dilute'] = nan_safe_ratio(
+                    c_mean, d_mean
+                )
+            results.append(row)
+            n_particles += 1
+
+    if log is not None:
+        log(f"  Found {n_particles} particles >= {min_size} px (per-cell)")
+    return results, donut_export
+
+
 # ---------------------------------------------------------------------------
 # Single-cell aggregation (whole-cell stats are unique to this analysis)
 # ---------------------------------------------------------------------------
@@ -152,7 +288,6 @@ def _whole_cell_stats(values: np.ndarray) -> tuple[float, ...]:
 
 def aggregate_by_cell(
     particle_results: list[dict[str, Any]],
-    particle_to_cell: dict[int, int],
     cp_mask_img: np.ndarray,
     channel_names: list[str],
     channel_images: dict[str, np.ndarray],
@@ -164,12 +299,14 @@ def aggregate_by_cell(
     intensity stats are computed directly from the pixels inside each
     cell mask. Every non-zero cell id gets a row — cells with no
     particles still get whole-cell stats with NaN particle metrics.
+
+    Rows are grouped by the ``cell_id`` each particle already carries
+    (set by :func:`analyze_particles_per_cell`), so particle identity and
+    cell assignment stay consistent with the per-particle table.
     """
     cell_particles: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for r in particle_results:
-        pid = r['particle_id']
-        if pid in particle_to_cell:
-            cell_particles[particle_to_cell[pid]].append(r)
+        cell_particles[int(r['cell_id'])].append(r)
 
     all_cell_ids = np.unique(cp_mask_img)
     all_cell_ids = all_cell_ids[all_cell_ids != 0]
@@ -304,17 +441,23 @@ def run_one_image_set(
     }
     channel_names = list(channel_images.keys())
 
-    particle_rows, donut_export = analyze_particles(
-        mask_img=mask, channel_images=channel_images,
-        buffer_px=buffer, donut_px=donut, min_size=min_size,
-        capture_donut_mask=export_donuts, log=log,
-    )
-
-    particle_to_cell: dict[int, int] | None = None
+    # With a cp_mask, particles are labeled per-cell (clipped to each cell)
+    # so cell_id / particle_id / area match the single-cell thresholding
+    # table exactly. Without one there are no cells to clip to, so the
+    # legacy whole-image labeling stands (no cell_id column).
     if cp_mask is not None:
-        particle_to_cell = assign_particles_to_cells(mask, cp_mask, min_size)
-        for r in particle_rows:
-            r['cell_id'] = particle_to_cell.get(r['particle_id'], 0)
+        particle_rows, donut_export = analyze_particles_per_cell(
+            mask_img=mask, cp_mask_img=cp_mask,
+            channel_images=channel_images,
+            buffer_px=buffer, donut_px=donut, min_size=min_size,
+            capture_donut_mask=export_donuts, log=log,
+        )
+    else:
+        particle_rows, donut_export = analyze_particles(
+            mask_img=mask, channel_images=channel_images,
+            buffer_px=buffer, donut_px=donut, min_size=min_size,
+            capture_donut_mask=export_donuts, log=log,
+        )
 
     # Per-particle whole-cell means for the requested channels. Joined by
     # cell_id; uses the float64-coerced channel_images and the same mean
@@ -341,8 +484,7 @@ def run_one_image_set(
 
     if single_cell:
         cell_rows = aggregate_by_cell(
-            particle_rows, particle_to_cell, cp_mask,
-            channel_names, channel_images,
+            particle_rows, cp_mask, channel_names, channel_images,
         )
         if log is not None:
             log(f"  Single-cell: {len(cell_rows)} cells aggregated")

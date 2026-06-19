@@ -76,17 +76,59 @@ def test_cp_mask_without_single_cell_adds_cell_id():
     rows = res["particle_rows"]
     assert all("cell_id" in r for r in rows)
     # particle at row 8 → cell 1, particle at row 40 → cell 2
-    by_id = {r["particle_id"]: r["cell_id"] for r in rows}
-    assert set(by_id.values()) == {1, 2}
+    assert sorted(r["cell_id"] for r in rows) == [1, 2]
+    # particle_id is per-cell sequential: the only particle in each cell is 1
+    assert {(r["cell_id"], r["particle_id"]) for r in rows} == {(1, 1), (2, 1)}
 
 
-def test_unmatched_particle_maps_to_cell_zero():
+def test_no_cells_yields_no_particles():
+    """With a cp_mask present but empty, no particle is in any cell — so the
+    per-particle table is empty, matching single-cell (which measures only
+    particles inside cells)."""
     cp = np.zeros((64, 64), np.int32)  # no cells anywhere
     res = run_one_image_set(
         mask=_mask_two_particles(), channels={"mNG": _channel()},
         cp_mask=cp, single_cell=False, export_donuts=False, **DEFAULTS,
     )
-    assert all(r["cell_id"] == 0 for r in res["particle_rows"])
+    assert res["particle_rows"] == []
+
+
+def test_per_cell_ids_and_clipped_area_match_single_cell():
+    """The per-particle table must share (cell_id, particle_id, area) with the
+    single-cell thresholding detail table — this is the bug this analysis was
+    fixed for. Cross-checks against the canonical single-cell extractor."""
+    from percell4.domain.measure.particle import analyze_particles_detail
+
+    h = w = 40
+    cp = np.zeros((h, w), np.int32)
+    cp[0:20, :] = 1       # cell 1 (top)
+    cp[20:35, :] = 2      # cell 2 (middle); rows 35:40 are background (0)
+
+    mask = np.zeros((h, w), np.uint8)
+    mask[5:8, 5:8] = 1    # A: fully inside cell 1 (9 px)
+    mask[18:23, 25:28] = 1  # B: straddles cell1/cell2 boundary → split
+    mask[33:38, 5:8] = 1  # C: straddles cell2/background → clipped to cell2
+
+    chan = np.random.default_rng(0).random((h, w)).astype(np.float64) * 100
+
+    min_v = 1
+    pp = run_one_image_set(
+        mask=mask, channels={"ch": chan}, cp_mask=cp, single_cell=False,
+        export_donuts=False, buffer=2, donut=3, min_size=min_v,
+    )["particle_rows"]
+    sc = analyze_particles_detail(
+        images={"ch": chan}, labels=cp, mask=mask, min_area=min_v,
+    )
+
+    pp_keys = sorted((r["cell_id"], r["particle_id"], r["particle_area_px"])
+                     for r in pp)
+    sc_keys = sorted((int(r.cell_id), int(r.particle_id), int(r.area))
+                     for r in sc.itertuples())
+    assert pp_keys == sc_keys
+    # The straddling particle B is split into two rows (one per cell), and the
+    # clipped particle C reports only its in-cell pixels — both consequences
+    # of per-cell labeling that the keys above encode.
+    assert len(pp_keys) == len(sc_keys) >= 4
 
 
 # ── single-cell ───────────────────────────────────────────────────
@@ -204,16 +246,14 @@ def test_cell_mean_channels_without_cp_mask_is_noop():
     assert all("cell_mNG_mean" not in r for r in res["particle_rows"])
 
 
-def test_cell_mean_unassigned_particle_is_nan():
-    cp = np.zeros((64, 64), np.int32)  # no cells → all particles cell_id 0
+def test_cell_mean_no_cells_yields_no_rows():
+    cp = np.zeros((64, 64), np.int32)  # no cells → no in-cell particles
     res = run_one_image_set(
         mask=_mask_two_particles(), channels={"mNG": _channel()},
         cp_mask=cp, single_cell=False, export_donuts=False,
         cell_mean_channels=["mNG"], **DEFAULTS,
     )
-    for r in res["particle_rows"]:
-        assert r["cell_id"] == 0
-        assert np.isnan(r["cell_mNG_mean"])
+    assert res["particle_rows"] == []
 
 
 def test_cell_mean_unknown_channel_skipped():

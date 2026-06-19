@@ -84,6 +84,51 @@ def region_and_donut_masks(
     return region_mask, donut_mask
 
 
+def donut_for_region_mask(
+    region_mask: np.ndarray,
+    binary_mask: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    buffer_px: int,
+    donut_px: int,
+) -> np.ndarray:
+    """Full-image donut-ring boolean for an arbitrary region given as a mask.
+
+    Sibling of :func:`region_and_donut_masks` that takes the region as a
+    pre-built boolean ``region_mask`` (plus its full-image ``bbox`` as
+    ``(min_row, min_col, max_row, max_col)``) instead of a label id in a
+    global label image. Used by the per-cell labeling path, where a
+    particle is a connected component of ``cell ∩ mask`` rather than a
+    component of the whole-image mask.
+
+    The ring is the set of pixels at Euclidean distance in
+    ``(buffer_px, buffer_px + donut_px]`` from the region, excluding any
+    pixel that belongs to ``binary_mask`` (the full particle mask, so the
+    dilute ring never includes another particle's pixels). Computed on a
+    padded bounding-box crop for speed, then mapped back to full-image
+    coordinates.
+    """
+    h, w = binary_mask.shape
+    pad = buffer_px + donut_px + 1
+    r0 = max(bbox[0] - pad, 0)
+    c0 = max(bbox[1] - pad, 0)
+    r1 = min(bbox[2] + pad, h)
+    c1 = min(bbox[3] + pad, w)
+
+    crop_region = region_mask[r0:r1, c0:c1]
+    crop_binary = binary_mask[r0:r1, c0:c1]
+
+    dist_from_this = distance_transform_edt(~crop_region)
+    in_donut_range = (
+        (dist_from_this > buffer_px)
+        & (dist_from_this <= buffer_px + donut_px)
+    )
+    crop_donut = in_donut_range & ~crop_binary
+
+    donut_mask = np.zeros_like(binary_mask)
+    donut_mask[r0:r1, c0:c1] = crop_donut
+    return donut_mask
+
+
 def assign_particles_to_cells(
     mask_img: np.ndarray, cp_mask_img: np.ndarray, min_size: int
 ) -> dict[int, int]:
