@@ -144,10 +144,6 @@ class AdaptiveClipPanel(QWidget):
         layout.setAlignment(Qt.AlignTop)
 
         self._settings = AdaptiveClipSettingsWidget(self)
-        # Selecting the "Otsu detect smallest particle size" method seeds the
-        # d_min knob from an Otsu first-pass of the active channel (the widget has
-        # no image, so the panel measures it).
-        self._settings.otsu_detect_requested.connect(self._on_otsu_detect_requested)
         layout.addWidget(self._settings)
 
         from percell4.gui import theme
@@ -221,106 +217,18 @@ class AdaptiveClipPanel(QWidget):
             flush=True,
         )
 
-    def _print_otsu_debug(self, image, labels, pixel_size_um: float, config) -> None:
-        """Print the Otsu first-pass diagnostics for an Otsu-smallest run (debug).
-
-        Recomputed fresh on the image being detected (not the auto-fill's earlier
-        pass), restricted to in-cell pixels exactly as the auto-fill was.
-        """
-        from percell4.domain.measure.adaptive_clip import otsu_smallest_particle
-
-        frame = image if image.ndim == 2 else image[0]
-        lab = labels if labels.ndim == 2 else labels[0]
-        cp_mask = (lab > 0) if lab.shape == frame.shape else None
-        try:
-            r = otsu_smallest_particle(frame, config.gaussian_sigma, pixel_size_um, cp_mask=cp_mask)
-        except Exception as e:  # noqa: BLE001 — debug print must never break the run
-            print(f"  [otsu first-pass] failed: {e}", flush=True)
-            return
-        if r is None:
-            print("  [otsu first-pass] degenerate (no particle detected)", flush=True)
-            return
+    def _print_otsu_report(self, report) -> None:
+        """Print the Otsu first-pass diagnostics for an Otsu-smallest run (debug)."""
         print(
-            f"  [otsu first-pass] scope={r.scope}\n"
-            f"    Otsu threshold               : {r.otsu_threshold:.4f}\n"
-            f"    smallest particle            : {r.smallest_diameter_px:.3f} px"
-            f" = {r.d_min_um:.4f} µm  (n_components={r.n_components})\n"
-            f"    threshold-area mean intensity: {r.area_mean:.4f}\n"
-            f"    mean − threshold             : {r.mean_minus_threshold:.4f}\n"
-            f"    threshold-area max intensity : {r.area_max:.4f}\n"
-            f"    threshold-area min intensity : {r.area_min:.4f}",
+            f"  [otsu first-pass] scope={report.scope}\n"
+            f"    Otsu threshold               : {report.otsu_threshold:.4f}\n"
+            f"    smallest particle            : {report.smallest_diameter_px:.3f} px"
+            f" = {report.d_min_um:.4f} µm  (n_components={report.n_components})\n"
+            f"    threshold-area mean intensity: {report.area_mean:.4f}\n"
+            f"    mean − threshold             : {report.mean_minus_threshold:.4f}\n"
+            f"    threshold-area max intensity : {report.area_max:.4f}\n"
+            f"    threshold-area min intensity : {report.area_min:.4f}",
             flush=True,
-        )
-
-    def _on_otsu_detect_requested(self) -> None:
-        """Auto-fill the smallest-particle Ø from an Otsu first-pass of the channel.
-
-        Selecting "Otsu detect smallest particle size" seeds the d_min knob from
-        the image so the user does not have to eyeball it. The knob is physical, so
-        this needs a known pixel size; it restricts the Otsu pass to the active
-        segmentation's cells when one is present (more robust than whole-frame). If
-        a prerequisite is missing we leave the current Ø and say why.
-
-        The gates here mirror the per-cell run's (``_run_particle_mode``): single
-        frame only, and in-cell scope decided on the full label/image shape match —
-        so the readout never promises an "(in-cell)" Ø the run would then refuse.
-
-        Runs synchronously on the GUI thread (unlike the threaded Run path): the
-        intended in-cell case is bounded (tens of ms). A large whole-frame channel
-        with no active segmentation briefly blocks the event loop on selection.
-        """
-        viewer_win = self._get_viewer_window()
-        store = self._get_store()
-        if viewer_win is None or viewer_win.viewer is None or store is None:
-            self._show_status("Open a dataset to auto-detect the smallest particle")
-            return
-
-        channel = self.data_model.session.active_channel
-        image = self._find_layer_data(viewer_win, "Image", channel)
-        if image is None:
-            self._show_status("Select a channel to auto-detect the smallest particle")
-            return
-
-        pixel_size_um = self._pixel_size_um(store)
-        if not pixel_size_um:
-            self._show_status("Auto-detect needs a known pixel size (µm/px) on this dataset")
-            return
-
-        # Mirror the per-cell run gates so the readout never promises a value the
-        # run will refuse: per-cell mode is single-frame only.
-        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
-        if image.ndim == 3 and n_timepoints > 1:
-            self._show_status("Per-cell mode supports single-frame channels only")
-            return
-
-        frame = image if image.ndim == 2 else image[0]
-        labels = self._find_layer_data(
-            viewer_win, "Labels", self.data_model.session.active_segmentation
-        )
-        # In-cell scope is decided on the FULL shape match the run requires
-        # (labels.shape == image.shape), not a per-frame slice.
-        cp_mask = None
-        if labels is not None and labels.shape == image.shape:
-            cp_mask = (labels if labels.ndim == 2 else labels[0]) > 0
-
-        from percell4.domain.measure.adaptive_clip import detect_smallest_particle_um
-
-        cfg = self._settings.current_config()
-        try:
-            d_um = detect_smallest_particle_um(
-                frame, cfg.gaussian_sigma, float(pixel_size_um), cp_mask=cp_mask
-            )
-        except Exception as e:  # noqa: BLE001 — surface any detection failure
-            self._show_status(f"Auto-detect failed: {e}")
-            return
-        if d_um is None:
-            self._show_status("Otsu first-pass found no particles; keeping current Ø")
-            return
-
-        self._settings.set_d_min_um(d_um)
-        scope = "in-cell" if cp_mask is not None else "whole-frame"
-        self._show_status(
-            f"Otsu smallest particle ≈ {d_um:.3f} µm ({scope}) — tweak Ø if needed"
         )
 
     # ── run (Creator) ────────────────────────────────────────────
@@ -421,9 +329,12 @@ class AdaptiveClipPanel(QWidget):
     def _run_particle_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
         """Creator path for the one-knob particle-size detector (per-cell).
 
-        Requires a known pixel size (the window is physical) and an active
-        segmentation (σ is per-cell). Restricted to single-frame channels — the
-        per-cell loop expects 2D image + 2D labels.
+        The smallest-particle Ø is re-measured FRESH from the current image's Otsu
+        first-pass at each run and drives the window (the d_min field is a readout
+        only); the run never reuses a cached value. Requires a known pixel size
+        (the window is physical) and an active segmentation (σ is per-cell).
+        Restricted to single-frame channels — the per-cell loop expects 2D image +
+        2D labels.
         """
         if is_timelapse:
             self._show_status("Particle-size mode supports single-frame channels only")
@@ -448,6 +359,28 @@ class AdaptiveClipPanel(QWidget):
             self._show_status("Segmentation and channel shapes differ")
             return
 
+        # Re-detect the smallest particle FRESH on this dataset (the d_min field is
+        # a readout, not an input): the window is sized from the current image's
+        # Otsu first-pass, never a cached/stale value.
+        from percell4.domain.measure.adaptive_clip import otsu_smallest_particle
+
+        try:
+            report = otsu_smallest_particle(
+                image, config.gaussian_sigma, float(pixel_size_um), cp_mask=labels > 0
+            )
+        except Exception as e:  # noqa: BLE001 — surface any detection failure
+            self._show_status(f"Otsu first-pass failed: {e}")
+            return
+        if report is None:
+            self._show_status(
+                "Otsu first-pass found no particle to size the window — "
+                "check the channel / segmentation"
+            )
+            return
+        d_min_um = report.d_min_um
+        self._settings.set_d_min_um(d_min_um)  # surface the value the run will use
+        self._print_otsu_report(report)
+
         existing = store.list_masks() if hasattr(store, "list_masks") else []
         mask_name = prompt_for_resource_name(
             self,
@@ -462,13 +395,12 @@ class AdaptiveClipPanel(QWidget):
         self._pending_name = mask_name
         self._pending_auto = False
         self._pending_particle = True
-        self._pending_d_min = float(config.d_min_um)
+        self._pending_d_min = float(d_min_um)
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
         self._show_status(
-            f"Detecting (smallest particle {config.d_min_um:g} µm, per-cell)..."
+            f"Detecting (smallest particle {d_min_um:g} µm, per-cell)..."
         )
-        self._print_otsu_debug(image, labels, float(pixel_size_um), config)
 
         from percell4.gui.workers import Worker
 
@@ -477,7 +409,7 @@ class AdaptiveClipPanel(QWidget):
             image,
             labels,
             float(pixel_size_um),
-            float(config.d_min_um),
+            float(d_min_um),
             float(config.k),  # sensitivity knob (defaults to 1; raise to be conservative)
             config.gaussian_sigma,
         )

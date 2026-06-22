@@ -107,17 +107,13 @@ class AdaptiveClipSettingsWidget(QWidget):
     Emits :attr:`config_changed` whenever any child widget's user-edit signal
     fires. Checking "Auto adaptive window size" disables the window spinbox (it
     is computed at run time) and enables the method dropdown; unchecking reverses
-    both. Selecting the "Otsu detect smallest particle size" method enables the
-    d_min knob and emits :attr:`otsu_detect_requested` so the host can measure the
-    smallest particle from an Otsu first-pass and auto-fill it.
+    both. The "Otsu detect smallest particle size" method makes the d_min field a
+    disabled **readout**: the host measures the smallest particle from an Otsu
+    first-pass on the *current* image at each run and surfaces it via
+    :meth:`set_d_min_um`.
     """
 
     config_changed = Signal()
-    # Fired when the auto-window method becomes "Otsu detect smallest particle
-    # size" (the per-cell d_min engine). The host (panel) runs an Otsu first-pass
-    # on the active channel and writes the result back via ``set_d_min_um``; the
-    # widget has no image, so it cannot do this itself.
-    otsu_detect_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -246,26 +242,25 @@ class AdaptiveClipSettingsWidget(QWidget):
     def _on_auto_toggled(self, checked: bool) -> None:
         self._apply_mode_gating()
         # Checking Auto while the per-cell method is the remembered selection
-        # enters particle mode -> seed d_min from the Otsu first-pass.
+        # enters particle mode -> adopt its validated default.
         if checked and self._is_particle_mode():
-            self._enter_otsu_smallest()
+            self._adopt_particle_defaults()
 
     def _on_window_method_changed(self, _index: int) -> None:
         self._apply_mode_gating()
-        # Switching the active method to the per-cell engine seeds d_min.
+        # Switching the active method to the per-cell engine.
         if self._is_particle_mode():
-            self._enter_otsu_smallest()
+            self._adopt_particle_defaults()
 
-    def _enter_otsu_smallest(self) -> None:
-        """Adopt the validated one-knob default (k=1) and request an Otsu auto-fill.
+    def _adopt_particle_defaults(self) -> None:
+        """Adopt the validated one-knob default (k=1) on entering particle mode.
 
         ``k`` stays editable so the user can raise it to be conservative (fewer
         false positives, at the cost of missing dim sub-threshold particles). The
-        host runs the Otsu first-pass and writes the measured Ø back via
-        :meth:`set_d_min_um`; the widget has no image of its own.
+        smallest-particle Ø is measured fresh by the host at each run (the d_min
+        field is a readout), so there is nothing to seed here beyond ``k``.
         """
         self._k.setValue(1.0)
-        self.otsu_detect_requested.emit()
 
     def _method_code(self) -> str:
         """The selected auto-window method's internal code."""
@@ -283,14 +278,15 @@ class AdaptiveClipSettingsWidget(QWidget):
         """Enable/disable fields for the active mode.
 
         The per-cell (particle) mode derives the spatial scale from ``d_min``, so
-        the size filter and the noise estimate go disabled (the d_min knob goes
-        live). ``k`` stays live in every mode (the sensitivity knob), as do
-        ``d_min``'s siblings Gaussian σ and Auto. The manual window is live only
-        when Auto is off; the method dropdown is live only when Auto is on.
+        the size filter and the noise estimate go disabled. ``d_min`` itself is a
+        disabled **readout** (the host re-measures it fresh at each run), never an
+        input. ``k`` stays live in every mode (the sensitivity knob), as do
+        Gaussian σ and Auto. The manual window is live only when Auto is off; the
+        method dropdown is live only when Auto is on.
         """
         auto = self._auto.isChecked()
         particle = self._is_particle_mode()
-        self._d_min.setEnabled(particle)
+        self._d_min.setEnabled(False)  # readout: filled by the host at run time
         for w in (self._min_size, self._unit, self._noise):
             w.setEnabled(not particle)
         self._k.setEnabled(True)

@@ -179,9 +179,9 @@ def test_particle_mode_defaults_and_snapshot(qtbot):
 
 def test_particle_mode_gates_fields(qtbot):
     w = _widget(qtbot)
-    assert not w._d_min.isEnabled()  # off until the per-cell method is selected
+    assert not w._d_min.isEnabled()  # readout, never an input
     _enter_particle_mode(w)
-    assert w._d_min.isEnabled()
+    assert not w._d_min.isEnabled()  # still a readout (host fills it fresh at run)
     # size / unit / noise are derived or fixed -> disabled in particle mode.
     for widget in (w._min_size, w._unit, w._noise):
         assert not widget.isEnabled()
@@ -192,9 +192,8 @@ def test_particle_mode_gates_fields(qtbot):
     assert w._k.isEnabled()
     assert w._sigma.isEnabled()
     assert w._auto.isEnabled()
-    # Switching to a finder method leaves particle mode (d_min off, size filter on).
+    # Switching to a finder method leaves particle mode (size filter back on).
     w._window_method.setCurrentText("Granule size")
-    assert not w._d_min.isEnabled()
     assert w._min_size.isEnabled()
     assert w._k.isEnabled()
 
@@ -208,11 +207,20 @@ def test_particle_mode_adopts_default_k_one_but_stays_editable(qtbot):
     assert w.current_config().k == 3.0
 
 
+def test_d_min_is_a_readout_filled_by_set_d_min_um(qtbot):
+    """In particle mode the Ø field is a disabled readout, written by the host."""
+    w = _widget(qtbot)
+    _enter_particle_mode(w)
+    assert not w._d_min.isEnabled()  # not user-editable
+    w.set_d_min_um(0.73)  # the host's run-time readout write still lands
+    assert w.current_config().d_min_um == pytest.approx(0.73)
+
+
 def test_set_enabled_respects_particle_gate(qtbot):
     w = _widget(qtbot)
     _enter_particle_mode(w)
     w.set_enabled(True)
-    assert w._d_min.isEnabled()
+    assert not w._d_min.isEnabled()  # readout, never editable
     assert not w._window.isEnabled()
     assert w._k.isEnabled()  # k is a live knob in particle mode
     w.set_enabled(False)
@@ -224,38 +232,23 @@ def test_config_changed_fires_on_particle_edits(qtbot):
     fired = []
     w.config_changed.connect(lambda: fired.append(1))
     _enter_particle_mode(w)
-    w._d_min.setValue(0.2)
+    w._k.setValue(0.5)
     assert len(fired) >= 2
 
 
-def test_otsu_smallest_emits_detect_request(qtbot):
-    """Selecting the per-cell method asks the host to auto-fill d_min from Otsu."""
-    w = _widget(qtbot)
-    requested = []
-    w.otsu_detect_requested.connect(lambda: requested.append(1))
-    _enter_particle_mode(w)
-    assert requested == [1]
-
-
 def test_otsu_smallest_inert_without_auto(qtbot):
-    """With Auto off the method is not active: no request, not particle mode."""
+    """With Auto off the Otsu-smallest method is not active (not particle mode)."""
     w = _widget(qtbot)
-    requested = []
-    w.otsu_detect_requested.connect(lambda: requested.append(1))
     w._window_method.setCurrentText("Otsu detect smallest particle size")
-    assert requested == []
     assert w.current_config().particle_mode is False
 
 
 def test_checking_auto_enters_particle_when_method_preselected(qtbot):
     """Auto-on while Otsu-smallest is the selected method enters particle mode."""
     w = _widget(qtbot)
-    requested = []
-    w.otsu_detect_requested.connect(lambda: requested.append(1))
     w._window_method.setCurrentText("Otsu detect smallest particle size")  # inert (auto off)
-    assert requested == []
+    assert w.current_config().particle_mode is False
     w._auto.setChecked(True)
-    assert requested == [1]
     assert w.current_config().particle_mode is True
 
 
