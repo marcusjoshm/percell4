@@ -18,16 +18,19 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from percell4.domain.measure.window_finder_names import WINDOW_FINDER_NAMES
 
-# Unit dropdown labels -> internal codes used by resolve_min_area_px.
+# Size-filter unit dropdown labels -> internal codes used by resolve_min_area_px.
 _UNIT_LABELS = ("px²", "µm²")
 _UNIT_CODES = {"px²": "px", "µm²": "um2"}
+
+# Manual-window unit dropdown labels -> codes used by resolve_window_px.
+_WINDOW_UNIT_LABELS = ("px", "µm")
+_WINDOW_UNIT_CODES = {"px": "px", "µm": "um"}
 
 # Noise (sigma) estimate dropdown labels -> BACKGROUND_ESTIMATORS registry names.
 # MAD is the default (matches the ImageJ reference macro and is robust to the
@@ -41,23 +44,24 @@ _NOISE_CODES = {"MAD (robust)": "mad", "stddev": "stddev", "gaussian-peak": "gau
 # window size" is on. The first two name whole-frame WINDOW_FINDERS (the default
 # `granule-size` isolates the granules and sizes the window to them; `otsu-mean`
 # is the legacy baseline; bake-off candidates land here with their registry
-# entries). The third, "Otsu detect smallest particle size", is *not* a finder —
-# it switches the run to the per-cell d_min engine (see _OTSU_SMALLEST_CODE).
+# entries). The third, "Otsu detect particle size", is *not* a finder — it
+# switches the run to the per-cell d_min engine (see _OTSU_SMALLEST_CODE).
 _WINDOW_METHOD_LABELS = (
     "Granule size",
     "Otsu mean (baseline)",
-    "Otsu detect smallest particle size",
+    "Otsu detect particle size",
 )
 _WINDOW_METHOD_CODES = {
     "Granule size": "granule-size",
     "Otsu mean (baseline)": "otsu-mean",
-    "Otsu detect smallest particle size": "otsu-smallest",
+    "Otsu detect particle size": "otsu-smallest",
 }
 
 # Selecting this method does not pick a whole-frame window-finder: an Otsu
-# first-pass measures the smallest particle, auto-fills the d_min knob, and the
-# run uses the per-cell detect_adaptive_by_particle_size engine (window + size
-# filter derived from d_min). It is therefore exempt from the finder drift guard.
+# first-pass measures a low-percentile particle size, fills the d_min readout,
+# and the run uses the per-cell detect_adaptive_by_particle_size engine (window +
+# size filter derived from d_min). It is therefore exempt from the finder drift
+# guard. (The internal code stays "otsu-smallest" for back-compat.)
 _OTSU_SMALLEST_CODE = "otsu-smallest"
 
 # Drift guard: every dropdown code that names a whole-frame finder must be a real
@@ -74,13 +78,16 @@ assert set(_WINDOW_METHOD_CODES.values()) - {_OTSU_SMALLEST_CODE} <= set(
 class AdaptiveClipConfig:
     """Immutable snapshot of the adaptive-clip settings widget.
 
-    ``window_px`` is always odd (the local window must be odd). ``min_size_unit``
-    is the internal code (``"px"`` / ``"um2"``). When ``auto_window`` is True the
-    ``window_px`` value is ignored by the run (it is estimated from an Otsu
-    first-pass).
+    ``window_value`` + ``window_unit`` (``"px"`` / ``"um"``) are the **manual**
+    window; the host resolves them to an odd px window via ``resolve_window_px``
+    (µm needs a known pixel size). ``min_size_unit`` is the internal code
+    (``"px"`` / ``"um2"``). When ``auto_window`` is True the manual window is
+    ignored (the window is estimated); the manual path runs per-cell off the
+    active segmentation when one is present, else whole-frame.
     """
 
-    window_px: int
+    window_value: float
+    window_unit: str
     k: float
     gaussian_sigma: float
     min_size_value: float
@@ -92,13 +99,17 @@ class AdaptiveClipConfig:
     # ``particle_mode`` is True. Default ``granule-size`` (granule-isolating).
     window_method: str = "granule-size"
     # Particle-size mode. True when ``auto_window`` is on AND ``window_method`` is
-    # the "Otsu detect smallest particle size" code — the run then derives the
-    # window + size filter from ``d_min_um`` (smallest particle Ø, µm, auto-filled
-    # from an Otsu first-pass) and uses the per-cell detector with a robust
-    # per-cell MAD σ. ``k`` is still honored (the sensitivity knob, default 1.0);
-    # ``window_px`` / ``min_size_*`` / ``noise_estimator`` are ignored in that mode.
+    # the "Otsu detect particle size" code — the run then measures the
+    # ``particle_percentile``-th particle diameter from an Otsu first-pass on the
+    # current image, derives the window + size filter from it (``d_min_um``), and
+    # uses the per-cell detector with a robust per-cell MAD σ. ``k`` is still
+    # honored (the sensitivity knob, default 1.0); ``window_px`` / ``min_size_*`` /
+    # ``noise_estimator`` are ignored in that mode. ``d_min_um`` is a readout the
+    # run fills; ``particle_percentile`` is the editable knob (0 = absolute
+    # smallest, which a single fragment can make too small).
     particle_mode: bool = False
     d_min_um: float = 0.40
+    particle_percentile: float = 10.0
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -141,36 +152,64 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._window_method.setToolTip(
             "How the window is found when Auto is on. Granule size isolates the "
             "granules and sizes the window to them; Otsu mean (baseline) is the "
-            "legacy first-pass estimate; Otsu detect smallest particle size runs "
-            "an Otsu first-pass to measure the smallest particle, auto-fills the "
-            "Ø knob below, and runs the per-cell detector driven by it."
+            "legacy first-pass estimate; Otsu detect particle size runs an Otsu "
+            "first-pass each run to measure the size-percentile particle, and "
+            "runs the per-cell detector driven by it."
         )
         self._window_method.setEnabled(False)  # off until Auto is checked
         method_row.addWidget(self._window_method)
         layout.addLayout(method_row)
 
-        # ── Smallest particle Ø (the one-knob per-cell detector) ──
-        # Editable only under the "Otsu detect smallest particle size" method,
-        # which auto-fills it from an Otsu first-pass (the user may then tweak it).
+        # ── Size percentile (the per-cell detector's one editable knob) ──
+        # Used only by the "Otsu detect particle size" method: the run measures
+        # this percentile of the detected particle diameters (0 = absolute
+        # smallest, which a single fragment can make too small).
+        pct_row = QHBoxLayout()
+        pct_row.addWidget(QLabel("Size percentile (%):"))
+        self._percentile = QDoubleSpinBox()
+        self._percentile.setRange(0.0, 100.0)
+        self._percentile.setDecimals(1)
+        self._percentile.setSingleStep(5.0)
+        self._percentile.setValue(10.0)
+        self._percentile.setToolTip(
+            "Which percentile of the detected particle diameters sizes the window. "
+            "0 = the absolute smallest particle; a low percentile (e.g. 10) ignores "
+            "a lone tiny fragment. Re-measured fresh on the current image at run."
+        )
+        self._percentile.setEnabled(False)  # off until the per-cell method is selected
+        pct_row.addWidget(self._percentile)
+        layout.addLayout(pct_row)
+
+        # ── Detected Ø readout (filled by the run from the size percentile) ──
         dmin_row = QHBoxLayout()
-        dmin_row.addWidget(QLabel("Smallest particle Ø (µm):"))
+        dmin_row.addWidget(QLabel("Detected Ø (µm):"))
         self._d_min = QDoubleSpinBox()
         self._d_min.setRange(0.02, 50.0)
         self._d_min.setDecimals(3)
         self._d_min.setSingleStep(0.05)
         self._d_min.setValue(0.40)
-        self._d_min.setEnabled(False)  # off until the per-cell method is selected
+        self._d_min.setEnabled(False)  # readout: filled by the host at run time
         dmin_row.addWidget(self._d_min)
         layout.addLayout(dmin_row)
 
-        # ── Adaptive window (px) ──
+        # ── Manual adaptive window (value + px/µm unit) ──
+        # Used when Auto is off. The host resolves it to an odd px window
+        # (forced odd, floored at 3); µm needs a known pixel size.
         win_row = QHBoxLayout()
-        win_row.addWidget(QLabel("Window (px):"))
-        self._window = QSpinBox()
-        self._window.setRange(3, 151)
-        self._window.setSingleStep(2)  # keep odd via the arrows
-        self._window.setValue(15)
+        win_row.addWidget(QLabel("Window:"))
+        self._window = QDoubleSpinBox()
+        self._window.setRange(0.02, 1000.0)
+        self._window.setDecimals(2)
+        self._window.setSingleStep(1.0)
+        self._window.setValue(15.0)
         win_row.addWidget(self._window)
+        self._window_unit = QComboBox()
+        self._window_unit.addItems(list(_WINDOW_UNIT_LABELS))
+        self._window_unit.setToolTip(
+            "Window unit. px is the local-window size in pixels; µm converts to "
+            "pixels via the dataset pixel size (needs a known µm/px)."
+        )
+        win_row.addWidget(self._window_unit)
         layout.addLayout(win_row)
 
         # ── k (sigma multiplier) ──
@@ -224,6 +263,7 @@ class AdaptiveClipSettingsWidget(QWidget):
         # Signal-to-signal forwarding: Qt drops the extra arg the child signals
         # carry (value / index / bool), so config_changed (0-arg) re-emits cleanly.
         self._window.valueChanged.connect(self.config_changed)
+        self._window_unit.currentIndexChanged.connect(self.config_changed)
         self._k.valueChanged.connect(self.config_changed)
         self._sigma.valueChanged.connect(self.config_changed)
         self._min_size.valueChanged.connect(self.config_changed)
@@ -235,6 +275,7 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._window_method.currentIndexChanged.connect(self._on_window_method_changed)
         self._window_method.currentIndexChanged.connect(self.config_changed)
         self._auto.toggled.connect(self.config_changed)
+        self._percentile.valueChanged.connect(self.config_changed)
         self._d_min.valueChanged.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
@@ -280,25 +321,29 @@ class AdaptiveClipSettingsWidget(QWidget):
         The per-cell (particle) mode derives the spatial scale from ``d_min``, so
         the size filter and the noise estimate go disabled. ``d_min`` itself is a
         disabled **readout** (the host re-measures it fresh at each run), never an
-        input. ``k`` stays live in every mode (the sensitivity knob), as do
-        Gaussian σ and Auto. The manual window is live only when Auto is off; the
-        method dropdown is live only when Auto is on.
+        input; the editable per-cell knob is instead the size **percentile**. ``k``
+        stays live in every mode (the sensitivity knob), as do Gaussian σ and Auto.
+        The manual window is live only when Auto is off; the method dropdown is
+        live only when Auto is on.
         """
         auto = self._auto.isChecked()
         particle = self._is_particle_mode()
         self._d_min.setEnabled(False)  # readout: filled by the host at run time
+        self._percentile.setEnabled(particle)  # the editable per-cell knob
         for w in (self._min_size, self._unit, self._noise):
             w.setEnabled(not particle)
         self._k.setEnabled(True)
-        self._window.setEnabled(not auto)
+        self._window.setEnabled(not auto)  # manual window: live only when Auto off
+        self._window_unit.setEnabled(not auto)
         self._window_method.setEnabled(auto)
 
     # ── Public API ────────────────────────────────────────────────
 
     def current_config(self) -> AdaptiveClipConfig:
-        """Snapshot the live widget state into a frozen dataclass (odd window)."""
+        """Snapshot the live widget state into a frozen dataclass."""
         return AdaptiveClipConfig(
-            window_px=int(self._window.value()) | 1,  # force odd
+            window_value=float(self._window.value()),
+            window_unit=_WINDOW_UNIT_CODES[self._window_unit.currentText()],
             k=float(self._k.value()),
             gaussian_sigma=float(self._sigma.value()),
             min_size_value=float(self._min_size.value()),
@@ -308,27 +353,29 @@ class AdaptiveClipSettingsWidget(QWidget):
             window_method=self._method_code(),
             particle_mode=self._is_particle_mode(),
             d_min_um=float(self._d_min.value()),
+            particle_percentile=float(self._percentile.value()),
         )
 
     def set_d_min_um(self, d_min_um: float) -> None:
-        """Display an (Otsu-detected) smallest-particle Ø in the d_min spinbox.
+        """Display the run's detected Ø in the (readout) d_min spinbox.
 
-        Used by the host to surface the auto-detected diameter. Setting it
-        programmatically forwards ``config_changed`` (a value did change) but does
-        not re-request Otsu detection — only the method dropdown does that — so
-        there is no detect/auto-fill feedback loop. The spinbox clamps the value
-        to its range ``[0.02, 50.0]`` µm.
+        Used by the host to surface the diameter measured at run time. Setting it
+        programmatically forwards ``config_changed`` (a value did change); the
+        field is a readout (disabled), so there is no edit/detect feedback loop.
+        The spinbox clamps the value to its range ``[0.02, 50.0]`` µm.
         """
         self._d_min.setValue(float(d_min_um))
 
     def set_window_value(self, window_px: int) -> None:
-        """Display an (auto-estimated) window in the spinbox without re-running.
+        """Display an (auto-estimated) px window in the spinbox without re-running.
 
-        Used to surface the auto-window result after a run. Setting it
-        programmatically does not re-trigger estimation (estimation only runs on
-        the panel's Run button), so there is no auto/manual feedback loop.
+        Used to surface the auto/per-cell window result after a run; it is always a
+        pixel count, so the unit is forced to px. Setting it programmatically does
+        not re-trigger estimation (estimation only runs on the panel's Run button),
+        so there is no auto/manual feedback loop.
         """
-        self._window.setValue(int(window_px) | 1)
+        self._window_unit.setCurrentText("px")
+        self._window.setValue(float(int(window_px) | 1))
 
     def set_enabled(self, enabled: bool) -> None:
         """Lock/unlock all widgets during a run (preserves the active-mode gating)."""
@@ -340,8 +387,10 @@ class AdaptiveClipSettingsWidget(QWidget):
             self._unit,
             self._noise,
             self._window_method,
+            self._percentile,
             self._d_min,
             self._window,
+            self._window_unit,
         ):
             widget.setEnabled(enabled)
         if enabled:

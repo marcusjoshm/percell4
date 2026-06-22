@@ -12,12 +12,14 @@ from percell4.domain.measure.adaptive_clip import (
     PARTICLE_WINDOW_MIN,
     auto_window,
     detect_adaptive_by_particle_size,
+    detect_adaptive_per_cell,
     detect_adaptive_whole_frame,
     detect_smallest_particle_um,
     estimate_adaptive_window,
     otsu_first_pass,
     otsu_smallest_particle,
     resolve_min_area_px,
+    resolve_window_px,
     window_min_spot_for_particle,
 )
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
@@ -377,23 +379,39 @@ def test_detect_smallest_particle_um_constant_in_cell_returns_none():
 
 
 def test_otsu_smallest_particle_report_fields():
-    """The report carries the threshold + smallest particle + threshold-area stats."""
+    """The report carries the threshold + percentile diameter + threshold-area stats."""
     img = _blobs_image([(40, 40), (140, 140)], radius=3, shape=(200, 200))
     rr, cc = disk((140, 140), 10, shape=img.shape)
     img[rr, cc] = 200.0
-    r = otsu_smallest_particle(img, 1.0, 0.1, noise_floor_px=3)
+    r = otsu_smallest_particle(img, 1.0, 0.1, noise_floor_px=3)  # percentile defaults to 0
     assert r is not None
     assert r.n_components == 2
     assert r.scope == "whole-frame"
-    # The smaller disc (radius 3, Ø ~6 px) drives the smallest, not the radius-10.
-    assert r.smallest_diameter_px < 12.0
-    assert r.d_min_um == pytest.approx(r.smallest_diameter_px * 0.1)
+    assert r.percentile == 0.0
+    # At percentile 0 the smaller disc (radius 3, Ø ~6 px) drives it, not the radius-10.
+    assert r.diameter_px < 12.0
+    assert r.d_min_um == pytest.approx(r.diameter_px * 0.1)
     # Threshold-area intensities sit above the Otsu threshold; ordering holds.
     assert r.area_min > r.otsu_threshold
     assert r.area_max >= r.area_mean >= r.area_min
     assert r.mean_minus_threshold == pytest.approx(r.area_mean - r.otsu_threshold)
-    # detect_smallest_particle_um delegates to the report's d_min_um.
+    # detect_smallest_particle_um delegates to the percentile-0 (smallest) d_min_um.
     assert detect_smallest_particle_um(img, 1.0, 0.1, noise_floor_px=3) == pytest.approx(r.d_min_um)
+
+
+def test_otsu_smallest_particle_percentile_raises_the_size():
+    """A higher percentile picks a larger particle than the absolute smallest."""
+    # One tiny fragment + several mid-size discs: p0 catches the fragment, p50 ignores it.
+    img = _blobs_image([(40, 40)], radius=2, shape=(220, 220))  # tiny fragment
+    for cy, cx in [(40, 120), (120, 40), (120, 120), (180, 180)]:
+        rr, cc = disk((cy, cx), 9, shape=img.shape)
+        img[rr, cc] = 200.0
+    r0 = otsu_smallest_particle(img, 1.0, 0.1, noise_floor_px=3, percentile=0.0)
+    r50 = otsu_smallest_particle(img, 1.0, 0.1, noise_floor_px=3, percentile=50.0)
+    assert r50.diameter_px > r0.diameter_px
+    assert r50.percentile == 50.0
+    # The percentile is clamped to [0, 100].
+    assert otsu_smallest_particle(img, 1.0, 0.1, percentile=150.0).percentile == 100.0
 
 
 def test_otsu_smallest_particle_none_on_constant():
@@ -407,3 +425,58 @@ def test_otsu_smallest_particle_scope_label_with_mask():
     rr, cc = disk((100, 100), 40, shape=img.shape)
     cell[rr, cc] = True
     assert otsu_smallest_particle(img, 1.0, 0.12, cp_mask=cell).scope == "in-cell"
+
+
+# ── resolve_window_px (manual px/µm window) ──────────────────────────────
+
+
+def test_resolve_window_px_px_is_odd_and_floored():
+    assert resolve_window_px(20, "px", None) == 21       # forced odd
+    assert resolve_window_px(15, "px", None) == 15       # already odd
+    assert resolve_window_px(1, "px", None) == PARTICLE_WINDOW_MIN  # floored at 3
+
+
+def test_resolve_window_px_um_conversion():
+    # 1.8 µm at 0.12 µm/px = 15 px (odd).
+    assert resolve_window_px(1.8, "um", 0.12) == 15
+    # Scales with pixel size: the same µm at 2x coarser pixel -> ~half the px.
+    assert resolve_window_px(1.8, "um", 0.24) < resolve_window_px(1.8, "um", 0.12)
+
+
+def test_resolve_window_px_um_without_pixel_size_raises():
+    with pytest.raises(ValueError):
+        resolve_window_px(1.8, "um", None)
+    with pytest.raises(ValueError):
+        resolve_window_px(1.8, "um", 0.0)
+
+
+def test_resolve_window_px_unknown_unit_raises():
+    with pytest.raises(ValueError):
+        resolve_window_px(15, "inches", 0.12)
+
+
+# ── detect_adaptive_per_cell (explicit-window per-cell core) ─────────────
+
+
+def test_detect_adaptive_per_cell_marks_blobs_in_cell():
+    img = _blobs_image([(50, 50), (50, 150), (150, 100)], radius=6)
+    labels = np.ones(img.shape, dtype=np.int32)  # one cell covering the frame
+    mask = detect_adaptive_per_cell(img, labels, window_px=21, min_spot_px=3, k=1.0)
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    for cy, cx in [(50, 50), (50, 150), (150, 100)]:
+        assert mask[cy, cx] == 1
+    assert mask[2, 2] == 0
+
+
+def test_detect_adaptive_per_cell_matches_particle_size_engine():
+    """The d_min engine delegates to the per-cell core with the derived window."""
+    img = _blobs_image([(60, 60), (60, 160), (160, 100)], radius=5)
+    labels = np.ones(img.shape, dtype=np.int32)
+    px, d_min = 0.120369, 0.40
+    window_px, min_spot_px = window_min_spot_for_particle(d_min, px)
+    via_core = detect_adaptive_per_cell(
+        img, labels, window_px=window_px, min_spot_px=min_spot_px, k=1.0
+    )
+    via_engine = detect_adaptive_by_particle_size(img, labels, px, d_min, k=1.0)
+    assert np.array_equal(via_core, via_engine)

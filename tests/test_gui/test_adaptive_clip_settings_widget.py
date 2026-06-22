@@ -19,7 +19,8 @@ def _widget(qtbot) -> AdaptiveClipSettingsWidget:
 def test_default_config(qtbot):
     w = _widget(qtbot)
     assert w.current_config() == AdaptiveClipConfig(
-        window_px=15,
+        window_value=15.0,
+        window_unit="px",
         k=2.25,
         gaussian_sigma=1.0,
         min_size_value=3.0,
@@ -61,7 +62,7 @@ def test_window_method_mapping(qtbot):
     for label, code in [
         ("Granule size", "granule-size"),
         ("Otsu mean (baseline)", "otsu-mean"),
-        ("Otsu detect smallest particle size", "otsu-smallest"),
+        ("Otsu detect particle size", "otsu-smallest"),
     ]:
         w._window_method.setCurrentText(label)
         assert w.current_config().window_method == code
@@ -96,7 +97,8 @@ def test_programmatic_changes_reflected(qtbot):
     w._auto.setChecked(True)
 
     cfg = w.current_config()
-    assert cfg.window_px == 31
+    assert cfg.window_value == 31.0
+    assert cfg.window_unit == "px"
     assert cfg.k == 2.5
     assert cfg.gaussian_sigma == 0.0
     assert cfg.min_size_value == 12.0
@@ -104,10 +106,13 @@ def test_programmatic_changes_reflected(qtbot):
     assert cfg.auto_window is True
 
 
-def test_window_reported_odd(qtbot):
+def test_window_value_and_unit_in_config(qtbot):
     w = _widget(qtbot)
-    w._window.setValue(20)  # even
-    assert w.current_config().window_px == 21  # forced odd
+    w._window.setValue(20.0)
+    assert w.current_config().window_value == 20.0
+    assert w.current_config().window_unit == "px"  # default unit
+    w._window_unit.setCurrentText("µm")
+    assert w.current_config().window_unit == "um"  # the engine resolves µm -> odd px
 
 
 def test_auto_checkbox_gates_window_field(qtbot):
@@ -138,11 +143,14 @@ def test_config_changed_fires_on_edits(qtbot):
     assert len(fired) >= 4
 
 
-def test_set_window_value_displays_odd(qtbot):
+def test_set_window_value_displays_odd_px(qtbot):
     w = _widget(qtbot)
+    w._window_unit.setCurrentText("µm")  # set_window_value forces the unit back to px
     w.set_window_value(50)
-    assert w._window.value() == 51
-    assert w.current_config().window_px == 51
+    assert w._window.value() == 51.0
+    cfg = w.current_config()
+    assert cfg.window_value == 51.0
+    assert cfg.window_unit == "px"
 
 
 def test_set_enabled_respects_auto_gate(qtbot):
@@ -162,7 +170,7 @@ def test_set_enabled_respects_auto_gate(qtbot):
 def _enter_particle_mode(w) -> None:
     """Activate the per-cell d_min engine: Auto on + the Otsu-smallest method."""
     w._auto.setChecked(True)
-    w._window_method.setCurrentText("Otsu detect smallest particle size")
+    w._window_method.setCurrentText("Otsu detect particle size")
 
 
 def test_particle_mode_defaults_and_snapshot(qtbot):
@@ -216,6 +224,20 @@ def test_d_min_is_a_readout_filled_by_set_d_min_um(qtbot):
     assert w.current_config().d_min_um == pytest.approx(0.73)
 
 
+def test_size_percentile_default_gated_and_in_config(qtbot):
+    """The size-percentile knob defaults to 10 and is editable only in particle mode."""
+    w = _widget(qtbot)
+    assert w.current_config().particle_percentile == 10.0
+    assert not w._percentile.isEnabled()  # off until the per-cell method is selected
+    _enter_particle_mode(w)
+    assert w._percentile.isEnabled()  # the editable per-cell knob
+    w._percentile.setValue(25.0)
+    assert w.current_config().particle_percentile == 25.0
+    # Leaving particle mode disables it again.
+    w._window_method.setCurrentText("Granule size")
+    assert not w._percentile.isEnabled()
+
+
 def test_set_enabled_respects_particle_gate(qtbot):
     w = _widget(qtbot)
     _enter_particle_mode(w)
@@ -239,14 +261,14 @@ def test_config_changed_fires_on_particle_edits(qtbot):
 def test_otsu_smallest_inert_without_auto(qtbot):
     """With Auto off the Otsu-smallest method is not active (not particle mode)."""
     w = _widget(qtbot)
-    w._window_method.setCurrentText("Otsu detect smallest particle size")
+    w._window_method.setCurrentText("Otsu detect particle size")
     assert w.current_config().particle_mode is False
 
 
 def test_checking_auto_enters_particle_when_method_preselected(qtbot):
     """Auto-on while Otsu-smallest is the selected method enters particle mode."""
     w = _widget(qtbot)
-    w._window_method.setCurrentText("Otsu detect smallest particle size")  # inert (auto off)
+    w._window_method.setCurrentText("Otsu detect particle size")  # inert (auto off)
     assert w.current_config().particle_mode is False
     w._auto.setChecked(True)
     assert w.current_config().particle_mode is True

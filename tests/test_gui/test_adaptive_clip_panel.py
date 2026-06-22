@@ -221,8 +221,10 @@ def test_auto_window_estimates_and_writes_back(qtbot, monkeypatch):
 
     panel._on_run()
 
-    # The estimated window is surfaced back into the (disabled) spinbox.
-    assert panel._settings.current_config().window_px == expected
+    # The estimated window is surfaced back into the (disabled) spinbox, in px.
+    surfaced = panel._settings.current_config()
+    assert surfaced.window_value == expected
+    assert surfaced.window_unit == "px"
     assert expected % 2 == 1
 
 
@@ -267,7 +269,7 @@ def test_cancel_prompt_writes_nothing(qtbot, monkeypatch):
     viewer_win.add_mask.assert_not_called()
 
 
-# ── particle-size (one-knob) mode via "Otsu detect smallest particle size" ──
+# ── particle-size (one-knob) mode via "Otsu detect particle size" ──
 
 
 def _select_otsu_smallest(panel) -> None:
@@ -277,7 +279,7 @@ def _select_otsu_smallest(panel) -> None:
     overwrites the d_min field); callers that pin a specific Ø set it afterwards.
     """
     panel._settings._auto.setChecked(True)
-    panel._settings._window_method.setCurrentText("Otsu detect smallest particle size")
+    panel._settings._window_method.setCurrentText("Otsu detect particle size")
 
 
 def test_particle_mode_creates_mask_via_per_cell_detector(qtbot, monkeypatch):
@@ -316,7 +318,7 @@ def test_particle_mode_passes_pixel_size_fresh_dmin_and_k_to_worker(qtbot, monke
     assert args[2] == 0.120369
     # d_min is the FRESHLY measured smallest particle (not a cached field value).
     expected = otsu_smallest_particle(
-        _blob_image(), 1.0, 0.120369, cp_mask=_labels_one_cell() > 0
+        _blob_image(), 1.0, 0.120369, cp_mask=_labels_one_cell() > 0, percentile=10.0
     ).d_min_um
     assert args[3] == pytest.approx(expected)
     assert args[4] == 2.5  # the user's k flows through (not locked)
@@ -407,11 +409,37 @@ def test_otsu_smallest_run_populates_dmin_readout(qtbot, monkeypatch):
     panel._on_run()
 
     expected = otsu_smallest_particle(
-        _blob_image(), 1.0, 0.120369, cp_mask=_labels_one_cell() > 0
+        _blob_image(), 1.0, 0.120369, cp_mask=_labels_one_cell() > 0, percentile=10.0
     ).d_min_um
     d = panel._settings.current_config().d_min_um
     assert d == pytest.approx(expected, abs=1e-3)  # spinbox rounds to 3 decimals
     assert d != 0.40  # the run updated the readout off the default
+
+
+def test_size_percentile_knob_reaches_detection(qtbot, monkeypatch):
+    """The panel's Size percentile knob drives the percentile passed to the run."""
+    from percell4.domain.measure.adaptive_clip import otsu_smallest_particle
+
+    # Varied particle sizes so the percentile actually changes the result.
+    img = _blob_image(radius=4)
+    rr, cc = disk((60, 60), 14, shape=img.shape)
+    img[rr, cc] = 200.0
+    panel, _model, _repo, viewer_win = _build(
+        qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells"
+    )
+    for layer in viewer_win.viewer.layers:
+        if layer.__class__.__name__ == "Image":
+            layer.data = img
+    _select_otsu_smallest(panel)
+    panel._settings._percentile.setValue(60.0)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    expected = otsu_smallest_particle(
+        img, 1.0, 0.120369, cp_mask=_labels_one_cell() > 0, percentile=60.0
+    ).d_min_um
+    assert panel._worker._args[3] == pytest.approx(expected)
 
 
 def test_failed_particle_run_does_not_mislabel_next_manual_run(qtbot, monkeypatch):
@@ -470,7 +498,7 @@ def test_otsu_smallest_run_prints_otsu_diagnostics(qtbot, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "otsu first-pass" in out
     assert "Otsu threshold" in out
-    assert "smallest particle" in out
+    assert "particle size" in out
     assert "threshold-area mean intensity" in out
     assert "mean − threshold" in out
     assert "threshold-area max intensity" in out
@@ -496,7 +524,9 @@ def test_otsu_smallest_run_detects_fresh_per_dataset(qtbot, monkeypatch):
     # Dataset A (discs r=6): Run must use A's freshly-detected d_min.
     _select_otsu_smallest(panel)
     panel._on_run()
-    expected_a = otsu_smallest_particle(_blob_image(radius=6), sigma, 0.120369, cp_mask=cp).d_min_um
+    expected_a = otsu_smallest_particle(
+        _blob_image(radius=6), sigma, 0.120369, cp_mask=cp, percentile=10.0
+    ).d_min_um
     assert panel._worker._args[3] == pytest.approx(expected_a)
 
     # Dataset B (discs r=12), swapped WITHOUT re-selecting the dropdown.
@@ -505,6 +535,74 @@ def test_otsu_smallest_run_detects_fresh_per_dataset(qtbot, monkeypatch):
         if layer.__class__.__name__ == "Image":
             layer.data = img_b
     panel._on_run()
-    expected_b = otsu_smallest_particle(img_b, sigma, 0.120369, cp_mask=cp).d_min_um
+    expected_b = otsu_smallest_particle(
+        img_b, sigma, 0.120369, cp_mask=cp, percentile=10.0
+    ).d_min_um
     assert panel._worker._args[3] == pytest.approx(expected_b)
     assert expected_b != pytest.approx(expected_a)  # different dataset -> different d_min
+
+
+# ── manual mode (Auto off): per-cell off segmentation / whole-frame / px·µm ──
+
+
+def test_manual_mode_per_cell_when_segmentation(qtbot, monkeypatch):
+    """Manual mode with an active segmentation runs the per-cell detector."""
+    panel, _model, repo, _viewer = _build(
+        qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells"
+    )
+    panel._settings._window.setValue(21.0)  # px (default unit)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert panel._worker._fn is panel_module.run_adaptive_detection_per_cell
+    # Worker args: (image, labels, window_px, min_spot_px, k, presmooth).
+    assert panel._worker._args[2] == 21
+    assert "m" in repo.masks
+
+
+def test_manual_mode_whole_frame_when_no_segmentation(qtbot, monkeypatch):
+    """Manual mode falls back to whole-frame when no segmentation is active."""
+    panel, *_ = _build(qtbot, monkeypatch)  # no segmentation
+    panel._settings._window.setValue(21.0)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert panel._worker._fn is panel_module.run_adaptive_detection
+    # Worker args: (image, gaussian_sigma, settings, auto_window, window_method).
+    assert panel._worker._args[3] is False  # not auto
+    assert dict(panel._worker._args[2].detector_params)["window_px"] == 21
+
+
+def test_manual_window_um_converts_to_px(qtbot, monkeypatch):
+    """A µm manual window is converted to an odd px window via the pixel size."""
+    from percell4.domain.measure.adaptive_clip import resolve_window_px
+
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    panel._settings._window.setValue(1.8)
+    panel._settings._window_unit.setCurrentText("µm")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert panel._worker._args[2] == resolve_window_px(1.8, "um", 0.120369)  # = 15 px
+
+
+def test_manual_um_window_without_pixel_size_aborts(qtbot, monkeypatch):
+    """A µm window with no calibration aborts before the name prompt."""
+    panel, _model, repo, viewer_win = _build(
+        qtbot, monkeypatch, pixel_size_um=None, segmentation="cells"
+    )
+    panel._settings._window.setValue(1.8)
+    panel._settings._window_unit.setCurrentText("µm")
+    called = []
+    monkeypatch.setattr(
+        panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
+    )
+
+    panel._on_run()
+
+    assert called == []  # aborted before the name prompt
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()

@@ -111,6 +111,26 @@ def run_adaptive_detection_by_particle_size(
     return mask, window_used
 
 
+def run_adaptive_detection_per_cell(image, labels, window_px, min_spot_px, k, presmooth_sigma_px):
+    """Worker body for manual mode off a segmentation (per-cell, explicit window).
+
+    Thresholds each Cellpose cell against its own robust MAD σ at the manual
+    window + k (the segmentation-aware sibling of the whole-frame manual path).
+    Returns ``(mask uint8, window_used int)``. Pure (no Qt) so it is worker-safe.
+    """
+    from percell4.domain.measure.adaptive_clip import detect_adaptive_per_cell
+
+    mask = detect_adaptive_per_cell(
+        image,
+        labels,
+        window_px=int(window_px),
+        min_spot_px=int(min_spot_px),
+        k=k,
+        presmooth_sigma_px=presmooth_sigma_px,
+    )
+    return mask, int(window_px)
+
+
 class AdaptiveClipPanel(QWidget):
     """Interactive Adaptive Local Clipping panel (Creator)."""
 
@@ -208,21 +228,22 @@ class AdaptiveClipPanel(QWidget):
             f"  auto_window       : {config.auto_window}\n"
             f"  window_method     : {config.window_method}\n"
             f"  particle_mode     : {config.particle_mode}\n"
-            f"  window_px         : {config.window_px}\n"
+            f"  window            : {config.window_value} {config.window_unit}\n"
             f"  k                 : {config.k}\n"
             f"  gaussian_sigma    : {config.gaussian_sigma}\n"
             f"  noise_estimator   : {config.noise_estimator}\n"
-            f"  d_min_um (used)   : {config.d_min_um}\n"
+            f"  size_percentile   : {config.particle_percentile} %\n"
+            f"  detected Ø (µm)   : {config.d_min_um}\n"
             f"  min particle size : {config.min_size_value} {config.min_size_unit}",
             flush=True,
         )
 
     def _print_otsu_report(self, report) -> None:
-        """Print the Otsu first-pass diagnostics for an Otsu-smallest run (debug)."""
+        """Print the Otsu first-pass diagnostics for an Otsu particle-size run (debug)."""
         print(
             f"  [otsu first-pass] scope={report.scope}\n"
             f"    Otsu threshold               : {report.otsu_threshold:.4f}\n"
-            f"    smallest particle            : {report.smallest_diameter_px:.3f} px"
+            f"    particle size (p{report.percentile:g})       : {report.diameter_px:.3f} px"
             f" = {report.d_min_um:.4f} µm  (n_components={report.n_components})\n"
             f"    threshold-area mean intensity: {report.area_mean:.4f}\n"
             f"    mean − threshold             : {report.mean_minus_threshold:.4f}\n"
@@ -261,12 +282,19 @@ class AdaptiveClipPanel(QWidget):
         config = self._settings.current_config()
         self._print_settings_debug(config)
 
-        # One-knob particle-size mode runs the per-cell detector (needs labels +
-        # a known pixel size); the manual path below stays whole-frame.
+        # "Otsu detect particle size" runs the per-cell detector off a fresh Otsu
+        # measurement (needs labels + a known pixel size).
         if config.particle_mode:
             self._run_particle_mode(config, image, is_timelapse, store, viewer_win)
             return
 
+        # Manual mode (Auto off): window in px/µm, per-cell off the active
+        # segmentation (whole-frame fallback when none is active).
+        if not config.auto_window:
+            self._run_manual_mode(config, image, is_timelapse, store, viewer_win)
+            return
+
+        # Auto-window finder modes (granule-size / otsu-mean): whole-frame.
         # Resolve the particle-size filter to a px area (µm² needs calibration).
         from percell4.domain.measure.adaptive_clip import resolve_min_area_px
 
@@ -296,14 +324,15 @@ class AdaptiveClipPanel(QWidget):
             detector_name="adaptive",
             seed_detector_name="otsu",
             background_estimator_name=config.noise_estimator,
-            detector_params={"window_px": config.window_px, "k": config.k},
+            # window_px is overwritten by the finder (auto_window is always True here).
+            detector_params={"window_px": 15, "k": config.k},
             min_spot_px=max(1, int(min_spot_px)),
             spot_scale_prior=(1.0, 4.0),
         )
 
         self._pending_name = mask_name
         self._pending_auto = config.auto_window
-        self._pending_particle = False  # this is the whole-frame/manual path
+        self._pending_particle = False  # this is the auto-finder whole-frame path
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
         n_frames = image.shape[0] if is_timelapse else 1
@@ -322,6 +351,90 @@ class AdaptiveClipPanel(QWidget):
         self._worker = Worker(
             worker_fn, image, config.gaussian_sigma, settings, config.auto_window, config.window_method
         )
+        self._worker.finished.connect(self._on_detect_done)
+        self._worker.error.connect(self._on_detect_error)
+        self._worker.start()
+
+    def _run_manual_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
+        """Creator path for manual mode (Auto off): explicit window, off the segmentation.
+
+        The window is the manual value resolved to an odd px count (px as-is, or
+        µm via the dataset pixel size). Detection goes per-cell against the active
+        segmentation's own noise floor when one is present (and single-frame);
+        otherwise it falls back to whole-frame detection.
+        """
+        from percell4.domain.measure.adaptive_clip import resolve_min_area_px, resolve_window_px
+
+        pixel_size_um = self._pixel_size_um(store)
+        try:
+            window_px = resolve_window_px(config.window_value, config.window_unit, pixel_size_um)
+            min_spot_px = max(
+                1, resolve_min_area_px(config.min_size_value, config.min_size_unit, pixel_size_um)
+            )
+        except ValueError as e:
+            self._show_status(str(e))
+            return
+
+        # Go off the active segmentation (per-cell) when present + single-frame;
+        # otherwise fall back to whole-frame detection.
+        seg = self.data_model.session.active_segmentation
+        labels = self._find_layer_data(viewer_win, "Labels", seg) if seg else None
+        per_cell = labels is not None and not is_timelapse and labels.shape == image.shape
+
+        existing = store.list_masks() if hasattr(store, "list_masks") else []
+        mask_name = prompt_for_resource_name(
+            self,
+            title="Save Adaptive Clipping Mask",
+            label="Mask name:",
+            default="adaptive",
+            existing_names=existing,
+        )
+        if mask_name is None:
+            return
+
+        self._pending_name = mask_name
+        self._pending_auto = False
+        self._pending_particle = False
+        self._run_btn.setEnabled(False)
+        self._settings.set_enabled(False)
+        if per_cell:
+            scope = "per-cell"
+        else:
+            scope = "whole-frame, per frame" if is_timelapse else "whole-frame"
+        self._show_status(f"Detecting (window {window_px} px, {scope})...")
+        print(
+            f"  [manual] window {window_px} px"
+            f" (from {config.window_value:g} {config.window_unit}), scope={scope}",
+            flush=True,
+        )
+
+        from percell4.gui.workers import Worker
+
+        if per_cell:
+            self._worker = Worker(
+                run_adaptive_detection_per_cell,
+                image,
+                labels,
+                window_px,
+                min_spot_px,
+                float(config.k),
+                config.gaussian_sigma,
+            )
+        else:
+            from percell4.workflows.models import PunctaDetectorSettings
+
+            settings = PunctaDetectorSettings(
+                detector_name="adaptive",
+                seed_detector_name="otsu",
+                background_estimator_name=config.noise_estimator,
+                detector_params={"window_px": window_px, "k": config.k},
+                min_spot_px=min_spot_px,
+                spot_scale_prior=(1.0, 4.0),
+            )
+            worker_fn = run_adaptive_detection_stack if is_timelapse else run_adaptive_detection
+            self._worker = Worker(
+                worker_fn, image, config.gaussian_sigma, settings, False, config.window_method
+            )
         self._worker.finished.connect(self._on_detect_done)
         self._worker.error.connect(self._on_detect_error)
         self._worker.start()
@@ -366,7 +479,11 @@ class AdaptiveClipPanel(QWidget):
 
         try:
             report = otsu_smallest_particle(
-                image, config.gaussian_sigma, float(pixel_size_um), cp_mask=labels > 0
+                image,
+                config.gaussian_sigma,
+                float(pixel_size_um),
+                cp_mask=labels > 0,
+                percentile=config.particle_percentile,
             )
         except Exception as e:  # noqa: BLE001 — surface any detection failure
             self._show_status(f"Otsu first-pass failed: {e}")

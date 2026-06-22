@@ -190,13 +190,45 @@ def detect_adaptive_by_particle_size(
     and P-bodies (DDX6) at ``d_min≈0.14 µm`` (window 7 px, size filter off).
     Returns a whole-frame ``{0, 1}`` ``uint8`` mask.
     """
+    window_px, min_spot_px = window_min_spot_for_particle(
+        d_min_um, pixel_size_um, factor=factor
+    )
+    return detect_adaptive_per_cell(
+        image,
+        labels,
+        window_px=window_px,
+        min_spot_px=min_spot_px,
+        k=k,
+        presmooth_sigma_px=presmooth_sigma_px,
+    )
+
+
+def detect_adaptive_per_cell(
+    image: np.ndarray,
+    labels: np.ndarray,
+    *,
+    window_px: int,
+    min_spot_px: int,
+    k: float = 1.0,
+    presmooth_sigma_px: float = 1.0,
+) -> np.ndarray:
+    """Per-cell adaptive local clip with an explicit window + size filter.
+
+    The shared core of the per-cell detectors (the manual segmentation path and
+    :func:`detect_adaptive_by_particle_size`, which derives ``window_px`` /
+    ``min_spot_px`` from a physical ``d_min`` and delegates here). Presmooths at
+    ``presmooth_sigma_px``, subtracts a whole-frame Gaussian local-mean background
+    at ``sigma=(window_px-1)/6`` (computed once — a per-cell-crop background would
+    distort the cell-edge granules), then thresholds every Cellpose cell against
+    *its own* robust ``1.4826*MAD`` σ at ``k``. The per-cell σ is what lets one
+    ``k`` hold across cells whose intensity scale varies many-fold. Components
+    smaller than ``min_spot_px`` are dropped (a no-op when ``min_spot_px <= 1``).
+    Returns a whole-frame ``{0, 1}`` ``uint8`` mask.
+    """
     from scipy.ndimage import find_objects, gaussian_filter
 
     img = np.asarray(image, dtype=np.float32)
     lab = np.asarray(labels)
-    window_px, min_spot_px = window_min_spot_for_particle(
-        d_min_um, pixel_size_um, factor=factor
-    )
 
     work = apply_gaussian_smoothing(img, presmooth_sigma_px)
     # Local background = Gaussian mean at the threshold_local('gaussian') sigma.
@@ -336,12 +368,16 @@ class OtsuSmallestReport:
     All intensities are in the units of the **smoothed** working image (which is
     what the Otsu threshold is defined on, so ``mean_minus_threshold`` is a like
     comparison). The "threshold area" is the Otsu foreground (pixels ``> threshold``
-    inside the selection), before the noise-floor size filter.
+    inside the selection), before the noise-floor size filter. ``diameter_px`` is
+    the ``percentile``-th equivalent diameter of the surviving components (a low
+    percentile is a robust stand-in for "smallest"; ``percentile=0`` is the
+    absolute minimum).
     """
 
     otsu_threshold: float          # Otsu threshold on the smoothed selected pixels
-    smallest_diameter_px: float    # smallest surviving component's equiv. diameter
-    d_min_um: float                # smallest_diameter_px * pixel_size_um
+    diameter_px: float             # the percentile-th component equiv. diameter
+    d_min_um: float                # diameter_px * pixel_size_um
+    percentile: float              # the diameter percentile used (0 = absolute min)
     n_components: int              # components surviving the noise floor
     area_mean: float               # mean intensity of the threshold area (sm > thr)
     area_max: float                # max intensity in the threshold area
@@ -361,17 +397,20 @@ def otsu_smallest_particle(
     *,
     cp_mask: np.ndarray | None = None,
     noise_floor_px: int = AUTO_WINDOW_NOISE_FLOOR_PX,
+    percentile: float = 0.0,
 ) -> OtsuSmallestReport | None:
-    """Otsu first-pass measuring the smallest particle (+ diagnostics).
+    """Otsu first-pass measuring a low-percentile particle size (+ diagnostics).
 
     Smooths ``image`` (``gaussian_sigma``), runs the Otsu first pass over the
     finite (and, when ``cp_mask`` is given, in-cell) pixels, labels the
-    foreground, drops sub-``noise_floor_px`` specks, and reports the **minimum**
-    equivalent diameter (``2*sqrt(area/pi)``) — in px and µm — alongside the Otsu
-    threshold and the threshold-area intensity stats. This is the inverse of
-    :func:`window_min_spot_for_particle`: instead of the user eyeballing the
-    smallest particle, the Otsu pass measures it so the per-cell ``d_min`` knob
-    (and hence the window + size filter it derives) can be auto-populated.
+    foreground, drops sub-``noise_floor_px`` specks, and reports the
+    ``percentile``-th equivalent diameter (``2*sqrt(area/pi)``) of the survivors —
+    in px and µm — alongside the Otsu threshold and the threshold-area intensity
+    stats. ``percentile=0`` gives the absolute smallest; a low percentile (e.g.
+    10) is robust to a single tiny fragment dragging the size down. This is the
+    inverse of :func:`window_min_spot_for_particle`: the Otsu pass measures the
+    particle size so the per-cell ``d_min`` knob (and the window + size filter it
+    derives) can be set from the image instead of eyeballed.
 
     Restricting to ``cp_mask`` (the union of Cellpose cells) is the robust path:
     whole-frame Otsu over-segments the black outside-cell region (the documented
@@ -424,12 +463,14 @@ def otsu_smallest_particle(
     areas = areas[areas >= noise_floor_px]
     if areas.size == 0:
         return None
-    smallest_px = float((2.0 * np.sqrt(areas / np.pi)).min())
+    pct = float(min(100.0, max(0.0, percentile)))
+    diameter_px = float(np.percentile(2.0 * np.sqrt(areas / np.pi), pct))
     area_vals = sm[mask]  # intensities of the Otsu threshold area (above threshold)
     return OtsuSmallestReport(
         otsu_threshold=thr,
-        smallest_diameter_px=smallest_px,
-        d_min_um=smallest_px * float(pixel_size_um),
+        diameter_px=diameter_px,
+        d_min_um=diameter_px * float(pixel_size_um),
+        percentile=pct,
         n_components=int(areas.size),
         area_mean=float(area_vals.mean()),
         area_max=float(area_vals.max()),
@@ -477,3 +518,27 @@ def resolve_min_area_px(value: float, unit: str, pixel_size_um: float | None) ->
             )
         return int(round(v / (float(pixel_size_um) ** 2)))
     raise ValueError(f"unknown size-filter unit: {unit!r}")
+
+
+def resolve_window_px(value: float, unit: str, pixel_size_um: float | None) -> int:
+    """Convert a manual window value+unit into an odd pixel window (floored at 3).
+
+    ``unit`` is ``"px"`` (the value is a pixel window) or ``"um"`` (a physical
+    window in µm, converted via a positive ``pixel_size_um`` or :class:`ValueError`).
+    The result is forced odd (the local window must be odd) and floored at
+    :data:`PARTICLE_WINDOW_MIN` (below which the local-background blur subtracts the
+    particle from itself).
+    """
+    v = float(value)
+    if unit == "px":
+        px = v
+    elif unit == "um":
+        if not pixel_size_um or float(pixel_size_um) <= 0:
+            raise ValueError(
+                "µm window requires a known pixel size; switch the unit to px or "
+                "re-import the dataset with TIFF resolution metadata."
+            )
+        px = v / float(pixel_size_um)
+    else:
+        raise ValueError(f"unknown window unit: {unit!r}")
+    return max(PARTICLE_WINDOW_MIN, _make_odd(int(round(px))))
