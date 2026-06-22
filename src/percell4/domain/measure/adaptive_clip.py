@@ -329,6 +329,135 @@ def estimate_adaptive_window(
     return _make_odd(window)
 
 
+@dataclasses.dataclass(frozen=True)
+class OtsuSmallestReport:
+    """Diagnostics from the Otsu first-pass that seeds the per-cell ``d_min``.
+
+    All intensities are in the units of the **smoothed** working image (which is
+    what the Otsu threshold is defined on, so ``mean_minus_threshold`` is a like
+    comparison). The "threshold area" is the Otsu foreground (pixels ``> threshold``
+    inside the selection), before the noise-floor size filter.
+    """
+
+    otsu_threshold: float          # Otsu threshold on the smoothed selected pixels
+    smallest_diameter_px: float    # smallest surviving component's equiv. diameter
+    d_min_um: float                # smallest_diameter_px * pixel_size_um
+    n_components: int              # components surviving the noise floor
+    area_mean: float               # mean intensity of the threshold area (sm > thr)
+    area_max: float                # max intensity in the threshold area
+    area_min: float                # min intensity in the threshold area
+    scope: str                     # "in-cell" | "whole-frame"
+
+    @property
+    def mean_minus_threshold(self) -> float:
+        """Mean intensity of the threshold area minus the Otsu threshold value."""
+        return self.area_mean - self.otsu_threshold
+
+
+def otsu_smallest_particle(
+    image: np.ndarray,
+    gaussian_sigma: float | None,
+    pixel_size_um: float,
+    *,
+    cp_mask: np.ndarray | None = None,
+    noise_floor_px: int = AUTO_WINDOW_NOISE_FLOOR_PX,
+) -> OtsuSmallestReport | None:
+    """Otsu first-pass measuring the smallest particle (+ diagnostics).
+
+    Smooths ``image`` (``gaussian_sigma``), runs the Otsu first pass over the
+    finite (and, when ``cp_mask`` is given, in-cell) pixels, labels the
+    foreground, drops sub-``noise_floor_px`` specks, and reports the **minimum**
+    equivalent diameter (``2*sqrt(area/pi)``) — in px and µm — alongside the Otsu
+    threshold and the threshold-area intensity stats. This is the inverse of
+    :func:`window_min_spot_for_particle`: instead of the user eyeballing the
+    smallest particle, the Otsu pass measures it so the per-cell ``d_min`` knob
+    (and hence the window + size filter it derives) can be auto-populated.
+
+    Restricting to ``cp_mask`` (the union of Cellpose cells) is the robust path:
+    whole-frame Otsu over-segments the black outside-cell region (the documented
+    ``otsu-mean`` failure mode), which would let an out-of-cell noise blob set an
+    absurdly small diameter. Out-of-cell pixels are NaN-filled **before** smoothing
+    (``apply_gaussian_smoothing`` then takes its NaN-safe normalized-convolution
+    path), so they cannot bleed across the cell boundary into in-cell values; the
+    threshold and mask are then computed strictly inside the original selection.
+
+    Returns ``None`` on a degenerate pass (constant/empty selection, or no
+    component survives the noise floor). Raises :class:`ValueError` on a
+    non-positive ``pixel_size_um`` (the knob is physical — mirrors
+    :func:`window_min_spot_for_particle`).
+    """
+    if pixel_size_um is None or float(pixel_size_um) <= 0:
+        raise ValueError(f"pixel_size_um must be > 0 µm/px, got {pixel_size_um}")
+    from skimage import measure
+    from skimage.filters import threshold_otsu as sk_threshold_otsu
+
+    raw = np.asarray(image, dtype=np.float32)
+    base_finite = np.isfinite(raw)
+    base_sel = ((np.asarray(cp_mask) > 0) & base_finite) if cp_mask is not None else base_finite
+    if not base_sel.any():
+        return None
+    # NaN-fill outside the selection before smoothing so out-of-cell pixels do not
+    # bleed inward across the boundary; re-clamp to base_sel after so in-cell
+    # values cannot bleed outward via the NaN-safe normalized convolution.
+    work = np.where(base_sel, raw, np.nan).astype(np.float32)
+    sm = apply_gaussian_smoothing(work, gaussian_sigma)
+    sel = base_sel & np.isfinite(sm)
+    vals = sm[sel]
+    if vals.size == 0:
+        return None
+    vmin, vmax = float(vals.min()), float(vals.max())
+    # Near-constant selection is degenerate: Otsu on it is meaningless and would
+    # split float32 smoothing noise into a spurious cell-sized "particle". The
+    # tolerance sits far above that epsilon (~1e-7 relative) yet orders of
+    # magnitude below any real contrast, so a genuinely flat cell returns None.
+    if (vmax - vmin) <= 1e-6 * (abs(vmax) + 1.0):
+        return None
+    thr = float(sk_threshold_otsu(vals))
+    mask = sel & (sm > thr)
+    if not mask.any():
+        return None
+    # connectivity=1 (4-conn) matches _filter_by_area, the size filter the per-cell
+    # engine this seeds applies — so "one particle" is counted the same both ways
+    # (a diagonal speck must not seed a d_min the engine would then reject).
+    labels = measure.label(mask, connectivity=1)
+    areas = np.array([p.area for p in measure.regionprops(labels)], dtype=float)
+    areas = areas[areas >= noise_floor_px]
+    if areas.size == 0:
+        return None
+    smallest_px = float((2.0 * np.sqrt(areas / np.pi)).min())
+    area_vals = sm[mask]  # intensities of the Otsu threshold area (above threshold)
+    return OtsuSmallestReport(
+        otsu_threshold=thr,
+        smallest_diameter_px=smallest_px,
+        d_min_um=smallest_px * float(pixel_size_um),
+        n_components=int(areas.size),
+        area_mean=float(area_vals.mean()),
+        area_max=float(area_vals.max()),
+        area_min=float(area_vals.min()),
+        scope="in-cell" if cp_mask is not None else "whole-frame",
+    )
+
+
+def detect_smallest_particle_um(
+    image: np.ndarray,
+    gaussian_sigma: float | None,
+    pixel_size_um: float,
+    *,
+    cp_mask: np.ndarray | None = None,
+    noise_floor_px: int = AUTO_WINDOW_NOISE_FLOOR_PX,
+) -> float | None:
+    """Smallest particle diameter (µm) from an Otsu first-pass — seeds ``d_min``.
+
+    Thin wrapper over :func:`otsu_smallest_particle` returning only its
+    ``d_min_um`` (the value the auto-fill writes into the spinbox); ``None`` on a
+    degenerate pass. See that function for the full contract and diagnostics.
+    """
+    report = otsu_smallest_particle(
+        image, gaussian_sigma, pixel_size_um, cp_mask=cp_mask, noise_floor_px=noise_floor_px
+    )
+    return report.d_min_um if report is not None else None
+
+
 def resolve_min_area_px(value: float, unit: str, pixel_size_um: float | None) -> int:
     """Convert a particle-size filter value+unit into an integer pixel area.
 

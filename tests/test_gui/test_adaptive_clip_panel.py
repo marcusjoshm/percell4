@@ -266,14 +266,25 @@ def test_cancel_prompt_writes_nothing(qtbot, monkeypatch):
     viewer_win.add_mask.assert_not_called()
 
 
-# ── particle-size (one-knob) mode ───────────────────────────────────────
+# ── particle-size (one-knob) mode via "Otsu detect smallest particle size" ──
+
+
+def _select_otsu_smallest(panel) -> None:
+    """Enter the per-cell d_min engine: Auto on + the Otsu-smallest method.
+
+    Selecting the method fires the panel's auto-fill (an Otsu first-pass that
+    overwrites the d_min field); callers that pin a specific Ø set it afterwards.
+    """
+    panel._settings._auto.setChecked(True)
+    panel._settings._window_method.setCurrentText("Otsu detect smallest particle size")
+
 
 def test_particle_mode_creates_mask_via_per_cell_detector(qtbot, monkeypatch):
     panel, model, repo, viewer_win = _build(
         qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells"
     )
-    panel._settings._particle.setChecked(True)
-    panel._settings._d_min.setValue(0.40)
+    _select_otsu_smallest(panel)
+    panel._settings._d_min.setValue(0.40)  # override the auto-filled value
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "pbody")
 
     panel._on_run()
@@ -291,8 +302,8 @@ def test_particle_mode_creates_mask_via_per_cell_detector(qtbot, monkeypatch):
 
 def test_particle_mode_passes_d_min_pixel_size_and_k_to_worker(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
-    panel._settings._particle.setChecked(True)  # adopts the default k=1
-    panel._settings._d_min.setValue(0.14)
+    _select_otsu_smallest(panel)  # adopts the default k=1
+    panel._settings._d_min.setValue(0.14)  # override the auto-filled value
     panel._settings._k.setValue(2.5)  # raise k to be conservative
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
 
@@ -307,7 +318,7 @@ def test_particle_mode_passes_d_min_pixel_size_and_k_to_worker(qtbot, monkeypatc
 
 def test_particle_mode_default_k_is_one(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
-    panel._settings._particle.setChecked(True)  # validated default
+    _select_otsu_smallest(panel)  # validated default k=1
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
     panel._on_run()
     assert panel._worker._args[4] == 1.0
@@ -317,7 +328,7 @@ def test_particle_mode_without_pixel_size_aborts(qtbot, monkeypatch):
     panel, _model, repo, viewer_win = _build(
         qtbot, monkeypatch, pixel_size_um=None, segmentation="cells"
     )
-    panel._settings._particle.setChecked(True)
+    _select_otsu_smallest(panel)  # auto-fill no-ops (no pixel size); run still aborts
     called = []
     monkeypatch.setattr(
         panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
@@ -334,7 +345,7 @@ def test_particle_mode_without_segmentation_aborts(qtbot, monkeypatch):
     panel, _model, repo, viewer_win = _build(
         qtbot, monkeypatch, pixel_size_um=0.120369, segmentation=None
     )
-    panel._settings._particle.setChecked(True)
+    _select_otsu_smallest(panel)
     called = []
     monkeypatch.setattr(
         panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
@@ -357,7 +368,7 @@ def test_particle_mode_timelapse_aborts(qtbot, monkeypatch):
         if layer.__class__.__name__ == "Image":
             layer.data = img3d
     panel._get_store().metadata["n_timepoints"] = 2
-    panel._settings._particle.setChecked(True)
+    _select_otsu_smallest(panel)
     called = []
     monkeypatch.setattr(
         panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
@@ -367,3 +378,116 @@ def test_particle_mode_timelapse_aborts(qtbot, monkeypatch):
 
     assert called == []
     assert repo.masks == {}
+
+
+# ── Otsu auto-fill of the smallest-particle Ø ───────────────────────────
+
+
+def test_otsu_smallest_autofills_d_min_from_first_pass(qtbot, monkeypatch):
+    """Selecting the per-cell method measures the smallest particle and fills Ø."""
+    from percell4.domain.measure.adaptive_clip import detect_smallest_particle_um
+
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    _select_otsu_smallest(panel)
+
+    d = panel._settings.current_config().d_min_um
+    # The blob discs (~12 px) are larger than the 0.40 µm default -> autofill ran.
+    assert d > 0.40
+    expected = detect_smallest_particle_um(
+        _blob_image(), 1.0, 0.120369, cp_mask=_labels_one_cell() > 0
+    )
+    assert abs(d - expected) < 1e-3  # within the spinbox's 3-decimal rounding
+
+
+def test_otsu_smallest_without_pixel_size_keeps_default(qtbot, monkeypatch):
+    """No pixel size -> autofill is skipped and Ø stays at its current value."""
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=None, segmentation="cells")
+    _select_otsu_smallest(panel)
+    assert panel._settings.current_config().d_min_um == 0.40  # unchanged default
+
+
+def test_otsu_smallest_whole_frame_when_no_segmentation(qtbot, monkeypatch):
+    """Without a segmentation the autofill still runs (whole-frame Otsu)."""
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation=None)
+    _select_otsu_smallest(panel)
+    # Detection ran whole-frame and wrote a (non-default) value.
+    assert panel._settings.current_config().d_min_um > 0.40
+
+
+def test_otsu_smallest_autofill_aborts_on_timelapse(qtbot, monkeypatch):
+    """On a time-lapse the autofill refuses (mirrors the per-cell run gate)."""
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    img3d = np.stack([_blob_image(), _blob_image()], axis=0)
+    for layer in panel._get_viewer_window().viewer.layers:
+        if layer.__class__.__name__ == "Image":
+            layer.data = img3d
+    panel._get_store().metadata["n_timepoints"] = 2
+
+    _select_otsu_smallest(panel)
+
+    # d_min stays at its default (autofill aborted) and the status explains why.
+    assert panel._settings.current_config().d_min_um == 0.40
+    assert "single-frame" in panel._status.text()
+
+
+def test_failed_particle_run_does_not_mislabel_next_manual_run(qtbot, monkeypatch):
+    """A failed per-cell run must not leave _pending_particle set for the next run."""
+    panel, _model, repo, _viewer_win = _build(
+        qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells"
+    )
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    # 1) Force the per-cell detector to fail -> _on_detect_error must clear flags.
+    def boom(*a, **kw):
+        raise RuntimeError("per-cell failed")
+
+    monkeypatch.setattr(panel_module, "run_adaptive_detection_by_particle_size", boom)
+    _select_otsu_smallest(panel)
+    panel._settings._d_min.setValue(0.40)
+    panel._on_run()
+    assert repo.masks == {}  # the per-cell run failed
+    assert panel._pending_particle is False  # cleared by _on_detect_error
+
+    # 2) A plain manual run must not emit a per-cell note nor overwrite the window.
+    panel._settings._auto.setChecked(False)  # manual window path
+    panel._settings._window.setValue(15)
+    panel._on_run()
+    assert "m" in repo.masks  # manual run succeeded
+    assert "per-cell" not in panel._status.text()
+    assert panel._settings._window.value() == 15  # spinbox untouched
+
+
+# ── terminal debug output ───────────────────────────────────────────────
+
+
+def test_run_prints_all_settings_to_terminal(qtbot, monkeypatch, capsys):
+    """Every run dumps the full settings block to stdout."""
+    panel, *_ = _build(qtbot, monkeypatch)
+    panel._settings._k.setValue(2.5)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    panel._on_run()
+    out = capsys.readouterr().out
+    assert "Adaptive Local Clipping run" in out
+    for field in ("auto_window", "window_method", "particle_mode", "k", "gaussian_sigma"):
+        assert field in out
+    assert "2.5" in out  # the k value flows into the dump
+
+
+def test_otsu_smallest_run_prints_otsu_diagnostics(qtbot, monkeypatch, capsys):
+    """An Otsu-smallest run prints the threshold + smallest particle + area stats."""
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    _select_otsu_smallest(panel)
+    panel._settings._d_min.setValue(0.40)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    capsys.readouterr()  # drop anything emitted during selection
+
+    panel._on_run()
+
+    out = capsys.readouterr().out
+    assert "otsu first-pass" in out
+    assert "Otsu threshold" in out
+    assert "smallest particle" in out
+    assert "threshold-area mean intensity" in out
+    assert "mean − threshold" in out
+    assert "threshold-area max intensity" in out
+    assert "threshold-area min intensity" in out

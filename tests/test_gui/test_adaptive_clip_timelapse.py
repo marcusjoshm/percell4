@@ -12,7 +12,7 @@ def test_run_adaptive_detection_stack_loops_and_stacks(monkeypatch):
     frame's mask is that frame's own detection (not frame 0 broadcast), and the
     auto window is computed per frame (contract D3)."""
 
-    def fake_detect(frame, sigma, settings, auto_window):
+    def fake_detect(frame, sigma, settings, auto_window, window_method="otsu-mean"):
         # Encode the frame's mean in the window so per-frame computation shows.
         w = int(frame.mean())
         m = (frame > frame.mean()).astype(np.uint8)

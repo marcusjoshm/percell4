@@ -13,8 +13,10 @@ from percell4.domain.measure.adaptive_clip import (
     auto_window,
     detect_adaptive_by_particle_size,
     detect_adaptive_whole_frame,
+    detect_smallest_particle_um,
     estimate_adaptive_window,
     otsu_first_pass,
+    otsu_smallest_particle,
     resolve_min_area_px,
     window_min_spot_for_particle,
 )
@@ -297,3 +299,111 @@ def test_detect_by_particle_size_empty_labels_is_empty():
     mask = detect_adaptive_by_particle_size(img, labels, 0.120369, 0.40)
     assert mask.dtype == np.uint8
     assert int(mask.sum()) == 0
+
+
+# ── detect_smallest_particle_um (Otsu first-pass d_min seed) ──────────────
+
+
+def test_detect_smallest_particle_um_returns_min_diameter():
+    """Returns the SMALLEST component's equivalent Ø (µm), not the mean."""
+    # Two well-separated discs: radius 3 (Ø 6 px) and radius 10 (Ø 20 px).
+    img = _blobs_image([(40, 40), (140, 140)], radius=3, shape=(200, 200))
+    rr, cc = disk((140, 140), 10, shape=img.shape)
+    img[rr, cc] = 200.0
+    px = 0.1
+    d_um = detect_smallest_particle_um(img, 1.0, px, noise_floor_px=3)
+    # The smaller disc (Ø ≈ 6 px) drives it, not the larger one or their mean.
+    expected_small_px = 2.0 * np.sqrt((np.pi * 3.0**2) / np.pi)  # = 6 px
+    assert d_um == pytest.approx(expected_small_px * px, rel=0.25)
+    # Strictly smaller than the mean-diameter the otsu-mean baseline would give.
+    assert d_um < estimate_adaptive_window(otsu_first_pass(img)) * px
+
+
+def test_detect_smallest_particle_um_restricts_to_cp_mask():
+    """A small out-of-cell particle is ignored when a cell mask is supplied."""
+    img = _blobs_image([(100, 100)], radius=10, shape=(200, 200))  # big disc, in cell
+    # A smaller real particle OUTSIDE any cell — the global smallest if unmasked.
+    rr, cc = disk((30, 30), 3, shape=img.shape)
+    img[rr, cc] = 200.0
+    cell = np.zeros(img.shape, dtype=bool)
+    rr, cc = disk((100, 100), 40, shape=img.shape)
+    cell[rr, cc] = True  # covers the big disc, not the small out-of-cell particle
+    px = 0.12
+    d_in_cell = detect_smallest_particle_um(img, 1.0, px, cp_mask=cell, noise_floor_px=3)
+    d_whole = detect_smallest_particle_um(img, 1.0, px, noise_floor_px=3)
+    # Whole-frame is dragged down by the out-of-cell particle; in-cell is not.
+    assert d_whole < d_in_cell
+
+
+def test_detect_smallest_particle_um_none_on_constant():
+    flat = np.full((64, 64), 5.0, dtype=np.float32)
+    assert detect_smallest_particle_um(flat, 1.0, 0.1) is None
+
+
+def test_detect_smallest_particle_um_none_when_only_specks():
+    """Sub-noise-floor components leave nothing -> None (caller keeps its value)."""
+    img = _blobs_image([(50, 50)], radius=1, shape=(100, 100))  # ~3-4 px speck
+    assert detect_smallest_particle_um(img, 1.0, 0.1, noise_floor_px=50) is None
+
+
+def test_detect_smallest_particle_um_requires_positive_pixel_size():
+    img = _blobs_image([(50, 50)], radius=5, shape=(100, 100))
+    with pytest.raises(ValueError):
+        detect_smallest_particle_um(img, 1.0, 0.0)
+    with pytest.raises(ValueError):
+        detect_smallest_particle_um(img, 1.0, None)
+
+
+def test_detect_smallest_particle_um_scales_with_pixel_size():
+    """Same image at 2× the µm/px yields 2× the diameter (physical units)."""
+    img = _blobs_image([(60, 60)], radius=6, shape=(160, 160))
+    d1 = detect_smallest_particle_um(img, 1.0, 0.10)
+    d2 = detect_smallest_particle_um(img, 1.0, 0.20)
+    assert d2 == pytest.approx(2.0 * d1, rel=1e-6)
+
+
+def test_detect_smallest_particle_um_constant_in_cell_returns_none():
+    """In-cell pixels constant (bright outside) -> degenerate -> None.
+
+    Guards the boundary-bleed fix: out-of-cell brightness must not smear inward
+    across the mask edge and fabricate a spurious above-threshold rim.
+    """
+    img = np.full((200, 200), 200.0, dtype=np.float32)  # bright everywhere
+    cell = np.zeros(img.shape, dtype=bool)
+    rr, cc = disk((100, 100), 30, shape=img.shape)
+    cell[rr, cc] = True
+    img[cell] = 50.0  # constant (dimmer) inside the cell; bright outside
+    assert detect_smallest_particle_um(img, 1.0, 0.1, cp_mask=cell) is None
+
+
+def test_otsu_smallest_particle_report_fields():
+    """The report carries the threshold + smallest particle + threshold-area stats."""
+    img = _blobs_image([(40, 40), (140, 140)], radius=3, shape=(200, 200))
+    rr, cc = disk((140, 140), 10, shape=img.shape)
+    img[rr, cc] = 200.0
+    r = otsu_smallest_particle(img, 1.0, 0.1, noise_floor_px=3)
+    assert r is not None
+    assert r.n_components == 2
+    assert r.scope == "whole-frame"
+    # The smaller disc (radius 3, Ø ~6 px) drives the smallest, not the radius-10.
+    assert r.smallest_diameter_px < 12.0
+    assert r.d_min_um == pytest.approx(r.smallest_diameter_px * 0.1)
+    # Threshold-area intensities sit above the Otsu threshold; ordering holds.
+    assert r.area_min > r.otsu_threshold
+    assert r.area_max >= r.area_mean >= r.area_min
+    assert r.mean_minus_threshold == pytest.approx(r.area_mean - r.otsu_threshold)
+    # detect_smallest_particle_um delegates to the report's d_min_um.
+    assert detect_smallest_particle_um(img, 1.0, 0.1, noise_floor_px=3) == pytest.approx(r.d_min_um)
+
+
+def test_otsu_smallest_particle_none_on_constant():
+    flat = np.full((64, 64), 5.0, dtype=np.float32)
+    assert otsu_smallest_particle(flat, 1.0, 0.1) is None
+
+
+def test_otsu_smallest_particle_scope_label_with_mask():
+    img = _blobs_image([(100, 100)], radius=8, shape=(200, 200))
+    cell = np.zeros(img.shape, dtype=bool)
+    rr, cc = disk((100, 100), 40, shape=img.shape)
+    cell[rr, cc] = True
+    assert otsu_smallest_particle(img, 1.0, 0.12, cp_mask=cell).scope == "in-cell"

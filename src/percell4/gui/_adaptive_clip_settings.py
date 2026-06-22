@@ -37,26 +37,36 @@ _UNIT_CODES = {"px²": "px", "µm²": "um2"}
 _NOISE_LABELS = ("MAD (robust)", "stddev", "gaussian-peak")
 _NOISE_CODES = {"MAD (robust)": "mad", "stddev": "stddev", "gaussian-peak": "gaussian-peak"}
 
-# Auto-window method dropdown labels -> WINDOW_FINDERS registry names. Only shown
-# when "Auto adaptive window size" is on. Lists only the finders actually
-# registered in the current phase (the drift guard below enforces this); bake-off
-# candidates (sweep-knee / fixed-point / autocorr / log-scale / granulometry) are
-# added here together with their registry entries when they land. The default is
-# `granule-size` (isolates the granules and sizes the window to them);
-# `otsu-mean` is the legacy baseline.
+# Auto-window method dropdown labels -> codes. Only shown when "Auto adaptive
+# window size" is on. The first two name whole-frame WINDOW_FINDERS (the default
+# `granule-size` isolates the granules and sizes the window to them; `otsu-mean`
+# is the legacy baseline; bake-off candidates land here with their registry
+# entries). The third, "Otsu detect smallest particle size", is *not* a finder —
+# it switches the run to the per-cell d_min engine (see _OTSU_SMALLEST_CODE).
 _WINDOW_METHOD_LABELS = (
     "Granule size",
     "Otsu mean (baseline)",
+    "Otsu detect smallest particle size",
 )
 _WINDOW_METHOD_CODES = {
     "Granule size": "granule-size",
     "Otsu mean (baseline)": "otsu-mean",
+    "Otsu detect smallest particle size": "otsu-smallest",
 }
 
-# Drift guard: every dropdown code must be a real registered finder.
-assert set(_WINDOW_METHOD_CODES.values()) <= set(WINDOW_FINDER_NAMES), (
+# Selecting this method does not pick a whole-frame window-finder: an Otsu
+# first-pass measures the smallest particle, auto-fills the d_min knob, and the
+# run uses the per-cell detect_adaptive_by_particle_size engine (window + size
+# filter derived from d_min). It is therefore exempt from the finder drift guard.
+_OTSU_SMALLEST_CODE = "otsu-smallest"
+
+# Drift guard: every dropdown code that names a whole-frame finder must be a real
+# registered finder (the per-cell engine switch above is exempt).
+assert set(_WINDOW_METHOD_CODES.values()) - {_OTSU_SMALLEST_CODE} <= set(
+    WINDOW_FINDER_NAMES
+), (
     "window-method dropdown codes drifted from WINDOW_FINDER_NAMES: "
-    f"{set(_WINDOW_METHOD_CODES.values()) - set(WINDOW_FINDER_NAMES)}"
+    f"{set(_WINDOW_METHOD_CODES.values()) - {_OTSU_SMALLEST_CODE} - set(WINDOW_FINDER_NAMES)}"
 )
 
 
@@ -81,11 +91,12 @@ class AdaptiveClipConfig:
     # (a WINDOW_FINDERS registry name). Ignored when ``auto_window`` is False or
     # ``particle_mode`` is True. Default ``granule-size`` (granule-isolating).
     window_method: str = "granule-size"
-    # Particle-size mode. When ``particle_mode`` is True the run derives the
-    # window + size filter from ``d_min_um`` (smallest particle Ø, µm) and uses
-    # the per-cell detector with a robust per-cell MAD σ. ``k`` is still honored
-    # (the sensitivity knob, default 1.0); ``window_px`` / ``min_size_*`` /
-    # ``auto_window`` / ``noise_estimator`` are ignored in that mode.
+    # Particle-size mode. True when ``auto_window`` is on AND ``window_method`` is
+    # the "Otsu detect smallest particle size" code — the run then derives the
+    # window + size filter from ``d_min_um`` (smallest particle Ø, µm, auto-filled
+    # from an Otsu first-pass) and uses the per-cell detector with a robust
+    # per-cell MAD σ. ``k`` is still honored (the sensitivity knob, default 1.0);
+    # ``window_px`` / ``min_size_*`` / ``noise_estimator`` are ignored in that mode.
     particle_mode: bool = False
     d_min_um: float = 0.40
 
@@ -95,10 +106,18 @@ class AdaptiveClipSettingsWidget(QWidget):
 
     Emits :attr:`config_changed` whenever any child widget's user-edit signal
     fires. Checking "Auto adaptive window size" disables the window spinbox (it
-    is computed at run time); unchecking re-enables it.
+    is computed at run time) and enables the method dropdown; unchecking reverses
+    both. Selecting the "Otsu detect smallest particle size" method enables the
+    d_min knob and emits :attr:`otsu_detect_requested` so the host can measure the
+    smallest particle from an Otsu first-pass and auto-fill it.
     """
 
     config_changed = Signal()
+    # Fired when the auto-window method becomes "Otsu detect smallest particle
+    # size" (the per-cell d_min engine). The host (panel) runs an Otsu first-pass
+    # on the active channel and writes the result back via ``set_d_min_um``; the
+    # widget has no image, so it cannot do this itself.
+    otsu_detect_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -126,25 +145,17 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._window_method.setToolTip(
             "How the window is found when Auto is on. Granule size isolates the "
             "granules and sizes the window to them; Otsu mean (baseline) is the "
-            "legacy first-pass estimate."
+            "legacy first-pass estimate; Otsu detect smallest particle size runs "
+            "an Otsu first-pass to measure the smallest particle, auto-fills the "
+            "Ø knob below, and runs the per-cell detector driven by it."
         )
         self._window_method.setEnabled(False)  # off until Auto is checked
         method_row.addWidget(self._window_method)
         layout.addLayout(method_row)
 
-        # ── Particle-size mode (the one-knob "just works" detector) ──
-        self._particle = QCheckBox("Detect by smallest particle size")
-        self._particle.setToolTip(
-            "Drive the detector from ONE physical knob — the smallest particle "
-            "diameter (µm) you want to detect. Window and size filter are derived "
-            "from it and the noise floor is a robust per-cell MAD (so one setting "
-            "transfers across cells/datasets). k stays adjustable (defaults to 1; "
-            "raise it to be conservative). Needs an active segmentation and a "
-            "known pixel size."
-        )
-        self._particle.toggled.connect(self._on_particle_toggled)
-        layout.addWidget(self._particle)
-
+        # ── Smallest particle Ø (the one-knob per-cell detector) ──
+        # Editable only under the "Otsu detect smallest particle size" method,
+        # which auto-fills it from an Otsu first-pass (the user may then tweak it).
         dmin_row = QHBoxLayout()
         dmin_row.addWidget(QLabel("Smallest particle Ø (µm):"))
         self._d_min = QDoubleSpinBox()
@@ -152,7 +163,7 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._d_min.setDecimals(3)
         self._d_min.setSingleStep(0.05)
         self._d_min.setValue(0.40)
-        self._d_min.setEnabled(False)  # off until particle mode is checked
+        self._d_min.setEnabled(False)  # off until the per-cell method is selected
         dmin_row.addWidget(self._d_min)
         layout.addLayout(dmin_row)
 
@@ -222,41 +233,69 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._min_size.valueChanged.connect(self.config_changed)
         self._unit.currentIndexChanged.connect(self.config_changed)
         self._noise.currentIndexChanged.connect(self.config_changed)
+        # The method dropdown drives gating + the Otsu auto-detect request; connect
+        # the behavior slot here (after _build_ui's addItems, so construction-time
+        # index changes do not fire it) before the config_changed forward.
+        self._window_method.currentIndexChanged.connect(self._on_window_method_changed)
         self._window_method.currentIndexChanged.connect(self.config_changed)
         self._auto.toggled.connect(self.config_changed)
-        self._particle.toggled.connect(self.config_changed)
         self._d_min.valueChanged.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
 
-    def _on_auto_toggled(self, checked: bool) -> None:  # noqa: ARG002
+    def _on_auto_toggled(self, checked: bool) -> None:
         self._apply_mode_gating()
+        # Checking Auto while the per-cell method is the remembered selection
+        # enters particle mode -> seed d_min from the Otsu first-pass.
+        if checked and self._is_particle_mode():
+            self._enter_otsu_smallest()
 
-    def _on_particle_toggled(self, checked: bool) -> None:
-        # Adopt the validated one-knob default (k=1) when entering particle mode;
-        # it stays editable so the user can raise k to be conservative (fewer
-        # false positives, at the cost of missing dim sub-threshold particles).
-        if checked:
-            self._k.setValue(1.0)
+    def _on_window_method_changed(self, _index: int) -> None:
         self._apply_mode_gating()
+        # Switching the active method to the per-cell engine seeds d_min.
+        if self._is_particle_mode():
+            self._enter_otsu_smallest()
+
+    def _enter_otsu_smallest(self) -> None:
+        """Adopt the validated one-knob default (k=1) and request an Otsu auto-fill.
+
+        ``k`` stays editable so the user can raise it to be conservative (fewer
+        false positives, at the cost of missing dim sub-threshold particles). The
+        host runs the Otsu first-pass and writes the measured Ø back via
+        :meth:`set_d_min_um`; the widget has no image of its own.
+        """
+        self._k.setValue(1.0)
+        self.otsu_detect_requested.emit()
+
+    def _method_code(self) -> str:
+        """The selected auto-window method's internal code."""
+        return _WINDOW_METHOD_CODES[self._window_method.currentText()]
+
+    def _is_particle_mode(self) -> bool:
+        """True when the active mode is the per-cell d_min engine.
+
+        Requires Auto on (the dropdown is the auto-window method picker) and the
+        "Otsu detect smallest particle size" method selected.
+        """
+        return self._auto.isChecked() and self._method_code() == _OTSU_SMALLEST_CODE
 
     def _apply_mode_gating(self) -> None:
         """Enable/disable fields for the active mode.
 
-        Particle-size mode derives the spatial scale from ``d_min``, so window,
-        the size filter, the noise estimate and auto-window go disabled. ``k``
-        stays live in BOTH modes (the sensitivity knob), as do ``d_min`` and
-        Gaussian σ. Outside particle mode the window respects the auto-window
-        checkbox exactly as before.
+        The per-cell (particle) mode derives the spatial scale from ``d_min``, so
+        the size filter and the noise estimate go disabled (the d_min knob goes
+        live). ``k`` stays live in every mode (the sensitivity knob), as do
+        ``d_min``'s siblings Gaussian σ and Auto. The manual window is live only
+        when Auto is off; the method dropdown is live only when Auto is on.
         """
-        particle = self._particle.isChecked()
+        auto = self._auto.isChecked()
+        particle = self._is_particle_mode()
         self._d_min.setEnabled(particle)
-        for w in (self._min_size, self._unit, self._noise, self._auto):
+        for w in (self._min_size, self._unit, self._noise):
             w.setEnabled(not particle)
         self._k.setEnabled(True)
-        self._window.setEnabled(not particle and not self._auto.isChecked())
-        # The auto-window method only matters when auto is on and not in particle mode.
-        self._window_method.setEnabled(not particle and self._auto.isChecked())
+        self._window.setEnabled(not auto)
+        self._window_method.setEnabled(auto)
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -270,10 +309,21 @@ class AdaptiveClipSettingsWidget(QWidget):
             min_size_unit=_UNIT_CODES[self._unit.currentText()],
             auto_window=self._auto.isChecked(),
             noise_estimator=_NOISE_CODES[self._noise.currentText()],
-            window_method=_WINDOW_METHOD_CODES[self._window_method.currentText()],
-            particle_mode=self._particle.isChecked(),
+            window_method=self._method_code(),
+            particle_mode=self._is_particle_mode(),
             d_min_um=float(self._d_min.value()),
         )
+
+    def set_d_min_um(self, d_min_um: float) -> None:
+        """Display an (Otsu-detected) smallest-particle Ø in the d_min spinbox.
+
+        Used by the host to surface the auto-detected diameter. Setting it
+        programmatically forwards ``config_changed`` (a value did change) but does
+        not re-request Otsu detection — only the method dropdown does that — so
+        there is no detect/auto-fill feedback loop. The spinbox clamps the value
+        to its range ``[0.02, 50.0]`` µm.
+        """
+        self._d_min.setValue(float(d_min_um))
 
     def set_window_value(self, window_px: int) -> None:
         """Display an (auto-estimated) window in the spinbox without re-running.
@@ -294,7 +344,6 @@ class AdaptiveClipSettingsWidget(QWidget):
             self._unit,
             self._noise,
             self._window_method,
-            self._particle,
             self._d_min,
             self._window,
         ):

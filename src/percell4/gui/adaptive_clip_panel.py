@@ -144,6 +144,10 @@ class AdaptiveClipPanel(QWidget):
         layout.setAlignment(Qt.AlignTop)
 
         self._settings = AdaptiveClipSettingsWidget(self)
+        # Selecting the "Otsu detect smallest particle size" method seeds the
+        # d_min knob from an Otsu first-pass of the active channel (the widget has
+        # no image, so the panel measures it).
+        self._settings.otsu_detect_requested.connect(self._on_otsu_detect_requested)
         layout.addWidget(self._settings)
 
         from percell4.gui import theme
@@ -170,6 +174,155 @@ class AdaptiveClipPanel(QWidget):
         self._status.setText(msg)
         self._show_status_cb(msg)
 
+    def _find_layer_data(self, viewer_win, kind: str, name: str | None):
+        """Data array of the first ``kind`` ("Image"/"Labels") layer named ``name``.
+
+        Returns ``None`` when ``name`` is empty, the viewer is gone, or no such
+        layer exists. Matches on ``__class__.__name__`` so the tests' mock layers
+        resolve the same way real napari layers do.
+        """
+        if not name or viewer_win is None or viewer_win.viewer is None:
+            return None
+        for layer in viewer_win.viewer.layers:
+            if layer.__class__.__name__ == kind and layer.name == name:
+                return np.asarray(layer.data)
+        return None
+
+    def _pixel_size_um(self, store):
+        """The dataset's pixel size (µm/px) as a positive float, or ``None``.
+
+        Coerces the stored value and rejects missing / non-numeric / non-finite /
+        non-positive metadata (e.g. an externally-edited HDF5), so callers can
+        treat a non-``None`` return as a usable µm/px without re-validating.
+        """
+        try:
+            px = float(store.metadata.get("pixel_size_um"))
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if not np.isfinite(px) or px <= 0:
+            return None
+        return px
+
+    # ── debug (terminal) ─────────────────────────────────────────
+
+    def _print_settings_debug(self, config) -> None:
+        """Print every Adaptive Local Clipping setting to the terminal (debug)."""
+        print(
+            "\n===== Adaptive Local Clipping run =====\n"
+            f"  auto_window       : {config.auto_window}\n"
+            f"  window_method     : {config.window_method}\n"
+            f"  particle_mode     : {config.particle_mode}\n"
+            f"  window_px         : {config.window_px}\n"
+            f"  k                 : {config.k}\n"
+            f"  gaussian_sigma    : {config.gaussian_sigma}\n"
+            f"  noise_estimator   : {config.noise_estimator}\n"
+            f"  d_min_um (used)   : {config.d_min_um}\n"
+            f"  min particle size : {config.min_size_value} {config.min_size_unit}",
+            flush=True,
+        )
+
+    def _print_otsu_debug(self, image, labels, pixel_size_um: float, config) -> None:
+        """Print the Otsu first-pass diagnostics for an Otsu-smallest run (debug).
+
+        Recomputed fresh on the image being detected (not the auto-fill's earlier
+        pass), restricted to in-cell pixels exactly as the auto-fill was.
+        """
+        from percell4.domain.measure.adaptive_clip import otsu_smallest_particle
+
+        frame = image if image.ndim == 2 else image[0]
+        lab = labels if labels.ndim == 2 else labels[0]
+        cp_mask = (lab > 0) if lab.shape == frame.shape else None
+        try:
+            r = otsu_smallest_particle(frame, config.gaussian_sigma, pixel_size_um, cp_mask=cp_mask)
+        except Exception as e:  # noqa: BLE001 — debug print must never break the run
+            print(f"  [otsu first-pass] failed: {e}", flush=True)
+            return
+        if r is None:
+            print("  [otsu first-pass] degenerate (no particle detected)", flush=True)
+            return
+        print(
+            f"  [otsu first-pass] scope={r.scope}\n"
+            f"    Otsu threshold               : {r.otsu_threshold:.4f}\n"
+            f"    smallest particle            : {r.smallest_diameter_px:.3f} px"
+            f" = {r.d_min_um:.4f} µm  (n_components={r.n_components})\n"
+            f"    threshold-area mean intensity: {r.area_mean:.4f}\n"
+            f"    mean − threshold             : {r.mean_minus_threshold:.4f}\n"
+            f"    threshold-area max intensity : {r.area_max:.4f}\n"
+            f"    threshold-area min intensity : {r.area_min:.4f}",
+            flush=True,
+        )
+
+    def _on_otsu_detect_requested(self) -> None:
+        """Auto-fill the smallest-particle Ø from an Otsu first-pass of the channel.
+
+        Selecting "Otsu detect smallest particle size" seeds the d_min knob from
+        the image so the user does not have to eyeball it. The knob is physical, so
+        this needs a known pixel size; it restricts the Otsu pass to the active
+        segmentation's cells when one is present (more robust than whole-frame). If
+        a prerequisite is missing we leave the current Ø and say why.
+
+        The gates here mirror the per-cell run's (``_run_particle_mode``): single
+        frame only, and in-cell scope decided on the full label/image shape match —
+        so the readout never promises an "(in-cell)" Ø the run would then refuse.
+
+        Runs synchronously on the GUI thread (unlike the threaded Run path): the
+        intended in-cell case is bounded (tens of ms). A large whole-frame channel
+        with no active segmentation briefly blocks the event loop on selection.
+        """
+        viewer_win = self._get_viewer_window()
+        store = self._get_store()
+        if viewer_win is None or viewer_win.viewer is None or store is None:
+            self._show_status("Open a dataset to auto-detect the smallest particle")
+            return
+
+        channel = self.data_model.session.active_channel
+        image = self._find_layer_data(viewer_win, "Image", channel)
+        if image is None:
+            self._show_status("Select a channel to auto-detect the smallest particle")
+            return
+
+        pixel_size_um = self._pixel_size_um(store)
+        if not pixel_size_um:
+            self._show_status("Auto-detect needs a known pixel size (µm/px) on this dataset")
+            return
+
+        # Mirror the per-cell run gates so the readout never promises a value the
+        # run will refuse: per-cell mode is single-frame only.
+        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+        if image.ndim == 3 and n_timepoints > 1:
+            self._show_status("Per-cell mode supports single-frame channels only")
+            return
+
+        frame = image if image.ndim == 2 else image[0]
+        labels = self._find_layer_data(
+            viewer_win, "Labels", self.data_model.session.active_segmentation
+        )
+        # In-cell scope is decided on the FULL shape match the run requires
+        # (labels.shape == image.shape), not a per-frame slice.
+        cp_mask = None
+        if labels is not None and labels.shape == image.shape:
+            cp_mask = (labels if labels.ndim == 2 else labels[0]) > 0
+
+        from percell4.domain.measure.adaptive_clip import detect_smallest_particle_um
+
+        cfg = self._settings.current_config()
+        try:
+            d_um = detect_smallest_particle_um(
+                frame, cfg.gaussian_sigma, float(pixel_size_um), cp_mask=cp_mask
+            )
+        except Exception as e:  # noqa: BLE001 — surface any detection failure
+            self._show_status(f"Auto-detect failed: {e}")
+            return
+        if d_um is None:
+            self._show_status("Otsu first-pass found no particles; keeping current Ø")
+            return
+
+        self._settings.set_d_min_um(d_um)
+        scope = "in-cell" if cp_mask is not None else "whole-frame"
+        self._show_status(
+            f"Otsu smallest particle ≈ {d_um:.3f} µm ({scope}) — tweak Ø if needed"
+        )
+
     # ── run (Creator) ────────────────────────────────────────────
 
     def _on_run(self) -> None:
@@ -187,11 +340,7 @@ class AdaptiveClipPanel(QWidget):
             self._show_status("Select a channel in the Session window first")
             return
 
-        image = None
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Image" and layer.name == channel:
-                image = np.asarray(layer.data)
-                break
+        image = self._find_layer_data(viewer_win, "Image", channel)
         if image is None:
             self._show_status(f"Channel '{channel}' not found in viewer")
             return
@@ -202,6 +351,7 @@ class AdaptiveClipPanel(QWidget):
         is_timelapse = image.ndim == 3 and n_timepoints > 1
 
         config = self._settings.current_config()
+        self._print_settings_debug(config)
 
         # One-knob particle-size mode runs the per-cell detector (needs labels +
         # a known pixel size); the manual path below stays whole-frame.
@@ -212,11 +362,7 @@ class AdaptiveClipPanel(QWidget):
         # Resolve the particle-size filter to a px area (µm² needs calibration).
         from percell4.domain.measure.adaptive_clip import resolve_min_area_px
 
-        pixel_size_um = None
-        try:
-            pixel_size_um = store.metadata.get("pixel_size_um")
-        except Exception:
-            pixel_size_um = None
+        pixel_size_um = self._pixel_size_um(store)
         try:
             min_spot_px = resolve_min_area_px(
                 config.min_size_value, config.min_size_unit, pixel_size_um
@@ -249,6 +395,7 @@ class AdaptiveClipPanel(QWidget):
 
         self._pending_name = mask_name
         self._pending_auto = config.auto_window
+        self._pending_particle = False  # this is the whole-frame/manual path
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
         n_frames = image.shape[0] if is_timelapse else 1
@@ -282,11 +429,7 @@ class AdaptiveClipPanel(QWidget):
             self._show_status("Particle-size mode supports single-frame channels only")
             return
 
-        pixel_size_um = None
-        try:
-            pixel_size_um = store.metadata.get("pixel_size_um")
-        except Exception:  # noqa: BLE001 — missing/garbled metadata -> treat as absent
-            pixel_size_um = None
+        pixel_size_um = self._pixel_size_um(store)
         if not pixel_size_um or float(pixel_size_um) <= 0:
             self._show_status(
                 "Particle-size mode needs a known pixel size (µm/px) on this dataset"
@@ -297,11 +440,7 @@ class AdaptiveClipPanel(QWidget):
         if not seg:
             self._show_status("Particle-size mode needs an active segmentation")
             return
-        labels = None
-        for layer in viewer_win.viewer.layers:
-            if layer.__class__.__name__ == "Labels" and layer.name == seg:
-                labels = np.asarray(layer.data)
-                break
+        labels = self._find_layer_data(viewer_win, "Labels", seg)
         if labels is None:
             self._show_status(f"Segmentation '{seg}' not found in viewer")
             return
@@ -329,6 +468,7 @@ class AdaptiveClipPanel(QWidget):
         self._show_status(
             f"Detecting (smallest particle {config.d_min_um:g} µm, per-cell)..."
         )
+        self._print_otsu_debug(image, labels, float(pixel_size_um), config)
 
         from percell4.gui.workers import Worker
 
@@ -346,6 +486,11 @@ class AdaptiveClipPanel(QWidget):
         self._worker.start()
 
     def _on_detect_error(self, err) -> None:
+        # Clear the pending flags so a failed run cannot mislabel the NEXT run
+        # (e.g. a failed per-cell run leaving _pending_particle set, which would
+        # then overwrite the manual Window spinbox + fabricate a per-cell note).
+        self._pending_auto = False
+        self._pending_particle = False
         self._run_btn.setEnabled(True)
         self._settings.set_enabled(True)
         self._show_status(f"Detection error: {err.exc_type}: {err.message}")
