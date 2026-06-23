@@ -68,7 +68,7 @@ FILL_FACTOR = 3.0          # window = FILL_FACTOR × particle diameter (no-hole 
 FDR = 0.1                  # target false rate for the coarse noise-symmetry floor
 SIZE_PERCENTILE = 99.0     # LoG blob-diameter percentile taken as the largest particle
 SMALL_PERCENTILE = 5.0     # low LoG percentile taken as the smallest particle (stable)
-MIN_SIGMA_SMALL = 1.0      # LoG scale floor for autodetecting the smallest particle
+MIN_SIGMA_SMALL = 0.5      # LoG scale floor for autodetecting the smallest particle
 LOG_PRESMOOTH = 1.0        # fixed pre-smoothing for LoG SIZING (decoupled from detection)
 MAX_SIGMA = 20.0           # upper LoG scale (caps the largest detectable particle)
 
