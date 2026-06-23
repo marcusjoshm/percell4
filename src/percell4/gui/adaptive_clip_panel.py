@@ -219,6 +219,23 @@ def run_cnr_classification(image, feature_mask, labels, *, mode, threshold):
     return pop_masks, res.components, res.report
 
 
+def run_cnr_measure(image, feature_mask, labels):
+    """Worker body for the interactive segmenter: measure per-focus CNR.
+
+    Returns ``(records, component_labels)`` where ``records`` are the per-focus
+    :func:`measure_cnr` dicts and ``component_labels`` is the labelled feature
+    mask (same ``scipy.ndimage.label`` call, so each record's ``label`` indexes
+    it). Pure (no Qt / store) so it is worker-safe.
+    """
+    from scipy.ndimage import label
+
+    from percell4.domain.measure.cnr_classification import measure_cnr
+
+    records = measure_cnr(image, feature_mask, labels)
+    component_labels, _ = label(np.asarray(feature_mask) > 0)
+    return records, component_labels
+
+
 class AdaptiveClipPanel(QWidget):
     """Interactive Adaptive Local Clipping panel (Creator)."""
 
@@ -247,6 +264,9 @@ class AdaptiveClipPanel(QWidget):
         # so it never collides with the detection run's _pending_* flags).
         self._cnr_worker = None
         self._pending_classify_base: str | None = None
+        # Interactive CNR segmenter (separate worker + held window reference).
+        self._measure_worker = None
+        self._cnr_segmenter = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -290,6 +310,14 @@ class AdaptiveClipPanel(QWidget):
         )
         self._classify_btn.clicked.connect(self._on_classify)
         layout.addWidget(self._classify_btn)
+
+        self._segment_btn = QPushButton("Segment by CNR (interactive)")
+        self._segment_btn.setToolTip(
+            "Open a CNR histogram with draggable dividers and a live napari "
+            "preview; save any number of CNR segments as masks."
+        )
+        self._segment_btn.clicked.connect(self._on_segment_cnr)
+        layout.addWidget(self._segment_btn)
 
         layout.addStretch()
 
@@ -988,57 +1016,72 @@ class AdaptiveClipPanel(QWidget):
             flush=True,
         )
 
-    def _on_classify(self) -> None:
+    def _resolve_cnr_inputs(self):
+        """Shared pre-flight for the CNR tools (classify + interactive segmenter).
+
+        Validates an open dataset/viewer, an active channel image, single-frame
+        (per-cell σ), an active segmentation matching the channel, and a selected
+        source mask read from the store. Returns ``(image, labels, feature_mask,
+        cfg)`` or ``None`` after setting a status message on any failure.
+        """
         viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
             self._show_status("Open a dataset in the viewer first")
-            return
+            return None
         store = self._get_store()
         if store is None:
             self._show_status("No dataset loaded")
-            return
+            return None
 
         channel = self.data_model.session.active_channel
         if not channel:
             self._show_status("Select a channel in the Session window first")
-            return
+            return None
         image = self._find_layer_data(viewer_win, "Image", channel)
         if image is None:
             self._show_status(f"Channel '{channel}' not found in viewer")
-            return
+            return None
 
         # Per-cell σ ⇒ single-frame only (mirrors the per-cell detector modes).
         n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
         if image.ndim == 3 and n_timepoints > 1:
-            self._show_status("CNR classification supports single-frame channels only")
-            return
+            self._show_status("CNR tools support single-frame channels only")
+            return None
 
         seg = self.data_model.session.active_segmentation
         if not seg:
-            self._show_status("CNR classification needs an active segmentation")
-            return
+            self._show_status("CNR tools need an active segmentation")
+            return None
         labels = self._find_layer_data(viewer_win, "Labels", seg)
         if labels is None:
             self._show_status(f"Segmentation '{seg}' not found in viewer")
-            return
+            return None
         if labels.shape != image.shape:
             self._show_status("Segmentation and channel shapes differ")
-            return
+            return None
 
         cfg = self._cnr_settings.current_config()
         if not cfg.source_mask:
-            self._show_status("Select a source mask to classify")
-            return
+            self._show_status("Select a source mask")
+            return None
         # Read the saved feature mask from the store (a /masks/<name> renders as a
         # napari Labels layer, so _find_layer_data has no apt 'mask' kind).
         try:
             feature_mask = store.read_mask(cfg.source_mask)
         except Exception as e:  # noqa: BLE001 — surface any read failure
             self._show_status(f"Could not read mask '{cfg.source_mask}': {e}")
-            return
+            return None
         if np.asarray(feature_mask).shape != image.shape:
             self._show_status("Source mask and channel shapes differ")
+            return None
+        return image, labels, feature_mask, cfg
+
+    def _on_classify(self) -> None:
+        resolved = self._resolve_cnr_inputs()
+        if resolved is None:
             return
+        image, labels, feature_mask, cfg = resolved
+        store = self._get_store()
 
         existing = store.list_masks() if hasattr(store, "list_masks") else []
         base_name = prompt_for_resource_name(
@@ -1136,3 +1179,58 @@ class AdaptiveClipPanel(QWidget):
         self._refresh_cnr_masks()
         summary = ", ".join(f"'{n}' {npos:,} px" for n, npos in written)
         self._show_status(f"CNR populations saved: {summary}{table_note}")
+
+    # ── Interactive CNR segmenter (Action) ────────────────────────
+
+    def _on_segment_cnr(self) -> None:
+        """Open the interactive CNR histogram segmenter for the selected mask.
+
+        Shares the CNR source-mask selector + pre-flight with the auto classifier;
+        measures per-focus CNR off-thread, then opens :class:`CnrSegmenterWindow`.
+        """
+        resolved = self._resolve_cnr_inputs()
+        if resolved is None:
+            return
+        image, labels, feature_mask, cfg = resolved
+
+        self._pending_segment_source = cfg.source_mask
+        self._segment_btn.setEnabled(False)
+        self._show_status(f"Measuring CNR for '{cfg.source_mask}'...")
+
+        from percell4.gui.workers import Worker
+
+        self._measure_worker = Worker(run_cnr_measure, image, feature_mask, labels)
+        self._measure_worker.finished.connect(self._on_measure_done)
+        self._measure_worker.error.connect(self._on_measure_error)
+        self._measure_worker.start()
+
+    def _on_measure_error(self, err) -> None:
+        self._segment_btn.setEnabled(True)
+        self._show_status(f"CNR measurement error: {err.exc_type}: {err.message}")
+
+    def _on_measure_done(self, result) -> None:
+        records, component_labels = result
+        self._segment_btn.setEnabled(True)
+        valid = [r for r in records if np.isfinite(r.get("cnr", float("nan"))) and r["cnr"] > 0]
+        if not valid:
+            self._show_status("No foci with a measurable CNR to segment")
+            return
+
+        from percell4.gui.cnr_segmenter import CnrSegmenterWindow
+
+        source = getattr(self, "_pending_segment_source", "adaptive")
+        self._cnr_segmenter = CnrSegmenterWindow(
+            records=records,
+            component_labels=component_labels,
+            source_mask=source,
+            get_viewer_window=self._get_viewer_window,
+            get_store=self._get_store,
+            get_repo=self._get_repo,
+            session=self.data_model.session,
+            show_status=self._show_status_cb,
+        )
+        self._cnr_segmenter.show()
+        # New segment masks become available as CNR sources once saved; refresh
+        # the source list when the segmenter window closes.
+        self._cnr_segmenter.destroyed.connect(lambda *_: self._refresh_cnr_masks())
+        self._show_status(f"CNR segmenter open for '{source}' ({len(valid)} foci)")

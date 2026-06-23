@@ -1052,3 +1052,56 @@ def test_auto_extract_prints_report(qtbot, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[auto-extract]" in out
     assert "passes" in out
+
+
+# ── SEG-U3: interactive CNR segmenter wiring ─────────────────────────────────
+
+
+def test_segment_without_segmentation_aborts(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, existing=["adaptive"])  # no segmentation
+    _select_source_mask(panel, "adaptive")
+    panel._on_segment_cnr()
+    assert panel._measure_worker is None
+    assert panel._cnr_segmenter is None
+
+
+def test_segment_without_source_mask_aborts(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")  # no masks exist
+    panel._on_segment_cnr()
+    assert panel._measure_worker is None
+
+
+def test_segment_dispatches_measure_and_opens_window(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    store = panel._get_store()
+    store.read_mask.return_value = np.ones((120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+
+    comp = np.zeros((120, 120), dtype=np.int32)
+    comp[10:20, 10:20] = 1
+    comp[30:40, 30:40] = 2
+    records = [{"label": 1, "cnr": 3.0}, {"label": 2, "cnr": 30.0}]
+    monkeypatch.setattr(panel_module, "run_cnr_measure", lambda *a, **k: (records, comp))
+
+    panel._on_segment_cnr()
+
+    store.read_mask.assert_called_once_with("adaptive")
+    from percell4.gui.cnr_segmenter import CnrSegmenterWindow
+
+    assert isinstance(panel._cnr_segmenter, CnrSegmenterWindow)
+    panel._cnr_segmenter.close()
+
+
+def test_segment_no_foci_shows_no_window(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    store = panel._get_store()
+    store.read_mask.return_value = np.ones((120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+    comp = np.zeros((120, 120), dtype=np.int32)
+    # records all have non-finite CNR -> nothing to segment
+    records = [{"label": 1, "cnr": float("nan")}]
+    monkeypatch.setattr(panel_module, "run_cnr_measure", lambda *a, **k: (records, comp))
+
+    panel._on_segment_cnr()
+
+    assert panel._cnr_segmenter is None

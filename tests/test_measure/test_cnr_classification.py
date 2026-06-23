@@ -14,8 +14,11 @@ from skimage.draw import disk
 
 from percell4.domain.measure.cnr_classification import (
     ClassificationResult,
+    assign_segments,
     classify_by_cnr,
     measure_cnr,
+    segment_label_image,
+    segment_masks_from_label_image,
     to_dataframe,
 )
 
@@ -202,3 +205,58 @@ def test_diptest_present_and_gap_test_reliable():
     )
     _, p = diptest.diptest(sample)
     assert p < 0.05  # a real gap
+
+
+# --------------------------------------------------------------------------- #
+# manual divider segmentation helpers (SEG-U1)
+# --------------------------------------------------------------------------- #
+def test_assign_segments_two_dividers():
+    cnr = np.array([1.0, 4.0, 6.0, 9.0, 20.0])
+    seg = assign_segments(cnr, [5.0, 10.0])  # 3 segments
+    # <=5 -> 1, (5,10] -> 2, >10 -> 3
+    assert list(seg) == [1, 1, 2, 2, 3]
+
+
+def test_assign_segments_empty_dividers_all_one():
+    cnr = np.array([1.0, 50.0, 999.0])
+    assert list(assign_segments(cnr, [])) == [1, 1, 1]
+
+
+def test_assign_segments_unsorted_dividers():
+    cnr = np.array([2.0, 7.0, 12.0])
+    a = assign_segments(cnr, [10.0, 5.0])  # given unsorted
+    b = assign_segments(cnr, [5.0, 10.0])
+    assert list(a) == list(b) == [1, 2, 3]
+
+
+def test_segment_label_image_maps_components():
+    # component-label image: 0 bg, comp 1 (top-left), comp 2 (bottom-right)
+    comp = np.zeros((6, 6), dtype=np.int32)
+    comp[0:2, 0:2] = 1
+    comp[4:6, 4:6] = 2
+    focus_labels = np.array([1, 2])
+    focus_cnr = np.array([3.0, 20.0])  # one low, one high
+    seg_img = segment_label_image(comp, focus_labels, focus_cnr, [10.0])
+    assert set(np.unique(seg_img)) == {0, 1, 2}
+    assert seg_img[0, 0] == 1   # comp 1 (cnr 3 <= 10) -> seg 1
+    assert seg_img[5, 5] == 2   # comp 2 (cnr 20 > 10) -> seg 2
+    assert seg_img[3, 3] == 0   # background unchanged
+
+
+def test_segment_label_image_invalid_focus_stays_zero():
+    comp = np.zeros((4, 4), dtype=np.int32)
+    comp[0:2, 0:2] = 1
+    # focus id 1 present but a stray id 99 (outside the component range) ignored
+    seg_img = segment_label_image(comp, np.array([1, 99]), np.array([5.0, 5.0]), [])
+    assert seg_img[0, 0] == 1
+    assert set(np.unique(seg_img)) == {0, 1}
+
+
+def test_segment_masks_from_label_image():
+    seg_img = np.array([[0, 1], [2, 2]], dtype=np.int32)
+    masks = segment_masks_from_label_image(seg_img, 3)
+    assert len(masks) == 3
+    assert masks[0].dtype == np.uint8
+    assert masks[0].sum() == 1   # one pixel in seg 1
+    assert masks[1].sum() == 2   # two pixels in seg 2
+    assert masks[2].sum() == 0   # seg 3 empty -> all-zero mask

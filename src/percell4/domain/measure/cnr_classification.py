@@ -51,6 +51,7 @@ optional ``scikit-learn`` (boundary placement; quantile fallback) and ``pandas``
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,6 +66,9 @@ __all__ = [
     "measure_cnr",
     "to_dataframe",
     "ClassificationResult",
+    "assign_segments",
+    "segment_label_image",
+    "segment_masks_from_label_image",
 ]
 
 # Fixed measurement geometry (reference, eye-validated). Not user-facing: the
@@ -472,3 +476,55 @@ def to_dataframe(result: ClassificationResult):
     import pandas as pd
 
     return pd.DataFrame(result.components)
+
+
+# --------------------------------------------------------------------------- #
+# manual divider-based segmentation (the interactive segmenter)
+# --------------------------------------------------------------------------- #
+def assign_segments(cnr: np.ndarray, dividers: Sequence[float]) -> np.ndarray:
+    """Map CNR values to 1-based segment ids by sorted ``dividers``.
+
+    ``N`` dividers partition the CNR axis into ``N+1`` segments: a value ≤ the
+    first divider is segment 1, between the first and second is segment 2, …, and
+    above the last divider is segment ``N+1`` (``np.digitize`` with the sorted
+    dividers, +1). Empty ``dividers`` → all values in segment 1. Dividers need not
+    be sorted on input.
+    """
+    d = np.sort(np.asarray(list(dividers), dtype=float))
+    return (np.digitize(np.asarray(cnr, dtype=float), d) + 1).astype(np.int32)
+
+
+def segment_label_image(
+    component_labels: np.ndarray,
+    focus_labels: np.ndarray,
+    focus_cnr: np.ndarray,
+    dividers: Sequence[float],
+) -> np.ndarray:
+    """Build a 0/1..N segment image from a component-label image + per-focus CNR.
+
+    ``component_labels`` is the labelled feature mask (0 = background, each focus a
+    unique positive id, as produced by ``scipy.ndimage.label``). ``focus_labels``
+    /``focus_cnr`` are aligned arrays giving each measured focus's component id and
+    CNR. Each focus is assigned a segment via :func:`assign_segments`, scattered
+    into a per-component lookup, and indexed back over the image — one fancy-index,
+    fast enough for live updates. Background and any component without a measured
+    focus stay 0.
+    """
+    comp = np.asarray(component_labels)
+    out_n = int(comp.max())
+    seg_of = np.zeros(out_n + 1, dtype=np.int32)
+    fl = np.asarray(focus_labels, dtype=np.int64)
+    if fl.size:
+        seg = assign_segments(focus_cnr, dividers)
+        # Guard against any stray focus id outside the component range.
+        valid = (fl >= 1) & (fl <= out_n)
+        seg_of[fl[valid]] = seg[valid]
+    return seg_of[comp].astype(np.int32)
+
+
+def segment_masks_from_label_image(
+    seg_img: np.ndarray, n_segments: int
+) -> list[np.ndarray]:
+    """Split a 0/1..N segment image into a list of ``{0,1}`` uint8 masks (seg 1..N)."""
+    img = np.asarray(seg_img)
+    return [(img == i).astype(np.uint8) for i in range(1, int(n_segments) + 1)]
