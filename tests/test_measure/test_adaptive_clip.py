@@ -683,3 +683,62 @@ def test_detect_adaptive_per_cell_unchanged_after_sigma_refactor():
         cell = labels == cid
         expected |= (diff > k * s) & cell
     assert np.array_equal(produced.astype(bool), expected)
+
+
+# --------------------------------------------------------------------------- #
+# detect_adaptive_per_cell fill_holes (AE-U1)
+# --------------------------------------------------------------------------- #
+def test_detect_adaptive_per_cell_fill_holes_closes_rings():
+    """A large particle under-windowed into a ring is closed solid with fill_holes."""
+    shape = (160, 160)
+    labels = np.ones(shape, dtype=np.int32)
+    rng = np.random.RandomState(4)
+    img = rng.normal(100.0, 3.0, shape).astype(np.float32)
+    # A big flat-topped disc: a small window detects only its rim (holes out).
+    img[disk((80, 80), 22, shape=shape)] = 260.0
+    center = (80, 80)
+
+    hollow = detect_adaptive_per_cell(
+        img, labels, window_px=11, min_spot_px=1, k=1.0, fill_holes=False
+    )
+    solid = detect_adaptive_per_cell(
+        img, labels, window_px=11, min_spot_px=1, k=1.0, fill_holes=True
+    )
+    # The under-windowed centre is a hole without filling, solid with it.
+    assert hollow[center] == 0
+    assert solid[center] == 1
+    assert int(solid.sum()) > int(hollow.sum())
+
+
+def test_detect_adaptive_per_cell_fill_holes_does_not_merge_components():
+    """fill_holes closes interiors only — two separate spots stay two components."""
+    from skimage import measure
+
+    shape = (120, 120)
+    labels = np.ones(shape, dtype=np.int32)
+    rng = np.random.RandomState(5)
+    img = rng.normal(100.0, 3.0, shape).astype(np.float32)
+    img[disk((35, 35), 5, shape=shape)] += 400.0
+    img[disk((85, 85), 5, shape=shape)] += 400.0
+
+    # k=3 + a size filter isolate the two real spots from noise; fill_holes must
+    # not bridge them into one component.
+    filled = detect_adaptive_per_cell(
+        img, labels, window_px=15, min_spot_px=8, k=3.0, fill_holes=True
+    )
+    n = measure.label(filled, connectivity=1).max()
+    assert n == 2  # two distinct spots, not merged
+
+
+def test_detect_adaptive_per_cell_default_is_unfilled():
+    """Default fill_holes=False matches an explicit no-fill run (back-compat)."""
+    shape = (160, 160)
+    labels = np.ones(shape, dtype=np.int32)
+    rng = np.random.RandomState(6)
+    img = rng.normal(100.0, 3.0, shape).astype(np.float32)
+    img[disk((80, 80), 22, shape=shape)] = 260.0
+    default = detect_adaptive_per_cell(img, labels, window_px=11, min_spot_px=1, k=1.0)
+    explicit = detect_adaptive_per_cell(
+        img, labels, window_px=11, min_spot_px=1, k=1.0, fill_holes=False
+    )
+    assert np.array_equal(default, explicit)

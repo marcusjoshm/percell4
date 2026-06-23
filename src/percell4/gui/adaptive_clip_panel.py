@@ -160,6 +160,30 @@ def run_adaptive_detection_multiscale(
     return mask, int(windows[-1]) if windows else 0
 
 
+def run_adaptive_auto_extract(
+    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px
+):
+    """Worker body for the two-pass auto-extraction routine (per-cell).
+
+    Runs :func:`percell4.domain.measure.auto_extraction.auto_extract`: a fine pass
+    (window = 3 × ``smallest_particle_px`` at k=1) plus, when the largest particle
+    (LoG-measured) exceeds it, a coarse pass (window = 3 × largest, k = the noise-
+    symmetry floor), OR-unioned with hole-filling. ``min_spot_px`` filters the
+    union. Returns ``(mask uint8, report)`` where ``report`` is the
+    :class:`AutoExtractReport`. Pure (no Qt) so it is worker-safe.
+    """
+    from percell4.domain.measure.auto_extraction import auto_extract
+
+    mask, report = auto_extract(
+        image,
+        labels,
+        smallest_particle_px=smallest_particle_px,
+        presmooth_sigma_px=presmooth_sigma_px,
+        min_spot_px=min_spot_px,
+    )
+    return mask, report
+
+
 def run_cnr_classification(image, feature_mask, labels, *, mode, threshold):
     """Worker body for CNR subpopulation classification (per-cell, pure).
 
@@ -394,6 +418,11 @@ class AdaptiveClipPanel(QWidget):
         # Multi-scale: per-cell Otsu size assessment -> doubling windows OR-combined.
         if config.multiscale_mode:
             self._run_multiscale_mode(config, image, is_timelapse, store, viewer_win)
+            return
+
+        # Auto extraction: two-pass (fine + LoG-sized coarse) per-cell union.
+        if config.auto_extract_mode:
+            self._run_auto_extract_mode(config, image, is_timelapse, store, viewer_win)
             return
 
         # Manual mode (Auto off): window in px/µm, per-cell off the active
@@ -668,6 +697,113 @@ class AdaptiveClipPanel(QWidget):
         self._worker.finished.connect(self._on_detect_done)
         self._worker.error.connect(self._on_detect_error)
         self._worker.start()
+
+    def _run_auto_extract_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
+        """Creator path for the two-pass auto-extraction routine (per-cell).
+
+        The user supplies the smallest particle Ø (px, or µm via the dataset pixel
+        size); the largest is measured by LoG and the coarse k by the noise-
+        symmetry floor inside the worker. Per-cell ⇒ requires an active
+        segmentation, single-frame.
+        """
+        if is_timelapse:
+            self._show_status("Auto extraction supports single-frame channels only")
+            return
+        seg = self.data_model.session.active_segmentation
+        if not seg:
+            self._show_status("Auto extraction needs an active segmentation")
+            return
+        labels = self._find_layer_data(viewer_win, "Labels", seg)
+        if labels is None:
+            self._show_status(f"Segmentation '{seg}' not found in viewer")
+            return
+        if labels.shape != image.shape:
+            self._show_status("Segmentation and channel shapes differ")
+            return
+
+        from percell4.domain.measure.adaptive_clip import resolve_min_area_px
+
+        pixel_size_um = self._pixel_size_um(store)
+        # Smallest particle Ø -> px (px as-is, or µm via the dataset pixel size).
+        if config.smallest_particle_unit == "um":
+            if not pixel_size_um or float(pixel_size_um) <= 0:
+                self._show_status(
+                    "µm smallest-particle size needs a known pixel size; switch the "
+                    "unit to px or re-import with TIFF resolution metadata."
+                )
+                return
+            smallest_px = float(config.smallest_particle_value) / float(pixel_size_um)
+        else:
+            smallest_px = float(config.smallest_particle_value)
+        if smallest_px <= 0:
+            self._show_status("Smallest particle Ø must be > 0")
+            return
+
+        try:
+            min_spot_px = max(
+                1, resolve_min_area_px(config.min_size_value, config.min_size_unit, pixel_size_um)
+            )
+        except ValueError as e:
+            self._show_status(str(e))
+            return
+
+        existing = store.list_masks() if hasattr(store, "list_masks") else []
+        mask_name = prompt_for_resource_name(
+            self,
+            title="Save Adaptive Clipping Mask",
+            label="Mask name:",
+            default="adaptive",
+            existing_names=existing,
+        )
+        if mask_name is None:
+            return
+
+        self._pending_name = mask_name
+        self._pending_auto = False
+        self._pending_particle = False
+        self._run_btn.setEnabled(False)
+        self._settings.set_enabled(False)
+        print(
+            f"  [auto-extract] smallest particle {smallest_px:.2f} px "
+            f"(from {config.smallest_particle_value:g} {config.smallest_particle_unit}); "
+            f"min particle {min_spot_px} px² (union filter)",
+            flush=True,
+        )
+        self._show_status(f"Detecting (auto extraction, smallest {smallest_px:.1f} px)...")
+
+        from percell4.gui.workers import Worker
+
+        self._worker = Worker(
+            run_adaptive_auto_extract,
+            image,
+            labels,
+            smallest_px,
+            config.gaussian_sigma,
+            min_spot_px,
+        )
+        self._worker.finished.connect(self._on_auto_extract_done)
+        self._worker.error.connect(self._on_detect_error)
+        self._worker.start()
+
+    def _print_auto_extract_report(self, report) -> None:
+        """Print the two-pass auto-extraction passes/sizes to the terminal (debug)."""
+        print(
+            f"  [auto-extract] passes {report.passes} "
+            f"(fine window {report.fine_window}; "
+            f"largest Ø {report.largest_particle_px} px; "
+            f"second pass {report.second_pass_used})\n"
+            f"    presmooth σ {report.presmooth_sigma_px}; n_cells {report.n_cells}; "
+            f"components {report.n_components}; area {report.area_px} px",
+            flush=True,
+        )
+
+    def _on_auto_extract_done(self, result) -> None:
+        """Finished handler for auto-extraction: print the report, then Creator-save."""
+        mask, report = result
+        self._print_auto_extract_report(report)
+        # Reuse the standard single-mask Creator save (no window write-back; the
+        # pending flags were cleared so no auto/particle note is fabricated).
+        self._on_detect_done((mask, report.fine_window))
 
     def _run_particle_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
         """Creator path for the one-knob particle-size detector (per-cell).

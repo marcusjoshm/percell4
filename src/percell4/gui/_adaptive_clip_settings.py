@@ -52,12 +52,14 @@ _WINDOW_METHOD_LABELS = (
     "Otsu mean (baseline)",
     "Otsu detect particle size",
     "Multi-scale (particle range)",
+    "Auto extraction (two-pass)",
 )
 _WINDOW_METHOD_CODES = {
     "Granule size": "granule-size",
     "Otsu mean (baseline)": "otsu-mean",
     "Otsu detect particle size": "otsu-smallest",
     "Multi-scale (particle range)": "multiscale",
+    "Auto extraction (two-pass)": "auto-extract",
 }
 
 # These two methods are per-cell *engine switches*, not whole-frame window-finders,
@@ -68,7 +70,8 @@ _WINDOW_METHOD_CODES = {
 #    detector runs at a doubling window sequence whose masks are OR-combined.
 _OTSU_SMALLEST_CODE = "otsu-smallest"
 _MULTISCALE_CODE = "multiscale"
-_ENGINE_SWITCH_CODES = {_OTSU_SMALLEST_CODE, _MULTISCALE_CODE}
+_AUTO_EXTRACT_CODE = "auto-extract"
+_ENGINE_SWITCH_CODES = {_OTSU_SMALLEST_CODE, _MULTISCALE_CODE, _AUTO_EXTRACT_CODE}
 
 # Drift guard: every dropdown code that names a whole-frame finder must be a real
 # registered finder (the per-cell engine switches above are exempt).
@@ -129,6 +132,17 @@ class AdaptiveClipConfig:
     # Manual iteration count for multi-scale: 0 = auto (double until past the
     # largest particle); N > 0 = run exactly N doubling passes (for testing).
     ms_iterations: int = 0
+    # Auto-extraction mode. True when ``auto_window`` is on AND ``window_method``
+    # is the "Auto extraction (two-pass)" code: a fine pass (window = 3×
+    # ``smallest_particle_value`` at k=1) unioned with a coarse pass (window = 3×
+    # LoG-measured largest, k = noise-symmetry floor) when the largest particle
+    # exceeds the fine window. ``smallest_particle_value`` + ``smallest_particle_unit``
+    # (``"px"`` / ``"um"``) are the one required input (the user's resolution
+    # limit). ``k`` is ignored here (fine k=1, coarse auto); the Min-particle-size
+    # filter applies to the union.
+    auto_extract_mode: bool = False
+    smallest_particle_value: float = 3.0
+    smallest_particle_unit: str = "px"
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -258,6 +272,34 @@ class AdaptiveClipSettingsWidget(QWidget):
         iter_row.addWidget(self._iterations)
         layout.addLayout(iter_row)
 
+        # ── Smallest particle Ø (auto-extraction's one required input) ──
+        # The fine window = 3 × this; the largest particle is measured (LoG) and
+        # the coarse k is automatic. px, or µm via the dataset pixel size.
+        sp_row = QHBoxLayout()
+        sp_row.addWidget(QLabel("Smallest particle Ø:"))
+        self._smallest = QDoubleSpinBox()
+        self._smallest.setRange(0.02, 1000.0)
+        self._smallest.setDecimals(2)
+        self._smallest.setSingleStep(1.0)
+        self._smallest.setValue(3.0)
+        self._smallest.setToolTip(
+            "Auto extraction only. The smallest particle diameter to resolve — "
+            "your optical resolution limit (it cannot be measured reliably, so you "
+            "supply it). The fine window is 3× this; the largest particle is "
+            "measured automatically (LoG)."
+        )
+        self._smallest.setEnabled(False)  # off until the auto-extract method is selected
+        sp_row.addWidget(self._smallest)
+        self._smallest_unit = QComboBox()
+        self._smallest_unit.addItems(list(_WINDOW_UNIT_LABELS))
+        self._smallest_unit.setToolTip(
+            "Smallest-particle unit. px is a pixel diameter; µm converts to pixels "
+            "via the dataset pixel size (needs a known µm/px)."
+        )
+        self._smallest_unit.setEnabled(False)
+        sp_row.addWidget(self._smallest_unit)
+        layout.addLayout(sp_row)
+
         # ── Manual adaptive window (value + px/µm unit) ──
         # Used when Auto is off, and as the multi-scale starting window when its
         # "Auto start window" is off. The host resolves it to an odd px window
@@ -347,6 +389,8 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._cutoff.valueChanged.connect(self.config_changed)
         self._ms_auto_start.toggled.connect(self.config_changed)
         self._iterations.valueChanged.connect(self.config_changed)
+        self._smallest.valueChanged.connect(self.config_changed)
+        self._smallest_unit.currentIndexChanged.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
 
@@ -380,11 +424,14 @@ class AdaptiveClipSettingsWidget(QWidget):
         return _WINDOW_METHOD_CODES[self._window_method.currentText()]
 
     def _active_mode(self) -> str:
-        """The active run mode: ``manual`` / ``finder`` / ``particle`` / ``multiscale``.
+        """The active run mode.
 
-        Auto off is always ``manual``. Auto on dispatches on the selected method:
-        the two per-cell engine switches (``particle`` = Otsu-detect-particle,
-        ``multiscale``) or a whole-frame ``finder`` (granule-size / otsu-mean).
+        One of ``manual`` / ``finder`` / ``particle`` / ``multiscale`` /
+        ``auto-extract``. Auto off is always ``manual``. Auto on dispatches on the
+        selected method:
+        the three per-cell engine switches (``particle`` = Otsu-detect-particle,
+        ``multiscale``, ``auto-extract``) or a whole-frame ``finder`` (granule-size
+        / otsu-mean).
         """
         if not self._auto.isChecked():
             return "manual"
@@ -393,6 +440,8 @@ class AdaptiveClipSettingsWidget(QWidget):
             return "particle"
         if code == _MULTISCALE_CODE:
             return "multiscale"
+        if code == _AUTO_EXTRACT_CODE:
+            return "auto-extract"
         return "finder"
 
     def _is_particle_mode(self) -> bool:
@@ -402,6 +451,10 @@ class AdaptiveClipSettingsWidget(QWidget):
     def _is_multiscale_mode(self) -> bool:
         """True when the active mode is the multi-scale per-cell routine."""
         return self._active_mode() == "multiscale"
+
+    def _is_auto_extract_mode(self) -> bool:
+        """True when the active mode is the two-pass auto-extraction routine."""
+        return self._active_mode() == "auto-extract"
 
     def _apply_mode_gating(self) -> None:
         """Enable/disable fields for the active mode.
@@ -423,14 +476,19 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._cutoff.setEnabled(mode == "multiscale")
         self._ms_auto_start.setEnabled(mode == "multiscale")
         self._iterations.setEnabled(mode == "multiscale")
-        # Min particle size filter: live in manual/finder AND multi-scale (where it
-        # filters the OR-combined output). The noise estimator is only used by the
-        # whole-frame detector (manual/finder); per-cell modes use a fixed MAD σ.
-        size_filter = mode in ("manual", "finder", "multiscale")
+        # Smallest particle Ø: the one input of auto-extraction.
+        self._smallest.setEnabled(mode == "auto-extract")
+        self._smallest_unit.setEnabled(mode == "auto-extract")
+        # Min particle size filter: live in manual/finder, multi-scale, AND
+        # auto-extract (where it filters the unioned output). The noise estimator
+        # is only used by the whole-frame detector (manual/finder); per-cell modes
+        # use a fixed MAD σ.
+        size_filter = mode in ("manual", "finder", "multiscale", "auto-extract")
         self._min_size.setEnabled(size_filter)
         self._unit.setEnabled(size_filter)
         self._noise.setEnabled(mode in ("manual", "finder"))
-        self._k.setEnabled(True)
+        # k is ignored in auto-extract (fine k=1 fixed, coarse k automatic).
+        self._k.setEnabled(mode != "auto-extract")
         # Manual window: live in manual mode, or as the multi-scale manual start.
         manual_window = mode == "manual" or (
             mode == "multiscale" and not self._ms_auto_start.isChecked()
@@ -460,6 +518,9 @@ class AdaptiveClipSettingsWidget(QWidget):
             size_cutoff_px=float(self._cutoff.value()),
             ms_auto_start=self._ms_auto_start.isChecked(),
             ms_iterations=int(self._iterations.value()),
+            auto_extract_mode=self._is_auto_extract_mode(),
+            smallest_particle_value=float(self._smallest.value()),
+            smallest_particle_unit=_WINDOW_UNIT_CODES[self._smallest_unit.currentText()],
         )
 
     def set_d_min_um(self, d_min_um: float) -> None:
@@ -498,6 +559,8 @@ class AdaptiveClipSettingsWidget(QWidget):
             self._cutoff,
             self._ms_auto_start,
             self._iterations,
+            self._smallest,
+            self._smallest_unit,
             self._window,
             self._window_unit,
         ):

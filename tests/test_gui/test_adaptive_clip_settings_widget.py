@@ -348,3 +348,72 @@ def test_multiscale_iterations_gated_and_in_config(qtbot):
     assert w._iterations.isEnabled()
     w._iterations.setValue(5)
     assert w.current_config().ms_iterations == 5
+
+
+# ── AE-U3: auto-extraction (two-pass) mode ───────────────────────────────────
+
+
+def _enter_auto_extract_mode(w) -> None:
+    w._auto.setChecked(True)
+    w._window_method.setCurrentText("Auto extraction (two-pass)")
+
+
+def test_auto_extract_mode_config_and_defaults(qtbot):
+    w = _widget(qtbot)
+    cfg = w.current_config()
+    assert cfg.auto_extract_mode is False
+    assert cfg.smallest_particle_value == 3.0
+    assert cfg.smallest_particle_unit == "px"
+    _enter_auto_extract_mode(w)
+    cfg = w.current_config()
+    assert cfg.auto_extract_mode is True
+    assert cfg.window_method == "auto-extract"
+    # distinct from the other per-cell engine switches
+    assert cfg.particle_mode is False
+    assert cfg.multiscale_mode is False
+
+
+def test_auto_extract_mode_gates_fields(qtbot):
+    w = _widget(qtbot)
+    assert not w._smallest.isEnabled()
+    assert not w._smallest_unit.isEnabled()
+    _enter_auto_extract_mode(w)
+    assert w._smallest.isEnabled()
+    assert w._smallest_unit.isEnabled()
+    # Min particle size filters the union, so it stays live.
+    assert w._min_size.isEnabled()
+    assert w._unit.isEnabled()
+    # k is ignored in auto-extract (fine k=1, coarse auto) -> disabled.
+    assert not w._k.isEnabled()
+    # noise estimator (whole-frame), percentile (otsu-smallest), multi-scale
+    # controls are all off here.
+    for widget in (w._noise, w._percentile, w._cutoff, w._ms_auto_start, w._iterations):
+        assert not widget.isEnabled()
+    # the manual window field is off in this mode
+    assert not w._window.isEnabled()
+
+
+def test_auto_extract_smallest_value_and_unit_reach_config(qtbot):
+    w = _widget(qtbot)
+    _enter_auto_extract_mode(w)
+    w._smallest.setValue(2.0)
+    w._smallest_unit.setCurrentText("µm")
+    cfg = w.current_config()
+    assert cfg.smallest_particle_value == 2.0
+    assert cfg.smallest_particle_unit == "um"
+
+
+def test_auto_extract_inert_without_auto(qtbot):
+    w = _widget(qtbot)
+    w._window_method.setCurrentText("Auto extraction (two-pass)")  # but Auto off
+    assert w.current_config().auto_extract_mode is False
+
+
+def test_set_enabled_respects_auto_extract_gate(qtbot):
+    w = _widget(qtbot)
+    _enter_auto_extract_mode(w)
+    w.set_enabled(False)
+    assert not w._smallest.isEnabled()
+    w.set_enabled(True)
+    assert w._smallest.isEnabled()  # gating re-applied on unlock
+    assert not w._k.isEnabled()

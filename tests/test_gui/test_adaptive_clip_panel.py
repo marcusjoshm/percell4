@@ -959,3 +959,96 @@ def test_classify_prints_report(qtbot, monkeypatch, capsys):
     assert "CNR subpopulation classification" in out
     assert "hartigan_dip" in out
     assert "candidate th" in out
+
+
+# ── AE-U4: auto-extraction (two-pass) mode ───────────────────────────────────
+
+
+def _select_auto_extract(panel) -> None:
+    panel._settings._auto.setChecked(True)
+    panel._settings._window_method.setCurrentText("Auto extraction (two-pass)")
+
+
+def test_auto_extract_run_uses_auto_extract_and_saves(qtbot, monkeypatch):
+    panel, model, repo, viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
+    _select_auto_extract(panel)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    assert panel._worker._fn is panel_module.run_adaptive_auto_extract
+    assert "ax" in repo.masks
+    assert set(np.unique(repo.masks["ax"])).issubset({0, 1})
+    viewer_win.add_mask.assert_called_once()
+    assert model.session.active_mask == "ax"
+
+
+def test_auto_extract_passes_smallest_px_to_worker(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
+    _select_auto_extract(panel)
+    panel._settings._smallest.setValue(4.0)  # px
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    # Worker args: (image, labels, smallest_px, presmooth, min_spot_px).
+    assert panel._worker._args[2] == 4.0
+
+
+def test_auto_extract_um_converts_to_px(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.5, segmentation="cells")
+    _select_auto_extract(panel)
+    panel._settings._smallest.setValue(2.0)
+    panel._settings._smallest_unit.setCurrentText("µm")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    # 2 µm / 0.5 µm/px = 4 px
+    assert panel._worker._args[2] == pytest.approx(4.0)
+
+
+def test_auto_extract_um_without_pixel_size_aborts(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")  # no pixel size
+    _select_auto_extract(panel)
+    panel._settings._smallest_unit.setCurrentText("µm")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    assert panel._worker is None  # aborted before dispatch
+
+
+def test_auto_extract_without_segmentation_aborts(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch)  # no segmentation
+    _select_auto_extract(panel)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    assert panel._worker is None
+
+
+def test_auto_extract_timelapse_aborts(qtbot, monkeypatch):
+    panel, _model, _repo, viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
+    store = panel._get_store()
+    store.metadata = {"n_timepoints": 3}
+    viewer_win.viewer.layers[0].data = np.zeros((3, 120, 120), dtype=np.float32)
+    _select_auto_extract(panel)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    assert panel._worker is None
+
+
+def test_auto_extract_prints_report(qtbot, monkeypatch, capsys):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
+    _select_auto_extract(panel)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    out = capsys.readouterr().out
+    assert "[auto-extract]" in out
+    assert "passes" in out

@@ -240,6 +240,7 @@ def detect_adaptive_per_cell(
     min_spot_px: int,
     k: float = 1.0,
     presmooth_sigma_px: float = 1.0,
+    fill_holes: bool = False,
 ) -> np.ndarray:
     """Per-cell adaptive local clip with an explicit window + size filter.
 
@@ -250,11 +251,14 @@ def detect_adaptive_per_cell(
     at ``sigma=(window_px-1)/6`` (computed once — a per-cell-crop background would
     distort the cell-edge granules), then thresholds every Cellpose cell against
     *its own* robust ``1.4826*MAD`` σ at ``k``. The per-cell σ is what lets one
-    ``k`` hold across cells whose intensity scale varies many-fold. Components
-    smaller than ``min_spot_px`` are dropped (a no-op when ``min_spot_px <= 1``).
-    Returns a whole-frame ``{0, 1}`` ``uint8`` mask.
+    ``k`` hold across cells whose intensity scale varies many-fold. When
+    ``fill_holes`` is True, enclosed interior holes are filled per pass (a large
+    particle under-windowed into a ring is closed solid) **before** the size
+    filter; default False leaves the mask as detected. Components smaller than
+    ``min_spot_px`` are dropped (a no-op when ``min_spot_px <= 1``). Returns a
+    whole-frame ``{0, 1}`` ``uint8`` mask.
     """
-    from scipy.ndimage import find_objects, gaussian_filter
+    from scipy.ndimage import binary_fill_holes, find_objects, gaussian_filter
 
     img = np.asarray(image, dtype=np.float32)
     lab = np.asarray(labels)
@@ -277,6 +281,8 @@ def detect_adaptive_per_cell(
         cell = lab[sl] == cid
         out[sl] |= (diff[sl] > float(k) * s) & cell
 
+    if fill_holes:
+        out = binary_fill_holes(out)
     return _filter_by_area(out, min_spot_px).astype(np.uint8)
 
 
