@@ -3,9 +3,12 @@
 A pop-up window showing a histogram of per-focus CNR with draggable vertical
 **divider** lines. The user adds/removes any number of dividers to partition the
 CNR axis into ``N+1`` segments; a **live multi-value labels overlay** in napari
-recolors as the dividers move. On **Save**, each non-empty CNR segment is written
-as its own ``{0,1}`` binary mask (``<base>_seg1 … <base>_segN``) via the Creator
-path (:class:`~percell4.application.use_cases.accept_puncta_mask.AcceptPunctaMask`).
+recolors as the dividers move. A **linear/log CNR axis** checkbox toggles the
+histogram scale (divider CNR values are preserved across the toggle), and a
+status line shows the **current divider CNR value(s)** plus per-segment foci
+counts live as they are dragged. On **Save**, each non-empty CNR segment is
+written as its own ``{0,1}`` binary mask (``<base>_seg1 … <base>_segN``) via the
+Creator path (:class:`~percell4.application.use_cases.accept_puncta_mask.AcceptPunctaMask`).
 
 Sibling to the automatic "Classify Mask by CNR" (discover/guided/forced) — this
 one gives the user direct control. Both consume :func:`measure_cnr`. The window
@@ -23,6 +26,7 @@ import logging
 import numpy as np
 from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -31,6 +35,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.domain.measure.cnr_classification import (
+    assign_segments,
     segment_label_image,
     segment_masks_from_label_image,
 )
@@ -102,6 +107,8 @@ class CnrSegmenterWindow(QWidget):
 
         self._dividers: list = []          # pg.InfiniteLine instances
         self._plot = None
+        self._bars = None                   # the histogram BarGraphItem (rebuilt on toggle)
+        self._log_mode = False              # x-axis: linear CNR (False) or log10(CNR)
         self._update_pending = False
         self._last_n = 0                    # last segment count (colormap rebuild guard)
 
@@ -136,17 +143,9 @@ class CnrSegmenterWindow(QWidget):
             plot.setBackground(theme.BACKGROUND)
             plot.getAxis("bottom").enableAutoSIPrefix(False)
             plot.getAxis("left").enableAutoSIPrefix(False)
-            plot.setLabel("bottom", "CNR")
             plot.setLabel("left", "Foci")
-            if self._cnr.size:
-                counts, edges = np.histogram(self._cnr, bins=_HIST_BINS)
-                centers = (edges[:-1] + edges[1:]) / 2.0
-                width = (edges[1] - edges[0]) * 0.95
-                bars = pg.BarGraphItem(
-                    x=centers, height=counts, width=width, brush=theme.ACCENT
-                )
-                plot.addItem(bars)
             self._plot = plot
+            self._rebuild_histogram()
             layout.addWidget(plot, stretch=1)
         except Exception:  # pragma: no cover - pyqtgraph is present in the GUI env
             self._pg = None
@@ -160,6 +159,13 @@ class CnrSegmenterWindow(QWidget):
         rm_btn = QPushButton("Remove divider")
         rm_btn.clicked.connect(self._remove_divider)
         btn_row.addWidget(rm_btn)
+        self._log_check = QCheckBox("Log CNR axis")
+        self._log_check.setToolTip(
+            "Show the CNR axis on a log scale (helpful when CNR is heavy-tailed). "
+            "Divider CNR values are preserved across the toggle."
+        )
+        self._log_check.toggled.connect(self._on_log_toggled)
+        btn_row.addWidget(self._log_check)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
@@ -183,16 +189,55 @@ class CnrSegmenterWindow(QWidget):
         action_row.addWidget(self._save_btn)
         layout.addLayout(action_row)
 
+    # ── axis (linear CNR <-> log10) ──────────────────────────────
+
+    def _to_plot(self, cnr: float) -> float:
+        """CNR value -> plot x-coordinate (identity, or log10 in log mode)."""
+        return float(np.log10(cnr)) if self._log_mode else float(cnr)
+
+    def _to_cnr(self, x: float) -> float:
+        """Plot x-coordinate -> CNR value (identity, or 10**x in log mode)."""
+        return float(10.0**x) if self._log_mode else float(x)
+
+    def _rebuild_histogram(self) -> None:
+        """(Re)draw the CNR histogram for the current axis mode."""
+        if self._plot is None or self._pg is None:
+            return
+        if self._bars is not None:
+            self._plot.removeItem(self._bars)
+            self._bars = None
+        self._plot.setLabel("bottom", "log₁₀(CNR)" if self._log_mode else "CNR")
+        if not self._cnr.size:
+            return
+        data = np.log10(self._cnr) if self._log_mode else self._cnr
+        counts, edges = np.histogram(data, bins=_HIST_BINS)
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        width = (edges[1] - edges[0]) * 0.95
+        self._bars = self._pg.BarGraphItem(
+            x=centers, height=counts, width=width, brush=theme.ACCENT
+        )
+        self._plot.addItem(self._bars)
+
+    def _on_log_toggled(self, checked: bool) -> None:
+        # Preserve each divider's CNR value across the axis change.
+        cnrs = [self._to_cnr(float(line.value())) for line in self._dividers]
+        self._log_mode = bool(checked)
+        self._rebuild_histogram()
+        for line, cnr in zip(self._dividers, cnrs):
+            line.setValue(float(self._to_plot(cnr)))
+        self._update_preview()
+
     # ── dividers ─────────────────────────────────────────────────
 
     def _divider_positions(self) -> list[float]:
-        return sorted(float(line.value()) for line in self._dividers)
+        """Sorted divider positions in **CNR** units (axis-mode independent)."""
+        return sorted(self._to_cnr(float(line.value())) for line in self._dividers)
 
     def _n_segments(self) -> int:
         return len(self._dividers) + 1
 
     def _next_divider_pos(self) -> float:
-        """Midpoint of the widest current segment (or the CNR median if none)."""
+        """Midpoint (CNR) of the widest current segment (or the CNR median if none)."""
         if not self._cnr.size:
             return 0.0
         if not self._dividers:
@@ -201,18 +246,19 @@ class CnrSegmenterWindow(QWidget):
         widest = max(range(len(edges) - 1), key=lambda i: edges[i + 1] - edges[i])
         return (edges[widest] + edges[widest + 1]) / 2.0
 
-    def _add_divider(self, pos: float | None = None) -> None:
+    def _add_divider(self, cnr: float | None = None) -> None:
+        """Add a divider at ``cnr`` (CNR units; placed at the current axis coord)."""
         if self._plot is None or self._pg is None:
             return
-        if pos is None:
-            pos = self._next_divider_pos()
+        if cnr is None:
+            cnr = self._next_divider_pos()
         line = self._pg.InfiniteLine(
-            pos=float(pos),
+            pos=float(self._to_plot(cnr)),
             angle=90,
             movable=True,
             pen=self._pg.mkPen(theme.TEXT_BRIGHT, width=2),
         )
-        line.sigPositionChanged.connect(self._schedule_update)
+        line.sigPositionChanged.connect(self._on_divider_moved)
         line.sigPositionChangeFinished.connect(self._update_preview)
         self._plot.addItem(line)
         self._dividers.append(line)
@@ -226,6 +272,11 @@ class CnrSegmenterWindow(QWidget):
             self._plot.removeItem(line)
         self._update_preview()
 
+    def _on_divider_moved(self) -> None:
+        """A line is being dragged: update the CNR readout now, the mask debounced."""
+        self._update_divider_readout()
+        self._schedule_update()
+
     # ── live preview ─────────────────────────────────────────────
 
     def _schedule_update(self) -> None:
@@ -238,22 +289,32 @@ class CnrSegmenterWindow(QWidget):
             self._comp, self._focus_labels, self._cnr, self._divider_positions()
         )
 
+    def _update_divider_readout(self) -> None:
+        """Show the current divider CNR value(s) + per-segment foci counts.
+
+        Cheap (digitize only) so it can run live on every drag, independent of the
+        debounced mask rebuild. Divider positions are always reported in CNR units,
+        regardless of the linear/log axis.
+        """
+        positions = self._divider_positions()
+        n = self._n_segments()
+        if self._focus_labels.size:
+            seg = assign_segments(self._cnr, positions)
+            counts = [int((seg == i).sum()) for i in range(1, n + 1)]
+        else:
+            counts = [0] * n
+        div_txt = ", ".join(f"{p:.2f}" for p in positions) if positions else "(none)"
+        self._status.setText(
+            f"Dividers (CNR): {div_txt}   |   {n} segments   |   "
+            f"foci per segment: " + ", ".join(map(str, counts))
+        )
+
     def _update_preview(self) -> None:
         self._update_pending = False
         n = self._n_segments()
         seg_img = self._current_segment_image()
         self._push_preview(seg_img, n)
-        # Per-segment foci counts for the status line.
-        if self._focus_labels.size:
-            from percell4.domain.measure.cnr_classification import assign_segments
-
-            seg = assign_segments(self._cnr, self._divider_positions())
-            counts = [int((seg == i).sum()) for i in range(1, n + 1)]
-        else:
-            counts = [0] * n
-        self._status.setText(
-            f"{n} segments — foci per segment: " + ", ".join(map(str, counts))
-        )
+        self._update_divider_readout()
 
     def _push_preview(self, seg_img: np.ndarray, n: int) -> None:
         viewer_win = self._get_viewer_window()

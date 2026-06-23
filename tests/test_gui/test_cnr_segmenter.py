@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from percell4.gui import cnr_segmenter as seg_module
 from percell4.gui.cnr_segmenter import PREVIEW_LAYER_NAME, CnrSegmenterWindow
@@ -155,3 +156,44 @@ def test_close_removes_preview_layer(qtbot, monkeypatch):
     assert any(layer.name == PREVIEW_LAYER_NAME for layer in viewer_win.viewer.layers)
     win.close()
     assert not any(layer.name == PREVIEW_LAYER_NAME for layer in viewer_win.viewer.layers)
+
+
+def test_divider_readout_shows_cnr_values(qtbot, monkeypatch):
+    win, _viewer_win, _repo = _build(qtbot, monkeypatch)
+    win._remove_divider()
+    win._add_divider(7.5)
+    win._update_divider_readout()
+    text = win._status.text()
+    assert "Dividers (CNR):" in text
+    assert "7.50" in text  # the divider's CNR value is displayed
+
+
+def test_log_toggle_preserves_divider_cnr_and_changes_axis(qtbot, monkeypatch):
+    win, viewer_win, _repo = _build(qtbot, monkeypatch)
+    win._remove_divider()
+    win._add_divider(10.0)
+    assert win._divider_positions() == pytest.approx([10.0])
+    assert win._plot.getAxis("bottom").labelText == "CNR"
+
+    # Toggle to log: the divider stays at CNR 10 but its plot coord becomes log10(10)=1.
+    win._log_check.setChecked(True)
+    assert win._log_mode is True
+    assert win._divider_positions() == pytest.approx([10.0])  # CNR preserved
+    assert float(win._dividers[0].value()) == pytest.approx(1.0)  # plot coord = log10
+    assert "log" in win._plot.getAxis("bottom").labelText.lower()
+
+    # Toggle back: plot coord returns to the CNR value.
+    win._log_check.setChecked(False)
+    assert win._divider_positions() == pytest.approx([10.0])
+    assert float(win._dividers[0].value()) == pytest.approx(10.0)
+
+
+def test_log_mode_segmentation_matches_linear(qtbot, monkeypatch):
+    """Segment assignment is identical in log mode (positions are CNR either way)."""
+    win, viewer_win, _repo = _build(qtbot, monkeypatch)
+    win._remove_divider()
+    win._add_divider(10.0)  # foci CNR 2,6,12,40 -> seg1={2,6}, seg2={12,40}
+    linear_img = win._current_segment_image().copy()
+    win._log_check.setChecked(True)
+    log_img = win._current_segment_image()
+    assert np.array_equal(linear_img, log_img)
