@@ -364,6 +364,7 @@ def test_auto_extract_mode_config_and_defaults(qtbot):
     assert cfg.auto_extract_mode is False
     assert cfg.smallest_particle_value == 3.0
     assert cfg.smallest_particle_unit == "px"
+    assert cfg.auto_extract_smallest_auto is True  # autodetect by default
     _enter_auto_extract_mode(w)
     cfg = w.current_config()
     assert cfg.auto_extract_mode is True
@@ -375,11 +376,15 @@ def test_auto_extract_mode_config_and_defaults(qtbot):
 
 def test_auto_extract_mode_gates_fields(qtbot):
     w = _widget(qtbot)
+    assert not w._ae_smallest_auto.isEnabled()
+    assert not w._smallest.isEnabled()
+    _enter_auto_extract_mode(w)
+    # The Auto-detect checkbox is live; with it ON (default) the smallest-Ø field
+    # is a disabled readout.
+    assert w._ae_smallest_auto.isEnabled()
+    assert w._ae_smallest_auto.isChecked()
     assert not w._smallest.isEnabled()
     assert not w._smallest_unit.isEnabled()
-    _enter_auto_extract_mode(w)
-    assert w._smallest.isEnabled()
-    assert w._smallest_unit.isEnabled()
     # Min particle size filters the union, so it stays live.
     assert w._min_size.isEnabled()
     assert w._unit.isEnabled()
@@ -393,14 +398,33 @@ def test_auto_extract_mode_gates_fields(qtbot):
     assert not w._window.isEnabled()
 
 
+def test_auto_extract_uncheck_auto_enables_manual_smallest(qtbot):
+    w = _widget(qtbot)
+    _enter_auto_extract_mode(w)
+    assert not w._smallest.isEnabled()       # auto on -> readout
+    w._ae_smallest_auto.setChecked(False)    # manual override
+    assert w._smallest.isEnabled()
+    assert w._smallest_unit.isEnabled()
+    assert w.current_config().auto_extract_smallest_auto is False
+
+
 def test_auto_extract_smallest_value_and_unit_reach_config(qtbot):
     w = _widget(qtbot)
     _enter_auto_extract_mode(w)
+    w._ae_smallest_auto.setChecked(False)  # manual override
     w._smallest.setValue(2.0)
     w._smallest_unit.setCurrentText("µm")
     cfg = w.current_config()
     assert cfg.smallest_particle_value == 2.0
     assert cfg.smallest_particle_unit == "um"
+
+
+def test_auto_extract_set_smallest_value_readout(qtbot):
+    w = _widget(qtbot)
+    _enter_auto_extract_mode(w)  # auto on -> field is a readout
+    w.set_smallest_value(4.5)
+    assert w.current_config().smallest_particle_value == 4.5
+    assert w.current_config().smallest_particle_unit == "px"
 
 
 def test_auto_extract_inert_without_auto(qtbot):
@@ -412,8 +436,9 @@ def test_auto_extract_inert_without_auto(qtbot):
 def test_set_enabled_respects_auto_extract_gate(qtbot):
     w = _widget(qtbot)
     _enter_auto_extract_mode(w)
+    w._ae_smallest_auto.setChecked(False)  # manual -> smallest field live
     w.set_enabled(False)
     assert not w._smallest.isEnabled()
     w.set_enabled(True)
-    assert w._smallest.isEnabled()  # gating re-applied on unlock
+    assert w._smallest.isEnabled()  # gating re-applied on unlock (manual)
     assert not w._k.isEnabled()

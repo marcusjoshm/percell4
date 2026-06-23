@@ -969,7 +969,13 @@ def _select_auto_extract(panel) -> None:
     panel._settings._window_method.setCurrentText("Auto extraction (two-pass)")
 
 
+def _manual_smallest(panel) -> None:
+    """Turn off Auto-detect so the smallest-Ø field is the manual override."""
+    panel._settings._ae_smallest_auto.setChecked(False)
+
+
 def test_auto_extract_run_uses_auto_extract_and_saves(qtbot, monkeypatch):
+    # Default: smallest auto-detected (LoG) on the blob fixture.
     panel, model, repo, viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
     _select_auto_extract(panel)
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
@@ -977,15 +983,30 @@ def test_auto_extract_run_uses_auto_extract_and_saves(qtbot, monkeypatch):
     panel._on_run()
 
     assert panel._worker._fn is panel_module.run_adaptive_auto_extract
+    assert panel._worker._args[2] is None  # auto-detect -> None passed to worker
     assert "ax" in repo.masks
     assert set(np.unique(repo.masks["ax"])).issubset({0, 1})
     viewer_win.add_mask.assert_called_once()
     assert model.session.active_mask == "ax"
 
 
-def test_auto_extract_passes_smallest_px_to_worker(qtbot, monkeypatch):
+def test_auto_extract_auto_backfills_smallest_readout(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
     _select_auto_extract(panel)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+
+    panel._on_run()
+
+    # After an auto run the smallest-Ø readout shows the adapted (LoG) value.
+    cfg = panel._settings.current_config()
+    assert cfg.smallest_particle_unit == "px"
+    assert cfg.smallest_particle_value > 0.0
+
+
+def test_auto_extract_manual_passes_smallest_px_to_worker(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
+    _select_auto_extract(panel)
+    _manual_smallest(panel)
     panel._settings._smallest.setValue(4.0)  # px
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
 
@@ -995,9 +1016,10 @@ def test_auto_extract_passes_smallest_px_to_worker(qtbot, monkeypatch):
     assert panel._worker._args[2] == 4.0
 
 
-def test_auto_extract_um_converts_to_px(qtbot, monkeypatch):
+def test_auto_extract_manual_um_converts_to_px(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.5, segmentation="cells")
     _select_auto_extract(panel)
+    _manual_smallest(panel)
     panel._settings._smallest.setValue(2.0)
     panel._settings._smallest_unit.setCurrentText("µm")
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
@@ -1008,9 +1030,10 @@ def test_auto_extract_um_converts_to_px(qtbot, monkeypatch):
     assert panel._worker._args[2] == pytest.approx(4.0)
 
 
-def test_auto_extract_um_without_pixel_size_aborts(qtbot, monkeypatch):
+def test_auto_extract_manual_um_without_pixel_size_aborts(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")  # no pixel size
     _select_auto_extract(panel)
+    _manual_smallest(panel)
     panel._settings._smallest_unit.setCurrentText("µm")
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
 

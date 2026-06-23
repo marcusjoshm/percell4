@@ -6,10 +6,13 @@ import numpy as np
 import pytest
 from skimage.draw import disk
 
+import pytest
+
 from percell4.domain.measure.auto_extraction import (
     AutoExtractReport,
     auto_extract,
     measure_largest_particle_diameter,
+    measure_smallest_particle_diameter,
     noise_symmetry_floor_k,
 )
 from percell4.domain.measure.adaptive_clip import per_cell_sigma
@@ -57,6 +60,21 @@ def test_measure_largest_diameter_empty_cells_returns_zero():
     assert measure_largest_particle_diameter(img, labels) == 0.0
 
 
+def test_measure_smallest_diameter_finds_blobs():
+    img, labels = _wide_range_image()
+    d = measure_smallest_particle_diameter(img, labels)
+    # a low percentile of LoG sizes -> a small positive value (≈ the fine window)
+    assert d > 0.0
+    # and the small end is well below the largest
+    assert d < measure_largest_particle_diameter(img, labels)
+
+
+def test_measure_smallest_diameter_empty_cells_returns_zero():
+    img = np.random.RandomState(0).normal(100.0, 5.0, (64, 64)).astype(np.float32)
+    labels = np.zeros((64, 64), dtype=np.int32)
+    assert measure_smallest_particle_diameter(img, labels) == 0.0
+
+
 # --------------------------------------------------------------------------- #
 # noise_symmetry_floor_k
 # --------------------------------------------------------------------------- #
@@ -100,6 +118,33 @@ def test_auto_extract_single_pass_when_no_large_particle():
     assert report.second_pass_used is False
     assert len(report.passes) == 1
     assert mask[40, 40] == 1
+
+
+def test_auto_extract_autodetects_smallest_by_default():
+    """smallest_particle_px=None -> fine window measured from the image (LoG)."""
+    img, labels = _wide_range_image()
+    mask, report = auto_extract(img, labels)  # default: autodetect both ends
+    assert report.smallest_source.startswith("auto LoG")
+    assert report.fine_window >= 3
+    assert report.smallest_diameter_px > 0.0
+    assert int(mask.sum()) > 0
+
+
+def test_auto_extract_supplied_smallest_uses_fill_factor():
+    """A supplied true Ø sets the fine window to fill_factor × it."""
+    img, labels = _wide_range_image()
+    _, report = auto_extract(img, labels, smallest_particle_px=3.0)
+    assert report.fine_window == 9          # 3 × 3
+    assert report.smallest_source.startswith("supplied")
+    assert report.smallest_diameter_px == 3.0
+
+
+def test_auto_extract_raises_when_no_smallest_blobs():
+    """Autodetection on a flat (blob-free) image raises, prompting a manual Ø."""
+    img = np.full((64, 64), 100.0, dtype=np.float32)
+    labels = np.ones((64, 64), dtype=np.int32)
+    with pytest.raises(ValueError, match="autodetection found no blobs"):
+        auto_extract(img, labels)  # autodetect on a flat image
 
 
 def test_auto_extract_no_cells_is_empty():

@@ -143,6 +143,10 @@ class AdaptiveClipConfig:
     auto_extract_mode: bool = False
     smallest_particle_value: float = 3.0
     smallest_particle_unit: str = "px"
+    # Auto-extraction: when True (default) the smallest particle / fine window is
+    # measured from the image per run (LoG); the smallest-Ø field is then a
+    # readout. When False the field is the manual optical-resolution override.
+    auto_extract_smallest_auto: bool = True
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -272,9 +276,26 @@ class AdaptiveClipSettingsWidget(QWidget):
         iter_row.addWidget(self._iterations)
         layout.addLayout(iter_row)
 
-        # ── Smallest particle Ø (auto-extraction's one required input) ──
-        # The fine window = 3 × this; the largest particle is measured (LoG) and
-        # the coarse k is automatic. px, or µm via the dataset pixel size.
+        # ── Auto-detect smallest particle (LoG) — auto-extraction only ──
+        # When on (default), the fine window is measured from the image each run
+        # (the smallest-Ø field becomes a readout). When off, the field is the
+        # manual optical-resolution override (a true diameter, ×3 → fine window).
+        self._ae_smallest_auto = QCheckBox("Auto-detect smallest (LoG)")
+        self._ae_smallest_auto.setChecked(True)
+        self._ae_smallest_auto.setToolTip(
+            "Auto extraction only. When on, the smallest particle (fine window) is "
+            "measured from the current image by a Laplacian-of-Gaussian each run, "
+            "so it adapts per dataset. Turn off to enter your optical resolution "
+            "limit in the field below."
+        )
+        self._ae_smallest_auto.setEnabled(False)  # off until auto-extract selected
+        self._ae_smallest_auto.toggled.connect(self._on_ae_smallest_auto_toggled)
+        layout.addWidget(self._ae_smallest_auto)
+
+        # ── Smallest particle Ø (auto-extraction) ──
+        # When Auto-detect is off this is the manual optical-resolution override
+        # (fine window = 3 × this); when on it is a readout the run fills. px, or
+        # µm via the dataset pixel size.
         sp_row = QHBoxLayout()
         sp_row.addWidget(QLabel("Smallest particle Ø:"))
         self._smallest = QDoubleSpinBox()
@@ -391,6 +412,7 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._iterations.valueChanged.connect(self.config_changed)
         self._smallest.valueChanged.connect(self.config_changed)
         self._smallest_unit.currentIndexChanged.connect(self.config_changed)
+        self._ae_smallest_auto.toggled.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
 
@@ -409,6 +431,9 @@ class AdaptiveClipSettingsWidget(QWidget):
 
     def _on_ms_auto_start_toggled(self, _checked: bool) -> None:
         self._apply_mode_gating()  # toggles the manual Window field in multi-scale mode
+
+    def _on_ae_smallest_auto_toggled(self, _checked: bool) -> None:
+        self._apply_mode_gating()  # toggles the smallest-Ø field in auto-extract mode
 
     def _adopt_particle_defaults(self) -> None:
         """Adopt the validated one-knob default (k=1) on entering a per-cell mode.
@@ -476,9 +501,12 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._cutoff.setEnabled(mode == "multiscale")
         self._ms_auto_start.setEnabled(mode == "multiscale")
         self._iterations.setEnabled(mode == "multiscale")
-        # Smallest particle Ø: the one input of auto-extraction.
-        self._smallest.setEnabled(mode == "auto-extract")
-        self._smallest_unit.setEnabled(mode == "auto-extract")
+        # Auto-extraction: the Auto-detect checkbox is live in the mode; the
+        # smallest-Ø field is the manual override, live only when Auto-detect is off.
+        self._ae_smallest_auto.setEnabled(mode == "auto-extract")
+        manual_smallest = mode == "auto-extract" and not self._ae_smallest_auto.isChecked()
+        self._smallest.setEnabled(manual_smallest)
+        self._smallest_unit.setEnabled(manual_smallest)
         # Min particle size filter: live in manual/finder, multi-scale, AND
         # auto-extract (where it filters the unioned output). The noise estimator
         # is only used by the whole-frame detector (manual/finder); per-cell modes
@@ -521,6 +549,7 @@ class AdaptiveClipSettingsWidget(QWidget):
             auto_extract_mode=self._is_auto_extract_mode(),
             smallest_particle_value=float(self._smallest.value()),
             smallest_particle_unit=_WINDOW_UNIT_CODES[self._smallest_unit.currentText()],
+            auto_extract_smallest_auto=self._ae_smallest_auto.isChecked(),
         )
 
     def set_d_min_um(self, d_min_um: float) -> None:
@@ -544,6 +573,17 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._window_unit.setCurrentText("px")
         self._window.setValue(float(int(window_px) | 1))
 
+    def set_smallest_value(self, diameter_px: float) -> None:
+        """Display the auto-detected smallest Ø (px) in the readout spinbox.
+
+        Used by the host to surface the LoG-measured smallest particle after an
+        auto-extraction run so the user sees the value adapt per dataset. Always a
+        pixel diameter, so the unit is forced to px. The field is a readout while
+        Auto-detect is on, so there is no feedback loop.
+        """
+        self._smallest_unit.setCurrentText("px")
+        self._smallest.setValue(float(diameter_px))
+
     def set_enabled(self, enabled: bool) -> None:
         """Lock/unlock all widgets during a run (preserves the active-mode gating)."""
         for widget in (
@@ -559,6 +599,7 @@ class AdaptiveClipSettingsWidget(QWidget):
             self._cutoff,
             self._ms_auto_start,
             self._iterations,
+            self._ae_smallest_auto,
             self._smallest,
             self._smallest_unit,
             self._window,

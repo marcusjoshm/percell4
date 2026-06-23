@@ -58,6 +58,7 @@ from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 __all__ = [
     "auto_extract",
     "measure_largest_particle_diameter",
+    "measure_smallest_particle_diameter",
     "noise_symmetry_floor_k",
     "AutoExtractReport",
 ]
@@ -66,6 +67,9 @@ __all__ = [
 FILL_FACTOR = 3.0          # window = FILL_FACTOR × particle diameter (no-hole floor)
 FDR = 0.1                  # target false rate for the coarse noise-symmetry floor
 SIZE_PERCENTILE = 99.0     # LoG blob-diameter percentile taken as the largest particle
+SMALL_PERCENTILE = 5.0     # low LoG percentile taken as the smallest particle (stable)
+MIN_SIGMA_SMALL = 1.0      # LoG scale floor for autodetecting the smallest particle
+LOG_PRESMOOTH = 1.0        # fixed pre-smoothing for LoG SIZING (decoupled from detection)
 MAX_SIGMA = 20.0           # upper LoG scale (caps the largest detectable particle)
 
 
@@ -90,27 +94,27 @@ class AutoExtractReport:
     n_cells: int
     n_components: int
     area_px: int
+    smallest_diameter_px: float = 0.0  # effective smallest Ø (supplied or auto)
+    smallest_source: str = ""          # "supplied …" | "auto LoG …"
     extra: dict = field(default_factory=dict)
 
 
-def measure_largest_particle_diameter(
+def _log_diameters(
     image: np.ndarray,
     cell_labels: np.ndarray,
     *,
-    percentile: float = SIZE_PERCENTILE,
-    presmooth_sigma_px: float = 1.0,
-    max_sigma: float = MAX_SIGMA,
+    min_sigma: float,
+    max_sigma: float,
+    presmooth_sigma_px: float,
     num_sigma: int = 12,
     threshold_rel: float = 0.1,
-) -> float:
-    """Largest particle diameter (px), from a percentile of LoG blob sizes.
+) -> np.ndarray:
+    """In-cell LoG blob diameters (px, ``2√2·σ``). Requires scikit-image (lazy).
 
-    Scale-space Laplacian-of-Gaussian blob detection: the response peaks at the
-    scale matching a particle, so blob scale gives size. Returns the
-    ``percentile``-th (default 99th) of in-cell blob diameters (``2√2·σ``) — robust
-    to the occasional spurious large-scale blob that would inflate the raw maximum.
-    Returns ``0.0`` on a degenerate/empty selection. Requires scikit-image
-    (imported lazily).
+    The LoG response peaks at the scale matching a particle, so blob scale gives
+    size. The image is normalised over its in-cell 1–99.9 percentile so the
+    relative threshold behaves consistently. Returns an empty array on a
+    degenerate/empty selection.
     """
     from skimage.feature import blob_log  # lazy import
 
@@ -118,30 +122,80 @@ def measure_largest_particle_diameter(
     cells = np.asarray(cell_labels)
     inc = cells > 0
     if not inc.any():
-        return 0.0
+        return np.array([])
     finite = img[inc & np.isfinite(img)]
     if finite.size == 0:
-        return 0.0
+        return np.array([])
     lo, hi = np.percentile(finite, [1.0, 99.9])
     if hi <= lo:
-        return 0.0
+        return np.array([])
     imn = np.clip((np.nan_to_num(img, nan=lo) - lo) / (hi - lo), 0.0, 1.0)
-
     blobs = blob_log(
         imn,
-        min_sigma=1.0,
+        min_sigma=min_sigma,
         max_sigma=max_sigma,
         num_sigma=num_sigma,
         threshold_rel=threshold_rel,
     )
-    diam = [
-        2.0 * np.sqrt(2.0) * b[2]
-        for b in blobs
-        if cells[int(b[0]), int(b[1])] > 0
-    ]
-    if not diam:
-        return 0.0
-    return float(np.percentile(diam, percentile))
+    return np.array(
+        [2.0 * np.sqrt(2.0) * b[2] for b in blobs if cells[int(b[0]), int(b[1])] > 0]
+    )
+
+
+def measure_largest_particle_diameter(
+    image: np.ndarray,
+    cell_labels: np.ndarray,
+    *,
+    percentile: float = SIZE_PERCENTILE,
+    presmooth_sigma_px: float = LOG_PRESMOOTH,
+    max_sigma: float = MAX_SIGMA,
+    num_sigma: int = 12,
+    threshold_rel: float = 0.1,
+) -> float:
+    """Largest particle diameter (px), from a high percentile of LoG blob sizes.
+
+    The largest particle is bright and isolated, so its LoG peak is unambiguous
+    and this is reliable; the ``percentile`` (default 99th, not the bare maximum)
+    guards against a spurious large-scale blob. Returns ``0.0`` if none found.
+    """
+    d = _log_diameters(
+        image, cell_labels, min_sigma=1.0, max_sigma=max_sigma,
+        presmooth_sigma_px=presmooth_sigma_px, num_sigma=num_sigma,
+        threshold_rel=threshold_rel,
+    )
+    return float(np.percentile(d, percentile)) if d.size else 0.0
+
+
+def measure_smallest_particle_diameter(
+    image: np.ndarray,
+    cell_labels: np.ndarray,
+    *,
+    min_sigma: float = MIN_SIGMA_SMALL,
+    percentile: float = SMALL_PERCENTILE,
+    presmooth_sigma_px: float = LOG_PRESMOOTH,
+    max_sigma: float = MAX_SIGMA,
+    num_sigma: int = 14,
+    threshold_rel: float = 0.1,
+) -> float:
+    """Smallest particle diameter (px), from a low LoG percentile at ``min_sigma``.
+
+    Used to set the fine window **directly**: at ``min_sigma=1`` the LoG size of a
+    small flat particle is ~3× its true diameter, which cancels the ×3 no-hole
+    factor, so this value approximates the fine window itself.
+
+    CAVEAT: unlike the largest, the smallest is partly confounded with noise — at
+    small scales the LoG also fires on texture, so the result depends on
+    ``min_sigma``, ``presmooth_sigma_px`` and ``percentile`` (a low percentile, not
+    the bare minimum, is used for stability). Treat it as an estimate of the
+    resolution-limited fine window, not a precise physical size. Returns ``0.0`` if
+    none found.
+    """
+    d = _log_diameters(
+        image, cell_labels, min_sigma=min_sigma, max_sigma=max_sigma,
+        presmooth_sigma_px=presmooth_sigma_px, num_sigma=num_sigma,
+        threshold_rel=threshold_rel,
+    )
+    return float(np.percentile(d, percentile)) if d.size else 0.0
 
 
 def noise_symmetry_floor_k(
@@ -197,9 +251,11 @@ def auto_extract(
     image: np.ndarray,
     cell_labels: np.ndarray,
     *,
-    smallest_particle_px: float,
+    smallest_particle_px: float | None = None,
     fill_factor: float = FILL_FACTOR,
     fdr: float = FDR,
+    min_sigma_small: float = MIN_SIGMA_SMALL,
+    log_presmooth: float = LOG_PRESMOOTH,
     presmooth_sigma_px: float = 1.0,
     min_spot_px: int = 2,
     size_percentile: float = SIZE_PERCENTILE,
@@ -208,18 +264,51 @@ def auto_extract(
 ) -> tuple[np.ndarray, AutoExtractReport]:
     """Two-pass automated extraction of all foci. Returns ``(mask uint8, report)``.
 
-    ``smallest_particle_px`` (your resolution limit) sets the fine window
-    ``= fill_factor × smallest`` at ``k = 1``; the largest particle is measured by
-    LoG (``size_percentile``) and sets the coarse window ``= fill_factor ×
-    largest`` at ``k =`` the noise-symmetry floor. The coarse pass runs only when
-    its window exceeds the fine window; the passes are OR-unioned (with per-pass
-    hole-filling), and ``min_spot_px`` filters the union once at the end.
-    Detection is per-cell (the per-cell σ is the basis of the method).
+    By default **both** ends are measured from the image (LoG): pass
+    ``smallest_particle_px=None`` (default) to autodetect the fine window from the
+    smallest particle (LoG p5 @ ``min_sigma_small``, used *directly* as the window
+    since the LoG size of a small particle already ≈ 3× its true diameter); supply
+    a true diameter to set the fine window ``= fill_factor × smallest`` instead.
+    The largest particle is always measured by LoG (``size_percentile``) and sets
+    the coarse window ``= fill_factor × largest`` at ``k =`` the noise-symmetry
+    floor. The coarse pass runs only when its window exceeds the fine window; the
+    passes are OR-unioned (with per-pass hole-filling), and ``min_spot_px`` filters
+    the union once at the end. Detection is per-cell (the per-cell σ is the basis
+    of the method). LoG **sizing** uses the fixed ``log_presmooth`` (decoupled from
+    the detection ``presmooth_sigma_px``). Raises :class:`ValueError` when
+    smallest autodetection finds no blobs (supply ``smallest_particle_px`` instead).
+
+    The two ends are not equally reliable: the largest is bright/isolated so LoG
+    sizes it robustly; the smallest is partly confounded with noise, so the
+    autodetected fine window is best read as an estimate of the resolution-limited
+    fine window — supplying your known optical resolution is more defensible.
     """
     img = np.asarray(image, dtype=np.float32)
     lab = np.asarray(cell_labels)
 
-    fine_window = _win(fill_factor * float(smallest_particle_px))
+    # ---- resolve the FINE window ----
+    if smallest_particle_px is not None:
+        fine_window = _win(fill_factor * float(smallest_particle_px))
+        smallest_diameter_px = float(smallest_particle_px)
+        smallest_source = f"supplied Ø {float(smallest_particle_px):g} px"
+    else:
+        d_small = measure_smallest_particle_diameter(
+            img, lab, min_sigma=min_sigma_small,
+            presmooth_sigma_px=log_presmooth, max_sigma=max_sigma,
+        )
+        if d_small <= 0:
+            raise ValueError(
+                "smallest-particle autodetection found no blobs; supply a smallest "
+                "particle Ø (turn off Auto-detect smallest) instead"
+            )
+        fine_window = _win(d_small)
+        # The LoG size is used directly as the window, so the equivalent *true* Ø
+        # is the window divided back out by the no-hole factor.
+        smallest_diameter_px = float(fine_window) / float(fill_factor)
+        smallest_source = (
+            f"auto LoG p{SMALL_PERCENTILE:g} @ min_sigma={min_sigma_small:g} "
+            f"({d_small:.1f} px → window {fine_window})"
+        )
 
     # Shared presmoothed buffer + per-cell σ — the noise floor uses these so its
     # z-scores match what detect_adaptive_per_cell thresholds.
@@ -233,10 +322,10 @@ def auto_extract(
     ).astype(bool)
     passes: list[tuple[int, float]] = [(int(fine_window), 1.0)]
 
-    # ---- resolve the coarse window (measured) ----
+    # ---- resolve the coarse window (always LoG-measured, fixed log_presmooth) ----
     largest_px = measure_largest_particle_diameter(
         img, lab, percentile=size_percentile,
-        presmooth_sigma_px=presmooth_sigma_px, max_sigma=max_sigma,
+        presmooth_sigma_px=log_presmooth, max_sigma=max_sigma,
     )
     coarse_window = _win(fill_factor * largest_px)
 
@@ -265,6 +354,8 @@ def auto_extract(
         n_cells=len(sigma),
         n_components=int(ncomp),
         area_px=int(mask.sum()),
-        extra={"smallest_particle_px": float(smallest_particle_px), "fdr": float(fdr)},
+        smallest_diameter_px=float(smallest_diameter_px),
+        smallest_source=smallest_source,
+        extra={"fdr": float(fdr)},
     )
     return out, report

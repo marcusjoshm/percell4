@@ -166,11 +166,12 @@ def run_adaptive_auto_extract(
     """Worker body for the two-pass auto-extraction routine (per-cell).
 
     Runs :func:`percell4.domain.measure.auto_extraction.auto_extract`: a fine pass
-    (window = 3 × ``smallest_particle_px`` at k=1) plus, when the largest particle
-    (LoG-measured) exceeds it, a coarse pass (window = 3 × largest, k = the noise-
-    symmetry floor), OR-unioned with hole-filling. ``min_spot_px`` filters the
-    union. Returns ``(mask uint8, report)`` where ``report`` is the
-    :class:`AutoExtractReport`. Pure (no Qt) so it is worker-safe.
+    at k=1 (window from ``smallest_particle_px`` — measured by LoG when it is
+    ``None``, else ``3 ×`` it) plus, when the LoG-measured largest particle exceeds
+    it, a coarse pass (window = 3 × largest, k = the noise-symmetry floor),
+    OR-unioned with hole-filling. ``min_spot_px`` filters the union. Returns
+    ``(mask uint8, report)`` where ``report`` is the :class:`AutoExtractReport`.
+    Pure (no Qt) so it is worker-safe.
     """
     from percell4.domain.measure.auto_extraction import auto_extract
 
@@ -267,6 +268,9 @@ class AdaptiveClipPanel(QWidget):
         # Interactive CNR segmenter (separate worker + held window reference).
         self._measure_worker = None
         self._cnr_segmenter = None
+        # Auto-extraction: whether the last run auto-detected the smallest Ø
+        # (drives the readout back-fill in _on_auto_extract_done).
+        self._pending_ae_auto = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -729,10 +733,12 @@ class AdaptiveClipPanel(QWidget):
     def _run_auto_extract_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
         """Creator path for the two-pass auto-extraction routine (per-cell).
 
-        The user supplies the smallest particle Ø (px, or µm via the dataset pixel
-        size); the largest is measured by LoG and the coarse k by the noise-
-        symmetry floor inside the worker. Per-cell ⇒ requires an active
-        segmentation, single-frame.
+        By default the smallest particle (fine window) is **auto-detected** from
+        the image (LoG) inside the worker, so it adapts per dataset; turning off
+        "Auto-detect smallest" lets the user supply the optical-resolution Ø (px,
+        or µm via the dataset pixel size). The largest is always measured by LoG
+        and the coarse k by the noise-symmetry floor. Per-cell ⇒ requires an
+        active segmentation, single-frame.
         """
         if is_timelapse:
             self._show_status("Auto extraction supports single-frame channels only")
@@ -752,20 +758,24 @@ class AdaptiveClipPanel(QWidget):
         from percell4.domain.measure.adaptive_clip import resolve_min_area_px
 
         pixel_size_um = self._pixel_size_um(store)
-        # Smallest particle Ø -> px (px as-is, or µm via the dataset pixel size).
-        if config.smallest_particle_unit == "um":
-            if not pixel_size_um or float(pixel_size_um) <= 0:
-                self._show_status(
-                    "µm smallest-particle size needs a known pixel size; switch the "
-                    "unit to px or re-import with TIFF resolution metadata."
-                )
-                return
-            smallest_px = float(config.smallest_particle_value) / float(pixel_size_um)
+        # Smallest particle: auto-detected (None) by default, or the manual
+        # optical-resolution override resolved to px (px as-is, or µm via pixel size).
+        if config.auto_extract_smallest_auto:
+            smallest_px = None
         else:
-            smallest_px = float(config.smallest_particle_value)
-        if smallest_px <= 0:
-            self._show_status("Smallest particle Ø must be > 0")
-            return
+            if config.smallest_particle_unit == "um":
+                if not pixel_size_um or float(pixel_size_um) <= 0:
+                    self._show_status(
+                        "µm smallest-particle size needs a known pixel size; switch "
+                        "the unit to px or re-import with TIFF resolution metadata."
+                    )
+                    return
+                smallest_px = float(config.smallest_particle_value) / float(pixel_size_um)
+            else:
+                smallest_px = float(config.smallest_particle_value)
+            if smallest_px <= 0:
+                self._show_status("Smallest particle Ø must be > 0")
+                return
 
         try:
             min_spot_px = max(
@@ -789,15 +799,22 @@ class AdaptiveClipPanel(QWidget):
         self._pending_name = mask_name
         self._pending_auto = False
         self._pending_particle = False
+        # Remember whether to back-fill the smallest-Ø readout after the run.
+        self._pending_ae_auto = config.auto_extract_smallest_auto
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
+        smallest_note = (
+            "auto-detect (LoG)"
+            if smallest_px is None
+            else f"{smallest_px:.2f} px (from {config.smallest_particle_value:g} "
+            f"{config.smallest_particle_unit})"
+        )
         print(
-            f"  [auto-extract] smallest particle {smallest_px:.2f} px "
-            f"(from {config.smallest_particle_value:g} {config.smallest_particle_unit}); "
+            f"  [auto-extract] smallest particle: {smallest_note}; "
             f"min particle {min_spot_px} px² (union filter)",
             flush=True,
         )
-        self._show_status(f"Detecting (auto extraction, smallest {smallest_px:.1f} px)...")
+        self._show_status(f"Detecting (auto extraction, smallest {smallest_note})...")
 
         from percell4.gui.workers import Worker
 
@@ -816,7 +833,8 @@ class AdaptiveClipPanel(QWidget):
     def _print_auto_extract_report(self, report) -> None:
         """Print the two-pass auto-extraction passes/sizes to the terminal (debug)."""
         print(
-            f"  [auto-extract] passes {report.passes} "
+            f"  [auto-extract] smallest: {report.smallest_source}\n"
+            f"    passes {report.passes} "
             f"(fine window {report.fine_window}; "
             f"largest Ø {report.largest_particle_px} px; "
             f"second pass {report.second_pass_used})\n"
@@ -829,6 +847,11 @@ class AdaptiveClipPanel(QWidget):
         """Finished handler for auto-extraction: print the report, then Creator-save."""
         mask, report = result
         self._print_auto_extract_report(report)
+        # When the smallest was auto-detected, surface the value in the (readout)
+        # smallest-Ø field so the user sees it adapt per dataset.
+        if getattr(self, "_pending_ae_auto", False):
+            self._settings.set_smallest_value(report.smallest_diameter_px)
+        self._pending_ae_auto = False
         # Reuse the standard single-mask Creator save (no window write-back; the
         # pending flags were cleared so no auto/particle note is fabricated).
         self._on_detect_done((mask, report.fine_window))
