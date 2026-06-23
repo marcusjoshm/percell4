@@ -606,3 +606,356 @@ def test_manual_um_window_without_pixel_size_aborts(qtbot, monkeypatch):
     assert called == []  # aborted before the name prompt
     assert repo.masks == {}
     viewer_win.add_mask.assert_not_called()
+
+
+# ── multi-scale mode (per-cell, doubling windows OR-combined) ────────────
+
+
+def _select_multiscale(panel) -> None:
+    panel._settings._auto.setChecked(True)
+    panel._settings._window_method.setCurrentText("Multi-scale (particle range)")
+
+
+def test_multiscale_run_uses_multiscale_detector(qtbot, monkeypatch):
+    panel, _model, repo, _viewer = _build(
+        qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells"
+    )
+    _select_multiscale(panel)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ms")
+
+    panel._on_run()
+
+    assert panel._worker._fn is panel_module.run_adaptive_detection_multiscale
+    assert "ms" in repo.masks
+    assert set(np.unique(repo.masks["ms"])).issubset({0, 1})
+
+
+def test_multiscale_auto_start_is_half_mean(qtbot, monkeypatch):
+    from percell4.domain.measure.adaptive_clip import assess_particle_sizes_per_cell
+
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    _select_multiscale(panel)  # auto start on by default
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    rep = assess_particle_sizes_per_cell(_blob_image(), _labels_one_cell(), 1.0)
+    expected_start = max(3, int(round(0.5 * rep.mean_px)) | 1)
+    # Worker args: (image, labels, start_window_px, max_particle_px, k, presmooth).
+    assert panel._worker._args[2] == expected_start
+
+
+def test_multiscale_manual_start_uses_window_field(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    _select_multiscale(panel)
+    panel._settings._ms_auto_start.setChecked(False)  # manual start window
+    panel._settings._window.setValue(9.0)  # px
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert panel._worker._args[2] == 9  # the manual start window (odd px)
+
+
+def test_multiscale_without_segmentation_aborts(qtbot, monkeypatch):
+    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch, pixel_size_um=0.120369)
+    _select_multiscale(panel)
+    called = []
+    monkeypatch.setattr(
+        panel_module, "prompt_for_resource_name", lambda *a, **kw: called.append(1) or "m"
+    )
+
+    panel._on_run()
+
+    assert called == []  # aborted before the name prompt
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
+
+
+def test_multiscale_run_prints_otsu_raw_range(qtbot, monkeypatch, capsys):
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    _select_multiscale(panel)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+    capsys.readouterr()  # drop selection-time output
+
+    panel._on_run()
+
+    out = capsys.readouterr().out
+    assert "multi-scale" in out
+    assert "Otsu raw particle" in out  # raw min/max printed for calibration
+    assert "windows" in out
+
+
+def test_multiscale_manual_iterations_reach_worker(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    _select_multiscale(panel)
+    panel._settings._iterations.setValue(4)  # exactly 4 doubling passes
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    # Worker args: (image, labels, start, max_particle, k, presmooth, force_passes).
+    assert panel._worker._args[6] == 4
+
+
+def test_multiscale_min_particle_size_reaches_worker(qtbot, monkeypatch):
+    """The Min particle size field is applied to the multi-scale output."""
+    panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.120369, segmentation="cells")
+    _select_multiscale(panel)
+    panel._settings._min_size.setValue(9.0)  # px²
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    # Worker args: (image, labels, start, max, k, presmooth, force_passes, min_spot_px).
+    assert panel._worker._args[7] == 9
+
+
+# ── U4: run_cnr_classification pure worker body ──────────────────────────────
+
+
+def _cnr_foci(levels, *, shape=(360, 360), noise_std=5.0, baseline=100.0, seed=0,
+              one_outside=False):
+    """(image, mask, labels): one radius-3 focus per level in a whole-frame cell."""
+    rng = np.random.RandomState(seed)
+    img = rng.normal(baseline, noise_std, shape).astype(np.float32)
+    labels = np.ones(shape, dtype=np.int32)
+    mask = np.zeros(shape, dtype=np.uint8)
+    n_side = int(round(len(levels) ** 0.5))
+    margin = 30
+    step = (shape[0] - 2 * margin) // (n_side - 1)
+    centers = [(margin + i * step, margin + j * step)
+               for i in range(n_side) for j in range(n_side)][: len(levels)]
+    for k, ((cy, cx), lvl) in enumerate(zip(centers, levels)):
+        rr, cc = disk((cy, cx), 3, shape=shape)
+        img[rr, cc] = baseline + float(lvl)
+        mask[rr, cc] = 1
+        if one_outside and k == len(levels) - 1:
+            labels[rr, cc] = 0
+    return img, mask, labels
+
+
+def test_run_cnr_classification_discover_two_populations():
+    """A CNR gap -> two non-empty population masks (_low/_high) + report."""
+    levels = np.concatenate([np.full(32, 30.0), np.full(32, 400.0)])
+    img, mask, labels = _cnr_foci(levels)
+    pop_masks, components, report = panel_module.run_cnr_classification(
+        img, mask, labels, mode="discover", threshold=None
+    )
+    suffixes = [s for s, _ in pop_masks]
+    assert suffixes == ["_low", "_high"]
+    for _, m in pop_masks:
+        assert m.dtype == np.uint8 and set(np.unique(m)) <= {0, 1} and m.sum() > 0
+    assert report["dip_cnr"]["bimodal"] is True
+    assert any(c.get("subpopulation") in (1, 2) for c in components)
+
+
+def test_run_cnr_classification_discover_single_population():
+    """A continuum -> exactly one mask under the base name (empty suffix)."""
+    rng = np.random.RandomState(3)
+    levels = np.clip(rng.normal(150.0, 45.0, 64), 20.0, None)
+    img, mask, labels = _cnr_foci(levels, seed=3)
+    pop_masks, _, report = panel_module.run_cnr_classification(
+        img, mask, labels, mode="discover", threshold=None
+    )
+    assert [s for s, _ in pop_masks] == [""]
+    assert pop_masks[0][1].sum() > 0
+
+
+def test_run_cnr_classification_guided_splits_at_threshold():
+    """Guided mode splits a continuum into two masks at the supplied threshold."""
+    rng = np.random.RandomState(5)
+    levels = np.clip(rng.normal(150.0, 45.0, 64), 20.0, None)
+    img, mask, labels = _cnr_foci(levels, seed=5)
+    # discover first to get a sensible candidate threshold
+    _, _, base = panel_module.run_cnr_classification(
+        img, mask, labels, mode="discover", threshold=None
+    )
+    thr = base["candidate_cnr_threshold"]
+    pop_masks, _, report = panel_module.run_cnr_classification(
+        img, mask, labels, mode="guided", threshold=thr
+    )
+    assert [s for s, _ in pop_masks] == ["_low", "_high"]
+    assert report["mode"].startswith("guided")
+
+
+def test_run_cnr_classification_forced_warns_on_continuum():
+    """Forced mode splits a continuum and flags low confidence."""
+    rng = np.random.RandomState(8)
+    levels = np.clip(rng.normal(150.0, 45.0, 64), 20.0, None)
+    img, mask, labels = _cnr_foci(levels, seed=8)
+    pop_masks, _, report = panel_module.run_cnr_classification(
+        img, mask, labels, mode="forced", threshold=None
+    )
+    assert [s for s, _ in pop_masks] == ["_low", "_high"]
+    assert any("low confidence" in w for w in report["warnings"])
+
+
+def test_run_cnr_classification_empty_mask_returns_no_masks():
+    """An empty feature mask -> no population masks, no exception."""
+    img = np.random.RandomState(0).normal(100.0, 5.0, (120, 120)).astype(np.float32)
+    mask = np.zeros((120, 120), dtype=np.uint8)
+    labels = np.ones((120, 120), dtype=np.int32)
+    pop_masks, components, report = panel_module.run_cnr_classification(
+        img, mask, labels, mode="discover", threshold=None
+    )
+    assert pop_masks == []
+    assert components == []
+
+
+# ── U6/U7: panel classify wiring, pre-flight, Creator save ───────────────────
+
+
+def _select_source_mask(panel, name):
+    """Populate the CNR source combo from the store and pick ``name``."""
+    panel._refresh_cnr_masks()
+    panel._cnr_settings._source.setCurrentText(name)
+
+
+def test_classify_without_segmentation_aborts(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, existing=["adaptive"])  # no segmentation
+    _select_source_mask(panel, "adaptive")
+    panel._on_classify()
+    assert panel._cnr_worker is None  # never dispatched
+
+
+def test_classify_without_source_mask_aborts(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")  # no masks exist
+    panel._on_classify()
+    assert panel._cnr_worker is None
+
+
+def test_classify_timelapse_aborts(qtbot, monkeypatch):
+    panel, model, repo, viewer_win = _build(
+        qtbot, monkeypatch, segmentation="cells", existing=["adaptive"]
+    )
+    store = panel._get_store()
+    store.metadata = {"n_timepoints": 3}
+    # a (T,H,W) channel layer
+    viewer_win.viewer.layers[0].data = np.zeros((3, 120, 120), dtype=np.float32)
+    _select_source_mask(panel, "adaptive")
+    panel._on_classify()
+    assert panel._cnr_worker is None
+
+
+def test_classify_reads_source_mask_and_passes_mode(qtbot, monkeypatch):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    store = panel._get_store()
+    fmask = np.zeros((120, 120), dtype=np.uint8)
+    fmask[40:60, 40:60] = 1
+    store.read_mask.return_value = fmask
+    _select_source_mask(panel, "adaptive")
+    panel._cnr_settings._mode.setCurrentText("Guided (CNR threshold)")
+    panel._cnr_settings._threshold.setValue(7.5)
+
+    captured = {}
+
+    def _stub(image, feature_mask, labels, *, mode, threshold):
+        captured.update(mode=mode, threshold=threshold, fmask=feature_mask)
+        return [], [], {"decision": "single", "warnings": []}
+
+    monkeypatch.setattr(panel_module, "run_cnr_classification", _stub)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "out")
+
+    panel._on_classify()
+
+    store.read_mask.assert_called_once_with("adaptive")
+    assert captured["mode"] == "guided"
+    assert captured["threshold"] == 7.5
+    assert np.array_equal(captured["fmask"], fmask)
+
+
+def test_classify_saves_two_populations_and_writes_table(qtbot, monkeypatch):
+    panel, model, repo, viewer_win = _build(
+        qtbot, monkeypatch, segmentation="cells", existing=["adaptive"]
+    )
+    store = panel._get_store()
+    store.read_mask.return_value = np.ones((120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+
+    low = np.zeros((120, 120), dtype=np.uint8)
+    low[10:20, 10:20] = 1
+    high = np.zeros((120, 120), dtype=np.uint8)
+    high[30:40, 30:40] = 1
+    comps = [
+        {"label": 1, "cnr": 3.0, "subpopulation": 1},
+        {"label": 2, "cnr": 30.0, "subpopulation": 2},
+    ]
+    report = {"decision": "2 populations", "warnings": [], "group_sizes": [1, 1]}
+    monkeypatch.setattr(
+        panel_module,
+        "run_cnr_classification",
+        lambda *a, **kw: ([("_low", low), ("_high", high)], comps, report),
+    )
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "out")
+
+    panel._on_classify()
+
+    # Both populations persisted as {0,1} masks + added to the viewer.
+    assert "out_low" in repo.masks and "out_high" in repo.masks
+    assert set(np.unique(repo.masks["out_low"])) <= {0, 1}
+    assert viewer_win.add_mask.call_count == 2
+    # Last population is the active selection (second Creator wins).
+    assert model.session.active_mask == "out_high"
+    # Per-focus table written to its own /classification group.
+    paths = [c.args[0] for c in store.write_dataframe.call_args_list]
+    assert "/classification/out" in paths
+
+
+def test_classify_single_population_saves_one_mask(qtbot, monkeypatch):
+    panel, model, repo, viewer_win = _build(
+        qtbot, monkeypatch, segmentation="cells", existing=["adaptive"]
+    )
+    store = panel._get_store()
+    store.read_mask.return_value = np.ones((120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+
+    only = np.zeros((120, 120), dtype=np.uint8)
+    only[10:30, 10:30] = 1
+    comps = [{"label": 1, "cnr": 5.0, "subpopulation": 1}]
+    report = {"decision": "single population", "warnings": []}
+    monkeypatch.setattr(
+        panel_module,
+        "run_cnr_classification",
+        lambda *a, **kw: ([("", only)], comps, report),
+    )
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "out")
+
+    panel._on_classify()
+
+    assert "out" in repo.masks and "out_low" not in repo.masks
+    assert viewer_win.add_mask.call_count == 1
+    assert model.session.active_mask == "out"
+
+
+def test_classify_prints_report(qtbot, monkeypatch, capsys):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    store = panel._get_store()
+    store.read_mask.return_value = np.ones((120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+    report = {
+        "decision": "2 populations",
+        "n_components_valid": 50,
+        "n_components_total": 52,
+        "dip_cnr": {"method": "hartigan_dip", "pvalue": 0.001, "bimodal": True, "reliable": True},
+        "cnr_percentiles": {50: 8.0},
+        "candidate_cnr_threshold": 8.8,
+        "mode": "discovered (significant CNR gap)",
+        "group_sizes": [20, 30],
+        "smaller_group_fraction": 0.4,
+        "warnings": [],
+    }
+    only = np.ones((120, 120), dtype=np.uint8)
+    monkeypatch.setattr(
+        panel_module,
+        "run_cnr_classification",
+        lambda *a, **kw: ([("", only)], [{"label": 1}], report),
+    )
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "out")
+
+    panel._on_classify()
+
+    out = capsys.readouterr().out
+    assert "CNR subpopulation classification" in out
+    assert "hartigan_dip" in out
+    assert "candidate th" in out

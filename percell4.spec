@@ -40,6 +40,10 @@ _hidden = collect_submodules("percell4") + [
     "skimage.morphology",
     "cellpose",
     "cellpose.models",
+    # diptest is a compiled C-extension; collect_submodules("percell4") will not
+    # pull it in, so it must be listed explicitly (PyInstaller then collects the
+    # binary). Backs the CNR subpopulation gap test.
+    "diptest",
     # Optional extras (include if installed)
     "dtcwt",
     "roifile",

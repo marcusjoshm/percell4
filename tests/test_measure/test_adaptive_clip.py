@@ -10,14 +10,18 @@ from percell4.domain.measure.adaptive_clip import (
     AUTO_WINDOW_MAX,
     AUTO_WINDOW_MIN,
     PARTICLE_WINDOW_MIN,
+    assess_particle_sizes_per_cell,
     auto_window,
     detect_adaptive_by_particle_size,
+    detect_adaptive_multiscale,
     detect_adaptive_per_cell,
     detect_adaptive_whole_frame,
     detect_smallest_particle_um,
     estimate_adaptive_window,
+    multiscale_windows,
     otsu_first_pass,
     otsu_smallest_particle,
+    per_cell_sigma,
     resolve_min_area_px,
     resolve_window_px,
     window_min_spot_for_particle,
@@ -480,3 +484,202 @@ def test_detect_adaptive_per_cell_matches_particle_size_engine():
     )
     via_engine = detect_adaptive_by_particle_size(img, labels, px, d_min, k=1.0)
     assert np.array_equal(via_core, via_engine)
+
+
+# ── multi-scale routine: assessment + windows + OR-combine ───────────────
+
+
+def _wide_range_image(shape=(256, 256)):
+    """Noise + small (Ø~6), medium (Ø~16) and large (Ø~40) discs in one frame."""
+    img = (10.0 + np.random.RandomState(0).normal(0, 1.5, shape)).astype(np.float32)
+    for c, r in [((40, 40), 3), ((40, 120), 8), ((150, 150), 20)]:
+        rr, cc = disk(c, r, shape=shape)
+        img[rr, cc] = 200.0
+    return img
+
+
+def test_assess_particle_sizes_per_cell_reports_range():
+    img = _wide_range_image()
+    labels = np.ones(img.shape, dtype=np.int32)
+    rep = assess_particle_sizes_per_cell(img, labels, 1.0)
+    assert rep is not None
+    assert rep.n_raw == 3
+    assert rep.raw_min_px < 8.0          # the small disc (Ø ~6 px)
+    assert rep.raw_max_px > 30.0         # the large disc (Ø ~40 px)
+    assert rep.smallest_px <= rep.mean_px <= rep.largest_px
+    assert rep.range_px == pytest.approx(rep.largest_px - rep.smallest_px)
+
+
+def test_assess_particle_sizes_cutoff_floors_stats_but_keeps_raw():
+    img = _wide_range_image()
+    labels = np.ones(img.shape, dtype=np.int32)
+    # Cutoff above the small disc: it drops out of the (non-raw) stats.
+    rep = assess_particle_sizes_per_cell(img, labels, 1.0, cutoff_px=10.0)
+    assert rep.raw_min_px < 8.0          # raw min is still the small disc
+    assert rep.smallest_px >= 10.0       # but the post-cutoff smallest is floored
+    assert rep.n_particles == 2          # small disc excluded from the stats
+
+
+def test_assess_particle_sizes_none_when_empty():
+    flat = np.full((64, 64), 5.0, dtype=np.float32)
+    assert assess_particle_sizes_per_cell(flat, np.ones((64, 64), np.int32), 1.0) is None
+
+
+def test_multiscale_windows_doubles_until_past_largest():
+    assert multiscale_windows(11, 39.8) == [11, 23, 47]   # stop after first > 39.8
+    assert multiscale_windows(1, 5) == [3, 7]             # floored at 3, then > 5
+    # A single pass when the start already exceeds the largest particle.
+    assert multiscale_windows(51, 40) == [51]
+    # Backstop caps the pass count even for a degenerate max.
+    assert len(multiscale_windows(3, 1e9, max_passes=5)) == 5
+
+
+def test_detect_adaptive_multiscale_fills_small_and_large():
+    """The OR-combine fills BOTH the small and the large particle (a single small
+    window would hollow out the large one)."""
+    img = _wide_range_image()
+    labels = np.ones(img.shape, dtype=np.int32)
+    rep = assess_particle_sizes_per_cell(img, labels, 1.0)
+    start = max(3, int(round(0.5 * rep.mean_px)) | 1)
+    mask, windows = detect_adaptive_multiscale(
+        img, labels, start_window_px=start, max_particle_px=rep.largest_px
+    )
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    assert len(windows) >= 2 and windows == sorted(windows)
+    assert mask[150, 150] == 1   # large disc center filled
+    assert mask[40, 40] == 1     # small disc filled
+    # Union ⊇ any single pass (OR-combine only adds foreground).
+    single = detect_adaptive_per_cell(img, labels, window_px=windows[0], min_spot_px=1)
+    assert int(mask.sum()) >= int(single.sum())
+
+
+def test_multiscale_windows_force_passes_overrides_stop():
+    # force_passes = N -> exactly N windows, ignoring max_particle.
+    assert multiscale_windows(11, 39.8, force_passes=5) == [11, 23, 47, 95, 191]
+    assert multiscale_windows(11, 1e9, force_passes=2) == [11, 23]
+    # 0 / None -> auto stop at the largest particle.
+    assert multiscale_windows(11, 39.8, force_passes=0) == [11, 23, 47]
+    assert multiscale_windows(11, 39.8, force_passes=None) == [11, 23, 47]
+
+
+def test_detect_adaptive_multiscale_force_passes():
+    img = _wide_range_image()
+    labels = np.ones(img.shape, dtype=np.int32)
+    # A tiny max_particle would auto-stop early; force_passes runs exactly N.
+    _, windows = detect_adaptive_multiscale(
+        img, labels, start_window_px=7, max_particle_px=12, force_passes=4
+    )
+    assert len(windows) == 4
+
+
+def test_assess_particle_sizes_rejects_near_constant_cell():
+    """A near-constant cell (float32-epsilon gradient) is degenerate, not a
+    spurious cell-sized particle — the guard matches otsu_smallest_particle's
+    relative tolerance, not exact equality (review consistency fix)."""
+    shape = (128, 128)
+    labels = np.zeros(shape, dtype=np.int32)
+    labels[disk((30, 30), 20, shape=shape)] = 1   # a real cell
+    labels[disk((90, 90), 25, shape=shape)] = 2   # a near-constant (empty) cell
+    yy, _ = np.mgrid[0:128, 0:128]
+    img = np.full(shape, 100.0, dtype=np.float32)
+    img[disk((30, 30), 5, shape=shape)] = 300.0   # one real particle in cell 1
+    # Faint float32 ramp in cell 2: vmin != vmax exactly (exact guard would admit
+    # and Otsu would carve it) but the span is far below the rel-tol (it must not).
+    img[labels == 2] = (100.0 + 1e-6 * yy.astype(np.float32))[labels == 2]
+    rep = assess_particle_sizes_per_cell(img, labels, 1.0)
+    assert rep is not None
+    assert rep.n_raw == 1  # only the real particle; the empty cell contributes none
+
+
+def test_detect_adaptive_multiscale_min_spot_filters_combined():
+    """min_spot_px filters the OR-combined mask (a no-op at 1; drops small at N)."""
+    img = _wide_range_image()
+    labels = np.ones(img.shape, dtype=np.int32)
+    unfiltered, _ = detect_adaptive_multiscale(
+        img, labels, start_window_px=7, max_particle_px=40, min_spot_px=1
+    )
+    filtered, _ = detect_adaptive_multiscale(
+        img, labels, start_window_px=7, max_particle_px=40, min_spot_px=500
+    )
+    assert int(filtered.sum()) < int(unfiltered.sum())  # big filter drops components
+    # The big disc (area ~1257 px) survives a 500 px filter; tiny specks do not.
+    assert filtered[150, 150] == 1
+
+
+# --------------------------------------------------------------------------- #
+# per_cell_sigma helper (U2) — shared robust per-cell noise scale
+# --------------------------------------------------------------------------- #
+def test_per_cell_sigma_returns_one_entry_per_cell():
+    """Each labelled cell gets 1.4826*MAD of its (smoothed) in-cell values."""
+    shape = (64, 64)
+    labels = np.zeros(shape, dtype=np.int32)
+    labels[disk((16, 16), 10, shape=shape)] = 1
+    labels[disk((48, 48), 10, shape=shape)] = 2
+    rng = np.random.RandomState(0)
+    work = rng.normal(100.0, 5.0, shape).astype(np.float32)
+    sig = per_cell_sigma(work, labels)
+    assert set(sig) == {1, 2}
+    for cid in (1, 2):
+        vals = work[labels == cid]
+        expect = 1.4826 * float(np.median(np.abs(vals - np.median(vals))))
+        assert sig[cid] == pytest.approx(expect)
+        assert sig[cid] > 0.0
+
+
+def test_per_cell_sigma_omits_flat_cell():
+    """A constant (MAD == 0) cell is omitted — it cannot define a threshold."""
+    shape = (64, 64)
+    labels = np.zeros(shape, dtype=np.int32)
+    labels[disk((16, 16), 10, shape=shape)] = 1   # flat
+    labels[disk((48, 48), 10, shape=shape)] = 2   # has spread
+    work = np.full(shape, 100.0, dtype=np.float32)
+    work[labels == 2] = np.random.RandomState(1).normal(100.0, 5.0, int((labels == 2).sum()))
+    sig = per_cell_sigma(work, labels)
+    assert 1 not in sig          # flat cell omitted
+    assert 2 in sig and sig[2] > 0.0
+
+
+def test_per_cell_sigma_skips_label_gap():
+    """A gap in the label ids (no pixels for an id) is skipped, not crashed."""
+    shape = (64, 64)
+    labels = np.zeros(shape, dtype=np.int32)
+    labels[disk((16, 16), 10, shape=shape)] = 1
+    labels[disk((48, 48), 10, shape=shape)] = 3   # id 2 has no pixels
+    work = np.random.RandomState(2).normal(100.0, 5.0, shape).astype(np.float32)
+    sig = per_cell_sigma(work, labels)
+    assert set(sig) == {1, 3}    # id 2 absent, no error
+
+
+def test_detect_adaptive_per_cell_unchanged_after_sigma_refactor():
+    """Characterization: the detector output is the same quantity per-cell σ feeds.
+
+    Detection thresholds ``diff > k*σ`` with σ from :func:`per_cell_sigma` on the
+    presmoothed ``work``; recomputing σ the same way and reproducing the mask by
+    hand must match the production detector exactly (guards the U2 extraction).
+    """
+    from scipy.ndimage import gaussian_filter
+
+    shape = (96, 96)
+    labels = np.zeros(shape, dtype=np.int32)
+    labels[disk((28, 28), 18, shape=shape)] = 1
+    labels[disk((68, 68), 18, shape=shape)] = 2
+    rng = np.random.RandomState(7)
+    img = rng.normal(100.0, 4.0, shape).astype(np.float32)
+    img[disk((28, 28), 4, shape=shape)] += 120.0   # bright spot in cell 1
+    img[disk((68, 68), 4, shape=shape)] += 120.0   # bright spot in cell 2
+
+    window_px, k = 15, 1.0
+    produced = detect_adaptive_per_cell(
+        img, labels, window_px=window_px, min_spot_px=1, k=k, presmooth_sigma_px=1.0
+    )
+
+    # Reproduce by hand from the shared helper.
+    work = apply_gaussian_smoothing(img, 1.0)
+    diff = work - gaussian_filter(work, (window_px - 1) / 6.0)
+    sig = per_cell_sigma(work, labels)
+    expected = np.zeros(shape, dtype=bool)
+    for cid, s in sig.items():
+        cell = labels == cid
+        expected |= (diff > k * s) & cell
+    assert np.array_equal(produced.astype(bool), expected)

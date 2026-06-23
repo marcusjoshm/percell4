@@ -69,6 +69,35 @@ def _make_odd(n: int) -> int:
     return int(n) | 1
 
 
+def per_cell_sigma(work: np.ndarray, labels: np.ndarray) -> dict[int, float]:
+    """Robust per-cell noise scale ``{cell_id -> 1.4826 * MAD(work) in the cell}``.
+
+    ``work`` is the **presmoothed** working image (``apply_gaussian_smoothing``
+    output), *not* the raw image — σ is defined on the same buffer the detector
+    thresholds, so :func:`detect_adaptive_per_cell` and the CNR measurement in
+    :mod:`percell4.domain.measure.cnr_classification` share one definition. Cells
+    whose MAD is zero or non-finite are omitted (they cannot define a threshold
+    and are skipped during detection).
+    """
+    from scipy.ndimage import find_objects
+
+    lab = np.asarray(labels)
+    sigma: dict[int, float] = {}
+    for idx, sl in enumerate(find_objects(lab)):
+        if sl is None:
+            continue
+        cid = idx + 1
+        cell = lab[sl] == cid
+        if not cell.any():
+            continue
+        vals = work[sl][cell]
+        med = float(np.median(vals))
+        s = 1.4826 * float(np.median(np.abs(vals - med)))
+        if np.isfinite(s) and s > 0.0:
+            sigma[cid] = s
+    return sigma
+
+
 def _filter_by_area(mask: np.ndarray, min_spot_px: int) -> np.ndarray:
     """Keep only connected components with area ``>= min_spot_px`` (boolean out).
 
@@ -236,21 +265,97 @@ def detect_adaptive_per_cell(
     # reduces to image > local_background + k*sigma (see adaptive_local_clip.ijm).
     diff = work - gaussian_filter(work, (window_px - 1) / 6.0)
 
+    sigmas = per_cell_sigma(work, lab)
     out = np.zeros(img.shape, dtype=bool)
     for idx, sl in enumerate(find_objects(lab)):
         if sl is None:
             continue
-        cell = lab[sl] == (idx + 1)
-        if not cell.any():
+        cid = idx + 1
+        s = sigmas.get(cid)
+        if s is None:  # zero/non-finite MAD: cell omitted (cannot threshold)
             continue
-        vals = work[sl][cell]
-        med = float(np.median(vals))
-        sigma = 1.4826 * float(np.median(np.abs(vals - med)))
-        if not np.isfinite(sigma) or sigma <= 0.0:
-            continue
-        out[sl] |= (diff[sl] > float(k) * sigma) & cell
+        cell = lab[sl] == cid
+        out[sl] |= (diff[sl] > float(k) * s) & cell
 
     return _filter_by_area(out, min_spot_px).astype(np.uint8)
+
+
+def multiscale_windows(
+    start_window_px: float,
+    max_particle_px: float,
+    *,
+    max_passes: int = 16,
+    force_passes: int | None = None,
+) -> list[int]:
+    """The doubling window sequence for the multi-scale routine.
+
+    Returns odd px windows ``[W0, 2·W0, 4·W0, …]`` starting at ``start_window_px``
+    (forced odd, floored at :data:`PARTICLE_WINDOW_MIN`).
+
+    * Default (``force_passes`` is ``None``): stop **after** the first window that
+      exceeds ``max_particle_px`` (so the largest particle is bracketed);
+      ``max_passes`` is a backstop against a degenerate ``max_particle_px``.
+    * ``force_passes = N`` (> 0): return **exactly** ``N`` windows regardless of
+      ``max_particle_px`` — the manual iteration count, for testing the doubling.
+    """
+    windows: list[int] = []
+    w = max(PARTICLE_WINDOW_MIN, _make_odd(int(round(float(start_window_px)))))
+    if force_passes is not None and int(force_passes) > 0:
+        for _ in range(int(force_passes)):
+            windows.append(w)
+            w = _make_odd(w * 2)
+        return windows
+    for _ in range(max(1, int(max_passes))):
+        windows.append(w)
+        if w > float(max_particle_px):
+            break
+        w = _make_odd(w * 2)
+    return windows
+
+
+def detect_adaptive_multiscale(
+    image: np.ndarray,
+    labels: np.ndarray,
+    *,
+    start_window_px: float,
+    max_particle_px: float,
+    k: float = 1.0,
+    presmooth_sigma_px: float = 1.0,
+    min_spot_px: int = 1,
+    max_passes: int = 16,
+    force_passes: int | None = None,
+) -> tuple[np.ndarray, list[int]]:
+    """Multi-scale per-cell adaptive clip: OR-union over a doubling window sequence.
+
+    Runs :func:`detect_adaptive_per_cell` at each window from
+    :func:`multiscale_windows` and OR-combines the masks (a pixel is foreground if
+    *any* pass marks it), so particles across a wide size range are all captured:
+    each window cleanly detects particles a few × smaller than it, and the union
+    spans the smallest start window up to past the largest particle.
+    ``force_passes = N`` runs exactly ``N`` doubling passes instead (manual
+    iteration count). ``min_spot_px`` is the size filter applied **once to the
+    OR-combined mask** (a particle may be fully formed only in the union, so each
+    pass detects unfiltered and the filter runs last); ``<= 1`` keeps everything.
+    Returns ``(combined {0,1} uint8 mask, windows_used)``.
+    """
+    windows = multiscale_windows(
+        start_window_px, max_particle_px, max_passes=max_passes, force_passes=force_passes
+    )
+    combined: np.ndarray | None = None
+    for w in windows:
+        m = detect_adaptive_per_cell(
+            image,
+            labels,
+            window_px=w,
+            min_spot_px=1,  # no per-pass filter; the union is filtered once below
+            k=k,
+            presmooth_sigma_px=presmooth_sigma_px,
+        )
+        combined = m.astype(bool) if combined is None else (combined | m.astype(bool))
+    if combined is None:
+        combined = np.zeros(np.asarray(image).shape, dtype=bool)
+    combined = _filter_by_area(combined, int(min_spot_px))
+    return combined.astype(np.uint8), windows
 
 
 def _with_window(settings: PunctaDetectorSettings, window_px: int) -> PunctaDetectorSettings:
@@ -497,6 +602,98 @@ def detect_smallest_particle_um(
         image, gaussian_sigma, pixel_size_um, cp_mask=cp_mask, noise_floor_px=noise_floor_px
     )
     return report.d_min_um if report is not None else None
+
+
+@dataclasses.dataclass(frozen=True)
+class ParticleSizeReport:
+    """Per-cell-Otsu particle-size assessment (px diameters) for the multi-scale routine.
+
+    ``raw_min_px`` / ``raw_max_px`` are over ALL detected particles (above the
+    noise floor, before the cutoff) — always surfaced for calibration. The other
+    stats are over particles ``>= cutoff_px`` (the cutoff is a stats floor); if the
+    cutoff excludes everything, they fall back to the full set so the routine still
+    runs (and the raw min/max reveal that the cutoff is too high).
+    """
+
+    raw_min_px: float
+    raw_max_px: float
+    smallest_px: float   # smallest particle >= cutoff
+    mean_px: float       # mean diameter >= cutoff (drives the ½×mean start window)
+    largest_px: float    # largest particle >= cutoff (the doubling stop target)
+    n_particles: int     # particles >= cutoff (or all, on cutoff fallback)
+    n_raw: int           # all particles above the noise floor
+
+    @property
+    def range_px(self) -> float:
+        """Spread of the (post-cutoff) particle sizes (largest − smallest)."""
+        return self.largest_px - self.smallest_px
+
+
+def assess_particle_sizes_per_cell(
+    image: np.ndarray,
+    labels: np.ndarray,
+    gaussian_sigma: float | None,
+    *,
+    cutoff_px: float = 0.0,
+    noise_floor_px: int = AUTO_WINDOW_NOISE_FLOOR_PX,
+) -> ParticleSizeReport | None:
+    """First-pass size assessment: per-cell Otsu, pooled component diameters.
+
+    Smooths the image, then for each Cellpose cell runs Otsu on **that cell's**
+    pixels (so dim and bright cells each get an apt threshold), labels the in-cell
+    foreground, and pools every surviving component's equivalent diameter
+    (``2*sqrt(area/pi)``, area ``>= noise_floor_px``) across cells. Returns a
+    :class:`ParticleSizeReport`; ``None`` only when no particle is found at all.
+    Particles below ``cutoff_px`` are excluded from the (non-raw) stats.
+    """
+    from scipy.ndimage import find_objects
+    from skimage import measure
+    from skimage.filters import threshold_otsu as sk_threshold_otsu
+
+    sm = apply_gaussian_smoothing(np.asarray(image, dtype=np.float32), gaussian_sigma)
+    lab = np.asarray(labels)
+    diameters: list[float] = []
+    for idx, sl in enumerate(find_objects(lab)):
+        if sl is None:
+            continue
+        cell = lab[sl] == (idx + 1)
+        if not cell.any():
+            continue
+        vals = sm[sl][cell]
+        finite = vals[np.isfinite(vals)]
+        if finite.size == 0:
+            continue
+        vmin, vmax = float(finite.min()), float(finite.max())
+        # Near-constant cell is degenerate — same relative-tolerance guard as
+        # otsu_smallest_particle. An exact-equality check would admit a float32-
+        # epsilon gradient and Otsu would carve a spurious cell-sized "particle",
+        # inflating raw_max/mean and the multi-scale window sequence.
+        if (vmax - vmin) <= 1e-6 * (abs(vmax) + 1.0):
+            continue
+        thr = float(sk_threshold_otsu(finite))
+        cell_fg = cell & (sm[sl] > thr)
+        if not cell_fg.any():
+            continue
+        comp = measure.label(cell_fg, connectivity=1)
+        for p in measure.regionprops(comp):
+            if p.area >= noise_floor_px:
+                diameters.append(2.0 * math.sqrt(p.area / math.pi))
+
+    if not diameters:
+        return None
+    diam = np.asarray(diameters, dtype=float)
+    kept = diam[diam >= float(cutoff_px)]
+    if kept.size == 0:  # cutoff above everything -> fall back so the run proceeds
+        kept = diam
+    return ParticleSizeReport(
+        raw_min_px=float(diam.min()),
+        raw_max_px=float(diam.max()),
+        smallest_px=float(kept.min()),
+        mean_px=float(kept.mean()),
+        largest_px=float(kept.max()),
+        n_particles=int(kept.size),
+        n_raw=int(diam.size),
+    )
 
 
 def resolve_min_area_px(value: float, unit: str, pixel_size_um: float | None) -> int:

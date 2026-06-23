@@ -63,6 +63,7 @@ def test_window_method_mapping(qtbot):
         ("Granule size", "granule-size"),
         ("Otsu mean (baseline)", "otsu-mean"),
         ("Otsu detect particle size", "otsu-smallest"),
+        ("Multi-scale (particle range)", "multiscale"),
     ]:
         w._window_method.setCurrentText(label)
         assert w.current_config().window_method == code
@@ -279,3 +280,71 @@ def test_set_d_min_um_updates_field_and_config(qtbot):
     w.set_d_min_um(0.235)
     assert w._d_min.value() == pytest.approx(0.235)
     assert w.current_config().d_min_um == pytest.approx(0.235)
+
+
+# ── multi-scale mode (per-cell, doubling windows) ───────────────────────
+
+
+def _enter_multiscale_mode(w) -> None:
+    w._auto.setChecked(True)
+    w._window_method.setCurrentText("Multi-scale (particle range)")
+
+
+def test_multiscale_mode_config_and_defaults(qtbot):
+    w = _widget(qtbot)
+    cfg = w.current_config()
+    assert cfg.multiscale_mode is False
+    assert cfg.size_cutoff_px == 0.0
+    assert cfg.ms_auto_start is True
+    _enter_multiscale_mode(w)
+    cfg = w.current_config()
+    assert cfg.multiscale_mode is True
+    assert cfg.window_method == "multiscale"
+    assert cfg.particle_mode is False  # distinct from the otsu-smallest mode
+
+
+def test_multiscale_mode_gates_fields(qtbot):
+    w = _widget(qtbot)
+    assert not w._cutoff.isEnabled()
+    assert not w._ms_auto_start.isEnabled()
+    _enter_multiscale_mode(w)
+    assert w._cutoff.isEnabled()
+    assert w._ms_auto_start.isEnabled()
+    # Min particle size filters the multi-scale output, so it stays live; the noise
+    # estimator (whole-frame only) and the percentile (otsu-smallest) are off.
+    assert w._min_size.isEnabled()
+    assert w._unit.isEnabled()
+    for widget in (w._noise, w._percentile):
+        assert not widget.isEnabled()
+    # Auto start on -> the manual Window field is off.
+    assert not w._window.isEnabled()
+    # Turning auto start off makes the Window field the manual starting window.
+    w._ms_auto_start.setChecked(False)
+    assert w._window.isEnabled()
+    assert w._window_unit.isEnabled()
+
+
+def test_multiscale_mode_adopts_k_one(qtbot):
+    w = _widget(qtbot)
+    w._k.setValue(2.25)
+    _enter_multiscale_mode(w)
+    assert w.current_config().k == 1.0  # validated default on entering a per-cell mode
+
+
+def test_multiscale_cutoff_reaches_config(qtbot):
+    w = _widget(qtbot)
+    _enter_multiscale_mode(w)
+    w._cutoff.setValue(8.0)
+    assert w.current_config().size_cutoff_px == 8.0
+    w._ms_auto_start.setChecked(False)
+    assert w.current_config().ms_auto_start is False
+
+
+def test_multiscale_iterations_gated_and_in_config(qtbot):
+    w = _widget(qtbot)
+    assert w.current_config().ms_iterations == 0  # auto by default
+    assert not w._iterations.isEnabled()
+    _enter_multiscale_mode(w)
+    assert w._iterations.isEnabled()
+    w._iterations.setValue(5)
+    assert w.current_config().ms_iterations == 5

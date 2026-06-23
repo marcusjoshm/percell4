@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -50,27 +51,32 @@ _WINDOW_METHOD_LABELS = (
     "Granule size",
     "Otsu mean (baseline)",
     "Otsu detect particle size",
+    "Multi-scale (particle range)",
 )
 _WINDOW_METHOD_CODES = {
     "Granule size": "granule-size",
     "Otsu mean (baseline)": "otsu-mean",
     "Otsu detect particle size": "otsu-smallest",
+    "Multi-scale (particle range)": "multiscale",
 }
 
-# Selecting this method does not pick a whole-frame window-finder: an Otsu
-# first-pass measures a low-percentile particle size, fills the d_min readout,
-# and the run uses the per-cell detect_adaptive_by_particle_size engine (window +
-# size filter derived from d_min). It is therefore exempt from the finder drift
-# guard. (The internal code stays "otsu-smallest" for back-compat.)
+# These two methods are per-cell *engine switches*, not whole-frame window-finders,
+# so they are exempt from the finder drift guard:
+#  - otsu-smallest: an Otsu first-pass sizes the d_min readout, then the per-cell
+#    detect_adaptive_by_particle_size runs.
+#  - multiscale: a per-cell Otsu measures the particle-size range, then the per-cell
+#    detector runs at a doubling window sequence whose masks are OR-combined.
 _OTSU_SMALLEST_CODE = "otsu-smallest"
+_MULTISCALE_CODE = "multiscale"
+_ENGINE_SWITCH_CODES = {_OTSU_SMALLEST_CODE, _MULTISCALE_CODE}
 
 # Drift guard: every dropdown code that names a whole-frame finder must be a real
-# registered finder (the per-cell engine switch above is exempt).
-assert set(_WINDOW_METHOD_CODES.values()) - {_OTSU_SMALLEST_CODE} <= set(
+# registered finder (the per-cell engine switches above are exempt).
+assert set(_WINDOW_METHOD_CODES.values()) - _ENGINE_SWITCH_CODES <= set(
     WINDOW_FINDER_NAMES
 ), (
     "window-method dropdown codes drifted from WINDOW_FINDER_NAMES: "
-    f"{set(_WINDOW_METHOD_CODES.values()) - {_OTSU_SMALLEST_CODE} - set(WINDOW_FINDER_NAMES)}"
+    f"{set(_WINDOW_METHOD_CODES.values()) - _ENGINE_SWITCH_CODES - set(WINDOW_FINDER_NAMES)}"
 )
 
 
@@ -110,6 +116,19 @@ class AdaptiveClipConfig:
     particle_mode: bool = False
     d_min_um: float = 0.40
     particle_percentile: float = 10.0
+    # Multi-scale mode. True when ``auto_window`` is on AND ``window_method`` is the
+    # "Multi-scale (particle range)" code: a per-cell Otsu first pass measures the
+    # particle-size range, then the per-cell detector runs at a doubling window
+    # sequence (OR-combined). ``size_cutoff_px`` floors the size *assessment* (a
+    # diameter lower limit; does not filter the final mask). ``ms_auto_start`` picks
+    # the starting window — ½ × mean particle when True, else the manual
+    # ``window_value`` / ``window_unit``. ``k`` is honored (default 1).
+    multiscale_mode: bool = False
+    size_cutoff_px: float = 0.0
+    ms_auto_start: bool = True
+    # Manual iteration count for multi-scale: 0 = auto (double until past the
+    # largest particle); N > 0 = run exactly N doubling passes (for testing).
+    ms_iterations: int = 0
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -192,8 +211,56 @@ class AdaptiveClipSettingsWidget(QWidget):
         dmin_row.addWidget(self._d_min)
         layout.addLayout(dmin_row)
 
+        # ── Multi-scale controls (used only by the "Multi-scale (particle range)" method) ──
+        # Size cutoff = a diameter lower limit that floors the size assessment
+        # (does not filter the final mask). 0 = no floor.
+        cut_row = QHBoxLayout()
+        cut_row.addWidget(QLabel("Size cutoff Ø (px):"))
+        self._cutoff = QDoubleSpinBox()
+        self._cutoff.setRange(0.0, 1000.0)
+        self._cutoff.setDecimals(1)
+        self._cutoff.setSingleStep(1.0)
+        self._cutoff.setValue(0.0)
+        self._cutoff.setToolTip(
+            "Lower size limit (particle diameter, px) for the multi-scale size "
+            "assessment: particles below it are ignored when measuring the "
+            "smallest/mean/largest. 0 = no floor. Does NOT filter the final mask."
+        )
+        self._cutoff.setEnabled(False)  # off until the multi-scale method is selected
+        cut_row.addWidget(self._cutoff)
+        layout.addLayout(cut_row)
+
+        # Auto start window (½ × mean particle) vs the manual Window field below.
+        self._ms_auto_start = QCheckBox("Auto start window (½ × mean particle)")
+        self._ms_auto_start.setChecked(True)
+        self._ms_auto_start.setToolTip(
+            "Multi-scale only. When on, the starting window is half the mean "
+            "particle diameter (then doubles until past the largest particle). "
+            "When off, the Window field below is the manual starting window."
+        )
+        self._ms_auto_start.setEnabled(False)  # off until the multi-scale method is selected
+        self._ms_auto_start.toggled.connect(self._on_ms_auto_start_toggled)
+        layout.addWidget(self._ms_auto_start)
+
+        # Manual iteration count (testing): 0 = auto (double until past the largest
+        # particle); N = run exactly N doubling passes.
+        iter_row = QHBoxLayout()
+        iter_row.addWidget(QLabel("Iterations (0 = auto):"))
+        self._iterations = QSpinBox()
+        self._iterations.setRange(0, 20)
+        self._iterations.setValue(0)
+        self._iterations.setToolTip(
+            "Multi-scale only. 0 = auto: keep doubling the window until it exceeds "
+            "the largest particle. N > 0 = run exactly N doubling passes regardless "
+            "of particle size (for testing the iteration)."
+        )
+        self._iterations.setEnabled(False)  # off until the multi-scale method is selected
+        iter_row.addWidget(self._iterations)
+        layout.addLayout(iter_row)
+
         # ── Manual adaptive window (value + px/µm unit) ──
-        # Used when Auto is off. The host resolves it to an odd px window
+        # Used when Auto is off, and as the multi-scale starting window when its
+        # "Auto start window" is off. The host resolves it to an odd px window
         # (forced odd, floored at 3); µm needs a known pixel size.
         win_row = QHBoxLayout()
         win_row.addWidget(QLabel("Window:"))
@@ -277,29 +344,34 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._auto.toggled.connect(self.config_changed)
         self._percentile.valueChanged.connect(self.config_changed)
         self._d_min.valueChanged.connect(self.config_changed)
+        self._cutoff.valueChanged.connect(self.config_changed)
+        self._ms_auto_start.toggled.connect(self.config_changed)
+        self._iterations.valueChanged.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
 
     def _on_auto_toggled(self, checked: bool) -> None:
         self._apply_mode_gating()
-        # Checking Auto while the per-cell method is the remembered selection
-        # enters particle mode -> adopt its validated default.
-        if checked and self._is_particle_mode():
+        # Checking Auto while a per-cell engine method is the remembered selection
+        # enters that mode -> adopt its validated default.
+        if checked and self._active_mode() in ("particle", "multiscale"):
             self._adopt_particle_defaults()
 
     def _on_window_method_changed(self, _index: int) -> None:
         self._apply_mode_gating()
-        # Switching the active method to the per-cell engine.
-        if self._is_particle_mode():
+        # Switching the active method to a per-cell engine.
+        if self._active_mode() in ("particle", "multiscale"):
             self._adopt_particle_defaults()
 
-    def _adopt_particle_defaults(self) -> None:
-        """Adopt the validated one-knob default (k=1) on entering particle mode.
+    def _on_ms_auto_start_toggled(self, _checked: bool) -> None:
+        self._apply_mode_gating()  # toggles the manual Window field in multi-scale mode
 
-        ``k`` stays editable so the user can raise it to be conservative (fewer
-        false positives, at the cost of missing dim sub-threshold particles). The
-        smallest-particle Ø is measured fresh by the host at each run (the d_min
-        field is a readout), so there is nothing to seed here beyond ``k``.
+    def _adopt_particle_defaults(self) -> None:
+        """Adopt the validated one-knob default (k=1) on entering a per-cell mode.
+
+        ``k`` stays editable so the user can raise it to be conservative. Sizes are
+        measured fresh by the host at each run (d_min readout / multi-scale
+        assessment), so there is nothing to seed here beyond ``k``.
         """
         self._k.setValue(1.0)
 
@@ -307,34 +379,64 @@ class AdaptiveClipSettingsWidget(QWidget):
         """The selected auto-window method's internal code."""
         return _WINDOW_METHOD_CODES[self._window_method.currentText()]
 
-    def _is_particle_mode(self) -> bool:
-        """True when the active mode is the per-cell d_min engine.
+    def _active_mode(self) -> str:
+        """The active run mode: ``manual`` / ``finder`` / ``particle`` / ``multiscale``.
 
-        Requires Auto on (the dropdown is the auto-window method picker) and the
-        "Otsu detect smallest particle size" method selected.
+        Auto off is always ``manual``. Auto on dispatches on the selected method:
+        the two per-cell engine switches (``particle`` = Otsu-detect-particle,
+        ``multiscale``) or a whole-frame ``finder`` (granule-size / otsu-mean).
         """
-        return self._auto.isChecked() and self._method_code() == _OTSU_SMALLEST_CODE
+        if not self._auto.isChecked():
+            return "manual"
+        code = self._method_code()
+        if code == _OTSU_SMALLEST_CODE:
+            return "particle"
+        if code == _MULTISCALE_CODE:
+            return "multiscale"
+        return "finder"
+
+    def _is_particle_mode(self) -> bool:
+        """True when the active mode is the per-cell d_min (Otsu-detect-particle) engine."""
+        return self._active_mode() == "particle"
+
+    def _is_multiscale_mode(self) -> bool:
+        """True when the active mode is the multi-scale per-cell routine."""
+        return self._active_mode() == "multiscale"
 
     def _apply_mode_gating(self) -> None:
         """Enable/disable fields for the active mode.
 
-        The per-cell (particle) mode derives the spatial scale from ``d_min``, so
-        the size filter and the noise estimate go disabled. ``d_min`` itself is a
-        disabled **readout** (the host re-measures it fresh at each run), never an
-        input; the editable per-cell knob is instead the size **percentile**. ``k``
-        stays live in every mode (the sensitivity knob), as do Gaussian σ and Auto.
-        The manual window is live only when Auto is off; the method dropdown is
-        live only when Auto is on.
+        - ``finder`` / ``manual``: size filter + noise estimate live; ``d_min`` /
+          percentile / multi-scale controls off. The manual window is live only in
+          ``manual``; the method dropdown only when Auto is on.
+        - ``particle``: percentile live; ``d_min`` is a disabled readout; size
+          filter / noise off (per-cell MAD).
+        - ``multiscale``: size cutoff + auto-start live; the manual Window is live
+          only when auto-start is off; size filter / noise / d_min / percentile off.
+
+        ``k`` stays live in every mode; so do Gaussian σ and Auto.
         """
+        mode = self._active_mode()
         auto = self._auto.isChecked()
-        particle = self._is_particle_mode()
         self._d_min.setEnabled(False)  # readout: filled by the host at run time
-        self._percentile.setEnabled(particle)  # the editable per-cell knob
-        for w in (self._min_size, self._unit, self._noise):
-            w.setEnabled(not particle)
+        self._percentile.setEnabled(mode == "particle")
+        self._cutoff.setEnabled(mode == "multiscale")
+        self._ms_auto_start.setEnabled(mode == "multiscale")
+        self._iterations.setEnabled(mode == "multiscale")
+        # Min particle size filter: live in manual/finder AND multi-scale (where it
+        # filters the OR-combined output). The noise estimator is only used by the
+        # whole-frame detector (manual/finder); per-cell modes use a fixed MAD σ.
+        size_filter = mode in ("manual", "finder", "multiscale")
+        self._min_size.setEnabled(size_filter)
+        self._unit.setEnabled(size_filter)
+        self._noise.setEnabled(mode in ("manual", "finder"))
         self._k.setEnabled(True)
-        self._window.setEnabled(not auto)  # manual window: live only when Auto off
-        self._window_unit.setEnabled(not auto)
+        # Manual window: live in manual mode, or as the multi-scale manual start.
+        manual_window = mode == "manual" or (
+            mode == "multiscale" and not self._ms_auto_start.isChecked()
+        )
+        self._window.setEnabled(manual_window)
+        self._window_unit.setEnabled(manual_window)
         self._window_method.setEnabled(auto)
 
     # ── Public API ────────────────────────────────────────────────
@@ -354,6 +456,10 @@ class AdaptiveClipSettingsWidget(QWidget):
             particle_mode=self._is_particle_mode(),
             d_min_um=float(self._d_min.value()),
             particle_percentile=float(self._percentile.value()),
+            multiscale_mode=self._is_multiscale_mode(),
+            size_cutoff_px=float(self._cutoff.value()),
+            ms_auto_start=self._ms_auto_start.isChecked(),
+            ms_iterations=int(self._iterations.value()),
         )
 
     def set_d_min_um(self, d_min_um: float) -> None:
@@ -389,6 +495,9 @@ class AdaptiveClipSettingsWidget(QWidget):
             self._window_method,
             self._percentile,
             self._d_min,
+            self._cutoff,
+            self._ms_auto_start,
+            self._iterations,
             self._window,
             self._window_unit,
         ):

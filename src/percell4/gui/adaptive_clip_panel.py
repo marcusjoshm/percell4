@@ -19,6 +19,7 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 from percell4.gui._adaptive_clip_settings import AdaptiveClipSettingsWidget
+from percell4.gui._cnr_classify_settings import CnrClassifySettingsWidget
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
 
@@ -131,6 +132,69 @@ def run_adaptive_detection_per_cell(image, labels, window_px, min_spot_px, k, pr
     return mask, int(window_px)
 
 
+def run_adaptive_detection_multiscale(
+    image, labels, start_window_px, max_particle_px, k, presmooth_sigma_px,
+    force_passes=None, min_spot_px=1,
+):
+    """Worker body for the multi-scale routine (per-cell, doubling windows OR-combined).
+
+    Runs the per-cell adaptive clip at a doubling window sequence (from
+    ``start_window_px`` until past ``max_particle_px``, or exactly ``force_passes``
+    passes when set) and unions the masks, so particles across a wide size range are
+    all captured. ``min_spot_px`` is the Min-particle-size filter applied once to the
+    combined mask. Returns ``(mask uint8, largest_window_used int)``. Pure (no Qt) so
+    it is worker-safe.
+    """
+    from percell4.domain.measure.adaptive_clip import detect_adaptive_multiscale
+
+    mask, windows = detect_adaptive_multiscale(
+        image,
+        labels,
+        start_window_px=start_window_px,
+        max_particle_px=max_particle_px,
+        k=k,
+        presmooth_sigma_px=presmooth_sigma_px,
+        min_spot_px=min_spot_px,
+        force_passes=force_passes,
+    )
+    return mask, int(windows[-1]) if windows else 0
+
+
+def run_cnr_classification(image, feature_mask, labels, *, mode, threshold):
+    """Worker body for CNR subpopulation classification (per-cell, pure).
+
+    Maps the GUI ``mode`` to :func:`classify_by_cnr`: ``"discover"`` → defaults,
+    ``"guided"`` → ``threshold=…``, ``"forced"`` → ``n_populations=2``. Splits the
+    result's ``labels_image`` (0=bg / 1=low-CNR / 2=high-CNR) into one ``{0,1}``
+    ``uint8`` mask per population and returns
+    ``(pop_masks: list[(suffix, mask)], components: list[dict], report: dict)``.
+    A single-population result yields one mask with suffix ``""`` (the base name).
+    Pure (no Qt / store) so it is worker-safe and unit-testable.
+    """
+    from percell4.domain.measure.cnr_classification import classify_by_cnr
+
+    if mode == "guided":
+        res = classify_by_cnr(image, feature_mask, labels, threshold=float(threshold))
+    elif mode == "forced":
+        res = classify_by_cnr(image, feature_mask, labels, n_populations=2)
+    else:  # discover
+        res = classify_by_cnr(image, feature_mask, labels)
+
+    lab = np.asarray(res.labels_image)
+    if res.n_subpopulations >= 2:
+        pop_masks = [
+            ("_low", (lab == 1).astype(np.uint8)),
+            ("_high", (lab == 2).astype(np.uint8)),
+        ]
+    else:
+        # One population: all classified foci in a single mask under the base name.
+        pop_masks = [("", (lab > 0).astype(np.uint8))]
+    # Drop any empty population mask (e.g. a degenerate split) so we never persist
+    # a blank resource.
+    pop_masks = [(suffix, m) for suffix, m in pop_masks if int(m.sum()) > 0]
+    return pop_masks, res.components, res.report
+
+
 class AdaptiveClipPanel(QWidget):
     """Interactive Adaptive Local Clipping panel (Creator)."""
 
@@ -155,6 +219,10 @@ class AdaptiveClipPanel(QWidget):
         self._pending_auto = False
         self._pending_particle = False
         self._pending_d_min = 0.0
+        # CNR classification (separate Action path — its own worker + pending state
+        # so it never collides with the detection run's _pending_* flags).
+        self._cnr_worker = None
+        self._pending_classify_base: str | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -182,7 +250,39 @@ class AdaptiveClipPanel(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
+        # ── CNR subpopulation classification (a separate Action on a saved mask) ──
+        cnr_heading = QLabel("CNR Subpopulation Classification")
+        cnr_heading.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        layout.addWidget(cnr_heading)
+
+        self._cnr_settings = CnrClassifySettingsWidget(self)
+        layout.addWidget(self._cnr_settings)
+
+        self._classify_btn = QPushButton("Classify Mask by CNR")
+        self._classify_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {theme.ACTION_GREEN}; color: white;"
+            f" padding: 8px; font-weight: bold; border-radius: 4px; }}"
+            f" QPushButton:hover {{ background-color: {theme.ACTION_GREEN_HOVER}; }}"
+        )
+        self._classify_btn.clicked.connect(self._on_classify)
+        layout.addWidget(self._classify_btn)
+
         layout.addStretch()
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        """Refresh the CNR source-mask list when the panel becomes visible."""
+        super().showEvent(event)
+        self._refresh_cnr_masks()
+
+    def _refresh_cnr_masks(self) -> None:
+        """Repopulate the CNR source-mask combo from the store's current masks."""
+        store = self._get_store()
+        names = (
+            store.list_masks()
+            if store is not None and hasattr(store, "list_masks")
+            else []
+        )
+        self._cnr_settings.set_mask_choices(names)
 
     # ── helpers ──────────────────────────────────────────────────
 
@@ -228,12 +328,15 @@ class AdaptiveClipPanel(QWidget):
             f"  auto_window       : {config.auto_window}\n"
             f"  window_method     : {config.window_method}\n"
             f"  particle_mode     : {config.particle_mode}\n"
+            f"  multiscale_mode   : {config.multiscale_mode}\n"
             f"  window            : {config.window_value} {config.window_unit}\n"
             f"  k                 : {config.k}\n"
             f"  gaussian_sigma    : {config.gaussian_sigma}\n"
             f"  noise_estimator   : {config.noise_estimator}\n"
             f"  size_percentile   : {config.particle_percentile} %\n"
             f"  detected Ø (µm)   : {config.d_min_um}\n"
+            f"  size_cutoff (px)  : {config.size_cutoff_px}  auto_start={config.ms_auto_start}"
+            f"  iterations={config.ms_iterations or 'auto'}\n"
             f"  min particle size : {config.min_size_value} {config.min_size_unit}",
             flush=True,
         )
@@ -286,6 +389,11 @@ class AdaptiveClipPanel(QWidget):
         # measurement (needs labels + a known pixel size).
         if config.particle_mode:
             self._run_particle_mode(config, image, is_timelapse, store, viewer_win)
+            return
+
+        # Multi-scale: per-cell Otsu size assessment -> doubling windows OR-combined.
+        if config.multiscale_mode:
+            self._run_multiscale_mode(config, image, is_timelapse, store, viewer_win)
             return
 
         # Manual mode (Auto off): window in px/µm, per-cell off the active
@@ -439,6 +547,128 @@ class AdaptiveClipPanel(QWidget):
         self._worker.error.connect(self._on_detect_error)
         self._worker.start()
 
+    def _run_multiscale_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
+        """Creator path for the multi-scale routine (per-cell, doubling windows).
+
+        Per-cell Otsu measures the particle-size range on the current image; the
+        starting window is ½ × mean particle (or the manual Window field); the
+        per-cell detector runs at a doubling window sequence until past the largest
+        particle, and the masks are OR-combined. Per-cell ⇒ requires an active
+        segmentation, single-frame.
+        """
+        if is_timelapse:
+            self._show_status("Multi-scale mode supports single-frame channels only")
+            return
+        seg = self.data_model.session.active_segmentation
+        if not seg:
+            self._show_status("Multi-scale mode needs an active segmentation")
+            return
+        labels = self._find_layer_data(viewer_win, "Labels", seg)
+        if labels is None:
+            self._show_status(f"Segmentation '{seg}' not found in viewer")
+            return
+        if labels.shape != image.shape:
+            self._show_status("Segmentation and channel shapes differ")
+            return
+
+        from percell4.domain.measure.adaptive_clip import (
+            assess_particle_sizes_per_cell,
+            multiscale_windows,
+            resolve_min_area_px,
+            resolve_window_px,
+        )
+
+        # Min-particle-size filter applied to the OR-combined output (µm² needs calibration).
+        try:
+            min_spot_px = max(
+                1,
+                resolve_min_area_px(
+                    config.min_size_value, config.min_size_unit, self._pixel_size_um(store)
+                ),
+            )
+        except ValueError as e:
+            self._show_status(str(e))
+            return
+
+        # First pass: per-cell Otsu size assessment on the current image.
+        report = assess_particle_sizes_per_cell(
+            image, labels, config.gaussian_sigma, cutoff_px=float(config.size_cutoff_px)
+        )
+        if report is None:
+            self._show_status("Multi-scale: Otsu found no particles to size from")
+            return
+
+        # Starting window: ½ × mean particle (auto) or the manual Window field.
+        if config.ms_auto_start:
+            start_window_px = max(3, int(round(0.5 * report.mean_px)) | 1)
+        else:
+            try:
+                start_window_px = resolve_window_px(
+                    config.window_value, config.window_unit, self._pixel_size_um(store)
+                )
+            except ValueError as e:
+                self._show_status(str(e))
+                return
+
+        force_passes = config.ms_iterations if config.ms_iterations > 0 else None
+        windows = multiscale_windows(
+            start_window_px, report.largest_px, force_passes=force_passes
+        )
+        stop_note = (
+            f"{len(windows)} forced passes"
+            if force_passes
+            else "stop > largest"
+        )
+        # Debug: raw Otsu min/max (calibration), post-cutoff stats, and the windows.
+        print(
+            f"  [multi-scale] Otsu raw particle Ø: min {report.raw_min_px:.2f} px, "
+            f"max {report.raw_max_px:.2f} px  (n_raw={report.n_raw})\n"
+            f"    post-cutoff (>= {config.size_cutoff_px:g} px): smallest "
+            f"{report.smallest_px:.2f}, mean {report.mean_px:.2f}, largest "
+            f"{report.largest_px:.2f}, range {report.range_px:.2f}  (n={report.n_particles})\n"
+            f"    start window {start_window_px} px "
+            f"({'½×mean auto' if config.ms_auto_start else 'manual'}); "
+            f"windows {windows} ({stop_note}); min particle {min_spot_px} px² (output filter)",
+            flush=True,
+        )
+
+        existing = store.list_masks() if hasattr(store, "list_masks") else []
+        mask_name = prompt_for_resource_name(
+            self,
+            title="Save Adaptive Clipping Mask",
+            label="Mask name:",
+            default="adaptive",
+            existing_names=existing,
+        )
+        if mask_name is None:
+            return
+
+        self._pending_name = mask_name
+        self._pending_auto = False
+        self._pending_particle = False
+        self._run_btn.setEnabled(False)
+        self._settings.set_enabled(False)
+        self._show_status(
+            f"Detecting (multi-scale, {len(windows)} windows {windows[0]}–{windows[-1]} px)..."
+        )
+
+        from percell4.gui.workers import Worker
+
+        self._worker = Worker(
+            run_adaptive_detection_multiscale,
+            image,
+            labels,
+            start_window_px,
+            report.largest_px,
+            float(config.k),
+            config.gaussian_sigma,
+            force_passes,
+            min_spot_px,
+        )
+        self._worker.finished.connect(self._on_detect_done)
+        self._worker.error.connect(self._on_detect_error)
+        self._worker.start()
+
     def _run_particle_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
         """Creator path for the one-knob particle-size detector (per-cell).
 
@@ -587,4 +817,186 @@ class AdaptiveClipPanel(QWidget):
         else:
             win_note = ""
         self._pending_particle = False
+        # A new mask is now available as a CNR classification source.
+        self._refresh_cnr_masks()
         self._show_status(f"Saved '{name}': {res.n_positive:,} px{win_note}")
+
+    # ── CNR subpopulation classification (Action) ─────────────────
+
+    def _print_cnr_settings_debug(self, cfg) -> None:
+        """Print the CNR-classification settings to the terminal (debug)."""
+        print(
+            "\n===== CNR subpopulation classification =====\n"
+            f"  source_mask : {cfg.source_mask}\n"
+            f"  mode        : {cfg.mode}\n"
+            f"  threshold   : {cfg.threshold}  (guided only)",
+            flush=True,
+        )
+
+    def _print_cnr_report(self, report) -> None:
+        """Print the classification decision trail to the terminal (debug)."""
+        dip = report.get("dip_cnr", {})
+        pct = report.get("cnr_percentiles", {})
+        print(
+            f"  decision    : {report.get('decision')}\n"
+            f"  foci        : {report.get('n_components_valid')} valid / "
+            f"{report.get('n_components_total')} total\n"
+            f"  dip (logCNR): method={dip.get('method')} p={dip.get('pvalue')} "
+            f"bimodal={dip.get('bimodal')} reliable={dip.get('reliable')}\n"
+            f"  CNR pct     : {pct}\n"
+            f"  candidate th: {report.get('candidate_cnr_threshold')}\n"
+            f"  mode        : {report.get('mode')}\n"
+            f"  group sizes : {report.get('group_sizes')} "
+            f"(smaller frac {report.get('smaller_group_fraction')})\n"
+            f"  warnings    : {report.get('warnings')}",
+            flush=True,
+        )
+
+    def _on_classify(self) -> None:
+        viewer_win = self._get_viewer_window()
+        if viewer_win is None or viewer_win.viewer is None:
+            self._show_status("Open a dataset in the viewer first")
+            return
+        store = self._get_store()
+        if store is None:
+            self._show_status("No dataset loaded")
+            return
+
+        channel = self.data_model.session.active_channel
+        if not channel:
+            self._show_status("Select a channel in the Session window first")
+            return
+        image = self._find_layer_data(viewer_win, "Image", channel)
+        if image is None:
+            self._show_status(f"Channel '{channel}' not found in viewer")
+            return
+
+        # Per-cell σ ⇒ single-frame only (mirrors the per-cell detector modes).
+        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+        if image.ndim == 3 and n_timepoints > 1:
+            self._show_status("CNR classification supports single-frame channels only")
+            return
+
+        seg = self.data_model.session.active_segmentation
+        if not seg:
+            self._show_status("CNR classification needs an active segmentation")
+            return
+        labels = self._find_layer_data(viewer_win, "Labels", seg)
+        if labels is None:
+            self._show_status(f"Segmentation '{seg}' not found in viewer")
+            return
+        if labels.shape != image.shape:
+            self._show_status("Segmentation and channel shapes differ")
+            return
+
+        cfg = self._cnr_settings.current_config()
+        if not cfg.source_mask:
+            self._show_status("Select a source mask to classify")
+            return
+        # Read the saved feature mask from the store (a /masks/<name> renders as a
+        # napari Labels layer, so _find_layer_data has no apt 'mask' kind).
+        try:
+            feature_mask = store.read_mask(cfg.source_mask)
+        except Exception as e:  # noqa: BLE001 — surface any read failure
+            self._show_status(f"Could not read mask '{cfg.source_mask}': {e}")
+            return
+        if np.asarray(feature_mask).shape != image.shape:
+            self._show_status("Source mask and channel shapes differ")
+            return
+
+        existing = store.list_masks() if hasattr(store, "list_masks") else []
+        base_name = prompt_for_resource_name(
+            self,
+            title="Save CNR Populations",
+            label="Base mask name:",
+            default=f"{cfg.source_mask}_cnr",
+            existing_names=existing,
+        )
+        if base_name is None:
+            return
+
+        self._pending_classify_base = base_name
+        self._classify_btn.setEnabled(False)
+        self._run_btn.setEnabled(False)
+        self._settings.set_enabled(False)
+        self._cnr_settings.set_enabled(False)
+        self._print_cnr_settings_debug(cfg)
+        self._show_status(
+            f"Classifying '{cfg.source_mask}' by CNR ({cfg.mode})..."
+        )
+
+        from percell4.gui.workers import Worker
+
+        self._cnr_worker = Worker(
+            run_cnr_classification,
+            image,
+            feature_mask,
+            labels,
+            mode=cfg.mode,
+            threshold=cfg.threshold,
+        )
+        self._cnr_worker.finished.connect(self._on_classify_done)
+        self._cnr_worker.error.connect(self._on_classify_error)
+        self._cnr_worker.start()
+
+    def _unlock_after_classify(self) -> None:
+        self._classify_btn.setEnabled(True)
+        self._run_btn.setEnabled(True)
+        self._settings.set_enabled(True)
+        self._cnr_settings.set_enabled(True)
+
+    def _on_classify_error(self, err) -> None:
+        self._pending_classify_base = None
+        self._unlock_after_classify()
+        self._show_status(f"CNR classification error: {err.exc_type}: {err.message}")
+
+    def _on_classify_done(self, result) -> None:
+        pop_masks, components, report = result
+        self._unlock_after_classify()
+        self._print_cnr_report(report)
+
+        base = self._pending_classify_base or "cnr"
+        self._pending_classify_base = None
+
+        if not pop_masks:
+            self._show_status(
+                f"CNR classification: no populations to save "
+                f"({report.get('decision', '')})"
+            )
+            return
+
+        # Creator: persist each population as its own {0,1} mask (store-before-layer
+        # per AcceptPunctaMask; the panel owns the viewer add).
+        from percell4.application.use_cases.accept_puncta_mask import AcceptPunctaMask
+
+        viewer_win = self._get_viewer_window()
+        written: list[tuple[str, int]] = []
+        try:
+            uc = AcceptPunctaMask(self._get_repo(), self.data_model.session)
+            for suffix, m in pop_masks:
+                name = f"{base}{suffix}"
+                res = uc.execute(m, name)
+                if viewer_win is not None:
+                    viewer_win.add_mask(np.asarray(m, dtype=np.uint8), name=name)
+                written.append((name, res.n_positive))
+        except Exception as e:  # noqa: BLE001 — surface any persist failure
+            self._show_status(f"Failed to save population mask: {e}")
+            return
+
+        # Per-focus CNR table -> its own /classification/<base> group (store, not
+        # the repo port — write_dataframe lives on DatasetStore).
+        table_note = ""
+        store = self._get_store()
+        try:
+            import pandas as pd
+
+            df = pd.DataFrame(components)
+            if store is not None and not df.empty:
+                store.write_dataframe(f"/classification/{base}", df)
+                table_note = f"; table /classification/{base} ({len(df)} foci)"
+        except Exception as e:  # noqa: BLE001 — table is secondary; report but don't fail the masks
+            table_note = f"; table write failed: {e}"
+
+        self._refresh_cnr_masks()
+        summary = ", ".join(f"'{n}' {npos:,} px" for n, npos in written)
+        self._show_status(f"CNR populations saved: {summary}{table_note}")
