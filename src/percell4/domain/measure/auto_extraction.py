@@ -179,16 +179,16 @@ def measure_smallest_particle_diameter(
 ) -> float:
     """Smallest particle diameter (px), from a low LoG percentile at ``min_sigma``.
 
-    Used to set the fine window **directly**: at ``min_sigma=1`` the LoG size of a
-    small flat particle is ~3× its true diameter, which cancels the ×3 no-hole
-    factor, so this value approximates the fine window itself.
+    The caller applies the same no-hole rule as the largest end — fine window =
+    ``fill_factor × this`` — so this returns the smallest particle *diameter*, not
+    a window.
 
     CAVEAT: unlike the largest, the smallest is partly confounded with noise — at
     small scales the LoG also fires on texture, so the result depends on
     ``min_sigma``, ``presmooth_sigma_px`` and ``percentile`` (a low percentile, not
     the bare minimum, is used for stability). Treat it as an estimate of the
-    resolution-limited fine window, not a precise physical size. Returns ``0.0`` if
-    none found.
+    resolution-limited smallest particle, not a precise physical size. Returns
+    ``0.0`` if none found.
     """
     d = _log_diameters(
         image, cell_labels, min_sigma=min_sigma, max_sigma=max_sigma,
@@ -301,13 +301,13 @@ def auto_extract(
                 "smallest-particle autodetection found no blobs; supply a smallest "
                 "particle Ø (turn off Auto-detect smallest) instead"
             )
-        fine_window = _win(d_small)
-        # The LoG size is used directly as the window, so the equivalent *true* Ø
-        # is the window divided back out by the no-hole factor.
-        smallest_diameter_px = float(fine_window) / float(fill_factor)
+        # The fine window follows the same no-hole rule as the coarse pass and the
+        # manual path: window = fill_factor × the measured smallest diameter.
+        fine_window = _win(fill_factor * d_small)
+        smallest_diameter_px = float(d_small)
         smallest_source = (
             f"auto LoG p{SMALL_PERCENTILE:g} @ min_sigma={min_sigma_small:g} "
-            f"({d_small:.1f} px → window {fine_window})"
+            f"({d_small:.1f} px → window {fill_factor:g}×{d_small:.1f}={fine_window})"
         )
 
     # Shared presmoothed buffer + per-cell σ — the noise floor uses these so its

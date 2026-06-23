@@ -121,12 +121,13 @@ def test_auto_extract_single_pass_when_no_large_particle():
 
 
 def test_auto_extract_autodetects_smallest_by_default():
-    """smallest_particle_px=None -> fine window measured from the image (LoG)."""
+    """smallest_particle_px=None -> fine window = 3 × LoG-measured smallest Ø."""
     img, labels = _wide_range_image()
     mask, report = auto_extract(img, labels)  # default: autodetect both ends
     assert report.smallest_source.startswith("auto LoG")
-    assert report.fine_window >= 3
     assert report.smallest_diameter_px > 0.0
+    # fine window is the no-hole 3× of the measured smallest, not equal to it.
+    assert report.fine_window == max(3, round(3.0 * report.smallest_diameter_px))
     assert int(mask.sum()) > 0
 
 
