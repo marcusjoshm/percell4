@@ -48,12 +48,21 @@ class TokenConfig:
 
 @dataclass(frozen=True)
 class TileConfig:
-    """Configuration for tile stitching layout."""
+    """Configuration for tile stitching layout.
+
+    A dumb carrier: the cross-field rule ``register ⇒ overlap>0 ∧
+    reference_channel set`` is enforced at the importer gate, not here, so
+    every existing ``TileConfig(grid_rows=1, grid_cols=1)`` keeps constructing
+    and ``TileConfig(register=True, overlap=0.0)`` is intentionally valid.
+    """
 
     grid_rows: int = 1
     grid_cols: int = 1
     grid_type: str = "row_by_row"  # row_by_row, column_by_column, snake_by_row, snake_by_column
     order: str = "right_down"  # right_down, right_up, left_down, left_up
+    overlap: float = 0.0  # tile overlap fraction in [0, 1)
+    register: bool = False  # phase-correlation registration opt-in
+    reference_channel: str | None = None  # channel name registration solves on
 
     def __post_init__(self) -> None:
         valid_types = {"row_by_row", "column_by_column", "snake_by_row", "snake_by_column"}
@@ -68,6 +77,10 @@ class TileConfig:
         if self.order not in valid_orders:
             raise ValueError(
                 f"Unknown order {self.order!r}, must be one of {valid_orders}"
+            )
+        if not 0.0 <= self.overlap < 1.0:
+            raise ValueError(
+                f"overlap must be in [0.0, 1.0), got {self.overlap!r}"
             )
 
 
@@ -196,6 +209,37 @@ class ProvenanceRecord:
             "importer_version": self.importer_version,
             "timestamp_utc": self.timestamp_utc,
             "content_sha256": self.content_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class StitchProvenanceRecord:
+    """Provenance for an overlap-aware registered stitch (``/provenance/stitch``).
+
+    All fields are str/bool so they round-trip cleanly as HDF5 attrs without
+    type ambiguity. ``quality_json`` is a JSON-encoded payload carrying the
+    per-pair correlations, disconnected-tile indices, ``accepted_pair_fraction``,
+    ``coverage_fraction``, and the engine parameters ``regression_threshold`` +
+    ``n_peaks`` so the solve is reproducible from the record (R12).
+    """
+
+    reference_channel: str
+    overlap: str
+    library: str  # name + identity/version of the vendored grid_stitching
+    quality_json: str  # JSON-encoded
+    n_tiles: str
+    importer_version: str
+    timestamp_utc: str
+
+    def to_attrs(self) -> dict:
+        return {
+            "reference_channel": self.reference_channel,
+            "overlap": self.overlap,
+            "library": self.library,
+            "quality_json": self.quality_json,
+            "n_tiles": self.n_tiles,
+            "importer_version": self.importer_version,
+            "timestamp_utc": self.timestamp_utc,
         }
 
 
