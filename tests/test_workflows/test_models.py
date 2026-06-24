@@ -393,6 +393,36 @@ def test_auto_extract_validation_is_skimage_free():
     assert not any(m.startswith("skimage") for m in sys.modules)
 
 
+# ── d_min / smallest-particle px-µm unit (U9) ─────────────────
+
+
+def test_adaptive_clip_unit_defaults_to_um():
+    assert AdaptiveClipSettings(d_min_um=0.4).d_min_unit == "um"
+
+
+def test_adaptive_clip_accepts_px_unit():
+    assert AdaptiveClipSettings(d_min_um=3.0, d_min_unit="px").d_min_unit == "px"
+
+
+def test_adaptive_clip_rejects_bad_unit():
+    with pytest.raises(ValueError, match="d_min_unit"):
+        AdaptiveClipSettings(d_min_um=0.4, d_min_unit="nm")
+
+
+def test_auto_extract_unit_defaults_to_um():
+    assert AutoExtractSettings().smallest_particle_unit == "um"
+
+
+def test_auto_extract_accepts_px_unit():
+    s = AutoExtractSettings(smallest_particle_um=3.0, smallest_particle_unit="px")
+    assert s.smallest_particle_unit == "px"
+
+
+def test_auto_extract_rejects_bad_unit():
+    with pytest.raises(ValueError, match="smallest_particle_unit"):
+        AutoExtractSettings(smallest_particle_um=3.0, smallest_particle_unit="nm")
+
+
 # ── CnrClassifySettings (U1) ──────────────────────────────────
 
 

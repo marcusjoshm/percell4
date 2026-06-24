@@ -711,31 +711,41 @@ def _apply_adaptive_clip_cells(
     detector ignores intensity grouping (it thresholds each Cellpose cell against
     its own MAD noise floor).
     """
-    if pixel_size_um is None or pixel_size_um <= 0:
-        return "adaptive clip: dataset has no pixel size (µm/px)"
+    # Unit resolution: in "px" mode the d_min value is pixels — feed the detector
+    # pixel_size 1.0 so it is used directly (no dataset pixel size needed, for
+    # datasets that lack one). In "um" mode require the real pixel size.
+    if settings.d_min_unit == "px":
+        eff_pixel = 1.0
+    else:
+        if pixel_size_um is None or pixel_size_um <= 0:
+            return (
+                "adaptive clip: dataset has no pixel size (µm/px); set the d_min "
+                "unit to px or add a pixel size"
+            )
+        eff_pixel = float(pixel_size_um)
     from percell4.domain.measure.adaptive_clip import (
         detect_adaptive_by_particle_size,
         window_min_spot_for_particle,
     )
 
-    # Plausibility guard: an absurd (but positive) pixel size or oversized d_min
-    # makes the local-background window exceed the frame, degenerating the "local"
-    # clip to a global one — detection silently collapses to an empty mask. Fail
-    # the dataset with a clear message instead.
-    window_px, _ = window_min_spot_for_particle(float(settings.d_min_um), float(pixel_size_um))
+    # Plausibility guard: an absurd pixel size or oversized d_min makes the
+    # local-background window exceed the frame, degenerating the "local" clip to a
+    # global one — detection silently collapses to an empty mask. Fail the dataset
+    # with a clear message instead.
+    window_px, _ = window_min_spot_for_particle(float(settings.d_min_um), eff_pixel)
     if window_px > min(image.shape[-2:]):
         return (
             f"adaptive clip: derived window {window_px}px exceeds the image "
-            f"({'x'.join(str(d) for d in image.shape[-2:])}) for d_min_um="
-            f"{settings.d_min_um:g} µm at pixel size {pixel_size_um:g} µm/px — "
-            "check the dataset pixel size and d_min"
+            f"({'x'.join(str(d) for d in image.shape[-2:])}) for d_min="
+            f"{settings.d_min_um:g} {settings.d_min_unit} — check the d_min and the "
+            "dataset pixel size"
         )
 
     try:
         mask = detect_adaptive_by_particle_size(
             image,
             labels,
-            float(pixel_size_um),
+            eff_pixel,
             float(settings.d_min_um),
             k=float(settings.k),
             presmooth_sigma_px=float(settings.presmooth_sigma_px),
@@ -748,9 +758,10 @@ def _apply_adaptive_clip_cells(
     np.minimum(combined, 1, out=combined)
     n_pos = int(combined.sum())
     logger.info(
-        "round %s: adaptive clip (d_min=%.3g µm, k=%.3g) — %d positive px",
+        "round %s: adaptive clip (d_min=%.3g %s, k=%.3g) — %d positive px",
         round_name,
         settings.d_min_um,
+        settings.d_min_unit,
         settings.k,
         n_pos,
     )
@@ -791,12 +802,17 @@ def _apply_auto_extract_cells(
 
     smallest_particle_px: float | None = None
     if settings.smallest_particle_um is not None:
-        if pixel_size_um is None or pixel_size_um <= 0:
-            return (
-                "auto extraction: dataset has no pixel size (µm/px) for the "
-                "smallest-particle override"
-            )
-        smallest_particle_px = float(settings.smallest_particle_um) / float(pixel_size_um)
+        # Unit resolution: "px" mode uses the value directly (no dataset pixel size
+        # needed); "um" mode converts via the pixel size and requires it.
+        if settings.smallest_particle_unit == "px":
+            smallest_particle_px = float(settings.smallest_particle_um)
+        else:
+            if pixel_size_um is None or pixel_size_um <= 0:
+                return (
+                    "auto extraction: dataset has no pixel size (µm/px) for the µm "
+                    "smallest-particle override; set the unit to px or add a pixel size"
+                )
+            smallest_particle_px = float(settings.smallest_particle_um) / float(pixel_size_um)
         # Plausibility: guard the FINE WINDOW (≈ FILL_FACTOR × smallest — the exact
         # window auto_extract derives), NOT the diameter. An absurd pixel size or
         # oversized smallest particle blows the window past the frame, degenerating
@@ -806,9 +822,9 @@ def _apply_auto_extract_cells(
             return (
                 f"auto extraction: fine window {fine_window}px (≈{FILL_FACTOR:g}× the "
                 f"smallest particle) exceeds the image "
-                f"({'x'.join(str(d) for d in image.shape[-2:])}) for "
-                f"smallest_particle_um={settings.smallest_particle_um:g} µm at pixel size "
-                f"{pixel_size_um:g} µm/px — check the dataset pixel size and smallest particle"
+                f"({'x'.join(str(d) for d in image.shape[-2:])}) for smallest_particle="
+                f"{settings.smallest_particle_um:g} {settings.smallest_particle_unit} — "
+                f"check the smallest particle and the dataset pixel size"
             )
 
     try:
@@ -1058,25 +1074,32 @@ def apply_threshold_headless(
     except (KeyError, ValueError) as e:
         return DatasetFailure.THRESHOLD_ERROR, str(e)
 
-    # The per-cell adaptive window is physical (µm), so adaptive rounds need a
-    # pixel size. Auto-extraction needs one only when the user supplied a µm
-    # smallest-particle override (auto-detect is px-native and needs none). Fail
-    # this dataset cleanly rather than producing garbage; never default to 1.
+    # A per-cell round needs a pixel size only when its size knob is in µm.
+    # Adaptive with d_min_unit="px", auto-extraction with a px override, and
+    # auto-detect are all px-native and need none. Fail this dataset cleanly rather
+    # than producing garbage; never default to 1.
     raw_ps = store.metadata.get("pixel_size_um")
     pixel_size_um = float(raw_ps) if raw_ps else None
-    needs_pixel_size = round_spec.adaptive_clip is not None or (
+    adaptive_needs_ps = (
+        round_spec.adaptive_clip is not None and round_spec.adaptive_clip.d_min_unit == "um"
+    )
+    auto_extract_needs_ps = (
         round_spec.auto_extract is not None
         and round_spec.auto_extract.smallest_particle_um is not None
+        and round_spec.auto_extract.smallest_particle_unit == "um"
     )
-    if needs_pixel_size and (pixel_size_um is None or pixel_size_um <= 0):
+    if (adaptive_needs_ps or auto_extract_needs_ps) and (
+        pixel_size_um is None or pixel_size_um <= 0
+    ):
         method = (
-            "adaptive sigma clipping"
-            if round_spec.adaptive_clip is not None
+            "adaptive sigma clipping (µm d_min)"
+            if adaptive_needs_ps
             else "auto extraction (µm smallest-particle override)"
         )
         return (
             DatasetFailure.THRESHOLD_ERROR,
-            f"{method} needs a pixel size (µm/px) on this dataset",
+            f"{method} needs a pixel size (µm/px) on this dataset; "
+            "switch the size unit to px or add a pixel size",
         )
 
     n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)

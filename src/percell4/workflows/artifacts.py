@@ -229,7 +229,12 @@ def _iterative_otsu_from_dict(d: dict[str, Any]) -> IterativeOtsuSettings:
 
 
 def _adaptive_clip_to_dict(s: AdaptiveClipSettings) -> dict[str, Any]:
-    return {"d_min_um": s.d_min_um, "k": s.k, "presmooth_sigma_px": s.presmooth_sigma_px}
+    return {
+        "d_min_um": s.d_min_um,
+        "k": s.k,
+        "presmooth_sigma_px": s.presmooth_sigma_px,
+        "d_min_unit": s.d_min_unit,
+    }
 
 
 def _adaptive_clip_from_dict(d: dict[str, Any]) -> AdaptiveClipSettings:
@@ -237,6 +242,8 @@ def _adaptive_clip_from_dict(d: dict[str, Any]) -> AdaptiveClipSettings:
         d_min_um=d["d_min_um"],
         k=d.get("k", 1.0),
         presmooth_sigma_px=d.get("presmooth_sigma_px", 1.0),
+        # Absent in legacy configs → µm (the original behavior).
+        d_min_unit=d.get("d_min_unit", "um"),
     )
 
 
@@ -244,6 +251,7 @@ def _auto_extract_to_dict(s: AutoExtractSettings) -> dict[str, Any]:
     return {
         "smallest_particle_um": s.smallest_particle_um,
         "presmooth_sigma_px": s.presmooth_sigma_px,
+        "smallest_particle_unit": s.smallest_particle_unit,
     }
 
 
@@ -252,6 +260,7 @@ def _auto_extract_from_dict(d: dict[str, Any]) -> AutoExtractSettings:
         # None == auto-detect; absent key also reconstructs as auto-detect.
         smallest_particle_um=d.get("smallest_particle_um"),
         presmooth_sigma_px=d.get("presmooth_sigma_px", 1.0),
+        smallest_particle_unit=d.get("smallest_particle_unit", "um"),
     )
 
 

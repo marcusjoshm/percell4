@@ -555,6 +555,20 @@ def test_apply_adaptive_clip_missing_pixel_size_fails_dataset(tmp_path):
     assert "ac" not in store.list_masks()
 
 
+def test_adaptive_clip_px_unit_runs_without_pixel_size(tmp_path):
+    """U9: in px mode an adaptive round needs no dataset pixel size — the d_min
+    value is taken as pixels directly."""
+    store = _make_adaptive_store(tmp_path / "px.h5", pixel_size_um=None)
+    round_spec = _adaptive_apply_round(
+        adaptive_clip=AdaptiveClipSettings(d_min_um=3.0, d_min_unit="px")
+    )
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+    assert store.read_mask("ac").sum() > 0
+
+
 def test_apply_adaptive_clip_zero_pixel_size_fails_dataset(tmp_path):
     store = _make_adaptive_store(tmp_path / "zero_ps.h5", pixel_size_um=0.0)
     round_spec = _adaptive_apply_round()
@@ -704,6 +718,19 @@ def test_auto_extract_um_override_missing_pixel_size_fails(tmp_path):
     assert failure is DatasetFailure.THRESHOLD_ERROR
     assert "pixel size" in msg
     assert "ae" not in store.list_masks()
+
+
+def test_auto_extract_px_unit_runs_without_pixel_size(tmp_path):
+    """U9: a px smallest-particle override needs no dataset pixel size."""
+    store = _make_auto_extract_store(tmp_path / "px.h5", pixel_size_um=None)
+    round_spec = _auto_extract_round(
+        auto_extract=AutoExtractSettings(smallest_particle_um=3.0, smallest_particle_unit="px")
+    )
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+    assert store.read_mask("ae").sum() > 0
 
 
 def test_auto_extract_autodetect_not_blocked_by_missing_pixel_size(tmp_path):

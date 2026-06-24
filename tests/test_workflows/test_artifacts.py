@@ -649,6 +649,32 @@ def test_auto_extract_cnr_mixed_config_round_trips() -> None:
     assert restored.thresholding_rounds[1].cnr_classify is None
 
 
+def test_size_unit_round_trips_px() -> None:
+    """The px size unit survives the round-trip for both ALC methods."""
+    ac = ThresholdingRound(
+        name="ac", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=3.0, d_min_unit="px"),
+    )
+    ae = ThresholdingRound(
+        name="ae", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        auto_extract=AutoExtractSettings(smallest_particle_um=3.0, smallest_particle_unit="px"),
+    )
+    assert _round_from_dict(_round_to_dict(ac)).adaptive_clip.d_min_unit == "px"
+    assert _round_from_dict(_round_to_dict(ae)).auto_extract.smallest_particle_unit == "px"
+
+
+def test_legacy_adaptive_round_defaults_size_unit_to_um() -> None:
+    """A legacy adaptive_clip dict without d_min_unit reconstructs as µm."""
+    legacy = {
+        "name": "ac", "channel": "GFP", "metric": "mean_intensity",
+        "algorithm": "kmeans", "adaptive_clip": {"d_min_um": 0.4},
+    }
+    r = _round_from_dict(legacy)
+    assert r.adaptive_clip.d_min_unit == "um"
+
+
 def test_puncta_round_round_trips_with_real_tuple_and_dict_params() -> None:
     """A puncta round with dict-input params and a real tuple scale prior
     round-trips to an equal object (the list/tuple and dict/tuple hazards)."""

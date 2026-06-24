@@ -289,10 +289,16 @@ class AdaptiveClipSettings:
     the eye-validated per-cell detector
     (``percell4.domain.measure.adaptive_clip.detect_adaptive_by_particle_size``)
     instead of grouped Otsu / puncta / iterative-Otsu. The detector is driven by
-    one physical knob, ``d_min_um`` (the smallest particle diameter, in µm, to
-    detect): it derives the local-background window and size filter, while the
-    noise floor is a robust per-cell ``1.4826*MAD`` so a fixed ``k`` transfers
-    across cells/datasets whose intensity scale varies many-fold.
+    the smallest particle diameter to detect (``d_min_um``): it derives the
+    local-background window and size filter, while the noise floor is a robust
+    per-cell ``1.4826*MAD`` so a fixed ``k`` transfers across cells/datasets whose
+    intensity scale varies many-fold.
+
+    ``d_min_um`` holds that diameter *value*; ``d_min_unit`` ("um" default, or
+    "px") says how to interpret it. In "um" mode the apply phase converts it to
+    pixels via the dataset pixel size (so it transfers across magnifications); in
+    "px" mode it is used as pixels directly — for datasets that lack a pixel size.
+    (The ``_um`` suffix is the historical/default-unit name, not a hard unit.)
 
     ``presmooth_sigma_px`` is the detector's fixed-pixel presmooth (noise
     suppression); it defaults to ``1.0`` — the eye-validated value. It is stored
@@ -306,10 +312,13 @@ class AdaptiveClipSettings:
     d_min_um: float
     k: float = 1.0
     presmooth_sigma_px: float = 1.0
+    d_min_unit: str = "um"
 
     def __post_init__(self) -> None:
         if self.d_min_um <= 0:
-            raise ValueError(f"d_min_um must be > 0 µm, got {self.d_min_um}")
+            raise ValueError(f"d_min must be > 0, got {self.d_min_um}")
+        if self.d_min_unit not in ("um", "px"):
+            raise ValueError(f"d_min_unit must be 'um' or 'px', got {self.d_min_unit!r}")
         if self.k < 0:
             raise ValueError(f"k must be >= 0, got {self.k}")
         if self.presmooth_sigma_px < 0:
@@ -328,10 +337,13 @@ class AutoExtractSettings:
     (window ``≈ 3 × LoG-measured largest particle``) fills large ones; the two are
     OR-unioned into one combined mask.
 
-    ``smallest_particle_um`` is the smallest particle diameter (µm) the user
-    supplies to **override** auto-detection of the smallest particle. ``None``
-    leaves it to be auto-detected from the image (no pixel size needed); when set,
-    the apply phase converts it to pixels via the dataset ``pixel_size_um``.
+    ``smallest_particle_um`` is the smallest particle diameter the user supplies to
+    **override** auto-detection of the smallest particle; ``smallest_particle_unit``
+    ("um" default, or "px") says how to interpret it. ``None`` leaves it
+    auto-detected from the image (no pixel size needed). In "um" mode the apply
+    phase converts it to pixels via the dataset pixel size; in "px" mode it is used
+    as pixels directly — for datasets that lack a pixel size. (The ``_um`` suffix is
+    the historical/default-unit name, not a hard unit.)
 
     ``presmooth_sigma_px`` is the detector's fixed-pixel presmooth; it defaults to
     ``1.0`` (the eye-validated value) and is stored here rather than borrowed from
@@ -343,12 +355,17 @@ class AutoExtractSettings:
 
     smallest_particle_um: float | None = None
     presmooth_sigma_px: float = 1.0
+    smallest_particle_unit: str = "um"
 
     def __post_init__(self) -> None:
         if self.smallest_particle_um is not None and self.smallest_particle_um <= 0:
             raise ValueError(
-                "smallest_particle_um must be > 0 µm or None (auto-detect), got "
+                "smallest_particle must be > 0 or None (auto-detect), got "
                 f"{self.smallest_particle_um}"
+            )
+        if self.smallest_particle_unit not in ("um", "px"):
+            raise ValueError(
+                f"smallest_particle_unit must be 'um' or 'px', got {self.smallest_particle_unit!r}"
             )
         if self.presmooth_sigma_px < 0:
             raise ValueError(f"presmooth_sigma_px must be >= 0, got {self.presmooth_sigma_px}")
