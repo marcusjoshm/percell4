@@ -22,7 +22,9 @@ from percell4.workflows.artifacts import (
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
     GmmCriterion,
     PunctaDetectorSettings,
@@ -551,6 +553,100 @@ def test_adaptive_clip_mixed_with_legacy_round_round_trips() -> None:
     restored = config_from_dict(config_to_dict(cfg))
     assert restored.thresholding_rounds[0].adaptive_clip.d_min_um == 0.14
     assert restored.thresholding_rounds[1].adaptive_clip is None
+
+
+def test_auto_extract_round_round_trips_with_override() -> None:
+    """An auto-extract round with a µm override survives to_dict → from_dict."""
+    r = ThresholdingRound(
+        name="SG",
+        channel="RFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        gaussian_sigma=2.0,
+        auto_extract=AutoExtractSettings(smallest_particle_um=0.4, presmooth_sigma_px=1.5),
+    )
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
+    assert restored.auto_extract is not None
+    assert restored.auto_extract.smallest_particle_um == 0.4
+    assert restored.auto_extract.presmooth_sigma_px == 1.5
+
+
+def test_auto_extract_round_round_trips_autodetect() -> None:
+    """smallest_particle_um=None (auto-detect) round-trips as None."""
+    r = ThresholdingRound(
+        name="SG",
+        channel="RFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        auto_extract=AutoExtractSettings(),
+    )
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
+    assert restored.auto_extract is not None
+    assert restored.auto_extract.smallest_particle_um is None
+
+
+def test_cnr_classify_round_round_trips() -> None:
+    """An auto-extract round with cnr_classify round-trips both."""
+    r = ThresholdingRound(
+        name="SG",
+        channel="RFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        auto_extract=AutoExtractSettings(smallest_particle_um=0.4),
+        cnr_classify=CnrClassifySettings(threshold=5.0),
+    )
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
+    assert restored.cnr_classify is not None
+    assert restored.cnr_classify.threshold == 5.0
+
+
+def test_legacy_round_omits_auto_extract_and_cnr_keys() -> None:
+    r = ThresholdingRound(
+        name="GFP_bright",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.GMM,
+    )
+    d = _round_to_dict(r)
+    assert "auto_extract" not in d
+    assert "cnr_classify" not in d
+    restored = _round_from_dict(d)
+    assert restored.auto_extract is None
+    assert restored.cnr_classify is None
+
+
+def test_auto_extract_cnr_mixed_config_round_trips() -> None:
+    """A config mixing an auto-extract+CNR round and a legacy Otsu round round-trips."""
+    from percell4.workflows.artifacts import config_from_dict, config_to_dict
+
+    cfg = _sample_config()
+    cfg = replace(
+        cfg,
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="ae",
+                channel="GFP",
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.KMEANS,
+                auto_extract=AutoExtractSettings(smallest_particle_um=0.14),
+                cnr_classify=CnrClassifySettings(threshold=4.0),
+            ),
+            ThresholdingRound(
+                name="otsu",
+                channel="GFP",
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.GMM,
+            ),
+        ],
+    )
+    restored = config_from_dict(config_to_dict(cfg))
+    assert restored.thresholding_rounds[0].auto_extract.smallest_particle_um == 0.14
+    assert restored.thresholding_rounds[0].cnr_classify.threshold == 4.0
+    assert restored.thresholding_rounds[1].auto_extract is None
+    assert restored.thresholding_rounds[1].cnr_classify is None
 
 
 def test_puncta_round_round_trips_with_real_tuple_and_dict_params() -> None:

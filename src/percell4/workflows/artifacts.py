@@ -25,7 +25,9 @@ from typing import Any
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
     DiluteSettings,
     EdgeMode,
@@ -238,6 +240,29 @@ def _adaptive_clip_from_dict(d: dict[str, Any]) -> AdaptiveClipSettings:
     )
 
 
+def _auto_extract_to_dict(s: AutoExtractSettings) -> dict[str, Any]:
+    return {
+        "smallest_particle_um": s.smallest_particle_um,
+        "presmooth_sigma_px": s.presmooth_sigma_px,
+    }
+
+
+def _auto_extract_from_dict(d: dict[str, Any]) -> AutoExtractSettings:
+    return AutoExtractSettings(
+        # None == auto-detect; absent key also reconstructs as auto-detect.
+        smallest_particle_um=d.get("smallest_particle_um"),
+        presmooth_sigma_px=d.get("presmooth_sigma_px", 1.0),
+    )
+
+
+def _cnr_classify_to_dict(s: CnrClassifySettings) -> dict[str, Any]:
+    return {"threshold": s.threshold}
+
+
+def _cnr_classify_from_dict(d: dict[str, Any]) -> CnrClassifySettings:
+    return CnrClassifySettings(threshold=d["threshold"])
+
+
 def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
     out: dict[str, Any] = {
         "name": r.name,
@@ -249,15 +274,20 @@ def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
         "kmeans_n_clusters": r.kmeans_n_clusters,
         "gaussian_sigma": r.gaussian_sigma,
     }
-    # Additive: only emitted for puncta / iterative-otsu / adaptive-clip rounds so
-    # legacy configs round-trip unchanged and old run_config.json files keep
-    # loading (the absent keys reconstruct as a legacy Otsu round).
+    # Additive: only emitted for puncta / iterative-otsu / adaptive-clip /
+    # auto-extract / cnr-classify rounds so legacy configs round-trip unchanged
+    # and old run_config.json files keep loading (absent keys reconstruct as a
+    # legacy Otsu round).
     if r.puncta is not None:
         out["puncta_detector"] = _puncta_to_dict(r.puncta)
     if r.iterative_otsu is not None:
         out["iterative_otsu"] = _iterative_otsu_to_dict(r.iterative_otsu)
     if r.adaptive_clip is not None:
         out["adaptive_clip"] = _adaptive_clip_to_dict(r.adaptive_clip)
+    if r.auto_extract is not None:
+        out["auto_extract"] = _auto_extract_to_dict(r.auto_extract)
+    if r.cnr_classify is not None:
+        out["cnr_classify"] = _cnr_classify_to_dict(r.cnr_classify)
     return out
 
 
@@ -265,6 +295,8 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
     puncta_raw = d.get("puncta_detector")
     iterative_raw = d.get("iterative_otsu")
     adaptive_raw = d.get("adaptive_clip")
+    auto_extract_raw = d.get("auto_extract")
+    cnr_classify_raw = d.get("cnr_classify")
     return ThresholdingRound(
         name=d["name"],
         channel=d["channel"],
@@ -280,6 +312,12 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
         ),
         adaptive_clip=(
             _adaptive_clip_from_dict(adaptive_raw) if adaptive_raw is not None else None
+        ),
+        auto_extract=(
+            _auto_extract_from_dict(auto_extract_raw) if auto_extract_raw is not None else None
+        ),
+        cnr_classify=(
+            _cnr_classify_from_dict(cnr_classify_raw) if cnr_classify_raw is not None else None
         ),
     )
 
