@@ -17,13 +17,18 @@ from qtpy.QtWidgets import QMessageBox
 
 from percell4.gui.workflows.single_cell.config_dialog import (
     _METHOD_ADAPTIVE,
+    _METHOD_AUTO_EXTRACT,
     _METHOD_GROUPED,
     _ROUND_COL_ALGO,
+    _ROUND_COL_CNR_ON,
+    _ROUND_COL_CNR_THR,
     _ROUND_COL_DMIN,
     _ROUND_COL_GMM_MAX,
     _ROUND_COL_K,
     _ROUND_COL_KMEANS_K,
     _ROUND_COL_METHOD,
+    _ROUND_COL_SIGMA,
+    _ROUND_COL_SMALLEST,
     WorkflowConfigDialog,
     _PendingDataset,
 )
@@ -336,6 +341,121 @@ def test_datasets_without_pixel_size_flags_missing(dialog, tmp_path):
     dialog._add_h5_paths([with_ps, no_ps])
     missing = dialog._datasets_without_pixel_size(dialog._pending_datasets)
     assert missing == ["NoPS"]
+
+
+# ── Method picker: auto-extraction + guided CNR (U5) ────────────────────
+
+
+def test_auto_extract_method_builds_round(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.36)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].auto_extract is not None
+    assert rounds[0].auto_extract.smallest_particle_um == 0.36
+    # The other method sentinels stay clear (no mutual-exclusion trip).
+    assert rounds[0].adaptive_clip is None
+    assert rounds[0].puncta is None
+    assert rounds[0].iterative_otsu is None
+
+
+def test_auto_extract_smallest_zero_means_autodetect(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.0)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].auto_extract is not None
+    assert rounds[0].auto_extract.smallest_particle_um is None  # 0 → auto-detect
+
+
+def test_auto_extract_disables_k_and_sigma_enables_smallest(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    smallest = dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST)
+    k = dialog._rounds_table.cellWidget(0, _ROUND_COL_K)
+    sigma = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIGMA)
+    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    assert smallest.isEnabled() is True
+    assert k.isEnabled() is False  # k is auto for two-pass
+    assert sigma.isEnabled() is False  # presmooth fixed at 1px, not user-facing
+
+
+def test_cnr_checkbox_enabled_only_on_alc_rows(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
+    # Grouped Otsu (default): CNR disabled.
+    assert cnr.isEnabled() is False
+    method.setCurrentText(_METHOD_ADAPTIVE)
+    assert cnr.isEnabled() is True
+    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    assert cnr.isEnabled() is True
+
+
+def test_cnr_threshold_gated_by_checkbox(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
+    thr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR)
+    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    assert thr.isEnabled() is False  # off until the box is checked
+    cnr.setChecked(True)
+    assert thr.isEnabled() is True
+    cnr.setChecked(False)
+    assert thr.isEnabled() is False
+
+
+def test_cnr_builds_settings_on_alc_round(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.36)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR).setValue(7.0)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].cnr_classify is not None
+    assert rounds[0].cnr_classify.threshold == 7.0
+
+
+def test_cnr_cleared_when_switching_to_grouped(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
+    method.setCurrentText(_METHOD_ADAPTIVE)
+    cnr.setChecked(True)
+    # Switching back to a non-ALC method unchecks CNR so a meaningless split
+    # cannot survive in the config.
+    method.setCurrentText(_METHOD_GROUPED)
+    assert cnr.isChecked() is False
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].cnr_classify is None
+
+
+def test_round_row_swap_preserves_auto_extract_and_cnr(dialog, h5_ds1):
+    """The new Smallest / CNR fields survive a row reorder (read/write symmetry)."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.36)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR).setValue(7.0)
+
+    dialog._swap_rounds(0, 1)
+
+    assert (
+        dialog._rounds_table.cellWidget(1, _ROUND_COL_METHOD).currentText()
+        == _METHOD_AUTO_EXTRACT
+    )
+    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_SMALLEST).value() == 0.36
+    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_ON).isChecked() is True
+    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_THR).value() == 7.0
 
 
 # ── Column picker ───────────────────────────────────────────────────────

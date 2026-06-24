@@ -71,7 +71,9 @@ from percell4.workflows.csv_columns import (
 )
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
     DiluteSettings,
     EdgeMode,
@@ -151,7 +153,10 @@ _ROUND_COL_KMEANS_K = 6
 _ROUND_COL_SIGMA = 7
 _ROUND_COL_DMIN = 8
 _ROUND_COL_K = 9
-_ROUND_COL_COUNT = 10
+_ROUND_COL_SMALLEST = 10
+_ROUND_COL_CNR_ON = 11
+_ROUND_COL_CNR_THR = 12
+_ROUND_COL_COUNT = 13
 _ROUND_COL_HEADERS = (
     "Name",
     "Channel",
@@ -163,12 +168,17 @@ _ROUND_COL_HEADERS = (
     "σ",
     "d_min (µm)",
     "k",
+    "Smallest (µm)",
+    "CNR split",
+    "CNR thr",
 )
 
 # Method dropdown labels. "Grouped Otsu" is the default (the legacy per-group
-# path); "Adaptive sigma clipping" carries an AdaptiveClipSettings sentinel.
+# path); "Adaptive sigma clipping" carries an AdaptiveClipSettings sentinel;
+# "Auto extraction (two-pass)" carries an AutoExtractSettings sentinel.
 _METHOD_GROUPED = "Grouped Otsu"
 _METHOD_ADAPTIVE = "Adaptive sigma clipping"
+_METHOD_AUTO_EXTRACT = "Auto extraction (two-pass)"
 
 
 # ── Internal per-dataset record ──────────────────────────────────────────
@@ -778,6 +788,9 @@ class WorkflowConfigDialog(QDialog):
             _ROUND_COL_SIGMA: 90,
             _ROUND_COL_DMIN: 100,
             _ROUND_COL_K: 70,
+            _ROUND_COL_SMALLEST: 110,
+            _ROUND_COL_CNR_ON: 80,
+            _ROUND_COL_CNR_THR: 80,
         }
         for col, width in _initial_round_col_widths.items():
             self._rounds_table.setColumnWidth(col, width)
@@ -1325,12 +1338,14 @@ class WorkflowConfigDialog(QDialog):
         # Selecting Adaptive greys the grouping columns (GMM/K-means) and enables
         # the d_min/k columns; Grouped Otsu does the inverse.
         method_combo = QComboBox()
-        method_combo.addItems([_METHOD_GROUPED, _METHOD_ADAPTIVE])
+        method_combo.addItems([_METHOD_GROUPED, _METHOD_ADAPTIVE, _METHOD_AUTO_EXTRACT])
         method_combo.setToolTip(
             "Grouped Otsu: per-intensity-group Otsu (uses Algorithm/GMM/K-means).\n"
-            "Adaptive sigma clipping: per-cell detector driven by the smallest "
-            "particle diameter (d_min, µm) and a robust per-cell noise floor; "
-            "ignores grouping and needs a pixel size on each dataset."
+            "Adaptive sigma clipping: per-cell single-window detector driven by the\n"
+            "smallest particle diameter (d_min, µm) and a robust per-cell noise floor.\n"
+            "Auto extraction (two-pass): per-cell two-pass detector; set Smallest (µm)\n"
+            "to override auto-detection (0 = auto-detect). Both per-cell methods ignore\n"
+            "grouping; the µm knobs need a pixel size on each dataset."
         )
         method_combo.currentTextChanged.connect(
             lambda _text, r=row: self._update_method_columns_enabled(r)
@@ -1382,6 +1397,40 @@ class WorkflowConfigDialog(QDialog):
         k_spin.setSingleStep(0.25)
         k_spin.setValue(1.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_K, k_spin)
+
+        # Smallest (µm) — auto-extraction override; 0 = auto-detect from the image.
+        smallest_spin = QDoubleSpinBox()
+        smallest_spin.setRange(0.0, 50.0)
+        smallest_spin.setDecimals(3)
+        smallest_spin.setSingleStep(0.05)
+        smallest_spin.setValue(0.0)
+        smallest_spin.setToolTip(
+            "Auto extraction: smallest particle diameter (µm) to override "
+            "auto-detection. 0 = auto-detect from the image (needs no pixel size)."
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_SMALLEST, smallest_spin)
+
+        # CNR split (guided) — opt-in subpopulation classification of the produced
+        # feature mask; valid only on per-cell (ALC) rounds.
+        cnr_check = QCheckBox()
+        cnr_check.setToolTip(
+            "Split the produced foci into 1–2 populations by contrast-to-noise "
+            "ratio at the CNR threshold (guided). Writes <round>_low / <round>_high "
+            "masks + a /classification/<round> table. ALC rounds only; single-"
+            "timepoint datasets only."
+        )
+        cnr_check.stateChanged.connect(
+            lambda _state, r=row: self._update_cnr_columns_enabled(r)
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_ON, cnr_check)
+
+        # CNR threshold — the guided split value; enabled only when CNR split is on.
+        cnr_thr_spin = QDoubleSpinBox()
+        cnr_thr_spin.setRange(0.01, 1000.0)
+        cnr_thr_spin.setDecimals(2)
+        cnr_thr_spin.setSingleStep(0.5)
+        cnr_thr_spin.setValue(5.0)
+        self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_THR, cnr_thr_spin)
 
         self._update_method_columns_enabled(row)
         self._refresh_column_picker()
@@ -1462,6 +1511,15 @@ class WorkflowConfigDialog(QDialog):
             "k": self._rounds_table.cellWidget(
                 row, _ROUND_COL_K
             ).value(),
+            "smallest_particle_um": self._rounds_table.cellWidget(
+                row, _ROUND_COL_SMALLEST
+            ).value(),
+            "cnr_classify": self._rounds_table.cellWidget(
+                row, _ROUND_COL_CNR_ON
+            ).isChecked(),
+            "cnr_threshold": self._rounds_table.cellWidget(
+                row, _ROUND_COL_CNR_THR
+            ).value(),
         }
 
     def _write_round_row(self, row: int, data: dict[str, Any]) -> None:
@@ -1495,43 +1553,96 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.cellWidget(
             row, _ROUND_COL_K
         ).setValue(float(data.get("k", 1.0)))
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_SMALLEST
+        ).setValue(float(data.get("smallest_particle_um", 0.0)))
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_CNR_ON
+        ).setChecked(bool(data.get("cnr_classify", False)))
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_CNR_THR
+        ).setValue(float(data.get("cnr_threshold", 5.0)))
         self._update_method_columns_enabled(row)
 
     def _is_adaptive_row(self, row: int) -> bool:
         method_combo = self._rounds_table.cellWidget(row, _ROUND_COL_METHOD)
         return method_combo is not None and method_combo.currentText() == _METHOD_ADAPTIVE
 
+    def _is_auto_extract_row(self, row: int) -> bool:
+        method_combo = self._rounds_table.cellWidget(row, _ROUND_COL_METHOD)
+        return (
+            method_combo is not None
+            and method_combo.currentText() == _METHOD_AUTO_EXTRACT
+        )
+
+    def _is_alc_row(self, row: int) -> bool:
+        """Per-cell Adaptive Local Clipping row (single-window OR two-pass) — the
+        rows that may opt into guided CNR subpopulation classification."""
+        return self._is_adaptive_row(row) or self._is_auto_extract_row(row)
+
     def _update_algo_columns_enabled(self, row: int) -> None:
         """Grey GMM-max / K-means-K per the Algorithm combo — but only when the
-        round is a Grouped Otsu round. Adaptive rounds keep both greyed (the
-        per-cell detector ignores intensity grouping). Values are retained either
-        way, so switching back restores prior input."""
+        round is a Grouped Otsu round. Per-cell (adaptive / auto-extraction) rounds
+        keep both greyed (they ignore intensity grouping). Values are retained
+        either way, so switching back restores prior input."""
         algo_combo = self._rounds_table.cellWidget(row, _ROUND_COL_ALGO)
         if algo_combo is None:
             return
-        adaptive = self._is_adaptive_row(row)
+        is_alc = self._is_alc_row(row)
         is_gmm = algo_combo.currentText() == ThresholdAlgorithm.GMM.value
         gmm_spin = self._rounds_table.cellWidget(row, _ROUND_COL_GMM_MAX)
         kmeans_spin = self._rounds_table.cellWidget(row, _ROUND_COL_KMEANS_K)
         if gmm_spin is not None:
-            gmm_spin.setEnabled(not adaptive and is_gmm)
+            gmm_spin.setEnabled(not is_alc and is_gmm)
         if kmeans_spin is not None:
-            kmeans_spin.setEnabled(not adaptive and not is_gmm)
+            kmeans_spin.setEnabled(not is_alc and not is_gmm)
 
     def _update_method_columns_enabled(self, row: int) -> None:
-        """Gate columns by the Method combo. Adaptive greys Algorithm + grouping
-        columns and enables d_min/k; Grouped Otsu does the inverse. Cell values
-        are retained when greyed so toggling Method back restores prior input."""
+        """Gate columns by the Method combo. Adaptive enables d_min/k; Auto-
+        extraction enables only Smallest (and greys k + σ — its presmooth is the
+        fixed validated 1 px, not user-facing); both grey Algorithm + grouping;
+        Grouped Otsu inverts. CNR-split controls are enabled only on per-cell (ALC)
+        rows. Values are retained when greyed so toggling Method back restores
+        prior input."""
         adaptive = self._is_adaptive_row(row)
+        auto_extract = self._is_auto_extract_row(row)
+        is_alc = adaptive or auto_extract
         algo_combo = self._rounds_table.cellWidget(row, _ROUND_COL_ALGO)
         if algo_combo is not None:
-            algo_combo.setEnabled(not adaptive)
+            algo_combo.setEnabled(not is_alc)
+        # d_min / k belong to the single-window adaptive method only.
         for col in (_ROUND_COL_DMIN, _ROUND_COL_K):
             w = self._rounds_table.cellWidget(row, col)
             if w is not None:
                 w.setEnabled(adaptive)
+        # Smallest (µm) belongs to auto-extraction only.
+        smallest = self._rounds_table.cellWidget(row, _ROUND_COL_SMALLEST)
+        if smallest is not None:
+            smallest.setEnabled(auto_extract)
+        # σ is a presmooth knob for grouped/adaptive; auto-extraction fixes its
+        # presmooth at the validated 1 px, so grey σ there.
+        sigma = self._rounds_table.cellWidget(row, _ROUND_COL_SIGMA)
+        if sigma is not None:
+            sigma.setEnabled(not auto_extract)
         # GMM/K-means enablement depends on both Method and Algorithm.
         self._update_algo_columns_enabled(row)
+        # CNR-split controls are valid only on per-cell ALC rows.
+        self._update_cnr_columns_enabled(row)
+
+    def _update_cnr_columns_enabled(self, row: int) -> None:
+        """The CNR-split checkbox is enabled only on per-cell (ALC) rows; the CNR
+        threshold is enabled only when the checkbox is on. On a non-ALC row the
+        checkbox is unchecked and disabled so a meaningless split can't be set."""
+        is_alc = self._is_alc_row(row)
+        check = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_ON)
+        thr = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_THR)
+        if check is not None:
+            if not is_alc and check.isChecked():
+                check.setChecked(False)  # clear a stale split on a non-ALC row
+            check.setEnabled(is_alc)
+        checked = check is not None and check.isChecked()
+        if thr is not None:
+            thr.setEnabled(is_alc and checked)
 
     def _on_round_item_changed(self, item: QTableWidgetItem) -> None:
         """Live-validate the Name column against the round-name regex."""
@@ -1963,14 +2074,22 @@ class WorkflowConfigDialog(QDialog):
             # datasets can be checked up front (tiff_pending datasets are
             # compressed during the run); their pixel size is enforced by the
             # runtime backstop in apply_threshold_headless.
-            if any(r.adaptive_clip is not None for r in rounds):
+            needs_pixel_size = any(
+                r.adaptive_clip is not None
+                or (
+                    r.auto_extract is not None
+                    and r.auto_extract.smallest_particle_um is not None
+                )
+                for r in rounds
+            )
+            if needs_pixel_size:
                 missing = self._datasets_without_pixel_size(kept_datasets)
                 if missing:
                     self._warn(
-                        "Adaptive sigma clipping needs a pixel size (µm/px) on every "
-                        "dataset, but it is missing on: " + ", ".join(missing) + ". "
-                        "Set the pixel size on these datasets, or remove the adaptive "
-                        "round."
+                        "Adaptive sigma clipping and µm auto-extraction overrides need "
+                        "a pixel size (µm/px) on every dataset, but it is missing on: "
+                        + ", ".join(missing) + ". Set the pixel size on these datasets, "
+                        "remove the round, or use auto-detect (Smallest = 0)."
                     )
                     return None
 
@@ -2174,14 +2293,30 @@ class WorkflowConfigDialog(QDialog):
                 algo = ThresholdAlgorithm(data["algorithm"])
             except ValueError as e:
                 raise ValueError(f"Round {row + 1}: {e}") from e
-            # Selecting Adaptive carries an AdaptiveClipSettings sentinel and
-            # explicitly clears the other method fields, so a row reconfigured
-            # from another method does not trip the mutual-exclusion check.
+            # Each method carries exactly one settings sentinel; only the selected
+            # method's sentinel is built, so a row reconfigured from another method
+            # does not trip the mutual-exclusion check.
+            method = data.get("method")
             adaptive = None
-            if data.get("method") == _METHOD_ADAPTIVE:
+            auto_extract = None
+            if method == _METHOD_ADAPTIVE:
                 adaptive = AdaptiveClipSettings(
                     d_min_um=float(data["d_min_um"]), k=float(data["k"])
                 )
+            elif method == _METHOD_AUTO_EXTRACT:
+                smallest = float(data.get("smallest_particle_um", 0.0))
+                # 0 (the spinbox minimum) means auto-detect → None.
+                auto_extract = AutoExtractSettings(
+                    smallest_particle_um=(smallest if smallest > 0 else None)
+                )
+            # Guided CNR split is opt-in and valid only on per-cell ALC rounds; the
+            # dialog disables the checkbox elsewhere, but guard the build too.
+            cnr_classify = None
+            if data.get("cnr_classify") and method in (
+                _METHOD_ADAPTIVE,
+                _METHOD_AUTO_EXTRACT,
+            ):
+                cnr_classify = CnrClassifySettings(threshold=float(data["cnr_threshold"]))
             try:
                 rounds.append(
                     ThresholdingRound(
@@ -2194,6 +2329,8 @@ class WorkflowConfigDialog(QDialog):
                         kmeans_n_clusters=int(data["kmeans_k"]),
                         gaussian_sigma=float(data["sigma"]),
                         adaptive_clip=adaptive,
+                        auto_extract=auto_extract,
+                        cnr_classify=cnr_classify,
                     )
                 )
             except ValueError as e:
