@@ -154,9 +154,10 @@ _ROUND_COL_SIGMA = 7
 _ROUND_COL_DMIN = 8
 _ROUND_COL_K = 9
 _ROUND_COL_SMALLEST = 10
-_ROUND_COL_CNR_ON = 11
-_ROUND_COL_CNR_THR = 12
-_ROUND_COL_COUNT = 13
+_ROUND_COL_SIZE_UNIT = 11
+_ROUND_COL_CNR_ON = 12
+_ROUND_COL_CNR_THR = 13
+_ROUND_COL_COUNT = 14
 _ROUND_COL_HEADERS = (
     "Name",
     "Channel",
@@ -166,9 +167,10 @@ _ROUND_COL_HEADERS = (
     "GMM max",
     "K-means K",
     "σ",
-    "d_min (µm)",
+    "d_min",
     "k",
-    "Smallest (µm)",
+    "Smallest",
+    "Unit",
     "CNR split",
     "CNR thr",
 )
@@ -788,7 +790,8 @@ class WorkflowConfigDialog(QDialog):
             _ROUND_COL_SIGMA: 90,
             _ROUND_COL_DMIN: 100,
             _ROUND_COL_K: 70,
-            _ROUND_COL_SMALLEST: 110,
+            _ROUND_COL_SMALLEST: 100,
+            _ROUND_COL_SIZE_UNIT: 70,
             _ROUND_COL_CNR_ON: 80,
             _ROUND_COL_CNR_THR: 80,
         }
@@ -1382,13 +1385,19 @@ class WorkflowConfigDialog(QDialog):
         sigma_spin.setValue(0.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_SIGMA, sigma_spin)
 
-        # d_min (µm) — smallest particle diameter for adaptive clipping. The
-        # positive minimum makes an invalid (<= 0) value structurally impossible.
+        # d_min — smallest particle diameter for adaptive clipping, in the Unit
+        # column's unit. The positive minimum makes an invalid (<= 0) value
+        # structurally impossible; the wide max accommodates a px diameter.
         dmin_spin = QDoubleSpinBox()
-        dmin_spin.setRange(0.02, 50.0)
+        dmin_spin.setRange(0.02, 10000.0)
         dmin_spin.setDecimals(3)
         dmin_spin.setSingleStep(0.05)
         dmin_spin.setValue(0.40)
+        dmin_spin.setToolTip(
+            "Adaptive sigma clipping: smallest particle diameter to detect, in the "
+            "unit chosen in the Unit column (µm uses the dataset pixel size; px is "
+            "used directly — for datasets without a pixel size)."
+        )
         self._rounds_table.setCellWidget(row, _ROUND_COL_DMIN, dmin_spin)
 
         # k — adaptive sigma multiplier.
@@ -1398,17 +1407,33 @@ class WorkflowConfigDialog(QDialog):
         k_spin.setValue(1.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_K, k_spin)
 
-        # Smallest (µm) — auto-extraction override; 0 = auto-detect from the image.
+        # Smallest — auto-extraction override, in the Unit column's unit;
+        # 0 = auto-detect from the image.
         smallest_spin = QDoubleSpinBox()
-        smallest_spin.setRange(0.0, 50.0)
+        smallest_spin.setRange(0.0, 10000.0)
         smallest_spin.setDecimals(3)
         smallest_spin.setSingleStep(0.05)
         smallest_spin.setValue(0.0)
         smallest_spin.setToolTip(
-            "Auto extraction: smallest particle diameter (µm) to override "
-            "auto-detection. 0 = auto-detect from the image (needs no pixel size)."
+            "Auto extraction: smallest particle diameter to override auto-detection, "
+            "in the unit chosen in the Unit column. 0 = auto-detect from the image "
+            "(needs no pixel size)."
         )
         self._rounds_table.setCellWidget(row, _ROUND_COL_SMALLEST, smallest_spin)
+
+        # Unit — px or µm for d_min / Smallest (whichever the row's method uses).
+        # µm resolves via the dataset pixel size; px is used directly (for datasets
+        # that lack a pixel size). Switching units does NOT auto-convert the value.
+        unit_combo = QComboBox()
+        unit_combo.addItem("µm", userData="um")
+        unit_combo.addItem("px", userData="px")
+        unit_combo.setCurrentIndex(0)  # µm — the historical default
+        unit_combo.setToolTip(
+            "Unit for d_min / Smallest. µm resolves to pixels per dataset using each "
+            "dataset's pixel size; px applies the value directly — pick px for "
+            "datasets that have no pixel size metadata."
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_SIZE_UNIT, unit_combo)
 
         # CNR split (guided) — opt-in subpopulation classification of the produced
         # feature mask; valid only on per-cell (ALC) rounds.
@@ -1514,6 +1539,9 @@ class WorkflowConfigDialog(QDialog):
             "smallest_particle_um": self._rounds_table.cellWidget(
                 row, _ROUND_COL_SMALLEST
             ).value(),
+            "size_unit": self._rounds_table.cellWidget(
+                row, _ROUND_COL_SIZE_UNIT
+            ).currentData(),
             "cnr_classify": self._rounds_table.cellWidget(
                 row, _ROUND_COL_CNR_ON
             ).isChecked(),
@@ -1556,6 +1584,9 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.cellWidget(
             row, _ROUND_COL_SMALLEST
         ).setValue(float(data.get("smallest_particle_um", 0.0)))
+        unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
+        unit_idx = unit_combo.findData(data.get("size_unit", "um"))
+        unit_combo.setCurrentIndex(unit_idx if unit_idx >= 0 else 0)
         self._rounds_table.cellWidget(
             row, _ROUND_COL_CNR_ON
         ).setChecked(bool(data.get("cnr_classify", False)))
@@ -1615,10 +1646,15 @@ class WorkflowConfigDialog(QDialog):
             w = self._rounds_table.cellWidget(row, col)
             if w is not None:
                 w.setEnabled(adaptive)
-        # Smallest (µm) belongs to auto-extraction only.
+        # Smallest belongs to auto-extraction only.
         smallest = self._rounds_table.cellWidget(row, _ROUND_COL_SMALLEST)
         if smallest is not None:
             smallest.setEnabled(auto_extract)
+        # The Unit applies to d_min (adaptive) or Smallest (auto-extraction), so it
+        # is live on any per-cell ALC row and greyed for Grouped Otsu.
+        unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
+        if unit_combo is not None:
+            unit_combo.setEnabled(is_alc)
         # σ is a presmooth knob for grouped/adaptive; auto-extraction fixes its
         # presmooth at the validated 1 px, so grey σ there.
         sigma = self._rounds_table.cellWidget(row, _ROUND_COL_SIGMA)
@@ -2068,17 +2104,18 @@ class WorkflowConfigDialog(QDialog):
                 self._warn(str(e))
                 return None
 
-            # Pre-flight: the per-cell adaptive window is physical (µm), so any
-            # adaptive round needs a pixel size on each dataset. Catch it now
-            # rather than as a per-dataset failure after a long run. Only h5
-            # datasets can be checked up front (tiff_pending datasets are
-            # compressed during the run); their pixel size is enforced by the
-            # runtime backstop in apply_threshold_headless.
+            # Pre-flight: a per-cell round needs a pixel size only when its size
+            # knob is in µm. px-unit rounds and auto-detect are px-native and need
+            # none. Catch the µm case now rather than as a per-dataset failure after
+            # a long run. Only h5 datasets can be checked up front (tiff_pending
+            # datasets are compressed during the run); their pixel size is enforced
+            # by the runtime backstop in apply_threshold_headless.
             needs_pixel_size = any(
-                r.adaptive_clip is not None
+                (r.adaptive_clip is not None and r.adaptive_clip.d_min_unit == "um")
                 or (
                     r.auto_extract is not None
                     and r.auto_extract.smallest_particle_um is not None
+                    and r.auto_extract.smallest_particle_unit == "um"
                 )
                 for r in rounds
             )
@@ -2086,10 +2123,10 @@ class WorkflowConfigDialog(QDialog):
                 missing = self._datasets_without_pixel_size(kept_datasets)
                 if missing:
                     self._warn(
-                        "Adaptive sigma clipping and µm auto-extraction overrides need "
-                        "a pixel size (µm/px) on every dataset, but it is missing on: "
-                        + ", ".join(missing) + ". Set the pixel size on these datasets, "
-                        "remove the round, or use auto-detect (Smallest = 0)."
+                        "µm d_min / smallest-particle values need a pixel size (µm/px) "
+                        "on every dataset, but it is missing on: " + ", ".join(missing)
+                        + ". Set the pixel size on these datasets, switch the round's "
+                        "Unit to px, or use auto-detect (Smallest = 0)."
                     )
                     return None
 
@@ -2297,17 +2334,21 @@ class WorkflowConfigDialog(QDialog):
             # method's sentinel is built, so a row reconfigured from another method
             # does not trip the mutual-exclusion check.
             method = data.get("method")
+            size_unit = data.get("size_unit", "um")
             adaptive = None
             auto_extract = None
             if method == _METHOD_ADAPTIVE:
                 adaptive = AdaptiveClipSettings(
-                    d_min_um=float(data["d_min_um"]), k=float(data["k"])
+                    d_min_um=float(data["d_min_um"]),
+                    k=float(data["k"]),
+                    d_min_unit=size_unit,
                 )
             elif method == _METHOD_AUTO_EXTRACT:
                 smallest = float(data.get("smallest_particle_um", 0.0))
                 # 0 (the spinbox minimum) means auto-detect → None.
                 auto_extract = AutoExtractSettings(
-                    smallest_particle_um=(smallest if smallest > 0 else None)
+                    smallest_particle_um=(smallest if smallest > 0 else None),
+                    smallest_particle_unit=size_unit,
                 )
             # Guided CNR split is opt-in and valid only on per-cell ALC rounds; the
             # dialog disables the checkbox elsewhere, but guard the build too.

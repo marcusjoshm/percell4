@@ -28,6 +28,7 @@ from percell4.gui.workflows.single_cell.config_dialog import (
     _ROUND_COL_KMEANS_K,
     _ROUND_COL_METHOD,
     _ROUND_COL_SIGMA,
+    _ROUND_COL_SIZE_UNIT,
     _ROUND_COL_SMALLEST,
     WorkflowConfigDialog,
     _PendingDataset,
@@ -456,6 +457,97 @@ def test_round_row_swap_preserves_auto_extract_and_cnr(dialog, h5_ds1):
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_SMALLEST).value() == 0.36
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_ON).isChecked() is True
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_THR).value() == 7.0
+
+
+# ── d_min / Smallest px-µm Unit column (U10) ────────────────────────────
+
+
+def _set_unit(dialog, row, code):
+    combo = dialog._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
+    combo.setCurrentIndex(combo.findData(code))
+
+
+def test_size_unit_defaults_to_um(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].adaptive_clip.d_min_unit == "um"
+
+
+def test_size_unit_enabled_only_on_alc_rows(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    unit = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIZE_UNIT)
+    assert unit.isEnabled() is False  # Grouped Otsu
+    method.setCurrentText(_METHOD_ADAPTIVE)
+    assert unit.isEnabled() is True
+    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    assert unit.isEnabled() is True
+
+
+def test_adaptive_px_unit_builds_round(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(3.0)
+    _set_unit(dialog, 0, "px")
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].adaptive_clip.d_min_um == 3.0
+    assert rounds[0].adaptive_clip.d_min_unit == "px"
+
+
+def test_auto_extract_px_unit_builds_round(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(3.0)
+    _set_unit(dialog, 0, "px")
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].auto_extract.smallest_particle_um == 3.0
+    assert rounds[0].auto_extract.smallest_particle_unit == "px"
+
+
+def test_px_unit_round_not_flagged_by_pixel_size_preflight(dialog, tmp_path):
+    """A px-unit auto-extract round on a dataset with NO pixel size builds a config
+    (the µm-only pre-flight must not fire)."""
+    no_ps = _make_h5_with_pixel_size(tmp_path, "NoPS", ["GFP"], pixel_size_um=None)
+    dialog._add_h5_paths([no_ps])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(3.0)
+    _set_unit(dialog, 0, "px")
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    cfg = dialog._try_build_config()
+    assert cfg is not None  # px round NOT blocked by the µm-only pixel-size pre-flight
+    assert cfg.thresholding_rounds[0].auto_extract.smallest_particle_unit == "px"
+
+
+def test_um_unit_round_flagged_by_pixel_size_preflight(dialog, tmp_path, monkeypatch):
+    """A µm-unit adaptive round on a dataset with NO pixel size IS blocked."""
+    no_ps = _make_h5_with_pixel_size(tmp_path, "NoPS", ["GFP"], pixel_size_um=None)
+    dialog._add_h5_paths([no_ps])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    _set_unit(dialog, 0, "um")
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    warnings = []
+    monkeypatch.setattr(dialog, "_warn", lambda msg, *a, **k: warnings.append(msg))
+    cfg = dialog._try_build_config()
+    assert cfg is None  # blocked
+    assert any("pixel size" in w for w in warnings)
+
+
+def test_size_unit_survives_row_swap(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    _set_unit(dialog, 0, "px")
+    dialog._swap_rounds(0, 1)
+    moved = dialog._rounds_table.cellWidget(1, _ROUND_COL_SIZE_UNIT)
+    assert moved.currentData() == "px"
 
 
 # ── Column picker ───────────────────────────────────────────────────────
