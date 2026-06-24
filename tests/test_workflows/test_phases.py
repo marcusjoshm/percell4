@@ -18,6 +18,7 @@ from percell4.store import DatasetStore
 from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
     DatasetSource,
     IterativeOtsuSettings,
@@ -596,6 +597,158 @@ def test_apply_adaptive_clip_presmooth_defaults_to_one_not_round_sigma(tmp_path)
     # And NOT the sigma=0 (no-presmooth) result, which differs on noisy data.
     no_presmooth = detect_adaptive_by_particle_size(image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=0.0)
     assert not np.array_equal(expected, no_presmooth)
+
+
+# ── apply_threshold_headless: auto-extraction (U3) ───────────────────────
+
+
+def _make_auto_extract_store(path: Path, pixel_size_um: float | None = 0.12) -> DatasetStore:
+    """One large cell with structured background (per-cell MAD > 0) and a bright
+    blob the two-pass auto-extractor should pick up."""
+    store = DatasetStore(path)
+    meta = {"channel_names": ["GFP"]}
+    if pixel_size_um is not None:
+        meta["pixel_size_um"] = pixel_size_um
+    store.create(metadata=meta)
+
+    img = np.zeros((1, 100, 100), dtype=np.float32)
+    rows = np.arange(100).reshape(-1, 1)
+    img[0, 20:60, 20:60] = 10 + (rows[20:60] % 3)
+    img[0, 35:45, 35:45] = 200.0  # bright blob well above k*sigma
+    store.write_array("intensity", img, attrs={"dims": ["C", "H", "W"]})
+
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[20:60, 20:60] = 1
+    store.write_labels("cellpose_qc", labels)
+    return store
+
+
+def _auto_extract_round(**overrides) -> ThresholdingRound:
+    defaults = dict(
+        name="ae",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=1.0,
+        auto_extract=AutoExtractSettings(smallest_particle_um=0.36),
+    )
+    defaults.update(overrides)
+    return ThresholdingRound(**defaults)
+
+
+def test_auto_extract_writes_binary_mask_and_degenerate_groups(tmp_path):
+    store = _make_auto_extract_store(tmp_path / "ae.h5")
+    round_spec = _auto_extract_round()
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+
+    mask = store.read_mask("ae")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    assert mask.sum() > 0  # the bright blob is detected
+    assert mask[:20].sum() == 0 and mask[60:].sum() == 0  # inside the cell only
+    groups = store.read_dataframe("/groups/ae")
+    assert set(groups["group_GFP_mean_intensity"].unique()) == {1}
+
+
+def test_auto_extract_trivial_grouping_bypasses_cluster_gate(tmp_path):
+    """An auto-extract round short-circuits grouping — a single-cell dataset that
+    grouped-Otsu would drop still yields a trivial grouping so apply runs."""
+    store = _make_fixture_h5(tmp_path / "one_cell.h5", n_cells=1)
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[5:11, 5:11] = 1
+    store.write_labels("cellpose_qc", labels)
+    result, failure, _ = threshold_compute_one(store, _auto_extract_round())
+    assert failure is None
+    assert result.n_groups == 1
+    assert set(result.group_assignments.unique()) == {1}
+
+
+def test_auto_extract_um_override_converts_to_px(tmp_path):
+    """A µm smallest override reaches auto_extract as (µm / pixel_size_um) px."""
+    from unittest.mock import patch
+
+    import percell4.domain.measure.auto_extraction as ae_mod
+    from percell4.workflows import phases as phases_mod
+
+    store = _make_auto_extract_store(tmp_path / "px.h5", pixel_size_um=0.12)
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    settings = AutoExtractSettings(smallest_particle_um=0.36)
+
+    captured = {}
+    real = ae_mod.auto_extract
+
+    def _spy(img, lab, *, smallest_particle_px=None, **kw):
+        captured["px"] = smallest_particle_px
+        return real(img, lab, smallest_particle_px=smallest_particle_px, **kw)
+
+    combined = np.zeros(labels.shape, dtype=np.uint8)
+    with patch.object(ae_mod, "auto_extract", _spy):
+        err = phases_mod._apply_auto_extract_cells(image, labels, settings, combined, 0.12, "ae")
+    assert err == ""
+    assert captured["px"] == pytest.approx(0.36 / 0.12)  # 3.0 px
+
+
+def test_auto_extract_um_override_missing_pixel_size_fails(tmp_path):
+    """A µm override with no pixel size fails cleanly (never defaults to 1 µm/px)."""
+    store = _make_auto_extract_store(tmp_path / "no_ps.h5", pixel_size_um=None)
+    round_spec = _auto_extract_round(auto_extract=AutoExtractSettings(smallest_particle_um=0.36))
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is DatasetFailure.THRESHOLD_ERROR
+    assert "pixel size" in msg
+    assert "ae" not in store.list_masks()
+
+
+def test_auto_extract_autodetect_not_blocked_by_missing_pixel_size(tmp_path):
+    """An auto-detect round (no µm override) is NOT failed by the pixel-size guard
+    even with no pixel size — auto-detect is px-native and needs none."""
+    store = _make_auto_extract_store(tmp_path / "autodetect.h5", pixel_size_um=None)
+    round_spec = _auto_extract_round(auto_extract=AutoExtractSettings())  # None override
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    _failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    # It must NOT be blocked for lacking a pixel size; success or a detection-side
+    # failure is fine, but never the pixel-size guard.
+    assert "pixel size" not in msg
+
+
+def test_auto_extract_presmooth_is_settings_default_not_round_sigma(tmp_path):
+    """R10 regression: presmooth comes from AutoExtractSettings (1.0), NOT the
+    round's grouped-Otsu gaussian_sigma (0) — proven by spying the auto_extract call,
+    and the result is not a silent empty mask."""
+    from unittest.mock import patch
+
+    import percell4.domain.measure.auto_extraction as ae_mod
+    from percell4.workflows import phases as phases_mod
+
+    store = _make_auto_extract_store(tmp_path / "presmooth.h5")
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    ps = float(store.metadata["pixel_size_um"])
+    settings = AutoExtractSettings(smallest_particle_um=0.36)  # presmooth defaults to 1.0
+
+    captured = {}
+    real = ae_mod.auto_extract
+
+    def _spy(img, lab, *, smallest_particle_px=None, presmooth_sigma_px=1.0, **kw):
+        captured["presmooth"] = presmooth_sigma_px
+        return real(
+            img, lab, smallest_particle_px=smallest_particle_px,
+            presmooth_sigma_px=presmooth_sigma_px, **kw,
+        )
+
+    combined = np.zeros(labels.shape, dtype=np.uint8)
+    with patch.object(ae_mod, "auto_extract", _spy):
+        err = phases_mod._apply_auto_extract_cells(image, labels, settings, combined, ps, "ae")
+    assert err == ""
+    assert captured["presmooth"] == 1.0  # NOT 0.0 (the round's gaussian_sigma default)
+    assert combined.sum() > 0  # catches the silent-empty-mask trap
 
 
 def test_apply_adaptive_clip_is_bit_identical_to_bare_detector(tmp_path):

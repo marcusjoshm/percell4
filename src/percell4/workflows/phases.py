@@ -59,6 +59,7 @@ from percell4.workflows.artifacts import write_atomic
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
     DatasetSource,
     EdgeMode,
@@ -471,17 +472,17 @@ def _group_image_labels(
     Returns ``(GroupingResult | None, failure, message)``. Shared by the
     single-frame and per-timepoint threshold-compute paths.
 
-    Adaptive-clip rounds short-circuit to a trivial single-group result (the
-    per-cell detector ignores grouping) so a clustering/measure failure on an
-    unused metric can never drop a dataset or timepoint the detector would have
-    thresholded.
+    Adaptive-clip and auto-extraction rounds short-circuit to a trivial
+    single-group result (the per-cell detectors ignore grouping) so a
+    clustering/measure failure on an unused metric can never drop a dataset or
+    timepoint the detector would have thresholded.
     """
     if int(labels.max()) == 0:
         return None, DatasetFailure.THRESHOLD_EMPTY, "no cells"
-    if round_spec.adaptive_clip is not None:
+    if round_spec.adaptive_clip is not None or round_spec.auto_extract is not None:
         ids = np.unique(labels)
         ids = ids[ids != 0]
-        return _trivial_grouping(ids), None, "adaptive: trivial single group"
+        return _trivial_grouping(ids), None, "per-cell: trivial single group"
     try:
         measure_df = measure_cells(image, labels, metrics=[round_spec.metric])
     except Exception as e:
@@ -766,6 +767,81 @@ def _apply_adaptive_clip_cells(
     return ""
 
 
+def _apply_auto_extract_cells(
+    image: NDArray,
+    labels: NDArray,
+    settings: AutoExtractSettings,
+    combined: NDArray,
+    pixel_size_um: float | None,
+    round_name: str,
+) -> str:
+    """Per-cell two-pass auto-extraction over one frame, into ``combined``.
+
+    Runs ``auto_extract`` (fine pass at ``≈3×smallest`` + optional coarse pass at
+    ``≈3×LoG-largest``, OR-unioned) on the **raw** image. The detector presmooths
+    itself at ``settings.presmooth_sigma_px`` (default 1 px — NOT the round's
+    grouped-Otsu ``gaussian_sigma``, which defaults to 0). ``smallest_particle_um``
+    overrides auto-detection of the smallest particle and is converted to pixels via
+    ``pixel_size_um``; ``None`` leaves the smallest auto-detected (no pixel size
+    needed). Unions the ``{0,1}`` result into ``combined`` in place. Returns an error
+    string on failure, else ``""``.
+    """
+    smallest_particle_px: float | None = None
+    if settings.smallest_particle_um is not None:
+        if pixel_size_um is None or pixel_size_um <= 0:
+            return (
+                "auto extraction: dataset has no pixel size (µm/px) for the "
+                "smallest-particle override"
+            )
+        smallest_particle_px = float(settings.smallest_particle_um) / float(pixel_size_um)
+        # Plausibility: an absurd (but positive) pixel size or oversized smallest
+        # particle makes the fine window exceed the frame, degenerating "local"
+        # clipping to a global one. Fail cleanly with a clear message.
+        if smallest_particle_px > min(image.shape[-2:]):
+            return (
+                f"auto extraction: smallest particle {smallest_particle_px:.1f}px exceeds "
+                f"the image ({'x'.join(str(d) for d in image.shape[-2:])}) for "
+                f"smallest_particle_um={settings.smallest_particle_um:g} µm at pixel size "
+                f"{pixel_size_um:g} µm/px — check the dataset pixel size and smallest particle"
+            )
+
+    from percell4.domain.measure.auto_extraction import auto_extract
+
+    try:
+        mask, report = auto_extract(
+            image,
+            labels,
+            smallest_particle_px=smallest_particle_px,
+            presmooth_sigma_px=float(settings.presmooth_sigma_px),
+        )
+    except Exception as e:
+        logger.exception("auto extraction failed for round %s", round_name)
+        return f"auto extraction: {e}"
+
+    np.maximum(combined, mask.astype(np.uint8), out=combined)
+    np.minimum(combined, 1, out=combined)
+    n_pos = int(combined.sum())
+    # Surface the two-pass decision in the run-log (these rounds apply headlessly,
+    # with no QC step, so the passes/window/largest-Ø are the only visible trace).
+    logger.info(
+        "round %s: auto extraction — passes=%s, fine_window=%s, largest=%.3gpx, "
+        "second_pass=%s, %d positive px",
+        round_name,
+        report.passes,
+        report.fine_window,
+        report.largest_particle_px or 0.0,
+        report.second_pass_used,
+        n_pos,
+    )
+    if n_pos == 0:
+        logger.warning(
+            "round %s: auto extraction detected 0 pixels — check the smallest "
+            "particle and the dataset pixel size",
+            round_name,
+        )
+    return ""
+
+
 def _apply_threshold_frame(
     image: NDArray,
     labels: NDArray,
@@ -789,16 +865,25 @@ def _apply_threshold_frame(
     else:
         smoothed = image.astype(np.float32)
 
-    # Dispatch precedence: adaptive-clip, then iterative-otsu, then puncta, then
-    # legacy per-group Otsu. All three sentinels None keeps the legacy path
-    # byte-identical.
+    # Dispatch precedence: auto-extract, then adaptive-clip, then iterative-otsu,
+    # then puncta, then legacy per-group Otsu. All method sentinels None keeps the
+    # legacy path byte-identical.
+    auto_extract = round_spec.auto_extract
     adaptive = round_spec.adaptive_clip
     iterative = round_spec.iterative_otsu
     puncta = round_spec.puncta
     use_puncta = puncta is not None and puncta.detector_name != "otsu"
 
     combined = np.zeros(labels.shape, dtype=np.uint8)
-    if adaptive is not None:
+    if auto_extract is not None:
+        # Two-pass auto-extraction also presmooths the RAW image itself (at its own
+        # validated presmooth_sigma_px, default 1 px) — same trap guard as adaptive.
+        err = _apply_auto_extract_cells(
+            image, labels, auto_extract, combined, pixel_size_um, round_spec.name,
+        )
+        if err:
+            return None, None, err
+    elif adaptive is not None:
         # The detector presmooths the RAW image itself (at its own validated
         # presmooth_sigma_px, default 1 px) — feeding `smoothed` would double-smooth,
         # and the round's grouped-Otsu `gaussian_sigma` (default 0) is not the
@@ -848,11 +933,15 @@ def _apply_threshold_frame(
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
     group_df.columns = ["label", col_name]
-    if adaptive is not None or (iterative is not None and iterative.scope != "groups"):
-        # Adaptive (per-cell) and per-cell/whole-field iterative scopes did NOT
-        # use the intensity grouping to build the mask, so keep /groups honest
-        # with a single degenerate group rather than implying a clustering that
-        # did not drive the result.
+    if (
+        auto_extract is not None
+        or adaptive is not None
+        or (iterative is not None and iterative.scope != "groups")
+    ):
+        # Auto-extract / adaptive (per-cell) and per-cell/whole-field iterative
+        # scopes did NOT use the intensity grouping to build the mask, so keep
+        # /groups honest with a single degenerate group rather than implying a
+        # clustering that did not drive the result.
         group_df[col_name] = 1
     return combined, group_df, ""
 
@@ -883,13 +972,24 @@ def apply_threshold_headless(
         return DatasetFailure.THRESHOLD_ERROR, str(e)
 
     # The per-cell adaptive window is physical (µm), so adaptive rounds need a
-    # pixel size. Fail this dataset cleanly rather than producing garbage.
+    # pixel size. Auto-extraction needs one only when the user supplied a µm
+    # smallest-particle override (auto-detect is px-native and needs none). Fail
+    # this dataset cleanly rather than producing garbage; never default to 1.
     raw_ps = store.metadata.get("pixel_size_um")
     pixel_size_um = float(raw_ps) if raw_ps else None
-    if round_spec.adaptive_clip is not None and (pixel_size_um is None or pixel_size_um <= 0):
+    needs_pixel_size = round_spec.adaptive_clip is not None or (
+        round_spec.auto_extract is not None
+        and round_spec.auto_extract.smallest_particle_um is not None
+    )
+    if needs_pixel_size and (pixel_size_um is None or pixel_size_um <= 0):
+        method = (
+            "adaptive sigma clipping"
+            if round_spec.adaptive_clip is not None
+            else "auto extraction (µm smallest-particle override)"
+        )
         return (
             DatasetFailure.THRESHOLD_ERROR,
-            "adaptive sigma clipping needs a pixel size (µm/px) on this dataset",
+            f"{method} needs a pixel size (µm/px) on this dataset",
         )
 
     n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
