@@ -457,12 +457,16 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 # stacked into the (T,H,W) /masks resource at the end. The
                 # handler picks the right wrapper from _is_timelapse(entry).
                 #
-                # Adaptive-clip rounds are per-cell (no intensity grouping) and
-                # cannot be previewed by the per-group ThresholdQCController, so
-                # they ALWAYS apply headlessly — even in an interactive run. The
-                # headless handler emits a status line so the user knows the round
-                # applied without a QC pause.
-                if self._interactive_qc and round_spec.adaptive_clip is None:
+                # Adaptive-clip and auto-extraction rounds are per-cell (no
+                # intensity grouping) and cannot be previewed by the per-group
+                # ThresholdQCController, so they ALWAYS apply headlessly — even in
+                # an interactive run. The headless handler emits a status line so
+                # the user knows the round applied without a QC pause.
+                if (
+                    self._interactive_qc
+                    and round_spec.adaptive_clip is None
+                    and round_spec.auto_extract is None
+                ):
                     yield PhaseRequest(
                         kind=PhaseKind.INTERACTIVE,
                         phase_name=f"threshold_qc:{round_spec.name}",
@@ -1025,13 +1029,19 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                           failure=failure.value, message=msg)
                 return PhaseResult(success=False, message=msg)
 
-            # Adaptive rounds skip the interactive QC pause every other round
-            # gets; make that explicit so the user is not silently handed
-            # unreviewed masks.
-            if round_spec.adaptive_clip is not None and self._interactive_qc:
-                msg = (
-                    f"adaptive sigma clipping — applied headlessly (no QC step): {msg}"
+            # Per-cell rounds (adaptive-clip / auto-extraction) skip the
+            # interactive QC pause every other round gets; make that explicit so
+            # the user is not silently handed unreviewed masks.
+            is_per_cell = (
+                round_spec.adaptive_clip is not None or round_spec.auto_extract is not None
+            )
+            if is_per_cell and self._interactive_qc:
+                method = (
+                    "adaptive sigma clipping"
+                    if round_spec.adaptive_clip is not None
+                    else "auto-extraction (two-pass)"
                 )
+                msg = f"{method} — applied headlessly (no QC step): {msg}"
                 event = "done_no_qc"
             else:
                 event = "done"

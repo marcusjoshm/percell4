@@ -30,6 +30,7 @@ from percell4.workflows.artifacts import create_run_folder, read_run_config
 from percell4.workflows.host import WorkflowHost
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
     DatasetSource,
     ParticleSettings,
@@ -409,6 +410,16 @@ def test_mixed_rounds_route_independently(tmp_path):
     assert "threshold_apply:otsu" not in names
 
 
+def test_auto_extract_round_applies_headlessly_in_interactive_run(tmp_path):
+    """U7: an auto-extract round is per-cell (no QC preview) so it routes to the
+    headless apply handler even under interactive_qc, like adaptive-clip."""
+    names = _threshold_phase_names(
+        [_round("ae", auto_extract=AutoExtractSettings(smallest_particle_um=0.36))], tmp_path
+    )
+    assert "threshold_apply:ae" in names
+    assert "threshold_qc:ae" not in names
+
+
 def _make_adaptive_h5(path: Path, pixel_size_um: float = 0.12) -> None:
     """One large cell, structured background (per-cell MAD > 0), bright blob."""
     store = DatasetStore(path)
@@ -454,6 +465,39 @@ def test_adaptive_apply_handler_emits_no_qc_status(qtbot, tmp_path):
     assert result.success, result.message
     assert "applied headlessly (no QC step)" in result.message
     assert "acr" in DatasetStore(p).list_masks()
+
+
+def test_auto_extract_apply_handler_emits_no_qc_status(qtbot, tmp_path):
+    """U7: in an interactive run the auto-extract round's headless apply emits the
+    two-pass no-QC status line."""
+    from percell4.workflows.phases import threshold_compute_one
+
+    p = tmp_path / "ae.h5"
+    _make_adaptive_h5(p)
+    entry = WorkflowDatasetEntry(
+        name="ae", source=DatasetSource.H5_EXISTING, h5_path=p, channel_names=["GFP"]
+    )
+    round_spec = _round("aer", auto_extract=AutoExtractSettings(smallest_particle_um=0.36))
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=[entry],
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[round_spec],
+        selected_csv_columns=["GFP_mean_intensity"],
+        output_parent=tmp_path / "runs",
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=True)
+    runner._effective_seg["ae"] = "cellpose_qc"
+    grouping, failure, _ = threshold_compute_one(DatasetStore(p), round_spec, seg_name="cellpose_qc")
+    assert failure is None
+    runner._grouping_cache[("ae", "aer")] = grouping
+
+    handler = runner._make_threshold_apply_headless_handler(entry, round_spec)
+    result = handler()
+    assert result.success, result.message
+    assert "auto-extraction (two-pass) — applied headlessly (no QC step)" in result.message
+    assert "aer" in DatasetStore(p).list_masks()
 
 
 def test_runner_records_failure_and_continues_other_datasets(qtbot, fake_host, tmp_path):
