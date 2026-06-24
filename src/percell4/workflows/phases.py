@@ -61,6 +61,7 @@ from percell4.workflows.models import (
     AdaptiveClipSettings,
     AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
     EdgeMode,
     ParticleSettings,
@@ -946,6 +947,89 @@ def _apply_threshold_frame(
     return combined, group_df, ""
 
 
+def _alc_presmooth_for_round(round_spec: ThresholdingRound) -> float:
+    """The presmooth σ the round's ALC method used, so CNR's per-cell σ matches the
+    detector's noise floor exactly (both default to 1 px)."""
+    if round_spec.auto_extract is not None:
+        return float(round_spec.auto_extract.presmooth_sigma_px)
+    if round_spec.adaptive_clip is not None:
+        return float(round_spec.adaptive_clip.presmooth_sigma_px)
+    return 1.0
+
+
+def _classify_and_write_cnr(
+    store: DatasetStore,
+    round_spec: ThresholdingRound,
+    image: NDArray,
+    labels: NDArray,
+    mask: NDArray,
+    settings: CnrClassifySettings,
+) -> tuple[DatasetFailure | None, str]:
+    """Guided CNR subpopulation split of a produced feature mask (single frame).
+
+    Splits ``mask`` at the user CNR ``threshold`` into per-population masks
+    ``<round>_low`` / ``<round>_high`` and writes a per-focus CNR table to
+    ``/classification/<round>``. CNR uses the same presmooth the producing ALC
+    method used so its per-cell σ matches the detector. A single-population result
+    writes no extra masks (the base mask stands). Returns ``(failure, message)``: a
+    classification raise or a population-mask write failure fails the dataset; a
+    table-write failure is reported in the message but does not lose the masks.
+    """
+    from percell4.domain.measure.cnr_classification import (
+        classify_by_cnr,
+        segment_masks_from_label_image,
+        to_dataframe,
+    )
+
+    try:
+        result = classify_by_cnr(
+            image,
+            mask,
+            labels,
+            threshold=float(settings.threshold),
+            presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+        )
+    except Exception as e:
+        logger.exception("CNR classification failed for round %s", round_spec.name)
+        return DatasetFailure.THRESHOLD_ERROR, f"CNR classification failed: {e}"
+
+    # Clear any stale population masks from a prior run BEFORE writing — a re-run
+    # that now yields a single population must not leave the old _low/_high on disk
+    # (where the standalone batch-measure CLI would otherwise pick them up).
+    for suffix in ("_low", "_high"):
+        store.delete_item(f"masks/{round_spec.name}{suffix}")
+
+    written: list[tuple[str, int]] = []
+    if result.n_subpopulations >= 2:
+        pops = segment_masks_from_label_image(result.labels_image, result.n_subpopulations)
+        for suffix, pop_mask in zip(("_low", "_high"), pops):
+            if int(pop_mask.sum()) == 0:
+                continue
+            name = f"{round_spec.name}{suffix}"
+            try:
+                store.write_mask(name, pop_mask.astype(np.uint8))
+            except Exception as e:
+                logger.exception("write_mask failed for CNR population %s", name)
+                return DatasetFailure.THRESHOLD_ERROR, f"CNR population write failed ({name}): {e}"
+            written.append((name, int(pop_mask.sum())))
+
+    # Per-focus CNR table — secondary; a failure here must not lose the masks.
+    table_note = ""
+    try:
+        store.write_dataframe(f"/classification/{round_spec.name}", to_dataframe(result))
+    except Exception as e:
+        logger.exception("write_dataframe /classification failed for %s", round_spec.name)
+        table_note = f"; CNR table write FAILED: {e}"
+
+    if not written:
+        return None, (
+            f"CNR: single population (no split at threshold {settings.threshold:g}); "
+            f"base mask stands{table_note}"
+        )
+    pops_desc = ", ".join(f"{name} ({px} px)" for name, px in written)
+    return None, f"CNR: split into {pops_desc}{table_note}"
+
+
 def apply_threshold_headless(
     store: DatasetStore,
     round_spec: ThresholdingRound,
@@ -993,6 +1077,16 @@ def apply_threshold_headless(
         )
 
     n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+
+    # Guided CNR classification is single-timepoint only in this version. Abort
+    # cleanly BEFORE the timepoint dispatch — the time-lapse branch below returns
+    # without ever reaching the single-tp CNR call site, so the guard must fire
+    # here or a time-lapse CNR round would silently skip classification.
+    if round_spec.cnr_classify is not None and n_timepoints > 1:
+        return (
+            DatasetFailure.THRESHOLD_ERROR,
+            "guided CNR classification is single-timepoint only in this version",
+        )
 
     if n_timepoints > 1:
         per_frame: dict[int, GroupingResult] = grouping  # type: ignore[assignment]
@@ -1055,7 +1149,19 @@ def apply_threshold_headless(
     except Exception as e:
         logger.exception("write_dataframe /groups failed")
         return DatasetFailure.THRESHOLD_ERROR, f"write /groups failed: {e}"
-    return None, f"{int(mask.sum())} positive pixels across {grouping.n_groups} groups"
+
+    # Optional guided CNR subpopulation split of the just-written feature mask.
+    cnr_note = ""
+    if round_spec.cnr_classify is not None:
+        cnr_failure, cnr_msg = _classify_and_write_cnr(
+            store, round_spec, image, labels, mask, round_spec.cnr_classify
+        )
+        if cnr_failure is not None:
+            return cnr_failure, cnr_msg
+        cnr_note = f"; {cnr_msg}"
+    return None, (
+        f"{int(mask.sum())} positive pixels across {grouping.n_groups} groups{cnr_note}"
+    )
 
 
 def _channel_index(store: DatasetStore, channel_name: str) -> int:

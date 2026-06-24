@@ -20,6 +20,7 @@ from percell4.workflows.models import (
     AdaptiveClipSettings,
     AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
     IterativeOtsuSettings,
     PunctaDetectorSettings,
@@ -749,6 +750,145 @@ def test_auto_extract_presmooth_is_settings_default_not_round_sigma(tmp_path):
     assert err == ""
     assert captured["presmooth"] == 1.0  # NOT 0.0 (the round's gaussian_sigma default)
     assert combined.sum() > 0  # catches the silent-empty-mask trap
+
+
+# ── apply_threshold_headless: guided CNR post-step (U4) ──────────────────
+
+
+def _cnr_round(**overrides) -> ThresholdingRound:
+    defaults = dict(
+        name="ae",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.12),
+        cnr_classify=CnrClassifySettings(threshold=5.0),
+    )
+    defaults.update(overrides)
+    return ThresholdingRound(**defaults)
+
+
+def _fake_two_pop_result():
+    from percell4.domain.measure.cnr_classification import ClassificationResult
+
+    labels_image = np.zeros((100, 100), dtype=np.int32)
+    labels_image[36:40, 36:40] = 1  # low-CNR population
+    labels_image[44:48, 44:48] = 2  # high-CNR population
+    components = [
+        {"label": 1, "cell": 1, "cnr": 3.0, "subpopulation": 1},
+        {"label": 2, "cell": 1, "cnr": 8.0, "subpopulation": 2},
+    ]
+    return ClassificationResult(
+        n_subpopulations=2, labels_image=labels_image, components=components,
+        split_axis="cnr", threshold=5.0, report={},
+    )
+
+
+def _fake_one_pop_result():
+    from percell4.domain.measure.cnr_classification import ClassificationResult
+
+    labels_image = np.zeros((100, 100), dtype=np.int32)
+    labels_image[36:40, 36:40] = 1
+    components = [{"label": 1, "cell": 1, "cnr": 3.0, "subpopulation": 1}]
+    return ClassificationResult(
+        n_subpopulations=1, labels_image=labels_image, components=components,
+        split_axis=None, threshold=None, report={},
+    )
+
+
+def _patch_classify(monkeypatch, result):
+    """Patch the domain classify_by_cnr so the PHASES wiring (split / naming /
+    stale-delete / table) is tested deterministically; the split logic itself is
+    covered in tests/test_measure/test_cnr_classification.py."""
+    import percell4.domain.measure.cnr_classification as cnr_mod
+
+    def _fake(image, feature_mask, cell_labels, *, threshold=None, presmooth_sigma_px=1.0):
+        return result
+
+    monkeypatch.setattr(cnr_mod, "classify_by_cnr", _fake)
+
+
+def test_cnr_two_population_writes_low_high_and_table(tmp_path, monkeypatch):
+    store = _make_auto_extract_store(tmp_path / "cnr2.h5")
+    round_spec = _cnr_round()
+    _patch_classify(monkeypatch, _fake_two_pop_result())
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+    masks = store.list_masks()
+    assert "ae" in masks  # base feature mask still written
+    assert "ae_low" in masks and "ae_high" in masks
+    assert set(np.unique(store.read_mask("ae_low"))).issubset({0, 1})
+    table = store.read_dataframe("/classification/ae")
+    assert len(table) == 2
+    assert "split into" in msg
+
+
+def test_cnr_single_population_writes_no_extra_masks(tmp_path, monkeypatch):
+    store = _make_auto_extract_store(tmp_path / "cnr1.h5")
+    round_spec = _cnr_round()
+    _patch_classify(monkeypatch, _fake_one_pop_result())
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+    masks = store.list_masks()
+    assert "ae" in masks
+    assert "ae_low" not in masks and "ae_high" not in masks
+    assert len(store.read_dataframe("/classification/ae")) == 1  # table still written
+    assert "single population" in msg
+
+
+def test_cnr_timelapse_round_aborts_before_any_write(tmp_path):
+    """R8: a time-lapse round opting into CNR fails cleanly BEFORE any mask write."""
+    from percell4.workflows.phases import _trivial_grouping
+
+    store = DatasetStore(tmp_path / "tl.h5")
+    store.create(metadata={"channel_names": ["GFP"], "pixel_size_um": 0.12, "n_timepoints": 2})
+    round_spec = _cnr_round()
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is DatasetFailure.THRESHOLD_ERROR
+    assert "single-timepoint" in msg
+    assert "ae" not in store.list_masks()
+
+
+def test_cnr_stale_population_masks_deleted_on_reclassify(tmp_path, monkeypatch):
+    """A 2→1 population re-run leaves no stale _low/_high masks."""
+    store = _make_auto_extract_store(tmp_path / "stale.h5")
+    round_spec = _cnr_round()
+    _patch_classify(monkeypatch, _fake_two_pop_result())
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+    apply_threshold_headless(store, round_spec, grouping)
+    assert "ae_low" in store.list_masks() and "ae_high" in store.list_masks()
+
+    _patch_classify(monkeypatch, _fake_one_pop_result())
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+    assert "ae_low" not in store.list_masks()
+    assert "ae_high" not in store.list_masks()
+
+
+def test_cnr_table_write_failure_does_not_lose_masks(tmp_path, monkeypatch):
+    store = _make_auto_extract_store(tmp_path / "tablefail.h5")
+    round_spec = _cnr_round()
+    _patch_classify(monkeypatch, _fake_two_pop_result())
+    grouping, _, _ = threshold_compute_one(store, round_spec)
+
+    real_write_df = store.write_dataframe
+
+    def _selective_write(path, df):
+        if path.startswith("/classification/"):
+            raise RuntimeError("disk full")
+        return real_write_df(path, df)
+
+    monkeypatch.setattr(store, "write_dataframe", _selective_write)
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None  # masks survive a table failure
+    assert "ae_low" in store.list_masks() and "ae_high" in store.list_masks()
+    assert "table write FAILED" in msg
 
 
 def test_apply_adaptive_clip_is_bit_identical_to_bare_detector(tmp_path):
