@@ -550,6 +550,24 @@ def test_size_unit_survives_row_swap(dialog, h5_ds1):
     assert moved.currentData() == "px"
 
 
+def test_size_unit_survives_method_toggle_grey_and_swap(dialog, h5_ds1):
+    """Unit=px set on an adaptive row survives toggling to Grouped Otsu (which greys
+    the Unit combo), a row swap, and toggling back to adaptive."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._on_add_round()
+    method0 = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    method0.setCurrentText(_METHOD_ADAPTIVE)
+    _set_unit(dialog, 0, "px")
+    method0.setCurrentText(_METHOD_GROUPED)  # greys the Unit combo, value retained
+    dialog._swap_rounds(0, 1)
+    # Row 1 now holds the former row-0 config; toggle it back to adaptive.
+    dialog._rounds_table.cellWidget(1, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[1].adaptive_clip is not None
+    assert rounds[1].adaptive_clip.d_min_unit == "px"
+
+
 # ── Column picker ───────────────────────────────────────────────────────
 
 

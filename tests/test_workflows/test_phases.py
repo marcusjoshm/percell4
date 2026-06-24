@@ -569,6 +569,21 @@ def test_adaptive_clip_px_unit_runs_without_pixel_size(tmp_path):
     assert store.read_mask("ac").sum() > 0
 
 
+def test_adaptive_clip_px_unit_oversized_window_fails_cleanly(tmp_path):
+    """U9: px mode still guards the window (via eff_pixel=1.0) — a huge px d_min
+    whose derived window exceeds the frame fails cleanly, no pixel size involved."""
+    from percell4.workflows.phases import _apply_adaptive_clip_cells
+
+    store = _make_adaptive_store(tmp_path / "px_big.h5", pixel_size_um=None)
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    settings = AdaptiveClipSettings(d_min_um=500.0, d_min_unit="px")  # window ≫ 100px frame
+    combined = np.zeros(labels.shape, dtype=np.uint8)
+    err = _apply_adaptive_clip_cells(image, labels, settings, combined, None, "ac")
+    assert "exceeds the image" in err
+    assert combined.sum() == 0
+
+
 def test_apply_adaptive_clip_zero_pixel_size_fails_dataset(tmp_path):
     store = _make_adaptive_store(tmp_path / "zero_ps.h5", pixel_size_um=0.0)
     round_spec = _adaptive_apply_round()
@@ -731,6 +746,22 @@ def test_auto_extract_px_unit_runs_without_pixel_size(tmp_path):
     failure, msg = apply_threshold_headless(store, round_spec, grouping)
     assert failure is None, msg
     assert store.read_mask("ae").sum() > 0
+
+
+def test_auto_extract_px_unit_oversized_window_fails_cleanly(tmp_path):
+    """U9: px mode auto-extract still guards the fine window, with no pixel size."""
+    from percell4.workflows.phases import _apply_auto_extract_cells
+
+    store = _make_auto_extract_store(tmp_path / "px_big.h5", pixel_size_um=None)
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    # px=40 → fine window ≈ 3×40 = 120 > 100px frame → guard fires; no pixel size.
+    settings = AutoExtractSettings(smallest_particle_um=40.0, smallest_particle_unit="px")
+    combined = np.zeros(labels.shape, dtype=np.uint8)
+    err = _apply_auto_extract_cells(image, labels, settings, combined, None, "ae")
+    assert "fine window" in err
+    assert "exceeds the image" in err
+    assert combined.sum() == 0
 
 
 def test_auto_extract_autodetect_not_blocked_by_missing_pixel_size(tmp_path):
