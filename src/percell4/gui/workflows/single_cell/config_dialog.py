@@ -153,11 +153,10 @@ _ROUND_COL_KMEANS_K = 6
 _ROUND_COL_SIGMA = 7
 _ROUND_COL_DMIN = 8
 _ROUND_COL_K = 9
-_ROUND_COL_SMALLEST = 10
-_ROUND_COL_SIZE_UNIT = 11
-_ROUND_COL_CNR_ON = 12
-_ROUND_COL_CNR_THR = 13
-_ROUND_COL_COUNT = 14
+_ROUND_COL_SIZE_UNIT = 10
+_ROUND_COL_CNR_ON = 11
+_ROUND_COL_CNR_THR = 12
+_ROUND_COL_COUNT = 13
 _ROUND_COL_HEADERS = (
     "Name",
     "Channel",
@@ -169,7 +168,6 @@ _ROUND_COL_HEADERS = (
     "σ",
     "d_min",
     "k",
-    "Smallest",
     "Unit",
     "CNR split",
     "CNR thr",
@@ -790,7 +788,6 @@ class WorkflowConfigDialog(QDialog):
             _ROUND_COL_SIGMA: 90,
             _ROUND_COL_DMIN: 100,
             _ROUND_COL_K: 70,
-            _ROUND_COL_SMALLEST: 100,
             _ROUND_COL_SIZE_UNIT: 70,
             _ROUND_COL_CNR_ON: 80,
             _ROUND_COL_CNR_THR: 80,
@@ -1345,13 +1342,13 @@ class WorkflowConfigDialog(QDialog):
         method_combo.setToolTip(
             "Grouped Otsu: per-intensity-group Otsu (uses Algorithm/GMM/K-means).\n"
             "Adaptive sigma clipping: per-cell single-window detector driven by the\n"
-            "smallest particle diameter (d_min, µm) and a robust per-cell noise floor.\n"
-            "Auto extraction (two-pass): per-cell two-pass detector; set Smallest (µm)\n"
-            "to override auto-detection (0 = auto-detect). Both per-cell methods ignore\n"
-            "grouping; the µm knobs need a pixel size on each dataset."
+            "smallest particle diameter (d_min) and a robust per-cell noise floor.\n"
+            "Auto extraction (two-pass): per-cell two-pass detector driven by the same\n"
+            "d_min (0 = auto-detect the smallest particle). Both per-cell methods use\n"
+            "σ as the detector presmooth and ignore grouping; µm units need a pixel size."
         )
         method_combo.currentTextChanged.connect(
-            lambda _text, r=row: self._update_method_columns_enabled(r)
+            lambda _text, r=row: self._on_method_changed(r)
         )
         self._rounds_table.setCellWidget(row, _ROUND_COL_METHOD, method_combo)
 
@@ -1377,61 +1374,57 @@ class WorkflowConfigDialog(QDialog):
         kmeans_spin.setValue(3)
         self._rounds_table.setCellWidget(row, _ROUND_COL_KMEANS_K, kmeans_spin)
 
-        # Gaussian sigma (shared: pre-threshold smoothing for grouped Otsu; the
-        # detector's presmooth for adaptive clipping).
+        # σ — pre-threshold smoothing for grouped Otsu; the per-cell DETECTOR
+        # presmooth (Gaussian blur) for both ALC methods. For ALC it is seeded to
+        # the validated 1.0 on entering the method (see _on_method_changed) so it is
+        # never silently 0 (which collapses detection).
         sigma_spin = QDoubleSpinBox()
         sigma_spin.setRange(0.0, 20.0)
         sigma_spin.setSingleStep(0.1)
         sigma_spin.setValue(0.0)
+        sigma_spin.setToolTip(
+            "Grouped Otsu: pre-threshold Gaussian smoothing.\n"
+            "Adaptive / Auto-extraction: the detector's per-cell presmooth (Gaussian "
+            "blur σ, px). Seeded to the validated 1.0 when you pick an ALC method."
+        )
         self._rounds_table.setCellWidget(row, _ROUND_COL_SIGMA, sigma_spin)
 
-        # d_min — smallest particle diameter for adaptive clipping, in the Unit
-        # column's unit. The positive minimum makes an invalid (<= 0) value
-        # structurally impossible; the wide max accommodates a px diameter.
+        # d_min — the smallest particle diameter, in the Unit column's unit. Drives
+        # the single-window adaptive detector and the auto-extraction fine pass. For
+        # auto-extraction, 0 = auto-detect the smallest particle (the "auto window").
+        # The per-method minimum (set in _update_method_columns_enabled) keeps
+        # adaptive > 0 while allowing 0 for auto-extraction.
         dmin_spin = QDoubleSpinBox()
         dmin_spin.setRange(0.02, 10000.0)
         dmin_spin.setDecimals(3)
         dmin_spin.setSingleStep(0.05)
         dmin_spin.setValue(0.40)
         dmin_spin.setToolTip(
-            "Adaptive sigma clipping: smallest particle diameter to detect, in the "
-            "unit chosen in the Unit column (µm uses the dataset pixel size; px is "
-            "used directly — for datasets without a pixel size)."
+            "Smallest particle diameter to detect, in the Unit column's unit (µm uses "
+            "the dataset pixel size; px is used directly — for datasets without a "
+            "pixel size). Auto-extraction only: 0 = auto-detect the smallest particle."
         )
         self._rounds_table.setCellWidget(row, _ROUND_COL_DMIN, dmin_spin)
 
-        # k — adaptive sigma multiplier.
+        # k — adaptive sigma multiplier (greyed for auto-extraction, which fixes the
+        # fine-pass k at 1 and derives the coarse-pass k automatically).
         k_spin = QDoubleSpinBox()
         k_spin.setRange(0.0, 20.0)
         k_spin.setSingleStep(0.25)
         k_spin.setValue(1.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_K, k_spin)
 
-        # Smallest — auto-extraction override, in the Unit column's unit;
-        # 0 = auto-detect from the image.
-        smallest_spin = QDoubleSpinBox()
-        smallest_spin.setRange(0.0, 10000.0)
-        smallest_spin.setDecimals(3)
-        smallest_spin.setSingleStep(0.05)
-        smallest_spin.setValue(0.0)
-        smallest_spin.setToolTip(
-            "Auto extraction: smallest particle diameter to override auto-detection, "
-            "in the unit chosen in the Unit column. 0 = auto-detect from the image "
-            "(needs no pixel size)."
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_SMALLEST, smallest_spin)
-
-        # Unit — px or µm for d_min / Smallest (whichever the row's method uses).
-        # µm resolves via the dataset pixel size; px is used directly (for datasets
-        # that lack a pixel size). Switching units does NOT auto-convert the value.
+        # Unit — px or µm for d_min. µm resolves via the dataset pixel size; px is
+        # used directly (for datasets that lack a pixel size). Switching units does
+        # NOT auto-convert the value.
         unit_combo = QComboBox()
         unit_combo.addItem("µm", userData="um")
         unit_combo.addItem("px", userData="px")
         unit_combo.setCurrentIndex(0)  # µm — the historical default
         unit_combo.setToolTip(
-            "Unit for d_min / Smallest. µm resolves to pixels per dataset using each "
-            "dataset's pixel size; px applies the value directly — pick px for "
-            "datasets that have no pixel size metadata."
+            "Unit for d_min. µm resolves to pixels per dataset using each dataset's "
+            "pixel size; px applies the value directly — pick px for datasets that "
+            "have no pixel size metadata."
         )
         self._rounds_table.setCellWidget(row, _ROUND_COL_SIZE_UNIT, unit_combo)
 
@@ -1536,9 +1529,6 @@ class WorkflowConfigDialog(QDialog):
             "k": self._rounds_table.cellWidget(
                 row, _ROUND_COL_K
             ).value(),
-            "smallest_particle_um": self._rounds_table.cellWidget(
-                row, _ROUND_COL_SMALLEST
-            ).value(),
             "size_unit": self._rounds_table.cellWidget(
                 row, _ROUND_COL_SIZE_UNIT
             ).currentData(),
@@ -1575,15 +1565,14 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.cellWidget(
             row, _ROUND_COL_SIGMA
         ).setValue(float(data["sigma"]))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_DMIN
-        ).setValue(float(data.get("d_min_um", 0.40)))
+        dmin_w = self._rounds_table.cellWidget(row, _ROUND_COL_DMIN)
+        # Set the per-method floor BEFORE the value so a 0 (auto-detect, valid only
+        # for auto-extraction) is not clamped up to the adaptive minimum.
+        dmin_w.setMinimum(self._dmin_minimum_for(data.get("method", _METHOD_GROUPED)))
+        dmin_w.setValue(float(data.get("d_min_um", 0.40)))
         self._rounds_table.cellWidget(
             row, _ROUND_COL_K
         ).setValue(float(data.get("k", 1.0)))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_SMALLEST
-        ).setValue(float(data.get("smallest_particle_um", 0.0)))
         unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
         unit_idx = unit_combo.findData(data.get("size_unit", "um"))
         unit_combo.setCurrentIndex(unit_idx if unit_idx >= 0 else 0)
@@ -1611,6 +1600,25 @@ class WorkflowConfigDialog(QDialog):
         rows that may opt into guided CNR subpopulation classification."""
         return self._is_adaptive_row(row) or self._is_auto_extract_row(row)
 
+    @staticmethod
+    def _dmin_minimum_for(method: str) -> float:
+        """The d_min spinbox floor for a method: auto-extraction allows 0 (= auto-
+        detect the smallest particle); adaptive requires a positive diameter."""
+        return 0.0 if method == _METHOD_AUTO_EXTRACT else 0.02
+
+    def _on_method_changed(self, row: int) -> None:
+        """User changed the row's Method. Seed the ALC presmooth default (σ = 1.0)
+        when entering an ALC method from σ = 0, so the detector presmooth is the
+        validated value rather than the grouped-Otsu 0 (which collapses detection),
+        then re-gate the columns. Programmatic writes call
+        ``_update_method_columns_enabled`` directly and skip this seeding, preserving
+        a saved σ."""
+        if self._is_alc_row(row):
+            sigma = self._rounds_table.cellWidget(row, _ROUND_COL_SIGMA)
+            if sigma is not None and sigma.value() == 0.0:
+                sigma.setValue(1.0)
+        self._update_method_columns_enabled(row)
+
     def _update_algo_columns_enabled(self, row: int) -> None:
         """Grey GMM-max / K-means-K per the Algorithm combo — but only when the
         round is a Grouped Otsu round. Per-cell (adaptive / auto-extraction) rounds
@@ -1629,37 +1637,42 @@ class WorkflowConfigDialog(QDialog):
             kmeans_spin.setEnabled(not is_alc and not is_gmm)
 
     def _update_method_columns_enabled(self, row: int) -> None:
-        """Gate columns by the Method combo. Adaptive enables d_min/k; Auto-
-        extraction enables only Smallest (and greys k + σ — its presmooth is the
-        fixed validated 1 px, not user-facing); both grey Algorithm + grouping;
-        Grouped Otsu inverts. CNR-split controls are enabled only on per-cell (ALC)
-        rows. Values are retained when greyed so toggling Method back restores
-        prior input."""
+        """Gate columns by the Method combo. Both ALC methods enable d_min + Unit
+        and use σ as the detector presmooth; adaptive also enables k (auto-extraction
+        derives its k automatically). Both grey Algorithm + grouping; Grouped Otsu
+        inverts. CNR-split controls are enabled only on per-cell (ALC) rows. Values
+        are retained when greyed so toggling Method back restores prior input."""
         adaptive = self._is_adaptive_row(row)
         auto_extract = self._is_auto_extract_row(row)
         is_alc = adaptive or auto_extract
         algo_combo = self._rounds_table.cellWidget(row, _ROUND_COL_ALGO)
         if algo_combo is not None:
             algo_combo.setEnabled(not is_alc)
-        # d_min / k belong to the single-window adaptive method only.
-        for col in (_ROUND_COL_DMIN, _ROUND_COL_K):
-            w = self._rounds_table.cellWidget(row, col)
-            if w is not None:
-                w.setEnabled(adaptive)
-        # Smallest belongs to auto-extraction only.
-        smallest = self._rounds_table.cellWidget(row, _ROUND_COL_SMALLEST)
-        if smallest is not None:
-            smallest.setEnabled(auto_extract)
-        # The Unit applies to d_min (adaptive) or Smallest (auto-extraction), so it
-        # is live on any per-cell ALC row and greyed for Grouped Otsu.
+        # d_min is the smallest-particle knob for BOTH ALC methods; its floor varies
+        # by method (auto-extraction allows 0 = auto-detect).
+        dmin = self._rounds_table.cellWidget(row, _ROUND_COL_DMIN)
+        if dmin is not None:
+            method = (
+                _METHOD_AUTO_EXTRACT if auto_extract
+                else (_METHOD_ADAPTIVE if adaptive else _METHOD_GROUPED)
+            )
+            new_min = self._dmin_minimum_for(method)
+            if dmin.minimum() != new_min:
+                dmin.setMinimum(new_min)
+            dmin.setEnabled(is_alc)
+        # k is the adaptive sigma multiplier only (auto-extraction's k is automatic).
+        k = self._rounds_table.cellWidget(row, _ROUND_COL_K)
+        if k is not None:
+            k.setEnabled(adaptive)
+        # The Unit applies to d_min on any per-cell ALC row; greyed for Grouped Otsu.
         unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
         if unit_combo is not None:
             unit_combo.setEnabled(is_alc)
-        # σ is a presmooth knob for grouped/adaptive; auto-extraction fixes its
-        # presmooth at the validated 1 px, so grey σ there.
+        # σ is live everywhere: pre-threshold smoothing for Grouped Otsu, and the
+        # detector presmooth (Gaussian blur) for both ALC methods.
         sigma = self._rounds_table.cellWidget(row, _ROUND_COL_SIGMA)
         if sigma is not None:
-            sigma.setEnabled(not auto_extract)
+            sigma.setEnabled(True)
         # GMM/K-means enablement depends on both Method and Algorithm.
         self._update_algo_columns_enabled(row)
         # CNR-split controls are valid only on per-cell ALC rows.
@@ -2335,19 +2348,22 @@ class WorkflowConfigDialog(QDialog):
             # does not trip the mutual-exclusion check.
             method = data.get("method")
             size_unit = data.get("size_unit", "um")
+            sigma = float(data["sigma"])  # σ is the detector presmooth for ALC rounds
+            d_min = float(data["d_min_um"])  # the merged size column serves both ALC methods
             adaptive = None
             auto_extract = None
             if method == _METHOD_ADAPTIVE:
                 adaptive = AdaptiveClipSettings(
-                    d_min_um=float(data["d_min_um"]),
+                    d_min_um=d_min,
                     k=float(data["k"]),
+                    presmooth_sigma_px=sigma,
                     d_min_unit=size_unit,
                 )
             elif method == _METHOD_AUTO_EXTRACT:
-                smallest = float(data.get("smallest_particle_um", 0.0))
-                # 0 (the spinbox minimum) means auto-detect → None.
+                # 0 (the auto-extraction floor) means auto-detect the smallest → None.
                 auto_extract = AutoExtractSettings(
-                    smallest_particle_um=(smallest if smallest > 0 else None),
+                    smallest_particle_um=(d_min if d_min > 0 else None),
+                    presmooth_sigma_px=sigma,
                     smallest_particle_unit=size_unit,
                 )
             # Guided CNR split is opt-in and valid only on per-cell ALC rounds; the

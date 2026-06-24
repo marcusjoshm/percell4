@@ -29,7 +29,6 @@ from percell4.gui.workflows.single_cell.config_dialog import (
     _ROUND_COL_METHOD,
     _ROUND_COL_SIGMA,
     _ROUND_COL_SIZE_UNIT,
-    _ROUND_COL_SMALLEST,
     WorkflowConfigDialog,
     _PendingDataset,
 )
@@ -351,7 +350,7 @@ def test_auto_extract_method_builds_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.36)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
     rounds = dialog._rounds_from_table(dialog._current_intersection())
     assert rounds[0].auto_extract is not None
     assert rounds[0].auto_extract.smallest_particle_um == 0.36
@@ -365,23 +364,54 @@ def test_auto_extract_smallest_zero_means_autodetect(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.0)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.0)
     rounds = dialog._rounds_from_table(dialog._current_intersection())
     assert rounds[0].auto_extract is not None
     assert rounds[0].auto_extract.smallest_particle_um is None  # 0 → auto-detect
 
 
-def test_auto_extract_disables_k_and_sigma_enables_smallest(dialog, h5_ds1):
+def test_auto_extract_enables_dmin_and_sigma_disables_k(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    smallest = dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST)
+    dmin = dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN)
     k = dialog._rounds_table.cellWidget(0, _ROUND_COL_K)
     sigma = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIGMA)
     method.setCurrentText(_METHOD_AUTO_EXTRACT)
-    assert smallest.isEnabled() is True
-    assert k.isEnabled() is False  # k is auto for two-pass
-    assert sigma.isEnabled() is False  # presmooth fixed at 1px, not user-facing
+    assert dmin.isEnabled() is True  # d_min serves auto-extraction too
+    assert sigma.isEnabled() is True  # σ controls the detector presmooth
+    assert k.isEnabled() is False  # k is automatic for two-pass
+    assert sigma.value() == 1.0  # entering an ALC method seeds presmooth σ=1.0
+    assert dmin.minimum() == 0.0  # auto-extraction allows d_min=0 (auto-detect)
+
+
+def test_alc_sigma_seeded_to_one_on_entry_and_wired_to_presmooth(dialog, h5_ds1):
+    """Entering an ALC method seeds σ=1.0 (from the grouped-Otsu 0), and σ then
+    controls the detector presmooth for both methods."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    sigma = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIGMA)
+    assert sigma.value() == 0.0  # grouped-Otsu default
+    method.setCurrentText(_METHOD_ADAPTIVE)
+    assert sigma.value() == 1.0  # seeded
+    sigma.setValue(2.0)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].adaptive_clip.presmooth_sigma_px == 2.0
+
+    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].auto_extract.presmooth_sigma_px == 2.0  # σ carried over, still wired
+
+
+def test_grouped_sigma_not_seeded(dialog, h5_ds1):
+    """A Grouped-Otsu row keeps σ=0 (the seeding fires only for ALC methods)."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    sigma = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIGMA)
+    assert sigma.value() == 0.0
+    assert sigma.isEnabled() is True  # σ is live for grouped (pre-threshold smoothing)
 
 
 def test_cnr_checkbox_enabled_only_on_alc_rows(dialog, h5_ds1):
@@ -415,7 +445,7 @@ def test_cnr_builds_settings_on_alc_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.36)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
     dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
     dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR).setValue(7.0)
     rounds = dialog._rounds_from_table(dialog._current_intersection())
@@ -444,7 +474,7 @@ def test_round_row_swap_preserves_auto_extract_and_cnr(dialog, h5_ds1):
     dialog._on_add_round()
     dialog._on_add_round()
     dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(0.36)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
     dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
     dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR).setValue(7.0)
 
@@ -454,7 +484,7 @@ def test_round_row_swap_preserves_auto_extract_and_cnr(dialog, h5_ds1):
         dialog._rounds_table.cellWidget(1, _ROUND_COL_METHOD).currentText()
         == _METHOD_AUTO_EXTRACT
     )
-    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_SMALLEST).value() == 0.36
+    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_DMIN).value() == 0.36
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_ON).isChecked() is True
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_THR).value() == 7.0
 
@@ -502,7 +532,7 @@ def test_auto_extract_px_unit_builds_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(3.0)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(3.0)
     _set_unit(dialog, 0, "px")
     rounds = dialog._rounds_from_table(dialog._current_intersection())
     assert rounds[0].auto_extract.smallest_particle_um == 3.0
@@ -516,7 +546,7 @@ def test_px_unit_round_not_flagged_by_pixel_size_preflight(dialog, tmp_path):
     dialog._add_h5_paths([no_ps])
     dialog._on_add_round()
     dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_SMALLEST).setValue(3.0)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(3.0)
     _set_unit(dialog, 0, "px")
     dialog._output_edit.setText(str(tmp_path / "runs"))
     cfg = dialog._try_build_config()
