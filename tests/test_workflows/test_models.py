@@ -8,7 +8,9 @@ import pytest
 
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
     DiluteSettings,
     EdgeMode,
@@ -322,6 +324,164 @@ def test_adaptive_clip_validation_is_skimage_free():
         del sys.modules[mod]
     AdaptiveClipSettings(d_min_um=0.40)
     assert not any(m.startswith("skimage") for m in sys.modules)
+
+
+# ── AutoExtractSettings (U1) ──────────────────────────────────
+
+
+def test_round_defaults_auto_extract_to_none():
+    assert _valid_round().auto_extract is None
+
+
+def test_auto_extract_defaults_are_valid():
+    s = AutoExtractSettings()
+    # None == auto-detect the smallest particle (the override is optional).
+    assert s.smallest_particle_um is None
+    # Presmooth defaults to the validated 1 px (NOT 0 / the grouped sigma default).
+    assert s.presmooth_sigma_px == 1.0
+
+
+def test_auto_extract_accepts_smallest_override():
+    s = AutoExtractSettings(smallest_particle_um=0.4)
+    assert s.smallest_particle_um == 0.4
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"smallest_particle_um": 0.0},
+        {"smallest_particle_um": -0.1},
+        {"presmooth_sigma_px": -0.5},
+    ],
+)
+def test_auto_extract_rejects_invalid(kwargs):
+    with pytest.raises(ValueError):
+        AutoExtractSettings(**kwargs)
+
+
+def test_round_accepts_auto_extract():
+    r = _valid_round(auto_extract=AutoExtractSettings(smallest_particle_um=0.4))
+    assert r.auto_extract.smallest_particle_um == 0.4
+    assert r.adaptive_clip is None
+
+
+def test_round_with_auto_extract_is_hashable():
+    r = _valid_round(auto_extract=AutoExtractSettings())
+    hash(r)
+    hash(r.auto_extract)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"puncta": PunctaDetectorSettings(detector_name="log")},
+        {"iterative_otsu": IterativeOtsuSettings()},
+        {"adaptive_clip": AdaptiveClipSettings(d_min_um=0.40)},
+    ],
+)
+def test_round_rejects_auto_extract_with_another_method(other):
+    with pytest.raises(ValueError, match="at most one"):
+        _valid_round(auto_extract=AutoExtractSettings(), **other)
+
+
+def test_auto_extract_validation_is_skimage_free():
+    import sys
+
+    for mod in [m for m in sys.modules if m.startswith("skimage")]:
+        del sys.modules[mod]
+    AutoExtractSettings(smallest_particle_um=0.4)
+    assert not any(m.startswith("skimage") for m in sys.modules)
+
+
+# ── CnrClassifySettings (U1) ──────────────────────────────────
+
+
+def test_round_defaults_cnr_classify_to_none():
+    r = _valid_round(adaptive_clip=AdaptiveClipSettings(d_min_um=0.4))
+    assert r.cnr_classify is None
+
+
+def test_cnr_classify_rejects_non_positive_threshold():
+    with pytest.raises(ValueError, match="CNR threshold"):
+        CnrClassifySettings(threshold=0.0)
+    with pytest.raises(ValueError, match="CNR threshold"):
+        CnrClassifySettings(threshold=-1.0)
+
+
+def test_cnr_classify_allowed_on_adaptive_clip_round():
+    r = _valid_round(
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.4),
+        cnr_classify=CnrClassifySettings(threshold=5.0),
+    )
+    assert r.cnr_classify.threshold == 5.0
+
+
+def test_cnr_classify_allowed_on_auto_extract_round():
+    r = _valid_round(
+        auto_extract=AutoExtractSettings(),
+        cnr_classify=CnrClassifySettings(threshold=5.0),
+    )
+    assert r.cnr_classify.threshold == 5.0
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        {},  # grouped Otsu — no method sentinel
+        {"puncta": PunctaDetectorSettings(detector_name="log")},
+        {"iterative_otsu": IterativeOtsuSettings()},
+    ],
+)
+def test_cnr_classify_rejected_on_non_alc_round(method):
+    with pytest.raises(ValueError, match="cnr_classify requires"):
+        _valid_round(cnr_classify=CnrClassifySettings(threshold=5.0), **method)
+
+
+def test_cnr_classify_round_is_hashable():
+    r = _valid_round(
+        auto_extract=AutoExtractSettings(),
+        cnr_classify=CnrClassifySettings(threshold=5.0),
+    )
+    hash(r)
+    hash(r.cnr_classify)
+
+
+def test_config_rejects_cnr_population_name_collision():
+    # A cnr_classify round 'foo' reserves /masks/foo_low and /masks/foo_high;
+    # a sibling round literally named 'foo_low' collides.
+    with pytest.raises(ValueError, match="collides with another"):
+        WorkflowConfig(
+            datasets=[_valid_entry(name="DS1")],
+            cellpose=CellposeSettings(),
+            thresholding_rounds=[
+                _valid_round(
+                    name="foo",
+                    auto_extract=AutoExtractSettings(),
+                    cnr_classify=CnrClassifySettings(threshold=5.0),
+                ),
+                _valid_round(name="foo_low"),
+            ],
+            selected_csv_columns=[],
+            output_parent=Path("/tmp/runs"),
+        )
+
+
+def test_config_allows_cnr_round_without_suffix_collision():
+    cfg = WorkflowConfig(
+        datasets=[_valid_entry(name="DS1")],
+        cellpose=CellposeSettings(),
+        thresholding_rounds=[
+            _valid_round(
+                name="foo",
+                auto_extract=AutoExtractSettings(),
+                cnr_classify=CnrClassifySettings(threshold=5.0),
+            ),
+            _valid_round(name="bar"),
+        ],
+        selected_csv_columns=[],
+        output_parent=Path("/tmp/runs"),
+    )
+    assert len(cfg.thresholding_rounds) == 2
 
 
 def test_round_with_iterative_otsu_is_hashable():

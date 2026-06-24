@@ -317,6 +317,70 @@ class AdaptiveClipSettings:
 
 
 @dataclass(frozen=True)
+class AutoExtractSettings:
+    """Per-cell two-pass Auto-extraction settings for a thresholding round.
+
+    When a :class:`ThresholdingRound` carries this, the headless apply phase runs
+    the two-pass total-feature extractor
+    (``percell4.domain.measure.auto_extraction.auto_extract``) instead of grouped
+    Otsu / puncta / iterative-Otsu / single-window adaptive clip. A fine pass
+    (window ``≈ 3 × smallest particle``) catches small particles and a coarse pass
+    (window ``≈ 3 × LoG-measured largest particle``) fills large ones; the two are
+    OR-unioned into one combined mask.
+
+    ``smallest_particle_um`` is the smallest particle diameter (µm) the user
+    supplies to **override** auto-detection of the smallest particle. ``None``
+    leaves it to be auto-detected from the image (no pixel size needed); when set,
+    the apply phase converts it to pixels via the dataset ``pixel_size_um``.
+
+    ``presmooth_sigma_px`` is the detector's fixed-pixel presmooth; it defaults to
+    ``1.0`` (the eye-validated value) and is stored here rather than borrowed from
+    the round's ``gaussian_sigma`` (which defaults to ``0`` for the grouped-Otsu
+    path) so an auto-extract round never silently inherits ``0``. The remaining
+    knobs (fill factor, FDR, min spot size, coarse-``k`` noise floor) are fixed,
+    eye-validated module constants in ``auto_extraction`` and are not surfaced.
+    """
+
+    smallest_particle_um: float | None = None
+    presmooth_sigma_px: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.smallest_particle_um is not None and self.smallest_particle_um <= 0:
+            raise ValueError(
+                "smallest_particle_um must be > 0 µm or None (auto-detect), got "
+                f"{self.smallest_particle_um}"
+            )
+        if self.presmooth_sigma_px < 0:
+            raise ValueError(f"presmooth_sigma_px must be >= 0, got {self.presmooth_sigma_px}")
+
+
+@dataclass(frozen=True)
+class CnrClassifySettings:
+    """Opt-in guided CNR subpopulation classification for a thresholding round.
+
+    A *post-step*, not a thresholding method: after the round's feature mask is
+    produced, its foci are split by contrast-to-noise ratio at ``threshold``
+    (guided mode of
+    ``percell4.domain.measure.cnr_classification.classify_by_cnr``) into per-
+    population masks (``<round>_low`` / ``<round>_high``) plus a per-focus CNR
+    table at ``/classification/<round>``. Guided mode only — the user supplies the
+    threshold; there is no discover / forced / interactive mode here.
+
+    Because CNR is defined against the per-cell ``1.4826·MAD`` noise scale the
+    Adaptive Local Clipping detector uses, it is only valid on a round that carries
+    an ALC method (``adaptive_clip`` or ``auto_extract``); :class:`ThresholdingRound`
+    rejects it otherwise. It is mutually *inclusive* with the method sentinels and
+    is NOT part of their at-most-one exclusion.
+    """
+
+    threshold: float
+
+    def __post_init__(self) -> None:
+        if self.threshold <= 0:
+            raise ValueError(f"CNR threshold must be > 0, got {self.threshold}")
+
+
+@dataclass(frozen=True)
 class ThresholdingRound:
     """One named round of grouped thresholding.
 
@@ -324,12 +388,19 @@ class ThresholdingRound:
     ``name`` becomes the HDF5 mask/group path component AND a pandas column
     suffix, so it is validated against a strict regex.
 
-    When ``puncta``, ``iterative_otsu``, and ``adaptive_clip`` are all ``None``
-    (the default), the apply phase uses the legacy per-group Otsu path unchanged.
-    When it carries a :class:`PunctaDetectorSettings`, the headless two-pass spot
-    detector runs instead; an :class:`IterativeOtsuSettings` runs iterative Otsu
-    peeling; an :class:`AdaptiveClipSettings` runs the per-cell adaptive clip
-    detector. The three sentinel fields are mutually exclusive on a single round.
+    When ``puncta``, ``iterative_otsu``, ``adaptive_clip``, and ``auto_extract``
+    are all ``None`` (the default), the apply phase uses the legacy per-group Otsu
+    path unchanged. When it carries a :class:`PunctaDetectorSettings`, the headless
+    two-pass spot detector runs instead; an :class:`IterativeOtsuSettings` runs
+    iterative Otsu peeling; an :class:`AdaptiveClipSettings` runs the per-cell
+    single-window adaptive clip detector; an :class:`AutoExtractSettings` runs the
+    two-pass auto-extraction detector. These four method sentinels are mutually
+    exclusive on a single round.
+
+    ``cnr_classify`` is a separate, mutually-*inclusive* opt-in post-step (guided
+    CNR subpopulation classification); it is valid only when the round carries an
+    ALC method (``adaptive_clip`` or ``auto_extract``) and is NOT part of the
+    method exclusion.
     """
 
     name: str
@@ -343,6 +414,8 @@ class ThresholdingRound:
     puncta: PunctaDetectorSettings | None = None
     iterative_otsu: IterativeOtsuSettings | None = None
     adaptive_clip: AdaptiveClipSettings | None = None
+    auto_extract: AutoExtractSettings | None = None
+    cnr_classify: CnrClassifySettings | None = None
 
     def __post_init__(self) -> None:
         if not _ROUND_NAME_RE.match(self.name):
@@ -359,9 +432,29 @@ class ThresholdingRound:
             raise ValueError("kmeans_n_clusters must be >= 2")
         if self.gaussian_sigma < 0:
             raise ValueError("gaussian_sigma must be >= 0")
-        if sum(s is not None for s in (self.puncta, self.iterative_otsu, self.adaptive_clip)) > 1:
+        method_sentinels = (
+            self.puncta,
+            self.iterative_otsu,
+            self.adaptive_clip,
+            self.auto_extract,
+        )
+        if sum(s is not None for s in method_sentinels) > 1:
             raise ValueError(
-                "a round carries at most one of puncta / iterative_otsu / adaptive_clip"
+                "a round carries at most one of puncta / iterative_otsu / "
+                "adaptive_clip / auto_extract"
+            )
+        # cnr_classify is an opt-in post-step, not a method — it is mutually
+        # INCLUSIVE with the method sentinels and excluded from the at-most-one
+        # check above. It splits the produced feature mask by per-cell-σ CNR, so
+        # it is only meaningful on an Adaptive Local Clipping round.
+        if (
+            self.cnr_classify is not None
+            and self.adaptive_clip is None
+            and self.auto_extract is None
+        ):
+            raise ValueError(
+                "cnr_classify requires an Adaptive Local Clipping method on the "
+                "round (adaptive_clip or auto_extract)"
             )
 
 
@@ -567,6 +660,22 @@ class WorkflowConfig:
         names = [r.name for r in self.thresholding_rounds]
         if len(set(names)) != len(names):
             raise ValueError(f"thresholding round names must be unique: {names}")
+        # Cross-round: a cnr_classify round mints /masks/<name>_low and
+        # /masks/<name>_high population masks (the CNR post-step). Those reserved
+        # names must not collide with another round's base name — round-name
+        # uniqueness above is base-name-only and blind to the suffixed masks.
+        name_set = set(names)
+        for r in self.thresholding_rounds:
+            if r.cnr_classify is None:
+                continue
+            for suffix in ("_low", "_high"):
+                reserved = f"{r.name}{suffix}"
+                if reserved in name_set:
+                    raise ValueError(
+                        f"round {r.name!r} with cnr_classify reserves population "
+                        f"mask name {reserved!r}, which collides with another "
+                        f"thresholding round name"
+                    )
         ds_names = [d.name for d in self.datasets]
         if len(set(ds_names)) != len(ds_names):
             raise ValueError(f"dataset names must be unique: {ds_names}")
