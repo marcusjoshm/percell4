@@ -228,7 +228,21 @@ def test_batch_threshold_auto_extract_writes_mask(tmp_path, capsys):
     assert mask.dtype == np.uint8
     assert set(np.unique(mask).tolist()) <= {0, 1}
     assert mask.sum() > 0
-    assert "auto-extract" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "auto-extract" in out
+    assert "smallest=0.36" in out  # the override summary fragment
+
+
+def test_batch_threshold_auto_extract_autodetect_summary(tmp_path, capsys):
+    """The autodetect path (no --smallest-particle-um) prints 'smallest=auto'."""
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+    ])
+    assert rc == 0
+    assert "smallest=auto" in capsys.readouterr().out
 
 
 def test_batch_threshold_auto_extract_gaussian_sigma_sets_presmooth(tmp_path, monkeypatch):

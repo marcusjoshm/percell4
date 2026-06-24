@@ -787,6 +787,8 @@ def _apply_auto_extract_cells(
     needed). Unions the ``{0,1}`` result into ``combined`` in place. Returns an error
     string on failure, else ``""``.
     """
+    from percell4.domain.measure.auto_extraction import FILL_FACTOR, _win, auto_extract
+
     smallest_particle_px: float | None = None
     if settings.smallest_particle_um is not None:
         if pixel_size_um is None or pixel_size_um <= 0:
@@ -795,18 +797,19 @@ def _apply_auto_extract_cells(
                 "smallest-particle override"
             )
         smallest_particle_px = float(settings.smallest_particle_um) / float(pixel_size_um)
-        # Plausibility: an absurd (but positive) pixel size or oversized smallest
-        # particle makes the fine window exceed the frame, degenerating "local"
-        # clipping to a global one. Fail cleanly with a clear message.
-        if smallest_particle_px > min(image.shape[-2:]):
+        # Plausibility: guard the FINE WINDOW (≈ FILL_FACTOR × smallest — the exact
+        # window auto_extract derives), NOT the diameter. An absurd pixel size or
+        # oversized smallest particle blows the window past the frame, degenerating
+        # "local" clipping to a global one. Fail cleanly with a clear message.
+        fine_window = _win(FILL_FACTOR * smallest_particle_px)
+        if fine_window > min(image.shape[-2:]):
             return (
-                f"auto extraction: smallest particle {smallest_particle_px:.1f}px exceeds "
-                f"the image ({'x'.join(str(d) for d in image.shape[-2:])}) for "
+                f"auto extraction: fine window {fine_window}px (≈{FILL_FACTOR:g}× the "
+                f"smallest particle) exceeds the image "
+                f"({'x'.join(str(d) for d in image.shape[-2:])}) for "
                 f"smallest_particle_um={settings.smallest_particle_um:g} µm at pixel size "
                 f"{pixel_size_um:g} µm/px — check the dataset pixel size and smallest particle"
             )
-
-    from percell4.domain.measure.auto_extraction import auto_extract
 
     try:
         mask, report = auto_extract(

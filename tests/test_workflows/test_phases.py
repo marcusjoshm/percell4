@@ -752,6 +752,50 @@ def test_auto_extract_presmooth_is_settings_default_not_round_sigma(tmp_path):
     assert combined.sum() > 0  # catches the silent-empty-mask trap
 
 
+def test_apply_auto_extract_is_bit_identical_to_bare_detector(tmp_path):
+    """R10 parity: the apply branch equals a direct auto_extract call with the
+    settings' presmooth_sigma_px — driven through _apply_threshold_frame with the
+    round's grouped-Otsu gaussian_sigma=0 and a NON-default presmooth (2.0). Catches
+    the dispatcher feeding `smoothed` instead of the raw image, or a wrong-sigma wire."""
+    from percell4.domain.measure.auto_extraction import auto_extract
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    store = _make_auto_extract_store(tmp_path / "parity.h5")
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    ps = float(store.metadata["pixel_size_um"])
+    round_spec = _auto_extract_round(
+        gaussian_sigma=0.0,
+        auto_extract=AutoExtractSettings(smallest_particle_um=0.36, presmooth_sigma_px=2.0),
+    )
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+    mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, ps)
+    assert err == ""
+    expected, _ = auto_extract(
+        image, labels, smallest_particle_px=0.36 / ps, presmooth_sigma_px=2.0
+    )
+    assert np.array_equal(mask, expected)
+
+
+def test_auto_extract_oversized_window_fails_cleanly(tmp_path):
+    """The plausibility guard bounds the FINE WINDOW (≈3× smallest), not the diameter:
+    a smallest-particle whose px diameter < frame but whose ≈3× window > frame must
+    fail cleanly rather than silently produce a degenerate global-clip mask."""
+    from percell4.workflows.phases import _apply_auto_extract_cells
+
+    store = _make_auto_extract_store(tmp_path / "oversized.h5", pixel_size_um=0.12)
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    # px = 4.8 / 0.12 = 40 on a 100px frame → diameter 40 < 100 (a diameter guard
+    # would miss it) but window ≈ 3×40 = 120 > 100 (the window guard fires).
+    settings = AutoExtractSettings(smallest_particle_um=4.8)
+    combined = np.zeros(labels.shape, dtype=np.uint8)
+    err = _apply_auto_extract_cells(image, labels, settings, combined, 0.12, "ae")
+    assert "fine window" in err
+    assert "exceeds the image" in err
+    assert combined.sum() == 0
+
+
 # ── apply_threshold_headless: guided CNR post-step (U4) ──────────────────
 
 
