@@ -333,6 +333,37 @@ def test_batch_threshold_cnr_classify_writes_classification_table(tmp_path, caps
     assert "SG_iter" not in DatasetStore(p).list_masks()
 
 
+# ── px/µm size unit (U11) ────────────────────────────────────────────────
+
+
+def test_batch_threshold_adaptive_clip_px_unit_runs_without_pixel_size(tmp_path, capsys):
+    """--d-min-unit px lets an adaptive round run on a dataset with no pixel size."""
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p, pixel_size_um=None)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ac",
+        "--segmentation", "cellpose", "--strategy", "adaptive-clip",
+        "--d-min-um", "3", "--d-min-unit", "px",
+    ])
+    assert rc == 0
+    assert DatasetStore(p).read_mask("ac").sum() > 0
+    assert "d_min=3 px" in capsys.readouterr().out
+
+
+def test_batch_threshold_auto_extract_px_unit_runs_without_pixel_size(tmp_path, capsys):
+    """--smallest-particle-unit px lets an auto-extract override run with no pixel size."""
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p, pixel_size_um=None)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+        "--smallest-particle-um", "3", "--smallest-particle-unit", "px",
+    ])
+    assert rc == 0
+    assert DatasetStore(p).read_mask("ae").sum() > 0
+    assert "smallest=3 px" in capsys.readouterr().out
+
+
 def test_batch_threshold_iterative_malformed_stop_param_exits_1(tmp_path, capsys):
     p = tmp_path / "DS1.h5"
     _make_dataset(p)

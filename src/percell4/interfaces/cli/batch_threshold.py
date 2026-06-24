@@ -142,9 +142,16 @@ def main(argv: list[str] | None = None) -> int:
     ac.add_argument(
         "--d-min-um", type=float, default=None,
         help=(
-            "Smallest particle diameter to detect, in µm (REQUIRED for "
-            "--strategy adaptive-clip). Sets the local-background window and size "
-            "filter; the noise floor is a robust per-cell MAD."
+            "Smallest particle diameter to detect, as a value in --d-min-unit "
+            "(REQUIRED for --strategy adaptive-clip). Sets the local-background "
+            "window and size filter; the noise floor is a robust per-cell MAD."
+        ),
+    )
+    ac.add_argument(
+        "--d-min-unit", choices=("um", "px"), default="um",
+        help=(
+            "Unit for --d-min-um (default um). 'um' resolves via the dataset pixel "
+            "size; 'px' is used directly — for datasets without a pixel size."
         ),
     )
     ac.add_argument(
@@ -157,10 +164,17 @@ def main(argv: list[str] | None = None) -> int:
     ae.add_argument(
         "--smallest-particle-um", type=float, default=None,
         help=(
-            "Smallest particle diameter, in µm, to OVERRIDE auto-detection of the "
-            "smallest particle. Omit to auto-detect it from the image. When set it "
-            "needs a pixel size on each dataset; the largest particle is always "
-            "measured automatically (LoG)."
+            "Smallest particle diameter, as a value in --smallest-particle-unit, to "
+            "OVERRIDE auto-detection of the smallest particle. Omit to auto-detect "
+            "it from the image. The largest particle is always measured (LoG)."
+        ),
+    )
+    ae.add_argument(
+        "--smallest-particle-unit", choices=("um", "px"), default="um",
+        help=(
+            "Unit for --smallest-particle-um (default um). 'um' resolves via the "
+            "dataset pixel size; 'px' is used directly — for datasets without a "
+            "pixel size."
         ),
     )
     cnr = parser.add_argument_group(
@@ -301,12 +315,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.strategy == "adaptive-clip":
             adaptive = AdaptiveClipSettings(
-                d_min_um=args.d_min_um, k=args.k, presmooth_sigma_px=args.gaussian_sigma
+                d_min_um=args.d_min_um,
+                k=args.k,
+                presmooth_sigma_px=args.gaussian_sigma,
+                d_min_unit=args.d_min_unit,
             )
         elif args.strategy == "auto-extract":
             auto_extract = AutoExtractSettings(
                 smallest_particle_um=args.smallest_particle_um,
                 presmooth_sigma_px=args.gaussian_sigma,
+                smallest_particle_unit=args.smallest_particle_unit,
             )
         cnr_classify = (
             CnrClassifySettings(threshold=args.cnr_threshold) if args.cnr_classify else None
@@ -379,10 +397,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.strategy == "iterative-otsu":
             strat = f" ({args.strategy}/{args.iterative_scope}; --verbose for peel report)"
         elif args.strategy == "adaptive-clip":
-            strat = f" (adaptive-clip; d_min={args.d_min_um:g} µm, k={args.k:g})"
+            strat = f" (adaptive-clip; d_min={args.d_min_um:g} {args.d_min_unit}, k={args.k:g})"
         elif args.strategy == "auto-extract":
             smallest = (
-                f"{args.smallest_particle_um:g} µm"
+                f"{args.smallest_particle_um:g} {args.smallest_particle_unit}"
                 if args.smallest_particle_um is not None
                 else "auto"
             )
