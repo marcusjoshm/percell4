@@ -118,20 +118,22 @@ def main(argv: list[str] | None = None) -> int:
         "--gaussian-sigma", type=float, default=1.0,
         help=(
             "Pre-threshold Gaussian sigma (default 1.0). For --strategy "
-            "adaptive-clip this is the detector's per-cell presmooth sigma (px)."
+            "adaptive-clip or auto-extract this is the detector's per-cell "
+            "presmooth sigma (px)."
         ),
     )
     grp.add_argument(
         "--strategy",
-        choices=("grouped-otsu", "iterative-otsu", "adaptive-clip"),
+        choices=("grouped-otsu", "iterative-otsu", "adaptive-clip", "auto-extract"),
         default="grouped-otsu",
         help=(
             "Thresholding strategy. 'grouped-otsu' (default) is the legacy "
             "per-group Otsu. 'iterative-otsu' peels the brightest layer each "
             "round (see the iterative-otsu options group). 'adaptive-clip' runs "
-            "the per-cell adaptive sigma-clipping detector (see the adaptive-clip "
-            "options group); it ignores --algorithm/--metric grouping and needs a "
-            "pixel size on each dataset."
+            "the per-cell single-window adaptive sigma-clipping detector (see the "
+            "adaptive-clip options group). 'auto-extract' runs the per-cell "
+            "two-pass auto-extraction detector (see the auto-extract options "
+            "group). Both per-cell strategies ignore --algorithm/--metric grouping."
         ),
     )
     ac = parser.add_argument_group(
@@ -148,6 +150,34 @@ def main(argv: list[str] | None = None) -> int:
     ac.add_argument(
         "--k", type=float, default=1.0,
         help="Adaptive-clip sigma multiplier (default 1.0; raise to be more conservative).",
+    )
+    ae = parser.add_argument_group(
+        "Auto extraction (two-pass) (only used when --strategy auto-extract)"
+    )
+    ae.add_argument(
+        "--smallest-particle-um", type=float, default=None,
+        help=(
+            "Smallest particle diameter, in µm, to OVERRIDE auto-detection of the "
+            "smallest particle. Omit to auto-detect it from the image. When set it "
+            "needs a pixel size on each dataset; the largest particle is always "
+            "measured automatically (LoG)."
+        ),
+    )
+    cnr = parser.add_argument_group(
+        "Guided CNR subpopulation classification (opt-in; ALC strategies only)"
+    )
+    cnr.add_argument(
+        "--cnr-classify", action="store_true",
+        help=(
+            "After the feature mask is produced, split its foci by contrast-to-"
+            "noise ratio at --cnr-threshold into <round>_low / <round>_high masks "
+            "plus a per-focus CNR table at /classification/<round>. Guided mode "
+            "only; valid only with --strategy adaptive-clip or auto-extract."
+        ),
+    )
+    cnr.add_argument(
+        "--cnr-threshold", type=float, default=None,
+        help="Guided CNR split threshold (REQUIRED with --cnr-classify).",
     )
     itr = parser.add_argument_group(
         "Iterative Otsu (only used when --strategy iterative-otsu)"
@@ -218,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     from percell4.store import DatasetStore
     from percell4.workflows.models import (
         AdaptiveClipSettings,
+        AutoExtractSettings,
+        CnrClassifySettings,
         GmmCriterion,
         IterativeOtsuSettings,
         ThresholdAlgorithm,
@@ -237,9 +269,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if args.cnr_classify and args.cnr_threshold is None:
+        print(
+            "[error] --cnr-classify requires --cnr-threshold (guided CNR split value).",
+            file=sys.stderr,
+        )
+        return 1
+    if args.cnr_classify and args.strategy not in ("adaptive-clip", "auto-extract"):
+        print(
+            "[error] --cnr-classify is only valid with --strategy adaptive-clip or "
+            "auto-extract (CNR is defined against the per-cell sigma detector).",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         iterative = None
         adaptive = None
+        auto_extract = None
         if args.strategy == "iterative-otsu":
             stop_params = tuple(_parse_stop_param(p) for p in args.stop_param)
             stop_criteria = tuple(c.strip() for c in args.stop_criteria.split(",") if c.strip())
@@ -256,6 +303,14 @@ def main(argv: list[str] | None = None) -> int:
             adaptive = AdaptiveClipSettings(
                 d_min_um=args.d_min_um, k=args.k, presmooth_sigma_px=args.gaussian_sigma
             )
+        elif args.strategy == "auto-extract":
+            auto_extract = AutoExtractSettings(
+                smallest_particle_um=args.smallest_particle_um,
+                presmooth_sigma_px=args.gaussian_sigma,
+            )
+        cnr_classify = (
+            CnrClassifySettings(threshold=args.cnr_threshold) if args.cnr_classify else None
+        )
         round_spec = ThresholdingRound(
             name=args.round_name,
             channel=args.channel,
@@ -267,6 +322,8 @@ def main(argv: list[str] | None = None) -> int:
             gaussian_sigma=args.gaussian_sigma,
             iterative_otsu=iterative,
             adaptive_clip=adaptive,
+            auto_extract=auto_extract,
+            cnr_classify=cnr_classify,
         )
     except ValueError as e:
         print(f"[error] invalid round configuration: {e}", file=sys.stderr)
@@ -323,8 +380,17 @@ def main(argv: list[str] | None = None) -> int:
             strat = f" ({args.strategy}/{args.iterative_scope}; --verbose for peel report)"
         elif args.strategy == "adaptive-clip":
             strat = f" (adaptive-clip; d_min={args.d_min_um:g} µm, k={args.k:g})"
+        elif args.strategy == "auto-extract":
+            smallest = (
+                f"{args.smallest_particle_um:g} µm"
+                if args.smallest_particle_um is not None
+                else "auto"
+            )
+            strat = f" (auto-extract; smallest={smallest})"
         else:
             strat = ""
+        if args.cnr_classify:
+            strat += f" + CNR split @ {args.cnr_threshold:g}"
         print(f"[{idx + 1}/{n_total}] [ok] {name}: wrote /masks/{args.round_name}{strat}")
 
     print(f"\n{n_ok}/{n_total} datasets thresholded.")

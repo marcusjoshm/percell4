@@ -209,6 +209,113 @@ def test_batch_threshold_adaptive_clip_missing_pixel_size_fails(tmp_path, capsys
     assert rc == 1  # the only dataset fails → no successes
     assert "pixel size" in capsys.readouterr().err
     assert "ac" not in DatasetStore(p).list_masks()
+
+
+# ── auto-extract strategy + guided CNR (U6) ──────────────────────────────
+
+
+def test_batch_threshold_auto_extract_writes_mask(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+        "--smallest-particle-um", "0.36",
+    ])
+    assert rc == 0
+    store = DatasetStore(p)
+    mask = store.read_mask("ae")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask).tolist()) <= {0, 1}
+    assert mask.sum() > 0
+    assert "auto-extract" in capsys.readouterr().out
+
+
+def test_batch_threshold_auto_extract_gaussian_sigma_sets_presmooth(tmp_path, monkeypatch):
+    """--gaussian-sigma maps to AutoExtractSettings.presmooth_sigma_px; --smallest-
+    particle-um is carried through as the µm override."""
+    import percell4.workflows.phases as phases_mod
+
+    captured = {}
+    real_compute = phases_mod.threshold_compute_one
+
+    def _capture(store, round_spec, seg_name="cellpose_qc"):
+        captured["round"] = round_spec
+        return real_compute(store, round_spec, seg_name=seg_name)
+
+    monkeypatch.setattr(phases_mod, "threshold_compute_one", _capture)
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+        "--smallest-particle-um", "0.36", "--gaussian-sigma", "0.5",
+    ])
+    r = captured["round"]
+    assert r.auto_extract is not None
+    assert r.auto_extract.presmooth_sigma_px == 0.5
+    assert r.auto_extract.smallest_particle_um == 0.36
+
+
+def test_batch_threshold_auto_extract_autodetect_constructs(tmp_path, monkeypatch):
+    """--strategy auto-extract without --smallest-particle-um builds a None override."""
+    import percell4.workflows.phases as phases_mod
+
+    captured = {}
+    real_compute = phases_mod.threshold_compute_one
+
+    def _capture(store, round_spec, seg_name="cellpose_qc"):
+        captured["round"] = round_spec
+        return real_compute(store, round_spec, seg_name=seg_name)
+
+    monkeypatch.setattr(phases_mod, "threshold_compute_one", _capture)
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+    ])
+    assert captured["round"].auto_extract.smallest_particle_um is None
+
+
+def test_batch_threshold_cnr_classify_requires_threshold(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+        "--smallest-particle-um", "0.36", "--cnr-classify",
+    ])
+    assert rc == 1
+    assert "--cnr-threshold" in capsys.readouterr().err
+
+
+def test_batch_threshold_cnr_classify_requires_alc_strategy(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "r1",
+        "--segmentation", "cellpose", "--strategy", "grouped-otsu",
+        "--cnr-classify", "--cnr-threshold", "5",
+    ])
+    assert rc == 1
+    assert "adaptive-clip or" in capsys.readouterr().err
+
+
+def test_batch_threshold_cnr_classify_writes_classification_table(tmp_path, capsys):
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+        "--smallest-particle-um", "0.36", "--cnr-classify", "--cnr-threshold", "5",
+    ])
+    assert rc == 0
+    store = DatasetStore(p)
+    assert "ae" in store.list_masks()
+    table = store.read_dataframe("/classification/ae")  # per-focus table written
+    assert len(table) >= 1
+    assert "CNR split" in capsys.readouterr().out
     assert "SG_iter" not in DatasetStore(p).list_masks()
 
 
