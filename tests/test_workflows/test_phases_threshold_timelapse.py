@@ -10,6 +10,8 @@ from percell4.store import DatasetStore
 from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
     AdaptiveClipSettings,
+    AutoExtractSettings,
+    CnrClassifySettings,
     ThresholdAlgorithm,
     ThresholdingRound,
 )
@@ -149,3 +151,122 @@ def test_single_timepoint_threshold_unchanged(tmp_path):
     assert store.read_mask("GFP_split").ndim == 2
     groups = store.read_dataframe("/groups/GFP_split")
     assert "timepoint" not in groups.columns
+
+
+# --------------------------------------------------------------------------- #
+# U3: per-frame guided CNR on a time-lapse (R5/R6) — single-tp abort lifted.
+# The per-frame split LOGIC is covered in tests/test_measure/test_cnr_classification.py;
+# here we test the phases wiring (THW stacks / timepoint table / single-population)
+# deterministically by patching the domain classify_by_cnr.
+# --------------------------------------------------------------------------- #
+def _cnr_round() -> ThresholdingRound:
+    return ThresholdingRound(
+        name="ac", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS, kmeans_n_clusters=2,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.12),
+        cnr_classify=CnrClassifySettings(threshold=5.0),
+    )
+
+
+def _patch_classify(monkeypatch, result):
+    import percell4.domain.measure.cnr_classification as cnr_mod
+
+    def _fake(image, feature_mask, cell_labels, *, threshold=None,
+              n_populations="auto", presmooth_sigma_px=1.0):
+        return result
+
+    monkeypatch.setattr(cnr_mod, "classify_by_cnr", _fake)
+
+
+def _two_pop_result():
+    from percell4.domain.measure.cnr_classification import ClassificationResult
+
+    labels_image = np.zeros((100, 100), dtype=np.int32)
+    labels_image[36:40, 36:40] = 1  # low-CNR population
+    labels_image[44:48, 44:48] = 2  # high-CNR population
+    components = [
+        {"label": 1, "cell": 1, "cnr": 3.0, "subpopulation": 1},
+        {"label": 2, "cell": 1, "cnr": 8.0, "subpopulation": 2},
+    ]
+    return ClassificationResult(
+        n_subpopulations=2, labels_image=labels_image, components=components,
+        split_axis="cnr", threshold=5.0, report={"decision": "guided"},
+    )
+
+
+def _one_pop_result():
+    from percell4.domain.measure.cnr_classification import ClassificationResult
+
+    labels_image = np.zeros((100, 100), dtype=np.int32)
+    labels_image[36:40, 36:40] = 1
+    components = [{"label": 1, "cell": 1, "cnr": 3.0, "subpopulation": 1}]
+    return ClassificationResult(
+        n_subpopulations=1, labels_image=labels_image, components=components,
+        split_axis=None, threshold=None, report={"decision": "single population"},
+    )
+
+
+def test_cnr_timelapse_writes_THW_population_masks_and_timepoint_table(tmp_path, monkeypatch):
+    """R5/R6: a time-lapse CNR round now RUNS (no single-timepoint abort), writing
+    (T,H,W) _low/_high stacks and a timepoint-columned /classification table."""
+    store = _adaptive_timelapse_store(tmp_path / "cnr_tl.h5", n_t=2)
+    _patch_classify(monkeypatch, _two_pop_result())
+    rnd = _cnr_round()
+    grouping, _f, _m = threshold_compute_one(store, rnd)
+    failure, msg = apply_threshold_headless(store, rnd, grouping)
+    assert failure is None, msg
+
+    low, high = store.read_mask("ac_low"), store.read_mask("ac_high")
+    assert low.shape == (2, 100, 100) and high.shape == (2, 100, 100)
+    assert int(low.sum()) > 0 and int(high.sum()) > 0
+    table = store.read_dataframe("/classification/ac")
+    assert "timepoint" in table.columns
+    assert set(table["timepoint"].unique()) == {0, 1}
+    assert "n_subpopulations" in table.columns
+
+
+def test_cnr_timelapse_single_population_writes_no_split(tmp_path, monkeypatch):
+    """A stack that never splits writes no _low/_high; the base (T,H,W) mask stands."""
+    store = _adaptive_timelapse_store(tmp_path / "cnr_tl_1pop.h5", n_t=2)
+    _patch_classify(monkeypatch, _one_pop_result())
+    rnd = _cnr_round()
+    grouping, _f, _m = threshold_compute_one(store, rnd)
+    failure, msg = apply_threshold_headless(store, rnd, grouping)
+    assert failure is None, msg
+    assert "ac_low" not in store.list_masks()
+    assert "ac_high" not in store.list_masks()
+    assert store.read_mask("ac").shape == (2, 100, 100)  # base mask stands
+    assert "single population" in msg
+
+
+def _blank_frame():
+    """A labelled cell with a flat interior — no LoG blob to size (auto-detect raises)."""
+    img = np.zeros((100, 100), dtype=np.float32)
+    img[20:60, 20:60] = 10.0  # uniform interior, no particle
+    lab = np.zeros((100, 100), dtype=np.int32)
+    lab[20:60, 20:60] = 1
+    return img, lab
+
+
+def test_auto_extract_timelapse_blank_frame_degrades_not_aborts(tmp_path):
+    """R9: an auto-detect frame with no detectable particles becomes an empty plane,
+    not a whole-dataset abort (the dissolved end of a washout)."""
+    img0, lab0 = _adaptive_frame()   # frame 0 has a bright blob
+    img1, lab1 = _blank_frame()      # frame 1 has none
+    store = DatasetStore(tmp_path / "ae_blank.h5")
+    store.create(metadata={"channel_names": ["GFP"]})  # no pixel size: auto-detect needs none
+    store.write_array("intensity", np.stack([img0, img1], 0), attrs={"dims": ["T", "H", "W"]})
+    store.write_labels("cellpose_qc", np.stack([lab0, lab1], 0).astype(np.int32))
+
+    rnd = ThresholdingRound(
+        name="ae", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS, kmeans_n_clusters=2,
+        auto_extract=AutoExtractSettings(),  # smallest_particle_um=None -> auto-detect
+    )
+    grouping, _f, _m = threshold_compute_one(store, rnd)
+    failure, msg = apply_threshold_headless(store, rnd, grouping)
+    assert failure is None, msg  # the blank frame did NOT abort the dataset
+    mask = store.read_mask("ae")
+    assert mask.shape == (2, 100, 100)
+    assert int(mask[0].sum()) > 0   # frame 0 detected its blob
+    assert int(mask[1].sum()) == 0  # frame 1 is an empty plane

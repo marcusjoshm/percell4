@@ -779,6 +779,15 @@ def _apply_adaptive_clip_cells(
     return ""
 
 
+# Sentinel error returned by _apply_auto_extract_cells when auto-detect-smallest found no
+# particles to size. In a time-lapse this is a recoverable empty frame (R9: the dissolved
+# end of a washout); single-timepoint callers still surface it as a clear failure.
+_AUTO_EXTRACT_NO_PARTICLES = (
+    "auto extraction: auto-detect found no particles to size (no blobs); supply a "
+    "smallest particle Ø (turn off auto-detect) or check the data"
+)
+
+
 def _apply_auto_extract_cells(
     image: NDArray,
     labels: NDArray,
@@ -834,6 +843,18 @@ def _apply_auto_extract_cells(
             smallest_particle_px=smallest_particle_px,
             presmooth_sigma_px=float(settings.presmooth_sigma_px),
         )
+    except ValueError as e:
+        if smallest_particle_px is None and "no blobs" in str(e):
+            # Auto-detect found no particles to size in this frame. That is a recoverable
+            # "no particles" outcome (e.g. the dissolved end of a washout time-lapse), NOT
+            # a dataset error: the time-lapse loop turns it into an empty frame (R9). The
+            # single-timepoint caller still treats this sentinel as a clear failure.
+            logger.info(
+                "round %s: auto extraction auto-detect found no particles to size", round_name
+            )
+            return _AUTO_EXTRACT_NO_PARTICLES
+        logger.exception("auto extraction failed for round %s", round_name)
+        return f"auto extraction: {e}"
     except Exception as e:
         logger.exception("auto extraction failed for round %s", round_name)
         return f"auto extraction: {e}"
@@ -1049,6 +1070,89 @@ def _classify_and_write_cnr(
     return None, f"CNR: split into {pops_desc}{table_note}"
 
 
+def _classify_and_write_cnr_stack(
+    store: DatasetStore,
+    round_spec: ThresholdingRound,
+    image_thw: NDArray,
+    labels_thw: NDArray,
+    mask_thw: NDArray,
+    settings: CnrClassifySettings,
+) -> tuple[DatasetFailure | None, str]:
+    """Per-frame guided CNR split of a ``(T,H,W)`` feature mask (time-lapse, R5/R6).
+
+    The time-lapse analog of :func:`_classify_and_write_cnr`: classifies every frame on
+    its own image/labels at the **one shared** ``threshold`` and writes ``(T,H,W)``
+    ``<round>_low`` / ``<round>_high`` population masks + a per-focus CNR table (with a
+    ``timepoint`` column and a per-frame ``n_subpopulations`` flag) to
+    ``/classification/<round>``. CNR uses the producing ALC round's presmooth so its σ
+    matches the detector (R7). Returns ``(failure, message)``: a classification raise or a
+    population-mask write failure fails the dataset; a table-write failure is reported in
+    the message but does not lose the masks.
+    """
+    from percell4.domain.measure.cnr_classification import classify_by_cnr_stack
+
+    try:
+        res = classify_by_cnr_stack(
+            image_thw,
+            mask_thw,
+            labels_thw,
+            mode="guided",
+            threshold=float(settings.threshold),
+            presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+        )
+    except Exception as e:
+        logger.exception("CNR stack classification failed for round %s", round_spec.name)
+        return DatasetFailure.THRESHOLD_ERROR, f"CNR classification failed: {e}"
+
+    # Clear any stale population masks BEFORE writing — a prior single-tp run leaves 2D
+    # _low/_high, and a re-run that now yields fewer populations must not leave the old
+    # stacks on disk (where the standalone batch-measure CLI would otherwise pick them up).
+    for suffix in ("_low", "_high"):
+        store.delete_item(f"masks/{round_spec.name}{suffix}")
+
+    # Write the population stacks only when at least one frame actually split (matching
+    # the single-tp "single population -> no extra mask, base stands" rule). When some
+    # frames split and others do not, a non-splitting frame still contributes its foci to
+    # the _low plane (n_subpopulations==1 on the table flags it as "unclassified, not
+    # dim") so the (T,H,W) stack stays coherent across the series.
+    n_frames = len(res.per_frame)
+    n_split = sum(1 for f in res.per_frame if f["n_subpopulations"] >= 2)
+    written: list[tuple[str, int]] = []
+    if n_split > 0:
+        for suffix, stack in (("_low", res.low_stack), ("_high", res.high_stack)):
+            # "non-empty" == any frame non-empty; the stack is always exactly (T,H,W) so
+            # the store validates the leading axis against n_timepoints.
+            if int(stack.sum()) == 0:
+                continue
+            name = f"{round_spec.name}{suffix}"
+            try:
+                store.write_mask(name, stack.astype(np.uint8))
+            except Exception as e:
+                logger.exception("write_mask failed for CNR population %s", name)
+                return (
+                    DatasetFailure.THRESHOLD_ERROR,
+                    f"CNR population write failed ({name}): {e}",
+                )
+            written.append((name, int(stack.sum())))
+
+    table_note = ""
+    try:
+        store.write_dataframe(f"/classification/{round_spec.name}", res.table)
+    except Exception as e:
+        logger.exception("write_dataframe /classification failed for %s", round_spec.name)
+        table_note = f"; CNR table write FAILED: {e}"
+
+    if not written:
+        return None, (
+            f"CNR: single population in all {n_frames} timepoint(s) "
+            f"(no split at threshold {settings.threshold:g}); base mask stands{table_note}"
+        )
+    pops_desc = ", ".join(f"{name} ({px} px)" for name, px in written)
+    return None, (
+        f"CNR: split into {pops_desc} across {n_split}/{n_frames} timepoint(s){table_note}"
+    )
+
+
 def apply_threshold_headless(
     store: DatasetStore,
     round_spec: ThresholdingRound,
@@ -1104,32 +1208,37 @@ def apply_threshold_headless(
 
     n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
 
-    # Guided CNR classification is single-timepoint only in this version. Abort
-    # cleanly BEFORE the timepoint dispatch — the time-lapse branch below returns
-    # without ever reaching the single-tp CNR call site, so the guard must fire
-    # here or a time-lapse CNR round would silently skip classification.
-    if round_spec.cnr_classify is not None and n_timepoints > 1:
-        return (
-            DatasetFailure.THRESHOLD_ERROR,
-            "guided CNR classification is single-timepoint only in this version",
-        )
-
     if n_timepoints > 1:
         per_frame: dict[int, GroupingResult] = grouping  # type: ignore[assignment]
         mask_frames: list[NDArray] = []
         group_dfs: list[pd.DataFrame] = []
+        # Guided CNR (R5) classifies each frame on its own image/labels at one shared
+        # threshold (R6). Collect the per-frame image/labels in THIS loop (only when CNR
+        # is requested) so the (T,H,W) stacks feed classify_by_cnr_stack without a second
+        # full-dataset read.
+        want_cnr = round_spec.cnr_classify is not None
+        image_frames: list[NDArray] = []
+        labels_frames: list[NDArray] = []
         for t in range(n_timepoints):
             try:
                 labels = store.read_labels(seg_name, timepoint=t)
                 image = _channel_from_frame(store.read_array_frame("intensity", t), channel_idx)
             except (KeyError, ValueError) as e:
                 return DatasetFailure.THRESHOLD_ERROR, str(e)
+            if want_cnr:
+                image_frames.append(image)
+                labels_frames.append(labels)
             g = per_frame.get(t)
             if g is None:
                 # No groups for this frame — empty mask, no group rows.
                 mask_frames.append(np.zeros(labels.shape, dtype=np.uint8))
                 continue
             mask, gdf, err = _apply_threshold_frame(image, labels, g, round_spec, pixel_size_um)
+            if err == _AUTO_EXTRACT_NO_PARTICLES:
+                # R9: no detectable particles this frame (e.g. dissolved granules at the
+                # end of a washout) — an empty frame, not a dataset failure.
+                mask_frames.append(np.zeros(labels.shape, dtype=np.uint8))
+                continue
             if err:
                 return DatasetFailure.THRESHOLD_ERROR, err
             mask_frames.append(mask)
@@ -1154,7 +1263,21 @@ def apply_threshold_headless(
         except Exception as e:
             logger.exception("write_dataframe /groups failed")
             return DatasetFailure.THRESHOLD_ERROR, f"write /groups failed: {e}"
-        return None, f"{int(combined.sum())} positive pixels across {len(group_dfs)} timepoint(s)"
+
+        # Optional per-frame guided CNR split of the just-written (T,H,W) feature mask.
+        cnr_note = ""
+        if want_cnr:
+            image_thw = np.stack(image_frames, axis=0)
+            labels_thw = np.stack(labels_frames, axis=0)
+            cnr_failure, cnr_msg = _classify_and_write_cnr_stack(
+                store, round_spec, image_thw, labels_thw, combined, round_spec.cnr_classify
+            )
+            if cnr_failure is not None:
+                return cnr_failure, cnr_msg
+            cnr_note = f"; {cnr_msg}"
+        return None, (
+            f"{int(combined.sum())} positive pixels across {len(group_dfs)} timepoint(s){cnr_note}"
+        )
 
     # Single-timepoint path.
     try:

@@ -942,20 +942,6 @@ def test_cnr_single_population_writes_no_extra_masks(tmp_path, monkeypatch):
     assert "single population" in msg
 
 
-def test_cnr_timelapse_round_aborts_before_any_write(tmp_path):
-    """R8: a time-lapse round opting into CNR fails cleanly BEFORE any mask write."""
-    from percell4.workflows.phases import _trivial_grouping
-
-    store = DatasetStore(tmp_path / "tl.h5")
-    store.create(metadata={"channel_names": ["GFP"], "pixel_size_um": 0.12, "n_timepoints": 2})
-    round_spec = _cnr_round()
-    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
-    failure, msg = apply_threshold_headless(store, round_spec, grouping)
-    assert failure is DatasetFailure.THRESHOLD_ERROR
-    assert "single-timepoint" in msg
-    assert "ae" not in store.list_masks()
-
-
 def test_cnr_stale_population_masks_deleted_on_reclassify(tmp_path, monkeypatch):
     """A 2→1 population re-run leaves no stale _low/_high masks."""
     store = _make_auto_extract_store(tmp_path / "stale.h5")
