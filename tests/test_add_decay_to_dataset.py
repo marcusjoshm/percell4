@@ -821,3 +821,218 @@ def test_add_decay_native_shape_match_succeeds(tmp_path, mock_read_flim_bin):
     assert report.written == ("ch00",)
     assert report.errors == {}
 
+
+# ── Registered-geometry append (U7) ─────────────────────────────────────
+
+
+def _tile_id_reader():
+    """A patterned .bin reader that embeds the tile id (_s<idx>) into the
+    array so placement can be verified pixel-for-pixel.
+
+    Returns 8x8x2 tiles whose every pixel equals ``idx + 1`` (so tile 0 = 1,
+    tile 1 = 2, ...). Distinct constant values make the overlap-winner check
+    unambiguous.
+    """
+    import re as _re
+
+    def _read(path, **kwargs):
+        m = _re.search(r"_s(\d+)", str(path))
+        idx = int(m.group(1)) if m else 0
+        arr = np.full((8, 8, 2), idx + 1, dtype=np.uint16)
+        return {
+            "array": arr,
+            "intensity": arr[..., 0].copy(),
+            "metadata": {"shape": (8, 8, 2)},
+        }
+
+    return _read
+
+
+def _write_registered_geometry(store, offsets, *, reference_channel="ch00",
+                               overlap=0.25):
+    """Persist registered overlap-stitch geometry via the store boundary."""
+    from percell4.domain.io.models import StitchProvenanceRecord
+
+    prov = StitchProvenanceRecord(
+        reference_channel=reference_channel,
+        overlap=str(overlap),
+        library="grid_stitching@test",
+        quality_json="{}",
+        n_tiles=str(len(offsets)),
+        importer_version="test",
+        timestamp_utc="2026-06-24T00:00:00+00:00",
+    )
+    store.write_stitch_geometry(
+        np.asarray(offsets, dtype=np.int32),
+        prov,
+        reference_channel=reference_channel,
+        overlap=overlap,
+    )
+
+
+def test_add_decay_registered_reuses_persisted_offsets(tmp_path, monkeypatch):
+    """AE2: append to a dataset with persisted registered geometry places
+    decay tiles at the persisted (y0, x0); /decay (H, W) == native_shape;
+    registration is NEVER recomputed."""
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # Guard: estimate_tile_offsets must NOT be called on the append path.
+    def _no_register(*a, **k):  # pragma: no cover - must never run
+        raise AssertionError("registration must not run on decay append")
+
+    monkeypatch.setattr(
+        "percell4.domain.io.assembler.estimate_tile_offsets", _no_register
+    )
+
+    # 2-tile horizontal mosaic: 8x8 tiles, tile 1 shifted right by 6 px
+    # (2 px overlap). canvas_from_offsets -> (8, 6 + 8) = (8, 14).
+    offsets = [(0, 0), (0, 6)]
+    from percell4.domain.io.assembler import canvas_from_offsets
+
+    native = canvas_from_offsets(np.asarray(offsets), (8, 8))
+    assert native == (8, 14)
+
+    store = _h5_with_intensity(
+        tmp_path, channel_names=("ch00",), shape=native
+    )
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    # _s0 -> tile 0 (value 1), _s1 -> tile 1 (value 2); offset=0 so token
+    # "00" maps to "ch00".
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+
+    assert report.written == ("ch00",), report.errors
+    assert report.errors == {}
+
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+    # Final (H, W) equals native_shape == canvas_from_offsets.
+    assert decay.shape == (8, 14, 2)
+    # Tile 0 (value 1) at columns 0-5 (its non-overlapped region).
+    assert (decay[:, 0:6, 0] == 1).all()
+    # Tile 1 (value 2) at columns 6-13.
+    assert (decay[:, 6:14, 0] == 2).all()
+    # Overlap columns 6-7: tile 1 (higher index) wins.
+    assert (decay[:, 6:8, 0] == 2).all()
+
+
+def test_add_decay_registered_offsets_absent_raises(tmp_path, mock_read_flim_bin,
+                                                    monkeypatch):
+    """AE4: a dataset flagged stitch_registered=True but with tile_offsets
+    absent → the append RAISES (no silent grid fallback)."""
+    from percell4.store import StitchGeometry
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 8))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    # Simulate the registered-but-offsets-absent corruption by patching the
+    # store's read_stitch_geometry to report registered=True / offsets=None.
+    monkeypatch.setattr(
+        "percell4.store.DatasetStore.read_stitch_geometry",
+        lambda self: StitchGeometry(
+            registered=True, offsets=None,
+            reference_channel="ch00", overlap=0.25,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="stitch_registered"):
+        add_decay_to_dataset(
+            h5_path=store.path,
+            source_dir=src,
+            token_config=TokenConfig(),
+            tile_config=TileConfig(grid_rows=1, grid_cols=1),
+            flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+            cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        )
+
+    # No decay was written.
+    with h5py.File(store.path, "r") as f:
+        assert "decay" not in f
+
+
+def test_add_decay_non_registered_uses_grid_path(tmp_path, mock_read_flim_bin):
+    """Back-compat: a dataset with NO registered geometry runs the unchanged
+    grid placement path (read_stitch_geometry reports registered=False)."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(16, 16))
+    # No stitch geometry written → read_stitch_geometry().registered is False.
+    assert store.read_stitch_geometry().registered is False
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, [
+        "exp_s1_ch1.bin", "exp_s2_ch1.bin", "exp_s3_ch1.bin", "exp_s4_ch1.bin",
+    ])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=2, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+    )
+
+    assert report.written == ("ch00",)
+    with h5py.File(store.path, "r") as f:
+        # 2x2 grid of 8x8 tiles → 16x16 stitched (edge-to-edge grid).
+        assert f["decay/ch00"].shape == (16, 16, 4)
+
+
+def test_add_decay_registered_rotate_k_odd_guard_transpose(tmp_path, monkeypatch):
+    """rotate_k odd on a registered dataset: the native_shape guard derives
+    out_h/out_w from canvas_from_offsets and still transposes for the odd
+    rotation, so a correctly-declared transposed native_shape matches."""
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # 2-tile horizontal mosaic → registered canvas (8, 14). rotate_k=1
+    # (90° CCW) transposes to (14, 8): native_shape declares the POST-rotation
+    # orientation.
+    offsets = [(0, 0), (0, 6)]
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(14, 8))
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+        rotate_k=1,
+    )
+
+    assert report.written == ("ch00",), report.errors
+    assert report.errors == {}
+    with h5py.File(store.path, "r") as f:
+        # Pre-rotation registered canvas (8, 14) → post-rotation (14, 8).
+        assert f["decay/ch00"].shape == (14, 8, 2)
+

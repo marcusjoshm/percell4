@@ -26,7 +26,7 @@ import numpy as np
 from percell4 import __version__ as _percell4_version
 from percell4.adapters.importer import write_decay_streaming
 from percell4.adapters.readers import read_flim_bin
-from percell4.domain.io.assembler import _tile_positions
+from percell4.domain.io.assembler import _tile_positions, canvas_from_offsets
 from percell4.domain.io.cross_format import (
     IntensityChannel,
     match_bin_to_intensity,
@@ -120,6 +120,23 @@ def add_decay_to_dataset(
 
     store = DatasetStore(h5_path)
     metadata = store.metadata
+    # Read registered overlap-stitch geometry FRESH from the store (never a
+    # cached handle.metadata snapshot — same staleness-safe pattern as the
+    # native_shape read below). When the dataset was never registered (or
+    # predates the feature) this reads back ``registered=False`` /
+    # ``offsets=None`` and the existing grid path runs unchanged (R6/back-compat).
+    geom = store.read_stitch_geometry()
+    # AE4: a dataset flagged registered but missing its persisted offsets is a
+    # dataset-level corruption — refuse the whole append rather than silently
+    # falling back to grid placement (which would mis-align /decay against the
+    # registered /intensity). This is dataset-wide, so it raises before the
+    # per-channel loop (never swallowed into a per-channel report error).
+    if geom.registered and geom.offsets is None:
+        raise ValueError(
+            "dataset is flagged stitch_registered=True but stitch/tile_offsets "
+            "is absent; cannot place decay at the registered geometry. "
+            "Re-import via the Compress dialog to a fresh output path."
+        )
     channel_names = list(metadata.get("channel_names", []))
     if not channel_names:
         return AppendReport(
@@ -229,19 +246,42 @@ def add_decay_to_dataset(
             tile_h, tile_w, n_bins = first_result["array"].shape
             del first_result
 
-            use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
-            if use_tiling:
-                out_h = tile_config.grid_rows * tile_h
-                out_w = tile_config.grid_cols * tile_w
-                positions = _tile_positions(
-                    tile_config.grid_rows,
-                    tile_config.grid_cols,
-                    tile_config.grid_type,
-                    tile_config.order,
-                )
+            # ── Placement: registered (overlap-aware) vs grid ──────────
+            # When the dataset carries registered geometry, reuse the
+            # persisted per-tile pixel offsets VERBATIM — never recompute
+            # registration here (R5/R6/AE2). Otherwise the existing fixed
+            # edge-to-edge grid path runs unchanged (back-compat, AE3).
+            if geom.registered:
+                # offsets-present is guaranteed here (AE4 already raised above
+                # when registered-but-absent). Build pixel_offsets keyed by the
+                # SAME 0-based normalized tile index used for tile_to_path
+                # (offsets[index] is the persisted (y0, x0) top-left corner).
+                offsets = np.asarray(geom.offsets)
+                pixel_offsets: dict[int, tuple[int, int]] = {
+                    idx: (int(offsets[idx][0]), int(offsets[idx][1]))
+                    for idx in tile_to_path
+                }
+                # Single canvas computation — canvas_from_offsets needs the
+                # tile shape (offsets are top-left corners); the append reads
+                # (tile_h, tile_w) from the first decay tile above.
+                out_h, out_w = canvas_from_offsets(offsets, (tile_h, tile_w))
+                use_tiling = True
+                positions = {}
             else:
-                out_h, out_w = tile_h, tile_w
-                positions = {0: (0, 0)}
+                pixel_offsets = None
+                use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
+                if use_tiling:
+                    out_h = tile_config.grid_rows * tile_h
+                    out_w = tile_config.grid_cols * tile_w
+                    positions = _tile_positions(
+                        tile_config.grid_rows,
+                        tile_config.grid_cols,
+                        tile_config.grid_type,
+                        tile_config.order,
+                    )
+                else:
+                    out_h, out_w = tile_h, tile_w
+                    positions = {0: (0, 0)}
 
             # Source-shape validation: the FINAL stored (H, W) must equal
             # /metadata.native_shape. Phase 2 below rotates each stitched
@@ -286,6 +326,10 @@ def add_decay_to_dataset(
                 out_w=out_w,
                 positions=positions,
                 use_tiling=use_tiling,
+                pixel_offsets=pixel_offsets,
+                # geom does not carry disconnected indices; pass () (the
+                # registered solve already demoted them at import time).
+                disconnected=(),
             )
 
         except Exception as e:  # noqa: BLE001
