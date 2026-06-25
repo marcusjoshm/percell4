@@ -312,6 +312,14 @@ class AddLayerDialog(QDialog):
         self._batch_stitch_widget.setVisible(False)
         settings_layout.addWidget(self._batch_stitch_widget)
 
+        # ── Read-only "reuse persisted geometry" affordance (R13) ──
+        # When the open dataset carries registered stitch geometry, decay /
+        # layer placement reuses the persisted per-tile offsets verbatim
+        # (no registration controls here — that's a compress-time concern).
+        self._batch_reuse_label = QLabel("")
+        self._seed_reuse_geometry_label(self._batch_reuse_label)
+        settings_layout.addWidget(self._batch_reuse_label)
+
         layout.addWidget(settings_group)
 
         # ── Token Patterns (collapsible) ──
@@ -854,6 +862,30 @@ class AddLayerDialog(QDialog):
         if hasattr(self._launcher, "statusBar"):
             self._launcher.statusBar().showMessage(msg)
 
+    def _seed_reuse_geometry_label(self, label: QLabel) -> None:
+        """Show "Reusing registered stitch geometry (N tiles)" when applicable.
+
+        Read-only affordance for the append surfaces (R13): when the open
+        dataset carries registered overlap-stitch geometry, decay / layer
+        placement reuses the persisted per-tile offsets verbatim, so the
+        user knows the grid controls are a fallback hint only. When the
+        dataset is not registered (or predates the feature), the label is
+        hidden. Never mutates session/state — purely informational.
+        """
+        try:
+            geom = self._store.read_stitch_geometry()
+        except Exception:
+            geom = None
+        if geom is not None and geom.registered and geom.offsets is not None:
+            n_tiles = int(len(geom.offsets))
+            label.setText(
+                f"Reusing registered stitch geometry ({n_tiles} tiles)"
+            )
+            label.setVisible(True)
+        else:
+            label.setText("")
+            label.setVisible(False)
+
     # ------------------------------------------------------------------
     # Tab: TCSPC (.bin) append
     # ------------------------------------------------------------------
@@ -957,6 +989,15 @@ class AddLayerDialog(QDialog):
         self._tcspc_stitch_cols.valueChanged.connect(_mark_user_edited)
         self._tcspc_stitch_type.currentIndexChanged.connect(_mark_user_edited)
         self._tcspc_stitch_order.currentIndexChanged.connect(_mark_user_edited)
+
+        # ── Read-only "reuse persisted geometry" affordance (R13) ──
+        # When the open dataset carries registered stitch geometry, the
+        # appended decay reuses the persisted per-tile offsets verbatim —
+        # the grid controls above are then only a fallback hint. No
+        # registration controls on this append surface (compress-time only).
+        self._tcspc_reuse_label = QLabel("")
+        self._seed_reuse_geometry_label(self._tcspc_reuse_label)
+        layout.addWidget(self._tcspc_reuse_label)
 
         # ── Rotation + Flip (LASX vs TIFF orientation) ──────────────
         # Both transforms apply to /decay/<ch> only (never /intensity).

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 import h5py
 import numpy as np
 import pandas as pd
 import pytest
 
-from percell4.store import DatasetStore
+from percell4.domain.io.models import StitchProvenanceRecord
+from percell4.store import DatasetStore, StitchGeometry
 
 
 @pytest.fixture
@@ -1031,3 +1034,184 @@ def test_array_dtype_on_group_raises(store):
     store.write_labels("seg", np.zeros((16, 16), dtype=np.int32))
     with pytest.raises(KeyError):
         store.array_dtype("labels")
+
+
+# ── Stitch geometry persistence (U4) ──────────────────────────
+
+
+def _stitch_provenance(coverage_fraction: float = 0.97) -> StitchProvenanceRecord:
+    quality = {
+        "correlations": [0.91, 0.88, 0.95, 0.82],
+        "disconnected": [],
+        "accepted_pair_fraction": 1.0,
+        "coverage_fraction": coverage_fraction,
+        "regression_threshold": 0.3,
+        "n_peaks": 5,
+    }
+    return StitchProvenanceRecord(
+        reference_channel="ch00",
+        overlap="0.1",
+        library="grid_stitching@vendored",
+        quality_json=json.dumps(quality),
+        n_tiles="4",
+        importer_version="0.1.0",
+        timestamp_utc="2026-06-24T12:00:00+00:00",
+    )
+
+
+def test_write_read_stitch_geometry_roundtrip(store):
+    """Offsets + scalar flags round-trip; reopening a fresh store reads them back."""
+    offsets = np.array([[0, 0], [0, 64], [60, 0], [62, 66]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets,
+        _stitch_provenance(),
+        reference_channel="ch00",
+        overlap=0.1,
+    )
+
+    # Reopen with a brand-new store object — nothing cached in-memory.
+    reopened = DatasetStore(store.path)
+    geo = reopened.read_stitch_geometry()
+
+    assert isinstance(geo, StitchGeometry)
+    assert geo.registered is True
+    assert isinstance(geo.registered, bool)
+    assert np.array_equal(geo.offsets, offsets)
+    assert geo.offsets.dtype == np.int32
+    assert geo.reference_channel == "ch00"
+    assert isinstance(geo.reference_channel, str)
+    assert geo.overlap == pytest.approx(0.1)
+    assert isinstance(geo.overlap, float)
+
+
+def test_stitch_provenance_roundtrip(store):
+    """/provenance/stitch attrs read back equal to to_attrs(); quality parses."""
+    prov = _stitch_provenance(coverage_fraction=0.93)
+    offsets = np.array([[0, 0], [0, 50]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets, prov, reference_channel="ch00", overlap=0.2
+    )
+
+    with h5py.File(store.path, "r") as f:
+        assert "provenance/stitch" in f
+        attrs = dict(f["provenance/stitch"].attrs)
+
+    expected = prov.to_attrs()
+    assert set(attrs) == set(expected)
+    for key, val in expected.items():
+        assert attrs[key] == val
+
+    quality = json.loads(attrs["quality_json"])
+    assert "coverage_fraction" in quality
+    assert quality["coverage_fraction"] == pytest.approx(0.93)
+
+
+def test_read_stitch_geometry_absent(store):
+    """Freshly-created store with no stitch geometry → registered False, offsets None."""
+    geo = store.read_stitch_geometry()
+    assert geo.registered is False
+    assert geo.offsets is None
+    assert geo.reference_channel is None
+    assert geo.overlap is None
+
+
+def test_write_stitch_geometry_min_zero_invariant(store):
+    """Offsets whose per-axis min != 0 raise on write.
+
+    FIX G: this is a data invariant, so it raises ``ValueError`` (``-O``-safe)
+    rather than ``AssertionError`` (elided under ``python -O``).
+    """
+    bad = np.array([[5, 0], [7, 64]], dtype=np.int32)  # y-axis min is 5, not 0
+    with pytest.raises(ValueError, match="per-axis min must be 0"):
+        store.write_stitch_geometry(
+            bad, _stitch_provenance(), reference_channel="ch00", overlap=0.1
+        )
+
+
+def test_write_stitch_geometry_does_not_perturb_metadata(store):
+    """After writing geometry, native_shape + channel_names still resolve correctly."""
+    # A tiny /intensity so native_shape is inferable, with channel names.
+    store.set_metadata({"channel_names": ["ch00", "ch01"]})
+    store.write_array(
+        "intensity",
+        np.zeros((2, 24, 32), dtype=np.uint16),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+
+    offsets = np.array([[0, 0], [0, 16], [12, 0], [12, 16]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets, _stitch_provenance(), reference_channel="ch00", overlap=0.1
+    )
+
+    meta = store.metadata
+    assert meta["native_shape"] == (24, 32)
+    assert meta["channel_names"] == ["ch00", "ch01"]
+    # And the new scalars normalize typed.
+    assert meta["stitch_registered"] is True
+    assert isinstance(meta["stitch_overlap"], float)
+
+
+def test_stitch_registered_written_last(store):
+    """The commit marker is set strictly after offsets + provenance exist."""
+    offsets = np.array([[0, 0], [0, 40]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets, _stitch_provenance(), reference_channel="ch00", overlap=0.15
+    )
+    # All three artifacts present together once the flag is set.
+    with h5py.File(store.path, "r") as f:
+        assert f["metadata"].attrs["stitch_registered"]
+        assert "stitch/tile_offsets" in f
+        assert "provenance/stitch" in f
+
+
+# ── FIX E: flag/offsets decoupling + disconnected persistence ─────────
+
+
+def test_read_geometry_flag_set_offsets_absent(store):
+    """FIX E: stitch_registered=True with the offset array absent reads back
+    registered=True, offsets=None — so the AE4 guard (registered + offsets is
+    None) is reachable rather than masked into registered=False.
+    """
+    # Simulate a crash that left the commit marker but lost the offset array.
+    store.set_metadata({"stitch_registered": True})
+    geo = store.read_stitch_geometry()
+    assert geo.registered is True
+    assert geo.offsets is None
+
+
+def test_read_geometry_offsets_present_flag_absent(store):
+    """FIX E: offsets present but stitch_registered absent reads back
+    registered=False with offsets present — the partial/aborted-import state
+    consumers refuse, no longer collapsed to a silent grid path.
+    """
+    offsets = np.array([[0, 0], [0, 32]], dtype=np.int32)
+    store.write_array("stitch/tile_offsets", offsets)
+    geo = store.read_stitch_geometry()
+    assert geo.registered is False
+    assert geo.offsets is not None
+    assert np.array_equal(geo.offsets, offsets)
+
+
+def test_stitch_disconnected_roundtrips(store):
+    """FIX E: the persisted disconnected set round-trips through read."""
+    offsets = np.array([[0, 0], [0, 40], [30, 0], [30, 40]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets,
+        _stitch_provenance(),
+        reference_channel="ch00",
+        overlap=0.1,
+        disconnected=(2, 3),
+    )
+    geo = DatasetStore(store.path).read_stitch_geometry()
+    assert geo.disconnected == (2, 3)
+    assert all(isinstance(i, int) for i in geo.disconnected)
+
+
+def test_stitch_disconnected_defaults_empty(store):
+    """FIX E: a registered geometry written without disconnected reads ()."""
+    offsets = np.array([[0, 0], [0, 40]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets, _stitch_provenance(), reference_channel="ch00", overlap=0.1
+    )
+    geo = DatasetStore(store.path).read_stitch_geometry()
+    assert geo.disconnected == ()

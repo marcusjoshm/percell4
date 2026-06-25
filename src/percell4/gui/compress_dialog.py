@@ -254,6 +254,41 @@ class CompressDialog(QDialog):
             ]
         )
         stitch_layout.addWidget(self._stitch_order)
+        # ── Overlap-aware registration (phase-correlation) ──
+        # Overlap is stored as a FRACTION in TileConfig; the spinbox shows
+        # a percentage. Register opts into the phase-correlation path,
+        # gated at the importer on register ∧ overlap>0 ∧ grid>1×1.
+        stitch_layout.addWidget(QLabel("Overlap:"))
+        self._stitch_overlap = QDoubleSpinBox()
+        self._stitch_overlap.setRange(0.0, 99.0)
+        self._stitch_overlap.setSuffix("%")
+        self._stitch_overlap.setValue(0.0)
+        stitch_layout.addWidget(self._stitch_overlap)
+        self._stitch_register = QCheckBox(
+            "Register overlapping tiles (phase correlation)"
+        )
+        stitch_layout.addWidget(self._stitch_register)
+        stitch_layout.addWidget(QLabel("Reference:"))
+        # Reference channel identified by NAME. Populated from discovered
+        # channels (``chXX``), editable so a free-text name is also accepted.
+        # itemData carries the name verbatim (not an index).
+        self._stitch_reference = QComboBox()
+        self._stitch_reference.setEditable(True)
+        stitch_layout.addWidget(self._stitch_reference)
+        # ── Overlap fusion ──
+        # "None" keeps each overlap pixel from a single tile (measurement-correct;
+        # forced for FLIM datasets). "Linear Blending" feathers the seam for a
+        # display mosaic. itemData carries the TileConfig value verbatim.
+        stitch_layout.addWidget(QLabel("Fusion:"))
+        self._stitch_fusion = QComboBox()
+        self._stitch_fusion.addItem("None", "none")
+        self._stitch_fusion.addItem("Linear Blending", "linear_blending")
+        self._stitch_fusion.setToolTip(
+            "How overlapping pixels combine. None = single tile (no intensity "
+            "distortion; required when FLIM decay is present). Linear Blending "
+            "= feathered seam for display (intensity-only datasets)."
+        )
+        stitch_layout.addWidget(self._stitch_fusion)
         stitch_layout.addStretch()
         self._stitch_widget.setVisible(False)
         settings_layout.addWidget(self._stitch_widget)
@@ -425,11 +460,17 @@ class CompressDialog(QDialog):
 
         tile_config = None
         if self._stitch_check.isChecked():
+            ref = self._stitch_reference.currentText().strip()
             tile_config = TileConfig(
                 grid_rows=self._stitch_rows.value(),
                 grid_cols=self._stitch_cols.value(),
                 grid_type=self._stitch_type.currentText(),
                 order=self._stitch_order.currentText(),
+                # Spinbox shows a percentage; TileConfig stores a fraction.
+                overlap=self._stitch_overlap.value() / 100.0,
+                register=self._stitch_register.isChecked(),
+                reference_channel=ref or None,
+                fusion_method=self._stitch_fusion.currentData() or "none",
             )
 
         # Dataset check states + name overrides
@@ -703,7 +744,13 @@ class CompressDialog(QDialog):
         self._ch_list.blockSignals(False)
 
         # ── Channels (manual mode panel) ──
+        # Built before the reference combo so the combo can read each
+        # channel's (possibly renamed) name from its name_edit.
         self._build_manual_channel_panel()
+
+        # ── Registration reference-channel combo ──
+        # Seeded from each channel's CURRENT name (see _refresh_reference_combo).
+        self._refresh_reference_combo()
 
         # ── FLIM per-channel calibration rows ──
         self._build_calibration_panel()
@@ -761,6 +808,9 @@ class CompressDialog(QDialog):
             name_edit = QLineEdit(f"ch{ch}")
             name_edit.setPlaceholderText("Name")
             name_edit.setFixedWidth(100)
+            # A rename here is the name the importer keys its registration
+            # tiles by, so keep the reference-channel combo in sync live.
+            name_edit.textChanged.connect(self._refresh_reference_combo)
             row.addWidget(name_edit)
 
             type_combo = QComboBox()
@@ -774,6 +824,39 @@ class CompressDialog(QDialog):
             self._channel_configs[ch] = _ChannelConfig(
                 checkbox=cb, name_edit=name_edit, type_combo=type_combo
             )
+
+    def _refresh_reference_combo(self) -> None:
+        """Rebuild the registration reference-channel combo from each channel's
+        CURRENT name.
+
+        In Manual mode a channel may be renamed (ch00 -> "ER"); the importer
+        keys registration tiles by that renamed layer name, so the reference
+        must be selectable by the same name — the chXX id no longer exists
+        post-rename. Falls back to ``chXX`` for an unnamed channel (and in Auto
+        mode, where the name_edits hold their chXX defaults). itemData carries
+        the name verbatim (not an index), matching the round-trip convention.
+        Preserves the user's pick by channel position across a rename, or by
+        text for a free-typed entry. Wired to each name_edit's textChanged in
+        _build_manual_channel_panel so it stays live.
+        """
+        combo = self._stitch_reference
+        prev_text = combo.currentText().strip()
+        prev_idx = combo.currentIndex()  # -1 when the text was free-typed
+        combo.blockSignals(True)
+        combo.clear()
+        for ch in self._all_channels:
+            cfg = self._channel_configs.get(ch)
+            name = (cfg.name_edit.text().strip() if cfg else "") or f"ch{ch}"
+            combo.addItem(name, name)
+        if 0 <= prev_idx < combo.count():
+            combo.setCurrentIndex(prev_idx)  # same channel position, new name
+        elif prev_text:
+            idx = combo.findText(prev_text)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setCurrentText(prev_text)  # genuine free-text pick
+        combo.blockSignals(False)
 
     def _build_calibration_panel(self) -> None:
         """Build per-channel phase/modulation widgets for FLIM calibration.

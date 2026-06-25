@@ -133,7 +133,7 @@ cells:
     evidence: "Single tile case (1×1 grid) and multi-tile go through assemble_tiles equivalently"
   "src/percell4/domain/io/assembler.py.6":
     status: n/a
-    evidence: "no provenance writes"
+    evidence: "no provenance writes. The registered path's estimate_tile_offsets returns a quality dict (correlations, disconnected, coverage_fraction, engine params) that the importer seals into /provenance/stitch via store.write_stitch_geometry — the provenance payload (P6) is written at the store boundary, not here."
   "src/percell4/domain/io/assembler.py.7":
     status: ok
     evidence: "Pure Python"
@@ -268,8 +268,8 @@ cells:
     evidence: "append_decay_layers is the bulk variant; write_array is the single-layer variant; same primitives underneath"
   "src/percell4/store.py.6":
     status: partial
-    evidence: "append_decay_layers requires per-channel ProvenanceRecord (line 341, 364-370) — strict for /decay. No equivalent enforcement for /intensity, /labels/, /masks/, /phasor/."
-    residual_evidence: "Provenance is enforced for one payload type and absent for others."
+    evidence: "append_decay_layers requires per-channel ProvenanceRecord (line 341, 364-370) — strict for /decay. write_stitch_geometry writes a StitchProvenanceRecord to /provenance/stitch (overlap-aware-stitching slug) — registered geometry is a payload (P6 applied). No equivalent enforcement for /intensity, /labels/, /masks/, /phasor/."
+    residual_evidence: "Provenance is enforced for /decay and now /stitch; still absent for intensity/labels/masks/phasor."
     thread: provenance-everywhere
   "src/percell4/store.py.7":
     status: ok

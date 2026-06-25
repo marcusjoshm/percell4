@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from percell4.domain.io.models import (
     CrossFormatRule,
     ExplicitRule,
     ProvenanceRecord,
+    StitchProvenanceRecord,
 )
 from percell4.domain.io.view_bin import (
     majority_vote_mask,
@@ -185,6 +187,35 @@ class DimsConsistencyError(Exception):
 # ``from percell4.store import LayerAlreadyExists`` still work.
 LayerAlreadyExists = LayerAlreadyExistsError
 CrossFormatRuleConflict = CrossFormatRuleConflictError
+
+
+@dataclass(frozen=True)
+class StitchGeometry:
+    """Registered overlap-stitch geometry read back from a dataset.
+
+    ``registered`` is the commit marker (``/metadata.stitch_registered``).
+    When a dataset was never registered (or predates the feature), the
+    ``stitch/tile_offsets`` dataset is absent and this reads back as
+    ``registered=False`` with ``offsets=None`` — the back-compat / grid
+    path signal for consumers (R6/AE4).
+
+    ``offsets`` is the ``(N, 2) int32`` array of per-tile ``(y0, x0)``
+    top-left corners, with per-axis min exactly 0 (asserted on both write
+    and read) so the canvas derivation is unconditionally
+    ``max(offset + extent)``.
+
+    ``disconnected`` is the persisted set of tile indices that the import
+    solve left at their grid seed (lowest overwrite priority). A later
+    decay-only append threads this back through ``write_decay_streaming`` so
+    the append reproduces the import's overlap winner exactly. Defaults to
+    ``()`` for back-compat with files written before it was persisted.
+    """
+
+    registered: bool
+    offsets: NDArray | None
+    reference_channel: str | None
+    overlap: float | None
+    disconnected: tuple[int, ...] = ()
 
 
 def _choose_chunks(shape: tuple[int, ...], is_decay: bool = False) -> tuple[int, ...]:
@@ -356,6 +387,133 @@ class DatasetStore:
         used to open ``h5py.File`` directly).
         """
         return self.read_array(f"decay/{channel}", view_bin=view_bin)
+
+    # ── Stitch geometry (registered overlap mosaics) ──────────
+
+    def write_stitch_geometry(
+        self,
+        offsets: NDArray,
+        provenance: StitchProvenanceRecord,
+        *,
+        reference_channel: str,
+        overlap: float,
+        disconnected: tuple[int, ...] = (),
+    ) -> None:
+        """Persist registered overlap-stitch geometry through the store boundary.
+
+        Writes three things, with the commit marker written **strictly
+        last** so a crash mid-write leaves an un-registered (recoverable)
+        file rather than a half-registered brick:
+
+        1. ``stitch/tile_offsets`` -- the ``(N, 2) int32`` per-tile
+           ``(y0, x0)`` array, via :meth:`write_array` (pass-through
+           view-bin, lossless, no ``is_decay``/``dims`` requirement).
+        2. ``/provenance/stitch`` group attrs from ``provenance.to_attrs()``
+           (mirrors how decay provenance is written -- group attrs).
+        3. ``/metadata`` attrs ``stitch_reference_channel`` (str),
+           ``stitch_overlap`` (float), and ``stitch_disconnected`` (a
+           JSON-encoded list of int tile indices), then
+           ``stitch_registered = True`` **last** (the commit point,
+           R4/U6 ordering).
+
+        ``disconnected`` is the set of tile indices the solve left at their
+        grid seed; it is persisted so a later decay-only append can reproduce
+        the import's overlap winner exactly.
+
+        ``offsets`` must have per-axis min exactly 0 (the canvas
+        derivation depends on it); this is enforced before any write.
+        """
+        import json
+
+        offsets = np.asarray(offsets, dtype=np.int32)
+        if offsets.ndim != 2 or offsets.shape[1] != 2:
+            raise ValueError(
+                f"offsets must be (N, 2); got shape {offsets.shape}"
+            )
+        if offsets.size:
+            mins = offsets.min(axis=0)
+            # Data invariant (the canvas derivation depends on min==0) — a
+            # ``raise``, not an ``assert``, so it survives ``python -O``.
+            if not (int(mins[0]) == 0 and int(mins[1]) == 0):
+                raise ValueError(
+                    f"offsets per-axis min must be 0; "
+                    f"got {tuple(int(m) for m in mins)}"
+                )
+
+        # 1. Offset array (own write boundary).
+        self.write_array("stitch/tile_offsets", offsets)
+
+        # 2. Provenance group attrs (mirror /provenance/decay/<ch>).
+        with h5py.File(self.path, "a") as f:
+            prov_path = "provenance/stitch"
+            if prov_path in f:
+                del f[prov_path]
+            grp = f.require_group(prov_path)
+            for key, val in provenance.to_attrs().items():
+                grp.attrs[key] = val
+
+        # 3. Metadata scalars, with the commit marker STRICTLY LAST.
+        self.set_metadata(
+            {
+                "stitch_reference_channel": str(reference_channel),
+                "stitch_overlap": float(overlap),
+                "stitch_disconnected": json.dumps(
+                    [int(i) for i in disconnected]
+                ),
+            }
+        )
+        self.set_metadata({"stitch_registered": True})
+
+    def read_stitch_geometry(self) -> StitchGeometry:
+        """Read registered overlap-stitch geometry back from the dataset.
+
+        The ``registered`` flag is read **first** from ``/metadata``, fully
+        independent of whether ``stitch/tile_offsets`` is present, so the two
+        corrupt states the consumers guard against are observable rather than
+        silently collapsed to ``registered=False``:
+
+        * flag True + offsets absent → ``registered=True, offsets=None``
+          (AE4: a crash after the commit marker but before — or after losing —
+          the offset array; the consumer refuses the append).
+        * offsets present + flag absent → ``registered=False`` with offsets
+          present (a partial/aborted registered import; the consumer refuses).
+
+        Flags are read fresh on every call (never cached on the store) so an
+        in-session write is always observed. ``stitch_disconnected`` (JSON list
+        of ints) round-trips here, defaulting to ``()``.
+
+        Enforces (via ``raise``, ``-O``-safe) that read-back offsets have
+        per-axis min 0 — the same invariant enforced on write.
+        """
+        import json
+
+        meta = self.metadata
+        registered_flag = bool(meta.get("stitch_registered", False))
+        disconnected_raw = meta.get("stitch_disconnected")
+        if disconnected_raw is None:
+            disconnected: tuple[int, ...] = ()
+        else:
+            disconnected = tuple(int(i) for i in json.loads(disconnected_raw))
+
+        try:
+            offsets = self.read_array("stitch/tile_offsets")
+        except KeyError:
+            offsets = None
+
+        if offsets is not None and offsets.size:
+            mins = offsets.min(axis=0)
+            if not (int(mins[0]) == 0 and int(mins[1]) == 0):
+                raise ValueError(
+                    f"persisted offsets per-axis min must be 0; "
+                    f"got {tuple(int(m) for m in mins)}"
+                )
+        return StitchGeometry(
+            registered=registered_flag,
+            offsets=offsets,
+            reference_channel=meta.get("stitch_reference_channel"),
+            overlap=meta.get("stitch_overlap"),
+            disconnected=disconnected,
+        )
 
     def read_channel(
         self,
@@ -1097,6 +1255,10 @@ class DatasetStore:
                 attrs["creation_bin"] = int(attrs["creation_bin"])
             if "n_timepoints" in attrs:
                 attrs["n_timepoints"] = int(attrs["n_timepoints"])
+            if "stitch_overlap" in attrs:
+                attrs["stitch_overlap"] = float(attrs["stitch_overlap"])
+            if "stitch_registered" in attrs:
+                attrs["stitch_registered"] = bool(attrs["stitch_registered"])
             return attrs
         finally:
             self._close_if_not_session(f)

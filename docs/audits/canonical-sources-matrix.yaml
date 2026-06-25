@@ -80,6 +80,16 @@ canonical_sources:
       - src/percell4/domain/analysis/**/*.py
       - src/percell4/application/use_cases/run_analysis*.py
       - src/percell4/gui/analysis_widgets.py
+  - slug: overlap-aware-stitching
+    solution_doc: docs/solutions/architecture-patterns/overlap-aware-stitching.md
+    canonical_file: src/percell4/domain/io/assembler.py
+    status: canonical_clean
+    notes: "First data-dependent stitch path in domain/io. Geometry (integer per-tile offsets) is computed ONCE at compress via estimate_tile_offsets, persisted via store.write_stitch_geometry, and reused verbatim for every channel and for decay-only append. canvas_from_offsets is the single canvas source; assemble_tiles_with_offsets (intensity) and write_decay_streaming(pixel_offsets=…) (decay) share one (offsets, canvas, ascending-index priority) contract so /decay and /intensity resolve every overlap pixel to the same tile. The byte-identical grid path is preserved behind the gate register ∧ overlap>0 ∧ grid>1×1."
+    applies_to:
+      - src/percell4/domain/io/assembler.py
+      - src/percell4/adapters/importer.py
+      - src/percell4/application/use_cases/add_decay_to_dataset.py
+      - src/percell4/store.py
 
 # ── T1 file scope ──────────────────────────────────────────────────────
 # R2 path corrections applied:
@@ -225,7 +235,7 @@ cells:
     evidence: "pure-domain"
   "src/percell4/domain/io/assembler.py.decay-write-path":
     status: n/a
-    evidence: "stitch only — does not write"
+    evidence: "stitch only — does not write. The registered path's canvas_from_offsets + assemble_tiles_with_offsets (overlap-aware-stitching slug) place INTENSITY only; the matching decay placement is fed the same (offsets, canvas) into write_decay_streaming(pixel_offsets=…), so decay is never stitched in memory here."
   "src/percell4/domain/io/assembler.py.channel-deletion-permanence":
     status: n/a
     evidence: "no deletion"
@@ -1041,6 +1051,9 @@ gaps:
     reason: "Pure-domain canonical exists at domain/io/cross_format.py but no docs/solutions/ entry frames it as a reusable boundary; would be useful for future format additions (.sdt → channel binding)."
     authored_by_audit: null
     note: "Not authored in this pass because the canonical is clean and consumed by both callsites; can be authored as a follow-up if a third callsite emerges."
+  - slug: overlap-aware-stitching
+    reason: "The overlap-aware registered stitch path (feat/mosaic-merge-overlap-stitching, U1–U7) introduced the first data-dependent canvas in domain/io. The register-once-at-compress + persist + reuse-verbatim architecture, the canvas_from_offsets single-source rule, the offsets-as-dataset + /provenance/stitch convention, and the byte-identical gate had no docs/solutions/ entry naming the canonical source or the cross-layer alignment invariant."
+    authored_by_audit: docs/solutions/architecture-patterns/overlap-aware-stitching.md
 
 # ── Threads ────────────────────────────────────────────────────────────
 threads:

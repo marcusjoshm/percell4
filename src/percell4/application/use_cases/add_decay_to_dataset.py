@@ -26,7 +26,7 @@ import numpy as np
 from percell4 import __version__ as _percell4_version
 from percell4.adapters.importer import write_decay_streaming
 from percell4.adapters.readers import read_flim_bin
-from percell4.domain.io.assembler import _tile_positions
+from percell4.domain.io.assembler import _tile_positions, canvas_from_offsets
 from percell4.domain.io.cross_format import (
     IntensityChannel,
     match_bin_to_intensity,
@@ -120,6 +120,33 @@ def add_decay_to_dataset(
 
     store = DatasetStore(h5_path)
     metadata = store.metadata
+    # Read registered overlap-stitch geometry FRESH from the store (never a
+    # cached handle.metadata snapshot — same staleness-safe pattern as the
+    # native_shape read below). When the dataset was never registered (or
+    # predates the feature) this reads back ``registered=False`` /
+    # ``offsets=None`` and the existing grid path runs unchanged (R6/back-compat).
+    geom = store.read_stitch_geometry()
+    # AE4: a dataset flagged registered but missing its persisted offsets is a
+    # dataset-level corruption — refuse the whole append rather than silently
+    # falling back to grid placement (which would mis-align /decay against the
+    # registered /intensity). This is dataset-wide, so it raises before the
+    # per-channel loop (never swallowed into a per-channel report error).
+    if geom.registered and geom.offsets is None:
+        raise ValueError(
+            "dataset is flagged stitch_registered=True but stitch/tile_offsets "
+            "is absent; cannot place decay at the registered geometry. "
+            "Re-import via the Compress dialog to a fresh output path."
+        )
+    # The complementary corruption (FIX F): the offset array is present but the
+    # commit marker is absent — a partial/aborted registered import. Placing
+    # decay on either path (grid or registered) would risk mis-aligning against
+    # an /intensity that may itself be half-written. Refuse here too, before the
+    # per-channel loop, so the per-channel except can't swallow it.
+    if geom.offsets is not None and not geom.registered:
+        raise ValueError(
+            "stitch/tile_offsets present but stitch_registered is False — "
+            "partial/aborted registered import; re-import to a fresh path."
+        )
     channel_names = list(metadata.get("channel_names", []))
     if not channel_names:
         return AppendReport(
@@ -229,19 +256,57 @@ def add_decay_to_dataset(
             tile_h, tile_w, n_bins = first_result["array"].shape
             del first_result
 
-            use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
-            if use_tiling:
-                out_h = tile_config.grid_rows * tile_h
-                out_w = tile_config.grid_cols * tile_w
-                positions = _tile_positions(
-                    tile_config.grid_rows,
-                    tile_config.grid_cols,
-                    tile_config.grid_type,
-                    tile_config.order,
-                )
+            # ── Placement: registered (overlap-aware) vs grid ──────────
+            # When the dataset carries registered geometry, reuse the
+            # persisted per-tile pixel offsets VERBATIM — never recompute
+            # registration here (R5/R6/AE2). Otherwise the existing fixed
+            # edge-to-edge grid path runs unchanged (back-compat, AE3).
+            if geom.registered:
+                # offsets-present is guaranteed here (AE4 already raised above
+                # when registered-but-absent). Build pixel_offsets keyed by the
+                # SAME 0-based normalized tile index used for tile_to_path
+                # (offsets[index] is the persisted (y0, x0) top-left corner).
+                offsets = np.asarray(geom.offsets)
+                # COMPLETENESS (FIX C): a registered append must cover EVERY
+                # registered tile. The canvas (out_h/out_w) is derived from the
+                # full persisted geometry, so a partial set of tiles would
+                # leave registered regions empty AND mis-resolve overlaps the
+                # import placed against the missing tiles — silently misaligning
+                # /decay from /intensity. Partial registered decay is unsupported.
+                expected = set(range(len(offsets)))
+                present = set(tile_to_path)
+                if present != expected:
+                    raise ValueError(
+                        f"registered decay append requires all {len(offsets)} "
+                        f"tiles; got {len(present)} "
+                        f"(missing {sorted(expected - present)}, "
+                        f"extra {sorted(present - expected)})."
+                    )
+                pixel_offsets: dict[int, tuple[int, int]] = {
+                    idx: (int(offsets[idx][0]), int(offsets[idx][1]))
+                    for idx in tile_to_path
+                }
+                # Single canvas computation — canvas_from_offsets needs the
+                # tile shape (offsets are top-left corners); the append reads
+                # (tile_h, tile_w) from the first decay tile above.
+                out_h, out_w = canvas_from_offsets(offsets, (tile_h, tile_w))
+                use_tiling = True
+                positions = {}
             else:
-                out_h, out_w = tile_h, tile_w
-                positions = {0: (0, 0)}
+                pixel_offsets = None
+                use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
+                if use_tiling:
+                    out_h = tile_config.grid_rows * tile_h
+                    out_w = tile_config.grid_cols * tile_w
+                    positions = _tile_positions(
+                        tile_config.grid_rows,
+                        tile_config.grid_cols,
+                        tile_config.grid_type,
+                        tile_config.order,
+                    )
+                else:
+                    out_h, out_w = tile_h, tile_w
+                    positions = {0: (0, 0)}
 
             # Source-shape validation: the FINAL stored (H, W) must equal
             # /metadata.native_shape. Phase 2 below rotates each stitched
@@ -286,6 +351,12 @@ def add_decay_to_dataset(
                 out_w=out_w,
                 positions=positions,
                 use_tiling=use_tiling,
+                pixel_offsets=pixel_offsets,
+                # Thread the persisted disconnected set through (FIX C) so the
+                # append reproduces the import's overlap winner EXACTLY: any
+                # tile the solve demoted is placed first (lowest priority) here
+                # too. ``()`` on the grid path (geom.disconnected is empty).
+                disconnected=geom.disconnected if geom.registered else (),
             )
 
         except Exception as e:  # noqa: BLE001
@@ -455,73 +526,6 @@ def _extract_channel_token(name: str, token_config: TokenConfig) -> str | None:
     """
     m = re.search(r"(\d+)$", name)
     return m.group(1) if m else None
-
-
-def _read_and_stitch_decay(
-    bindings: list,
-    tile_config: TileConfig,
-    flim_config: FlimConfig,
-    token_config: TokenConfig,
-) -> np.ndarray:
-    """Read each binding's .bin, place tiles in grid positions, return stitched (H, W, T)."""
-    bin_kwargs = {
-        "x_dim": flim_config.bin_x or 512,
-        "y_dim": flim_config.bin_y or 512,
-        "t_dim": flim_config.bin_t or 132,
-        "dtype": flim_config.bin_dtype or "uint16",
-        "dim_order": flim_config.bin_dim_order or "YXT",
-        "header_bytes": flim_config.bin_header_bytes or 0,
-    }
-
-    # Single-tile fast path
-    if tile_config.grid_rows == 1 and tile_config.grid_cols == 1:
-        result = read_flim_bin(bindings[0].bin_path, **bin_kwargs)
-        return np.asarray(result["array"])
-
-    # Multi-tile: read all tiles, place in grid via _tile_positions
-    tile_to_path: dict[int, Path] = {}
-    for b in bindings:
-        idx = _extract_tile_index(b.bin_path.stem, token_config)
-        if idx is None:
-            raise ValueError(
-                f"tile token missing from {b.bin_path.name}; cannot stitch"
-            )
-        tile_to_path[idx] = b.bin_path
-
-    # Normalize 1-based → 0-based (filenames may use _s1, _s2, …)
-    if tile_to_path:
-        min_idx = min(tile_to_path.keys())
-        if min_idx > 0:
-            tile_to_path = {k - min_idx: v for k, v in tile_to_path.items()}
-
-    # Read first tile to determine shape/dtype
-    first_path = next(iter(tile_to_path.values()))
-    first = read_flim_bin(first_path, **bin_kwargs)
-    first_arr = np.asarray(first["array"])
-    tile_h, tile_w = first_arr.shape[:2]
-    t_dim = first_arr.shape[2] if first_arr.ndim == 3 else 1
-
-    out_h = tile_config.grid_rows * tile_h
-    out_w = tile_config.grid_cols * tile_w
-    output = np.zeros((out_h, out_w, t_dim), dtype=first_arr.dtype)
-
-    positions = _tile_positions(
-        tile_config.grid_rows,
-        tile_config.grid_cols,
-        tile_config.grid_type,
-        tile_config.order,
-    )
-
-    for tile_idx, (row, col) in positions.items():
-        if tile_idx not in tile_to_path:
-            continue
-        result = read_flim_bin(tile_to_path[tile_idx], **bin_kwargs)
-        arr = np.asarray(result["array"])
-        y0 = row * tile_h
-        x0 = col * tile_w
-        output[y0 : y0 + tile_h, x0 : x0 + tile_w] = arr
-
-    return output
 
 
 def _extract_tile_index(stem: str, token_config: TokenConfig) -> int | None:

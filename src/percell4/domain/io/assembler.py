@@ -5,8 +5,26 @@ Pure numpy functions — no HDF5 or GUI dependencies.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from numpy.typing import NDArray
+
+from percell4.domain._vendor.grid_stitching import (
+    compute_pairwise_shifts,
+    grid_positions,
+    optimize_positions,
+)
+
+
+class RegistrationError(RuntimeError):
+    """Raised when phase-correlation registration produces a degenerate solve.
+
+    A degenerate solve is one where too few tile pairs clear
+    ``regression_threshold`` so most/all tiles fall back to their initial grid
+    position — the result would collapse to a grid-equivalent canvas that must
+    never be stored as "registered" (R11 success gate).
+    """
 
 
 def assemble_tiles(
@@ -125,6 +143,450 @@ def _tile_positions(
         raise ValueError(f"Unknown grid_type: {grid_type!r}")
 
     return positions
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Overlap-aware (phase-correlation) registration + offset-driven placement.
+#
+# These three functions are the pure-domain core of the mosaic-merge stitching
+# path. ``assemble_tiles`` / ``_tile_positions`` above remain the 0%-overlap
+# edge-to-edge grid path and are untouched.
+# ──────────────────────────────────────────────────────────────────────────
+
+# PerCell4 carries the scan pattern as two fields: ``grid_type`` (row/column/
+# snake) + ``order`` (start corner, e.g. ``right_down``). The vendored
+# ``grid_positions`` accepts only a single hyphenated ``order`` string that
+# encodes the row/column/snake pattern. This table maps PerCell4's ``grid_type``
+# onto that vocabulary. The start-corner ``order`` has no ``grid_positions``
+# concept: v1 always seeds from the top-left corner and lets phase-correlation
+# refine the absolute positions from there — the seed only needs to be close
+# enough for neighbouring tiles to overlap, which top-left seeding guarantees.
+_GRID_TYPE_TO_VENDOR_ORDER: dict[str, str] = {
+    "row_by_row": "row-by-row",
+    "column_by_column": "column-by-column",
+    "snake_by_row": "snake-by-rows",
+    "snake_by_column": "snake-by-columns",
+}
+
+# Below this fraction of the expected grid-adjacent pairs (or with >half the
+# tiles disconnected) the solve is treated as degenerate and rejected (R11
+# success gate). Measured against grid adjacency (not the C(n, 2) combinatorial
+# count), so a healthy mosaic where most adjacent pairs register passes.
+_MIN_ACCEPTED_PAIR_FRACTION = 0.5
+
+
+def canvas_from_offsets(
+    offsets: NDArray, tile_shape: tuple[int, int]
+) -> tuple[int, int]:
+    """The single canvas computation for the registered path.
+
+    The canvas bounding box is ``max(y0 + th)`` by ``max(x0 + tw)`` over the
+    final non-negative integer offsets, where ``tile_shape == (th, tw)``.
+    ``native_shape``, the intensity allocator, and the decay allocator all
+    consume *this* value — the canvas is never recomputed elsewhere.
+
+    Returned dims are plain Python ints (not numpy ints), so any element/byte
+    sizing the caller does via :func:`math.prod` cannot wrap on Windows LLP64
+    where ``np.prod`` would overflow int32 (registered mosaics get large).
+
+    Parameters
+    ----------
+    offsets : (N, 2) int array of ``(y0, x0)`` top-left corners (per-axis min 0).
+    tile_shape : ``(th, tw)`` — the uniform tile height and width.
+
+    Returns
+    -------
+    (H, W) : tuple[int, int]
+    """
+    offsets = np.asarray(offsets)
+    th, tw = int(tile_shape[0]), int(tile_shape[1])
+    h = int(offsets[:, 0].max()) + th
+    w = int(offsets[:, 1].max()) + tw
+    return h, w
+
+
+def grid_seed_offsets(
+    tile_shape: tuple[int, int],
+    grid_rows: int,
+    grid_cols: int,
+    grid_type: str,
+    order: str,
+    overlap: float,
+) -> tuple[NDArray, tuple[int, int]]:
+    """Nominal-overlap grid offsets — the registration-free fallback.
+
+    Places each tile at its grid-seed position (the ``overlap`` IS accounted
+    for via ``step = dim·(1-overlap)``, but NO phase-correlation refinement is
+    applied). This is the clean mosaic floor a caller uses when a registered
+    solve is degenerate: strictly better than the 0%-overlap edge-to-edge grid,
+    never an arbitrary overlap. Returns the same ``(offsets, canvas)`` shape and
+    invariants as :func:`estimate_tile_offsets` (int32 ``(y0, x0)``, per-axis
+    min 0, canvas via :func:`canvas_from_offsets`) so the two are interchangeable
+    at the placement call site.
+
+    Parameters
+    ----------
+    tile_shape : ``(th, tw)`` — the uniform tile height and width.
+    grid_rows, grid_cols, grid_type, order, overlap : as in
+        :func:`estimate_tile_offsets`.
+    """
+    if grid_type not in _GRID_TYPE_TO_VENDOR_ORDER:
+        raise ValueError(f"Unknown grid_type: {grid_type!r}")
+    th, tw = int(tile_shape[0]), int(tile_shape[1])
+    vendor_order = _GRID_TYPE_TO_VENDOR_ORDER[grid_type]
+    _tile_positions(grid_rows, grid_cols, grid_type, order)  # validate order
+    seed_tiles = grid_positions(
+        grid_size_x=grid_cols,
+        grid_size_y=grid_rows,
+        tile_width=tw,
+        tile_height=th,
+        overlap=float(overlap),
+        order=vendor_order,
+    )
+    n = len(seed_tiles)
+    offsets = np.zeros((n, 2), dtype=np.int32)
+    for idx, tile in enumerate(seed_tiles):
+        x, y = tile.position  # (x, y) order
+        offsets[idx, 0] = int(round(float(y)))  # y0
+        offsets[idx, 1] = int(round(float(x)))  # x0
+    offsets[:, 0] -= int(offsets[:, 0].min())
+    offsets[:, 1] -= int(offsets[:, 1].min())
+    canvas_hw = canvas_from_offsets(offsets, (th, tw))
+    return offsets, canvas_hw
+
+
+def estimate_tile_offsets(
+    reference_tiles: dict[int, NDArray],
+    grid_rows: int,
+    grid_cols: int,
+    grid_type: str,
+    order: str,
+    overlap: float,
+) -> tuple[NDArray, tuple[int, int], dict]:
+    """Compute integer per-tile pixel offsets from overlapping reference tiles.
+
+    Seeds initial positions from ``grid_positions`` (grid + overlap), refines
+    them by phase-correlation registration on the reference channel, then
+    normalises the solved positions to non-negative integer ``(y0, x0)`` offsets.
+
+    Parameters
+    ----------
+    reference_tiles : dict mapping 0-based tile index to a 2D array. All tiles
+        must share one shape (raises ``ValueError`` otherwise — R14).
+    grid_rows, grid_cols : grid dimensions.
+    grid_type : ``'row_by_row'`` / ``'column_by_column'`` / ``'snake_by_row'`` /
+        ``'snake_by_column'`` (mapped to the vendored vocabulary).
+    order : start-corner string (``right_down`` …); v1 seeds from top-left and
+        registration refines, so ``order`` only validates as a known value.
+    overlap : fractional overlap in ``[0, 1)`` used to seed initial positions.
+
+    Returns
+    -------
+    offsets : (N, 2) int32 ``(y0, x0)``, per-axis min exactly 0.
+    canvas_hw : ``(H, W)`` from :func:`canvas_from_offsets`.
+    quality : dict carrying ``correlations`` (per accepted pair), ``disconnected``
+        (tile indices left at their seed position), ``accepted_pair_fraction``,
+        ``coverage_fraction``, ``regression_threshold``, ``n_peaks``.
+
+    Raises
+    ------
+    ValueError : non-uniform tile shapes, unknown ``grid_type``/``order``.
+    RegistrationError : degenerate solve (R11 success gate).
+    """
+    if not reference_tiles:
+        raise ValueError("No reference tiles to register")
+    if grid_type not in _GRID_TYPE_TO_VENDOR_ORDER:
+        raise ValueError(f"Unknown grid_type: {grid_type!r}")
+
+    n_tiles = len(reference_tiles)
+    indices = sorted(reference_tiles)
+
+    # Uniform-shape gate (R14): reject ragged mosaics before any work.
+    shapes = {reference_tiles[i].shape for i in indices}
+    if len(shapes) != 1:
+        raise ValueError(f"Reference tiles must have uniform shape, got {shapes}")
+    th, tw = next(iter(shapes))[:2]
+
+    vendor_order = _GRID_TYPE_TO_VENDOR_ORDER[grid_type]
+    # Validate `order` against the existing grid-order vocabulary so a typo is
+    # caught here even though v1 always seeds from the top-left corner.
+    _tile_positions(grid_rows, grid_cols, grid_type, order)
+
+    # Seed initial (x, y) positions from grid + overlap, then attach each
+    # reference tile's array onto its image-less Tile (in tile-index order).
+    seed_tiles = grid_positions(
+        grid_size_x=grid_cols,
+        grid_size_y=grid_rows,
+        tile_width=tw,
+        tile_height=th,
+        overlap=float(overlap),
+        order=vendor_order,
+    )
+    if len(seed_tiles) != n_tiles:
+        raise ValueError(
+            f"grid {grid_rows}x{grid_cols} expects {len(seed_tiles)} tiles, "
+            f"got {n_tiles}"
+        )
+    for tile, idx in zip(seed_tiles, indices):
+        tile.image = reference_tiles[idx]
+
+    initial_positions = [t.position for t in seed_tiles]  # (x, y) order
+
+    # Grid-prior band: the overlap distance in pixels. A solved tile may only
+    # move within this band of its grid seed, so registration refines WITHIN the
+    # overlap region and can never relocate a tile a tile-width away (the
+    # full-tile spurious-peak failure mode). Auto-derived from the overlap
+    # geometry — the in-house analogue of ASHLAR's max_shift / MIST's (4r)^2,
+    # but tied to the overlap fraction rather than a user micron value.
+    band_px = int(math.ceil(float(overlap) * max(int(th), int(tw))))
+
+    # Phase-correlation pairwise shifts + global least-squares optimisation.
+    regression_threshold = 0.3
+    n_peaks = 5
+    shifts = compute_pairwise_shifts(
+        seed_tiles,
+        ndim=2,
+        n_peaks=n_peaks,
+        regression_threshold=regression_threshold,
+        max_dev=band_px if band_px > 0 else None,
+    )
+
+    # Iterative outlier rejection (ImageJ-style): solve, drop the single pairwise
+    # shift least consistent with the global solution, re-solve — until every
+    # surviving shift agrees within `outlier_threshold` px or only a spanning set
+    # of pairs remains. Removes the few mis-registered pairs that would otherwise
+    # pull the least-squares and bow the far-corner tiles.
+    outlier_threshold = 2.5
+    n_rejected = 0
+    positions_xy = optimize_positions(
+        n_tiles, shifts, initial_positions, ndim=2
+    )  # (N, 2) in (x, y)
+    while len(shifts) > n_tiles:
+        residuals = [
+            float(
+                np.abs(
+                    np.asarray(s.shift) - (positions_xy[s.j] - positions_xy[s.i])
+                ).max()
+            )
+            for s in shifts
+        ]
+        worst = int(np.argmax(residuals))
+        if residuals[worst] <= outlier_threshold:
+            break
+        shifts.pop(worst)
+        n_rejected += 1
+        positions_xy = optimize_positions(
+            n_tiles, shifts, initial_positions, ndim=2
+        )
+
+    # Disconnected = tiles touched by no accepted pair (optimize_positions left
+    # them at their seed / initial position; never trusted to win an overlap).
+    connected: set[int] = set()
+    for s in shifts:
+        connected.add(s.i)
+        connected.add(s.j)
+    # Map vendor's 0..N-1 tile slot back to the caller's tile indices.
+    slot_to_index = {slot: idx for slot, idx in enumerate(indices)}
+    disconnected = sorted(
+        slot_to_index[slot] for slot in range(n_tiles) if slot not in connected
+    )
+
+    # Final hard clamp (grid-prior band): pin every solved position to within
+    # band_px of its own grid seed on each axis. The per-pair band gate already
+    # keeps each measured shift in-band, but a global least-squares chain could
+    # in principle accumulate drift; this clamp makes a tile escaping its
+    # overlap band MATHEMATICALLY IMPOSSIBLE regardless of solver pathology.
+    clamped_tiles: list[int] = []
+    if band_px > 0:
+        init_xy = np.asarray(initial_positions, dtype=np.float64)
+        pos_xy = np.asarray(positions_xy, dtype=np.float64)
+        clipped = np.minimum(np.maximum(pos_xy, init_xy - band_px), init_xy + band_px)
+        moved = np.any(clipped != pos_xy, axis=1)
+        clamped_tiles = sorted(
+            slot_to_index[slot] for slot in range(n_tiles) if bool(moved[slot])
+        )
+        positions_xy = clipped
+
+    # Convert (x, y) positions → image-axis (y0, x0); round to int.
+    offsets = np.empty((n_tiles, 2), dtype=np.int64)
+    for slot in range(n_tiles):
+        x, y = positions_xy[slot]
+        offsets[slot, 0] = int(round(float(y)))  # y0
+        offsets[slot, 1] = int(round(float(x)))  # x0
+
+    # Normalise to a non-negative origin: subtract per-axis min so min is 0.
+    offsets[:, 0] -= int(offsets[:, 0].min())
+    offsets[:, 1] -= int(offsets[:, 1].min())
+    if not (int(offsets[:, 0].min()) == 0 and int(offsets[:, 1].min()) == 0):
+        # Data invariant, not a debug check — must survive ``python -O``.
+        raise ValueError("offset normalisation must leave per-axis min == 0")
+    offsets = offsets.astype(np.int32)
+
+    # Index offsets by the caller's tile index (offsets[tile_index]).
+    offsets_by_index = np.zeros((n_tiles, 2), dtype=np.int32)
+    for slot, idx in slot_to_index.items():
+        offsets_by_index[idx] = offsets[slot]
+    offsets = offsets_by_index
+
+    canvas_hw = canvas_from_offsets(offsets, (th, tw))
+
+    # Quality metrics.
+    #
+    # ``compute_pairwise_shifts`` only emits shifts for SEED-OVERLAPPING
+    # (grid-adjacent) tile pairs, never every C(n, 2) combination — so the
+    # denominator must be the expected grid adjacency count, not
+    # ``n_tiles*(n_tiles-1)//2``. Using the combinatorial count false-rejected
+    # every mosaic >=4x4 (a perfect 4x4 emits ~24 shifts / 120 combos = 0.20).
+    # n_adjacent = horizontal edges + vertical edges in the grid.
+    n_adjacent = (grid_cols - 1) * grid_rows + (grid_rows - 1) * grid_cols
+    accepted_pair_fraction = (
+        len(shifts) / n_adjacent if n_adjacent else 0.0
+    )
+    coverage_fraction = _coverage_fraction(offsets, (th, tw), canvas_hw)
+    correlations = [float(s.weight) for s in shifts]
+    quality = {
+        "correlations": correlations,
+        "disconnected": disconnected,
+        "accepted_pair_fraction": float(accepted_pair_fraction),
+        "coverage_fraction": float(coverage_fraction),
+        "regression_threshold": float(regression_threshold),
+        "n_peaks": int(n_peaks),
+        "n_adjacent": int(n_adjacent),
+        "overlap_band_px": int(band_px),
+        "clamped_tiles": list(clamped_tiles),
+        "outlier_threshold": float(outlier_threshold),
+        "rejected_outliers": int(n_rejected),
+    }
+
+    # Degenerate-solve gate (R11): refuse to return a grid-equivalent canvas
+    # that a caller would store as "registered". Measured against the expected
+    # grid adjacency (above) so a healthy large mosaic — where most adjacent
+    # pairs register — passes, while a low-contrast solve (few adjacent pairs
+    # accepted, or most tiles left at their seed) is rejected.
+    if n_tiles > 1 and (
+        len(disconnected) > n_tiles // 2
+        or (n_adjacent and accepted_pair_fraction < _MIN_ACCEPTED_PAIR_FRACTION)
+    ):
+        raise RegistrationError(
+            "Degenerate registration: only "
+            f"{len(shifts)}/{n_adjacent} adjacent tile pairs cleared "
+            f"regression_threshold={regression_threshold} "
+            f"({len(disconnected)}/{n_tiles} tiles disconnected). "
+            "The reference channel is likely too low-contrast to register; "
+            "the solve collapses to the grid layout and must not be stored "
+            "as registered."
+        )
+
+    return offsets, canvas_hw, quality
+
+
+def _coverage_fraction(
+    offsets: NDArray, tile_shape: tuple[int, int], canvas_hw: tuple[int, int]
+) -> float:
+    """Fraction of canvas pixels covered by at least one placed tile."""
+    h, w = int(canvas_hw[0]), int(canvas_hw[1])
+    total = math.prod((h, w))
+    if total == 0:
+        return 0.0
+    th, tw = int(tile_shape[0]), int(tile_shape[1])
+    covered = np.zeros((h, w), dtype=bool)
+    for y0, x0 in offsets:
+        covered[int(y0) : int(y0) + th, int(x0) : int(x0) + tw] = True
+    return float(int(covered.sum()) / total)
+
+
+def _linear_blend_weight(th: int, tw: int) -> NDArray:
+    """Separable linear blend weight: per-axis distance to the nearest tile edge
+    (``+1`` so an edge keeps weight 1, never 0). Highest toward the tile centre,
+    so each overlap pixel is dominated by the tile whose centre is closest —
+    ImageJ-style feathering that fades a seam smoothly across the overlap.
+    """
+    y = np.minimum(np.arange(1, th + 1), np.arange(th, 0, -1)).astype(np.float64)
+    x = np.minimum(np.arange(1, tw + 1), np.arange(tw, 0, -1)).astype(np.float64)
+    return np.outer(y, x)
+
+
+def assemble_tiles_with_offsets(
+    tiles: dict[int, NDArray],
+    offsets: NDArray,
+    canvas_hw: tuple[int, int],
+    fill_value: int = 0,
+    disconnected: tuple[int, ...] = (),
+    fusion_method: str = "none",
+) -> NDArray:
+    """Place tiles at arbitrary integer offsets and fuse the overlaps.
+
+    ``fusion_method="none"`` (default): a hand-written integer overwrite loop —
+    deliberately NOT the vendored ``fuse``. Overlap priority is pinned **ascending
+    tile index** so the highest tile index wins every overlap pixel — identical to
+    the decay streamer's last-writer-wins, so intensity and decay resolve every
+    overlap pixel to the same tile (R7). **Disconnected tiles are placed first
+    (lowest priority)** so an untrusted, mis-placed tile can never overwrite a
+    correctly-registered neighbour. This is the only measurement-correct fusion
+    and the only one valid when FLIM decay is present.
+
+    ``fusion_method="linear_blending"``: a feathered weighted average over every
+    covering tile (ImageJ's default), for a seamless DISPLAY mosaic. It alters
+    overlap intensities, so the importer forces ``none`` on FLIM datasets and
+    never blends label/mask layers.
+
+    Parameters
+    ----------
+    tiles : dict mapping 0-based tile index to a 2D array.
+    offsets : (N, 2) int array of ``(y0, x0)`` indexed by tile index.
+    canvas_hw : ``(H, W)`` from :func:`canvas_from_offsets`.
+    fill_value : value for uncovered canvas pixels.
+    disconnected : tile indices to demote to lowest overwrite priority (``none``).
+    fusion_method : ``"none"`` (overwrite) or ``"linear_blending"``.
+
+    Returns
+    -------
+    ndarray of shape ``canvas_hw``, dtype matching the tiles.
+    """
+    if not tiles:
+        raise ValueError("No tiles to assemble")
+    if fusion_method not in ("none", "linear_blending"):
+        raise ValueError(f"Unknown fusion_method {fusion_method!r}")
+
+    first = next(iter(tiles.values()))
+    h, w = int(canvas_hw[0]), int(canvas_hw[1])
+    offsets = np.asarray(offsets)
+
+    if fusion_method == "linear_blending":
+        acc = np.zeros((h, w), dtype=np.float64)
+        wsum = np.zeros((h, w), dtype=np.float64)
+        wcache: dict[tuple[int, int], NDArray] = {}
+        for tile_idx in sorted(tiles):
+            tile = tiles[tile_idx]
+            th, tw = tile.shape[:2]
+            wm = wcache.get((th, tw))
+            if wm is None:
+                wm = _linear_blend_weight(th, tw)
+                wcache[(th, tw)] = wm
+            y0 = int(offsets[tile_idx, 0])
+            x0 = int(offsets[tile_idx, 1])
+            acc[y0 : y0 + th, x0 : x0 + tw] += tile.astype(np.float64) * wm
+            wsum[y0 : y0 + th, x0 : x0 + tw] += wm
+        out = np.full((h, w), float(fill_value), dtype=np.float64)
+        covered = wsum > 0
+        out[covered] = acc[covered] / wsum[covered]
+        return out.astype(first.dtype)
+
+    output = np.full((h, w), fill_value, dtype=first.dtype)
+    disconnected_set = set(disconnected)
+    # Disconnected tiles first (lowest priority), then the rest in ascending
+    # tile index so the highest registered index wins overlaps.
+    placement_order = sorted(
+        tiles, key=lambda idx: (idx not in disconnected_set, idx)
+    )
+    for tile_idx in placement_order:
+        tile = tiles[tile_idx]
+        th, tw = tile.shape[:2]
+        y0 = int(offsets[tile_idx, 0])
+        x0 = int(offsets[tile_idx, 1])
+        output[y0 : y0 + th, x0 : x0 + tw] = tile
+
+    return output
 
 
 def assemble_channels(channel_images: list[NDArray]) -> NDArray:

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -90,6 +92,32 @@ class StitchingFlimForm(QWidget):
         stitch_row.addWidget(self.stitch_order)
         stitch_row.addStretch()
         outer.addLayout(stitch_row)
+
+        # ── Overlap-aware registration (phase-correlation) ──
+        # Overlap is stored as a FRACTION in TileConfig; the spinbox shows
+        # a percentage. Register opts into the phase-correlation path
+        # (gated at the importer on register ∧ overlap>0 ∧ grid>1×1).
+        # Reference channel is identified by NAME (stable), not index —
+        # populated by ``set_reference_channels`` from the caller's
+        # discovered channel list, and editable so a caller without a
+        # channel list at config time can still type a name.
+        reg_row = QHBoxLayout()
+        reg_row.addWidget(QLabel("Overlap:"))
+        self.overlap_spin = QDoubleSpinBox()
+        self.overlap_spin.setRange(0.0, 99.0)
+        self.overlap_spin.setSuffix("%")
+        self.overlap_spin.setValue(0.0)
+        reg_row.addWidget(self.overlap_spin)
+        self.register_check = QCheckBox(
+            "Register overlapping tiles (phase correlation)"
+        )
+        reg_row.addWidget(self.register_check)
+        reg_row.addWidget(QLabel("Reference channel:"))
+        self.reference_combo = QComboBox()
+        self.reference_combo.setEditable(True)
+        reg_row.addWidget(self.reference_combo)
+        reg_row.addStretch()
+        outer.addLayout(reg_row)
 
         # ── Rotation + Flip (applies to /decay only; T-axis untouched) ──
         rot_row = QHBoxLayout()
@@ -175,17 +203,54 @@ class StitchingFlimForm(QWidget):
             self.bin_t,
             self.bin_header,
         ):
-            spin.valueChanged.connect(self.changed.emit)
+            # ``valueChanged(int)`` carries an arg; discard it so the 0-arg
+            # ``changed`` Signal never receives the value (strict in PySide6).
+            spin.valueChanged.connect(lambda _v: self.changed.emit())
+        # ``valueChanged(float)`` carries an arg; the existing int spins
+        # above rely on Qt swallowing it, but the editable-combo text
+        # signal below is strict under PySide6 — wrap both in arg-discarding
+        # lambdas so ``changed`` (a 0-arg Signal) never receives a value.
+        self.overlap_spin.valueChanged.connect(lambda _v: self.changed.emit())
         for combo in (
             self.stitch_type,
             self.stitch_order,
+            self.reference_combo,
             self.rotation_combo,
             self.flip_combo,
             self.bin_dtype,
             self.bin_dim_order,
         ):
-            combo.currentIndexChanged.connect(self.changed.emit)
+            # ``currentIndexChanged(int)`` carries an arg; discard it so the
+            # 0-arg ``changed`` Signal never receives the index (strict under
+            # PySide6 when the combo is actually driven).
+            combo.currentIndexChanged.connect(lambda _i: self.changed.emit())
+        # The reference combo is editable — free-text edits also count.
+        self.reference_combo.editTextChanged.connect(
+            lambda _text: self.changed.emit()
+        )
+        self.register_check.toggled.connect(lambda _checked: self.changed.emit())
         self.flim_group.toggled.connect(lambda _checked: self.changed.emit())
+
+    def set_reference_channels(self, names: list[str]) -> None:
+        """Populate the reference-channel combo from discovered channels.
+
+        Each name is carried verbatim as the item's ``itemData`` (not an
+        enum position) so reads round-trip the name, not an index — the
+        PR #9 drift precedent. Preserves the current text when possible so
+        a re-discovery does not silently drop a user's pick.
+        """
+        current = self.reference_combo.currentText()
+        self.reference_combo.blockSignals(True)
+        self.reference_combo.clear()
+        for name in names:
+            self.reference_combo.addItem(name, name)
+        if current:
+            idx = self.reference_combo.findText(current)
+            if idx >= 0:
+                self.reference_combo.setCurrentIndex(idx)
+            else:
+                self.reference_combo.setCurrentText(current)
+        self.reference_combo.blockSignals(False)
 
     # ──────────────────────────────────────────────────────────────
     # Accessors — same call sites the single-dataset dialog uses, so
@@ -193,11 +258,16 @@ class StitchingFlimForm(QWidget):
     # ──────────────────────────────────────────────────────────────
 
     def tile_config(self) -> TileConfig:
+        ref = self.reference_combo.currentText().strip()
         return TileConfig(
             grid_rows=self.stitch_rows.value(),
             grid_cols=self.stitch_cols.value(),
             grid_type=self.stitch_type.currentText(),
             order=self.stitch_order.currentText(),
+            # Spinbox shows a percentage; TileConfig stores a fraction.
+            overlap=self.overlap_spin.value() / 100.0,
+            register=self.register_check.isChecked(),
+            reference_channel=ref or None,
         )
 
     def rotation_k(self) -> int:

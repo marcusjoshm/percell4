@@ -7,6 +7,7 @@ CSV rows are confusing).
 
 from __future__ import annotations
 
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
@@ -16,6 +17,7 @@ import numpy as np
 
 from percell4.adapters.readers import read_tiff
 from percell4.domain.io.assembler import (
+    RegistrationError,
     assemble_channels,
     assemble_tiles,
     project_z,
@@ -145,6 +147,59 @@ def import_dataset(
     source_dir = Path(source_dir)
     output_h5 = Path(output_h5)
 
+    # ── Overlap-aware registration gate (R1) ──────────────────────────────
+    # The registered path is entered ONLY when register is opted-in AND there
+    # is actual overlap AND more than one tile. Otherwise the existing grid
+    # path runs verbatim (byte-identical — F3). The cross-field validation
+    # (register ⇒ overlap>0 ∧ reference_channel set) is enforced here at the
+    # importer gate, NOT in TileConfig (kept a dumb carrier).
+    register_requested = bool(tile_config is not None and tile_config.register)
+    grid_cells = (
+        tile_config.grid_rows * tile_config.grid_cols
+        if tile_config is not None
+        else 1
+    )
+    if register_requested:
+        if not (tile_config.overlap > 0):
+            raise ValueError(
+                "register=True requires overlap>0 (the tiles must actually "
+                f"overlap to phase-correlate); got overlap={tile_config.overlap}."
+            )
+        if not tile_config.reference_channel:
+            raise ValueError(
+                "register=True requires a reference_channel (the intensity "
+                "channel name registration solves on); none was set."
+            )
+    do_register = register_requested and tile_config.overlap > 0 and grid_cells > 1
+
+    # ── Re-import guard (S1) ──────────────────────────────────────────────
+    # Refuse to re-solve over an already-registered dataset that has appended
+    # decay: re-registration would rewrite offsets the existing decay was
+    # placed against, silently misaligning /decay from /intensity. A registered
+    # dataset with NO decay yet is still safe to re-import (nothing was placed
+    # against the old offsets), so the refusal is conditioned on both flags.
+    if do_register and output_h5.exists():
+        # Narrow except: only an absent file / absent geometry is a benign
+        # "nothing to guard against" — let OSError and real corruption
+        # (e.g. a raised ValueError from read_stitch_geometry) propagate.
+        _existing_store = DatasetStore(output_h5)
+        try:
+            _existing = _existing_store.read_stitch_geometry()
+        except (KeyError, FileNotFoundError):
+            _existing = None
+        if _existing is not None and _existing.registered:
+            has_decay = bool(_existing_store.list_groups("decay"))
+            if has_decay:
+                raise ValueError(
+                    f"Refusing to re-import over {output_h5}: it is a "
+                    "registered dataset with appended decay "
+                    "(stitch_registered=True and at least one /decay layer "
+                    "present). Re-solving would rewrite the offsets the "
+                    "existing decay was placed against, silently misaligning "
+                    "/decay from /intensity. Import to a fresh output path "
+                    "instead."
+                )
+
     def _progress(current: int, total: int, msg: str) -> None:
         if progress_callback is not None:
             progress_callback(current, total, msg)
@@ -222,9 +277,62 @@ def import_dataset(
     label_layers: list[tuple[str, np.ndarray]] = []  # (name, array)
     mask_layers: list[tuple[str, np.ndarray]] = []   # (name, array)
 
+    # Registered overlap path: capture each channel's per-tile, per-timepoint
+    # arrays so registration can solve on the reference channel and every
+    # channel can be re-stitched at the solved offsets. Collected at the
+    # post-z-projection, pre-creation_bin plane (offsets are binned later, in
+    # the same step as native_shape). ``None`` on the grid path keeps the
+    # inline assembly byte-identical.
+    #   reg_channel_tiles[layer_name] -> list (per timepoint) of {tile_idx: arr}
+    reg_channel_tiles: dict[str, list[dict[int, np.ndarray]]] = {}
+    reg_channel_order: list[tuple[str, str]] = []  # (layer_name, layer_type)
+
     for ch_key in sorted(channel_groups.keys()):
         files = channel_groups[ch_key]
         default_name = f"ch{ch_key}" if ch_key else "ch0"
+
+        # Route to correct layer type based on assignment.
+        assignment = layer_assignments.get(ch_key) if layer_assignments else None
+        if assignment is not None:
+            layer_type = getattr(assignment, "layer_type", "channel")
+            layer_name = getattr(assignment, "name", "") or default_name
+        else:
+            layer_type = "channel"
+            layer_name = default_name
+
+        # On the registered path, capture this channel's per-tile arrays per
+        # timepoint via a sink. (Labels/masks are captured too so they can be
+        # re-stitched at the solved offsets and stay pixel-aligned to the
+        # registered intensity canvas.)
+        if do_register:
+            per_tp_sinks: list[dict[int, np.ndarray]] = []
+            if n_timepoints > 1:
+                tp_groups = _group_by_timepoint(files)
+                tp_tokens = ordered_timepoint_tokens(tp_groups.keys())
+                if len(tp_tokens) != n_timepoints:
+                    raise SourceShapeMismatchError(
+                        f"Channel {default_name!r} covers {len(tp_tokens)} "
+                        f"timepoint(s) but the dataset has {n_timepoints}. "
+                        "Every channel must cover the same timepoints; a "
+                        "missing frame would mis-stack the time axis.\n"
+                        f"  found: {tp_tokens}"
+                    )
+                for tp in tp_tokens:
+                    sink: dict[int, np.ndarray] = {}
+                    _assemble_plane(
+                        tp_groups[tp], tile_config, z_project_method,
+                        tile_sink=sink,
+                    )
+                    per_tp_sinks.append(sink)
+            else:
+                sink = {}
+                _assemble_plane(
+                    files, tile_config, z_project_method, tile_sink=sink
+                )
+                per_tp_sinks.append(sink)
+            reg_channel_tiles[layer_name] = per_tp_sinks
+            reg_channel_order.append((layer_name, layer_type))
+            continue
 
         if n_timepoints > 1:
             # Time-lapse: assemble one plane per timepoint, then stack on a
@@ -248,15 +356,6 @@ def import_dataset(
         else:
             channel_img = _assemble_plane(files, tile_config, z_project_method)
 
-        # Route to correct layer type based on assignment
-        assignment = layer_assignments.get(ch_key) if layer_assignments else None
-        if assignment is not None:
-            layer_type = getattr(assignment, "layer_type", "channel")
-            layer_name = getattr(assignment, "name", "") or default_name
-        else:
-            layer_type = "channel"
-            layer_name = default_name
-
         if layer_type == "segmentation":
             label_layers.append((layer_name, channel_img))
         elif layer_type == "mask":
@@ -265,9 +364,220 @@ def import_dataset(
             channel_names.append(layer_name)
             channel_images.append(channel_img.astype(np.float32))
 
+    # ── Registered overlap path: solve once, assemble every layer at the
+    #    solved offsets, freeze geometry for the decay placement below. ──────
+    stitch_offsets: np.ndarray | None = None
+    stitch_disconnected: tuple[int, ...] = ()
+    stitch_canvas: tuple[int, int] | None = None
+    stitch_quality: dict | None = None
+    stitch_offsets_dict: dict[int, tuple[int, int]] | None = None
+    stitch_ref_tile_shape: tuple[int, int] | None = None
+    # True only when phase-correlation registration succeeded. A degenerate
+    # solve falls back to nominal-overlap grid placement with this left False,
+    # so the dataset is assembled (>= grid floor) but never marked registered.
+    stitch_registered = False
+    if do_register:
+        from percell4.domain.io.assembler import (
+            assemble_tiles_with_offsets,
+            canvas_from_offsets,
+            estimate_tile_offsets,
+            grid_seed_offsets,
+        )
+
+        ref_name = tile_config.reference_channel
+        if ref_name not in reg_channel_tiles:
+            raise ValueError(
+                f"reference_channel {ref_name!r} not found among the imported "
+                f"channels {sorted(reg_channel_tiles)}; cannot register."
+            )
+
+        def _bin_tiles(
+            tiles: dict[int, np.ndarray], kind: str
+        ) -> dict[int, np.ndarray]:
+            """Apply creation_bin per-tile so offsets/canvas are post-bin."""
+            if creation_bin <= 1:
+                return tiles
+            out: dict[int, np.ndarray] = {}
+            for idx, arr in tiles.items():
+                if kind == "segmentation":
+                    out[idx] = mode_labels(
+                        arr.astype(np.int32, copy=False), creation_bin
+                    )
+                elif kind == "mask":
+                    out[idx] = majority_vote_mask(
+                        (arr > 0).astype(np.uint8), creation_bin
+                    )
+                else:
+                    out[idx] = sum_bin_2d(arr, creation_bin)
+            return out
+
+        # Reference tiles, post-bin, from the FIRST timepoint (register once).
+        ref_tiles_first = _bin_tiles(reg_channel_tiles[ref_name][0], "channel")
+        # Capture the ACTUAL post-bin reference tile (h, w) — the real extent
+        # the offsets were placed against — so the canvas consistency check at
+        # step 4b is non-vacuous (FIX G). All tiles share this shape (R14).
+        _ref_tile = next(iter(ref_tiles_first.values()))
+        stitch_ref_tile_shape = (int(_ref_tile.shape[0]), int(_ref_tile.shape[1]))
+        try:
+            stitch_offsets, stitch_canvas, stitch_quality = estimate_tile_offsets(
+                ref_tiles_first,
+                grid_rows=tile_config.grid_rows,
+                grid_cols=tile_config.grid_cols,
+                grid_type=tile_config.grid_type,
+                order=tile_config.order,
+                overlap=tile_config.overlap,
+            )
+            stitch_registered = True
+        except RegistrationError as exc:
+            # Degenerate solve (reference channel too ambiguous to register
+            # within the overlap band). Fall back to nominal-overlap grid
+            # placement: a clean mosaic that accounts for the overlap but
+            # applies no drift correction — strictly better than the 0%-overlap
+            # grid, never an arbitrary overlap. Left NOT registered (no geometry
+            # committed), so the file is honest about what happened.
+            stitch_offsets, stitch_canvas = grid_seed_offsets(
+                stitch_ref_tile_shape,
+                grid_rows=tile_config.grid_rows,
+                grid_cols=tile_config.grid_cols,
+                grid_type=tile_config.grid_type,
+                order=tile_config.order,
+                overlap=tile_config.overlap,
+            )
+            stitch_quality = {
+                "fallback": "grid_seed_nominal_overlap",
+                "degenerate_reason": str(exc),
+                "disconnected": [],
+                "coverage_fraction": 1.0,
+            }
+            warnings.warn(
+                "Registration was degenerate on the reference channel "
+                f"{ref_name!r}; placed tiles at the nominal-overlap grid "
+                "positions instead (NOT registered — no drift correction). "
+                f"{exc}",
+                stacklevel=2,
+            )
+        stitch_disconnected = tuple(stitch_quality["disconnected"])
+        stitch_offsets_dict = {
+            i: (int(stitch_offsets[i, 0]), int(stitch_offsets[i, 1]))
+            for i in range(stitch_offsets.shape[0])
+        }
+
+        # Surface low-confidence solves (R11) — degenerate ones already raised
+        # inside estimate_tile_offsets.
+        if stitch_quality["coverage_fraction"] < 1.0:
+            warnings.warn(
+                "Registered mosaic covers only "
+                f"{stitch_quality['coverage_fraction']:.1%} of the canvas; "
+                "uncovered pixels are filled with 0.",
+                stacklevel=2,
+            )
+        if stitch_disconnected:
+            warnings.warn(
+                "Registration left tiles "
+                f"{list(stitch_disconnected)} disconnected (placed at their "
+                "grid seed, lowest overwrite priority).",
+                stacklevel=2,
+            )
+
+        # Time-lapse drift re-check on the LAST timepoint (R14): re-solve on
+        # the last frame's reference tiles and warn if any tile drifted beyond
+        # the overlap budget. Offsets still come from the first timepoint.
+        # Skipped on the grid fallback (offsets are seed positions, not solved).
+        if stitch_registered and n_timepoints > 1:
+            ref_tiles_last = _bin_tiles(
+                reg_channel_tiles[ref_name][-1], "channel"
+            )
+            tile_h_b = next(iter(ref_tiles_first.values())).shape[0]
+            tile_w_b = next(iter(ref_tiles_first.values())).shape[1]
+            overlap_budget = int(
+                tile_config.overlap * max(tile_h_b, tile_w_b)
+            )
+            try:
+                last_offsets, _, _ = estimate_tile_offsets(
+                    ref_tiles_last,
+                    grid_rows=tile_config.grid_rows,
+                    grid_cols=tile_config.grid_cols,
+                    grid_type=tile_config.grid_type,
+                    order=tile_config.order,
+                    overlap=tile_config.overlap,
+                )
+                drift = int(np.abs(last_offsets - stitch_offsets).max())
+                if drift > overlap_budget:
+                    warnings.warn(
+                        f"Inter-frame drift on the last timepoint is {drift}px, "
+                        f"exceeding the overlap budget ({overlap_budget}px). "
+                        "Offsets from the first timepoint are reused for all "
+                        "frames (zero-drift assumption); placement may be off "
+                        "on later frames.",
+                        stacklevel=2,
+                    )
+            except RegistrationError:
+                warnings.warn(
+                    "Could not re-check drift on the last timepoint "
+                    "(degenerate solve); reusing first-timepoint offsets.",
+                    stacklevel=2,
+                )
+
+        # Overlap fusion. Blending alters overlap intensities, so it is forced
+        # to "none" when FLIM decay is present (the decay stream hard-assigns
+        # each overlap pixel to one tile; /intensity must match it — R7) and is
+        # never applied to label/mask layers (averaging labels is meaningless).
+        has_decay = bool(bin_files) or bool(tcspc_files)
+        intensity_fusion = tile_config.fusion_method
+        if intensity_fusion != "none" and has_decay:
+            warnings.warn(
+                f"Fusion {intensity_fusion!r} requested but FLIM decay is "
+                "present; forcing 'none' so /intensity and /decay resolve every "
+                "overlap pixel to the same tile. Blending is offered only for "
+                "intensity-only datasets.",
+                stacklevel=2,
+            )
+            intensity_fusion = "none"
+
+        # Assemble EVERY captured layer at the solved offsets (post-bin).
+        for layer_name, layer_type in reg_channel_order:
+            per_tp_sinks = reg_channel_tiles[layer_name]
+            fusion = intensity_fusion if layer_type == "channel" else "none"
+            planes = []
+            for sink in per_tp_sinks:
+                binned = _bin_tiles(sink, layer_type)
+                planes.append(
+                    assemble_tiles_with_offsets(
+                        binned,
+                        stitch_offsets,
+                        stitch_canvas,
+                        disconnected=stitch_disconnected,
+                        fusion_method=fusion,
+                    )
+                )
+            if n_timepoints > 1:
+                layer_img = stack_timepoints(planes)
+            else:
+                layer_img = planes[0]
+
+            if layer_type == "segmentation":
+                label_layers.append((layer_name, layer_img))
+            elif layer_type == "mask":
+                mask_layers.append((layer_name, layer_img))
+            else:
+                channel_names.append(layer_name)
+                channel_images.append(layer_img.astype(np.float32))
+
     # 4. Handle TCSPC data (FLIM)
     _progress(3, 5, "Processing TCSPC data...")
     tcspc_data: dict[str, np.ndarray] = {}  # channel -> (H, W, T) array
+
+    if do_register and tcspc_files:
+        # Registered overlap stitching of 3D TCSPC-TIFF decay is deferred to a
+        # follow-up (the registered canvas is solved on 2D intensity; properly
+        # re-stitching the (H, W, T) TCSPC-TIFF volume at those offsets is out
+        # of v1 scope). Without this guard the loop below grid-stitches decay
+        # while /intensity uses the registered canvas — a silent /decay vs
+        # /intensity misalignment. Mirror the z-stack-mosaic deferral.
+        raise ValueError(
+            "Overlap registration with TCSPC-TIFF decay is deferred to "
+            "follow-up — use .bin decay, or import without register."
+        )
 
     if flim_params and tcspc_files:
         # TCSPC TIFFs with "TCSPC" token — stitch same as intensity
@@ -409,6 +719,15 @@ def import_dataset(
                 out_h, out_w = tile_h, tile_w
                 positions = {0: (0, 0)}
 
+            # Registered path: this channel's decay reuses the SINGLE solved
+            # offsets (R5). The intensity synth below assembles at those
+            # post-bin offsets; the streaming decay write receives them via
+            # ``pixel_offsets``. ``out_h``/``out_w`` come from the registered
+            # canvas (post-bin units) — never the grid-derived value.
+            if do_register:
+                use_tiling = True
+                out_h, out_w = stitch_canvas
+
             # Track whether we need to write decay to HDF5 via streaming
             _bin_decay_path = f"decay/{ch_name}"
             _bin_decay_written = False
@@ -440,7 +759,24 @@ def import_dataset(
             # channel. Otherwise the TIFF intensity wins and the .bin is
             # decay-only — no duplicate napari layer.
             if ch_name not in channel_names:
-                if use_tiling:
+                if do_register:
+                    # Bin each intensity tile per-tile so the synth lands on
+                    # the registered (post-bin) canvas, then place at the
+                    # solved offsets. This synth is ALREADY post-bin, so step
+                    # 4b must not re-bin it (see ``_registered_channel_count``).
+                    binned_tiles = (
+                        {i: sum_bin_2d(a, creation_bin)
+                         for i, a in intensity_tiles.items()}
+                        if creation_bin > 1
+                        else intensity_tiles
+                    )
+                    stitched_intensity = assemble_tiles_with_offsets(
+                        binned_tiles,
+                        stitch_offsets,
+                        stitch_canvas,
+                        disconnected=stitch_disconnected,
+                    )
+                elif use_tiling:
                     stitched_intensity = assemble_tiles(
                         intensity_tiles,
                         grid_rows=tile_config.grid_rows,
@@ -457,7 +793,9 @@ def import_dataset(
             # write_decay_streaming expects POST-bin dims (its kwarg
             # ``spatial_bin`` drives the per-tile bin during streaming),
             # so we floor-divide here to match the validate-and-bin step
-            # 4b ran on the synthesized intensity.
+            # 4b ran on the synthesized intensity. On the registered path the
+            # canvas (out_h/out_w) is already post-bin; ``pixel_offsets`` and
+            # ``disconnected`` carry the single solved geometry.
             tcspc_data[ch_name] = {
                 "_streaming": True,
                 "tile_bins": tile_bins,
@@ -465,11 +803,13 @@ def import_dataset(
                 "tile_h": tile_h // creation_bin,
                 "tile_w": tile_w // creation_bin,
                 "n_bins": n_bins,
-                "out_h": out_h // creation_bin,
-                "out_w": out_w // creation_bin,
+                "out_h": (out_h if do_register else out_h // creation_bin),
+                "out_w": (out_w if do_register else out_w // creation_bin),
                 "positions": positions,
                 "use_tiling": use_tiling,
                 "creation_bin": creation_bin,
+                "pixel_offsets": stitch_offsets_dict if do_register else None,
+                "disconnected": stitch_disconnected if do_register else (),
             }
 
     # 4b. Source-shape validation + creation_bin application.
@@ -481,7 +821,11 @@ def import_dataset(
     pre_bin_shape = _validate_and_collect_source_shape(
         channel_images, label_layers, mask_layers
     )
-    if creation_bin > 1 and pre_bin_shape is not None:
+    # On the registered path every layer was binned PER-TILE before
+    # offset-assembly, so the assembled arrays are already post-bin — the
+    # global bin step (and the floor-division for native_shape) must be
+    # skipped to avoid double-binning.
+    if creation_bin > 1 and pre_bin_shape is not None and not do_register:
         channel_images = [
             sum_bin_2d(arr, creation_bin) for arr in channel_images
         ]
@@ -498,7 +842,32 @@ def import_dataset(
 
     # native_shape is the post-bin (H, W) of any of the above arrays.
     native_shape: tuple[int, int] | None = None
-    if pre_bin_shape is not None:
+    if do_register and stitch_canvas is not None:
+        # The registered canvas (already post-bin) is the ONLY native_shape —
+        # never the grid-derived value. Verify it matches the assembled arrays
+        # before committing (the consistency lock store enforces via
+        # MetadataConsistencyError on /intensity.shape[-2:]). These are data
+        # invariants → raise (not assert), so they survive ``python -O``.
+        from percell4.domain.io.assembler import canvas_from_offsets
+
+        # Re-derive the canvas from the offsets and the ACTUAL post-bin
+        # reference tile shape captured at registration time (FIX G). The old
+        # code back-solved (th, tw) from the canvas itself, which made this a
+        # tautology that could never catch a real inconsistency.
+        derived = canvas_from_offsets(stitch_offsets, stitch_ref_tile_shape)
+        if tuple(derived) != tuple(stitch_canvas):
+            raise RegistrationError(
+                f"canvas_from_offsets {tuple(derived)} (offsets + post-bin "
+                f"ref tile {stitch_ref_tile_shape}) != pinned canvas "
+                f"{tuple(stitch_canvas)}"
+            )
+        if pre_bin_shape is not None and tuple(pre_bin_shape) != tuple(stitch_canvas):
+            raise ValueError(
+                f"assembled (H, W) {tuple(pre_bin_shape)} != registered canvas "
+                f"{tuple(stitch_canvas)}"
+            )
+        native_shape = (int(stitch_canvas[0]), int(stitch_canvas[1]))
+    elif pre_bin_shape is not None:
         h, w = pre_bin_shape
         native_shape = (h // creation_bin, w // creation_bin)
 
@@ -616,62 +985,58 @@ def import_dataset(
                 positions=info["positions"],
                 use_tiling=info["use_tiling"],
                 spatial_bin=info.get("creation_bin", 1),
+                pixel_offsets=info.get("pixel_offsets"),
+                disconnected=info.get("disconnected", ()),
             )
             continue
 
-        # Legacy path retained for the (unused-in-practice) non-streaming
-        # case so the loop body stays a single shape.
-        if isinstance(decay_info, dict) and decay_info.get("_streaming"):
-            import h5py
-            from percell4.adapters.readers import read_flim_bin
-            info = decay_info
-            with h5py.File(store.path, "a") as f:
-                if decay_path in f:
-                    del f[decay_path]
-                dset = f.create_dataset(
-                    decay_path,
-                    shape=(info["out_h"], info["out_w"], info["n_bins"]),
-                    dtype=np.float32,
-                    chunks=(
-                        min(64, info["tile_h"]),
-                        min(64, info["tile_w"]),
-                        info["n_bins"],
-                    ),
-                    compression="lzf",
-                )
-                dset.attrs["dims"] = ["H", "W", "T"]
-                dset.attrs["channel"] = ch_name
-                for tile_idx, bin_path in sorted(info["tile_bins"].items()):
-                    tile_data = read_flim_bin(
-                        bin_path,
-                        x_dim=info["bin_dims"].get("x_dim", 512),
-                        y_dim=info["bin_dims"].get("y_dim", 512),
-                        t_dim=info["bin_dims"].get("t_dim", 132),
-                        dtype=info["bin_dims"].get("dtype", "float32"),
-                        dim_order=info["bin_dims"].get("dim_order", "YXT"),
-                        header_bytes=info["bin_dims"].get("header_bytes", 0),
-                    )["array"].astype(np.float32)
-                    if info["use_tiling"] and tile_idx in info["positions"]:
-                        row, col = info["positions"][tile_idx]
-                        y0 = row * info["tile_h"]
-                        x0 = col * info["tile_w"]
-                        dset[
-                            y0:y0 + info["tile_h"],
-                            x0:x0 + info["tile_w"],
-                            :,
-                        ] = tile_data
-                    else:
-                        dset[:, :, :] = tile_data
+        # In-memory array (from TCSPC TIFFs or single .bin)
+        store.write_array(
+            decay_path,
+            decay_info,
+            attrs={"dims": ["H", "W", "T"], "channel": ch_name},
+            is_decay=True,
+        )
 
-                    del tile_data  # free immediately
-        else:
-            # In-memory array (from TCSPC TIFFs or single .bin)
-            store.write_array(
-                decay_path,
-                decay_info,
-                attrs={"dims": ["H", "W", "T"], "channel": ch_name},
-                is_decay=True,
+    # ── COMMIT registered geometry (R4/R12) — flag written STRICTLY LAST ────
+    # Done after /intensity + /decay are durably on disk so a crash before the
+    # commit leaves an un-registered (recoverable) file, never the AE4 brick.
+    # store.write_stitch_geometry orders stitch_registered=True last internally.
+    # Skipped on the grid fallback (stitch_registered False): tiles were placed
+    # at nominal-overlap seed positions, so the file is left un-registered.
+    if do_register and stitch_registered:
+        import json
+        from datetime import UTC, datetime
+
+        from percell4 import __version__ as _importer_version
+        from percell4.domain.io.models import StitchProvenanceRecord
+
+        # Final consistency lock: the stored /intensity canvas must equal the
+        # registered canvas the offsets were placed against, before committing.
+        # Data invariant → raise (not assert), so it survives ``python -O``.
+        stored_intensity = store.read_array("intensity")
+        if tuple(stored_intensity.shape[-2:]) != tuple(stitch_canvas):
+            raise RegistrationError(
+                f"stored /intensity (H, W) {tuple(stored_intensity.shape[-2:])} "
+                f"!= registered canvas {tuple(stitch_canvas)}"
             )
+
+        provenance = StitchProvenanceRecord(
+            reference_channel=str(tile_config.reference_channel),
+            overlap=str(tile_config.overlap),
+            library="grid_stitching (vendored; Preibisch et al. 2009)",
+            quality_json=json.dumps(stitch_quality),
+            n_tiles=str(stitch_offsets.shape[0]),
+            importer_version=str(_importer_version),
+            timestamp_utc=datetime.now(UTC).isoformat(),
+        )
+        store.write_stitch_geometry(
+            stitch_offsets,
+            provenance,
+            reference_channel=str(tile_config.reference_channel),
+            overlap=float(tile_config.overlap),
+            disconnected=stitch_disconnected,
+        )
 
     # 6. Update project.csv
     if project_csv is not None:
@@ -719,15 +1084,32 @@ def _assemble_plane(
     files: list,
     tile_config: TileConfig | None,
     z_project_method: str | None,
+    tile_sink: dict[int, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Assemble one channel's files for a single timepoint into a 2D plane.
 
     Groups by z-slice and either z-projects (when multiple z and a method is
     given) or stitches/loads. This is the per-(channel, timepoint) unit of
     assembly; the caller stacks planes across timepoints when needed.
+
+    ``tile_sink`` (registered overlap path only): when a dict is supplied it
+    is populated with the per-tile 2D arrays (0-based tile index → array) at
+    the post-z-projection, *pre-creation_bin* plane, so the caller can register
+    on them and re-stitch with solved offsets. ``None`` (default) leaves the
+    byte-identical grid path untouched. A z-stack mosaic (``len(z_groups) > 1``)
+    cannot supply a sink — its per-tile arrays only exist per z-slice, before
+    projection — so we reject that combination here (z-stack-mosaic overlap is
+    deferred to follow-up).
     """
     z_groups = _group_by_z(files)
     if len(z_groups) > 1 and z_project_method is not None:
+        if tile_sink is not None:
+            raise ValueError(
+                "z-stack-mosaic overlap registration is deferred to follow-up: "
+                "register=True with a z-stack mosaic (multiple z-slices per "
+                "tile) is not supported in v1. Z-project to 2D first, or "
+                "disable registration."
+            )
         z_images = []
         for z_key in sorted(z_groups.keys()):
             z_images.append(_load_and_stitch(z_groups[z_key], tile_config))
@@ -735,13 +1117,24 @@ def _assemble_plane(
     all_files = []
     for z_key in sorted(z_groups.keys()):
         all_files.extend(z_groups[z_key])
-    return _load_and_stitch(all_files, tile_config)
+    return _load_and_stitch(all_files, tile_config, tile_sink=tile_sink)
 
 
-def _load_and_stitch(files: list, tile_config: TileConfig | None) -> np.ndarray:
-    """Load files and optionally stitch tiles."""
+def _load_and_stitch(
+    files: list,
+    tile_config: TileConfig | None,
+    tile_sink: dict[int, np.ndarray] | None = None,
+) -> np.ndarray:
+    """Load files and optionally stitch tiles.
+
+    ``tile_sink`` (registered overlap path only): when supplied, the per-tile
+    0-based-indexed 2D arrays are copied into it before stitching consumes them.
+    ``None`` (default) keeps the grid path byte-identical.
+    """
     if len(files) == 1:
         data = read_tiff(str(files[0].path))
+        if tile_sink is not None:
+            tile_sink[0] = data["array"]
         return data["array"]
 
     if tile_config is not None and tile_config.grid_rows * tile_config.grid_cols > 1:
@@ -757,6 +1150,9 @@ def _load_and_stitch(files: list, tile_config: TileConfig | None) -> np.ndarray:
             min_idx = min(tiles.keys())
             if min_idx > 0:
                 tiles = {k - min_idx: v for k, v in tiles.items()}
+
+        if tile_sink is not None:
+            tile_sink.update(tiles)
 
         return assemble_tiles(
             tiles,
@@ -811,6 +1207,8 @@ def write_decay_streaming(
     positions: dict[int, tuple[int, int]],
     use_tiling: bool,
     spatial_bin: int = 1,
+    pixel_offsets: dict[int, tuple[int, int]] | None = None,
+    disconnected: tuple[int, ...] = (),
 ) -> None:
     """Stream-write a TCSPC decay channel to ``/decay/<channel_name>`` in an
     .h5 file, tile by tile.
@@ -833,6 +1231,20 @@ def write_decay_streaming(
     512×512 tile to 170×170, dropping the 2 residual pixels per axis.
     Sum (not mean) preserves Poisson photon counts. ``tile_h``, ``tile_w``,
     ``out_h`` and ``out_w`` are the POST-binning dimensions.
+
+    ``pixel_offsets`` selects the registered (overlap-aware) placement path.
+    When ``None`` (default), tiles land on the fixed edge-to-edge grid
+    (``y0 = row·tile_h``, ``x0 = col·tile_w``) and the output is
+    byte-identical to the legacy grid path. When provided, it maps each
+    0-based tile index to an absolute post-bin ``(y0, x0)`` top-left corner;
+    the canvas comes from :func:`canvas_from_offsets` (never recomputed
+    inline) and tiles are placed with plain overwrite. Placement priority is
+    pinned **ascending tile index** (highest index wins overlaps), with any
+    indices in ``disconnected`` placed **first** (lowest priority) so an
+    untrusted tile never overwrites a registered neighbour — mirroring
+    ``assemble_tiles_with_offsets`` so intensity and decay resolve every
+    overlap pixel to the same tile. ``disconnected`` is ignored on the grid
+    path.
     """
     import h5py
 
@@ -841,6 +1253,21 @@ def write_decay_streaming(
     if spatial_bin < 1:
         raise ValueError(f"spatial_bin must be >= 1, got {spatial_bin}")
 
+    registered = pixel_offsets is not None
+    if registered:
+        # Canvas computed ONCE by the caller from the FULL registered geometry
+        # and passed in as out_h/out_w — trusted here verbatim. Recomputing it
+        # from this subset of pixel_offsets would under-allocate /decay (smaller
+        # than native_shape) and silently mis-align tiles when only some tiles
+        # are streamed. Guard that every tile fits within the trusted canvas.
+        for idx, (y0, x0) in pixel_offsets.items():
+            if y0 < 0 or x0 < 0 or y0 + tile_h > out_h or x0 + tile_w > out_w:
+                raise ValueError(
+                    f"tile {idx} at (y0={y0}, x0={x0}) with shape "
+                    f"({tile_h}, {tile_w}) does not fit the caller canvas "
+                    f"({out_h}, {out_w})."
+                )
+
     decay_path = f"decay/{channel_name}"
     with h5py.File(h5_path, "a") as f:
         if decay_path in f:
@@ -848,7 +1275,8 @@ def write_decay_streaming(
         # Invalidate stale phasor for this channel — without this, the GUI
         # phasor plot shows the OLD computed (g, s) maps even after the
         # underlying /decay layer was overwritten, which looks like a
-        # broken import. compute_phasor must be re-run to refresh.
+        # broken import. compute_phasor must be re-run to refresh. This MUST
+        # fire on both the grid and the offset path.
         phasor_path = f"phasor/{channel_name}"
         if phasor_path in f:
             del f[phasor_path]
@@ -864,7 +1292,20 @@ def write_decay_streaming(
         if spatial_bin > 1:
             dset.attrs["spatial_bin"] = spatial_bin
 
-        for tile_idx, bin_path in sorted(tile_bins.items()):
+        if registered:
+            # Disconnected tiles first (lowest priority), then ascending tile
+            # index so the highest registered index wins overlaps — identical
+            # ordering to assemble_tiles_with_offsets.
+            disconnected_set = set(disconnected)
+            placement_order = sorted(
+                tile_bins,
+                key=lambda idx: (idx not in disconnected_set, idx),
+            )
+        else:
+            placement_order = sorted(tile_bins)
+
+        for tile_idx in placement_order:
+            bin_path = tile_bins[tile_idx]
             tile_data = read_flim_bin(
                 bin_path,
                 x_dim=bin_dims.get("x_dim", 512),
@@ -878,7 +1319,10 @@ def write_decay_streaming(
             if spatial_bin > 1:
                 tile_data = _spatial_bin_tile(tile_data, spatial_bin)
 
-            if use_tiling and tile_idx in positions:
+            if registered:
+                y0, x0 = pixel_offsets[tile_idx]
+                dset[y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
+            elif use_tiling and tile_idx in positions:
                 row, col = positions[tile_idx]
                 y0 = row * tile_h
                 x0 = col * tile_w
