@@ -27,6 +27,7 @@
   - [`percell4-inspect` — print dataset metadata + layers](#percell4-inspect--print-dataset-metadata--layers)
 - [Tech Stack](#tech-stack)
 - [Features](#features)
+- [Changelog](#changelog)
 - [Installation](#installation)
   - [macOS](#macos)
   - [Linux](#linux)
@@ -70,7 +71,7 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 3. **Add your datasets.**
    Click the **.tiff file icon** in the Datasets panel of the setup window. A new window called **Compress TIFF Dataset** opens. In the Source panel at the top, click **Browse...** next to the Directory field and select a folder containing `.tiff` files exported from LASX. The Output field defaults to one level up from the folder containing the `.tiff` files; this is where the dataset will be saved. To change the output folder, click **Browse...** next to the Output field and create or choose a different folder.
 
-   Next, change the Discovery field from **Subdirectory** to **Flat Directory**. You should see a list of file names matching the LASX file names. Channels will be the channel tokens created by LASX at export. To rename them, switch the discovery mode to **Manual** and type your desired channel name. Z-series stacks are automatically projected to a single image; the default is `MIP` (Maximum Intensity Projection). Non-overlapping tiles of a tile scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation if needed. Click **Compress** at the bottom of the window.
+   Next, change the Discovery field from **Subdirectory** to **Flat Directory**. You should see a list of file names matching the LASX file names. Channels will be the channel tokens created by LASX at export. To rename them, switch the discovery mode to **Manual** and type your desired channel name. Z-series stacks are automatically projected to a single image; the default is `MIP` (Maximum Intensity Projection). Tiles of a tile scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation if needed. For overlapping tiles, set the **Overlap %** and check **Register overlapping tiles** to phase-correlate the overlap and correct for stage drift; pick a **Reference** channel for the solve (any imported channel, including one renamed in Manual mode). Choose a **Fusion** mode for the overlap regions: **None** keeps each pixel from a single tile (no intensity distortion — required and auto-selected when the dataset has FLIM decay), or **Linear Blending** for a seamless display mosaic. Click **Compress** at the bottom of the window.
 
    The Compress TIFF Dataset window closes and the new dataset is added to the Datasets table. Repeat for every experiment you want to include in this run.
 
@@ -449,9 +450,11 @@ Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `fli
 ## Features
 
 - **HDF5-backed projects.** One `.h5` per experiment holds intensity channels, segmentation labels, masks, phasor maps, and measurement staging — no separate database, no scattered files.
+- **Overlap-aware tile stitching.** Stitch tile scans at import with phase-correlation registration on the tile *overlap region* (Fiji/ImageJ-style) — solved once on a reference channel and reused for every channel and the FLIM decay stream. Falls back to a nominal-overlap grid when a channel can't register, and offers **None** (measurement-correct, forced for FLIM) or **Linear Blending** overlap fusion.
 - **Cellpose segmentation with interactive QC.** Run Cellpose batch-style across many datasets, then QC each dataset's labels in the napari viewer with paint/erase/fill shortcuts.
 - **Time-lapse tracking and lineage.** Import `.tiff` series with `_tN` timepoint tokens as a single multi-timepoint dataset, scroll the timepoints in napari, segment every frame, then track cells so each keeps one ID across time. Cells that die or leave the field of view end their track; dividing cells are linked parent → daughter as lineage (powered by [laptrack](https://github.com/yfukai/laptrack)). The tracked segmentation stores the track ID as the label value, and a napari Tracks layer shows trajectories and divisions.
 - **Grouped thresholding.** Cluster cells by intensity, apply per-group autothresholding, refine with a circular ROI per dataset, write the result to `/masks/<round>`. Run multiple rounds in one workflow.
+- **Puncta detection & subpopulation classification.** Adaptive Local Clipping (per-cell band-pass + z-score) finds puncta inside each cell, with auto-window sizing and two-pass auto-extraction. Split a feature mask into populations by contrast-to-noise ratio (discover/guided/forced) or interactively with the CNR segmenter. Runs per-frame on time-lapse data.
 - **FLIM phasor analysis.** Compute phasor maps from `.sdt` data, plot with `nipy_spectral` density on a Qt-native histogram, draw multi-ROI selections, save the union as a mask layer.
 - **Per-cell measurements.** Configurable per-channel metrics across every segmentation and mask layer, exported as a tidy parquet plus CSV mirrors.
 - **Multi-window UI.** Independent top-level windows for the napari viewer, pyqtgraph scatter, cell table, and phasor plot — all synchronized through a single `CellDataModel` with one `state_changed` signal.
@@ -460,6 +463,12 @@ Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `fli
 - **Image and measurement export.** TIFF (GUI dialog or CLI), CSV/XLSX, parquet. Round-trips pixel-size metadata.
 - **Headless CLI.** Batch TIFF export, phasor compute, GMM ellipse fitting, whole-field segmentation, and resource rename/delete tooling that runs without a display — see [Command-line Tools](#command-line-tools).
 - **Dataset lifecycle.** Import, append, resume, close — with `run_state.json` for crash- and pause-tolerant workflows.
+
+---
+
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the dated history of when each feature was implemented (grouped by month; PerCell4 is pre-release `0.1.0`).
 
 ---
 
