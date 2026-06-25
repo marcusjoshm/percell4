@@ -728,26 +728,14 @@ class CompressDialog(QDialog):
             self._ch_list.addItem(item)
         self._ch_list.blockSignals(False)
 
-        # ── Registration reference-channel combo ──
-        # Seed from discovered channels (``chXX`` — matches the
-        # /metadata.channel_names default convention). itemData carries the
-        # name verbatim (not an index); editable so free-text still works.
-        current_ref = self._stitch_reference.currentText()
-        self._stitch_reference.blockSignals(True)
-        self._stitch_reference.clear()
-        for ch in self._all_channels:
-            ch_name = f"ch{ch}"
-            self._stitch_reference.addItem(ch_name, ch_name)
-        if current_ref:
-            idx = self._stitch_reference.findText(current_ref)
-            if idx >= 0:
-                self._stitch_reference.setCurrentIndex(idx)
-            else:
-                self._stitch_reference.setCurrentText(current_ref)
-        self._stitch_reference.blockSignals(False)
-
         # ── Channels (manual mode panel) ──
+        # Built before the reference combo so the combo can read each
+        # channel's (possibly renamed) name from its name_edit.
         self._build_manual_channel_panel()
+
+        # ── Registration reference-channel combo ──
+        # Seeded from each channel's CURRENT name (see _refresh_reference_combo).
+        self._refresh_reference_combo()
 
         # ── FLIM per-channel calibration rows ──
         self._build_calibration_panel()
@@ -805,6 +793,9 @@ class CompressDialog(QDialog):
             name_edit = QLineEdit(f"ch{ch}")
             name_edit.setPlaceholderText("Name")
             name_edit.setFixedWidth(100)
+            # A rename here is the name the importer keys its registration
+            # tiles by, so keep the reference-channel combo in sync live.
+            name_edit.textChanged.connect(self._refresh_reference_combo)
             row.addWidget(name_edit)
 
             type_combo = QComboBox()
@@ -818,6 +809,39 @@ class CompressDialog(QDialog):
             self._channel_configs[ch] = _ChannelConfig(
                 checkbox=cb, name_edit=name_edit, type_combo=type_combo
             )
+
+    def _refresh_reference_combo(self) -> None:
+        """Rebuild the registration reference-channel combo from each channel's
+        CURRENT name.
+
+        In Manual mode a channel may be renamed (ch00 -> "ER"); the importer
+        keys registration tiles by that renamed layer name, so the reference
+        must be selectable by the same name — the chXX id no longer exists
+        post-rename. Falls back to ``chXX`` for an unnamed channel (and in Auto
+        mode, where the name_edits hold their chXX defaults). itemData carries
+        the name verbatim (not an index), matching the round-trip convention.
+        Preserves the user's pick by channel position across a rename, or by
+        text for a free-typed entry. Wired to each name_edit's textChanged in
+        _build_manual_channel_panel so it stays live.
+        """
+        combo = self._stitch_reference
+        prev_text = combo.currentText().strip()
+        prev_idx = combo.currentIndex()  # -1 when the text was free-typed
+        combo.blockSignals(True)
+        combo.clear()
+        for ch in self._all_channels:
+            cfg = self._channel_configs.get(ch)
+            name = (cfg.name_edit.text().strip() if cfg else "") or f"ch{ch}"
+            combo.addItem(name, name)
+        if 0 <= prev_idx < combo.count():
+            combo.setCurrentIndex(prev_idx)  # same channel position, new name
+        elif prev_text:
+            idx = combo.findText(prev_text)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setCurrentText(prev_text)  # genuine free-text pick
+        combo.blockSignals(False)
 
     def _build_calibration_panel(self) -> None:
         """Build per-channel phase/modulation widgets for FLIM calibration.
