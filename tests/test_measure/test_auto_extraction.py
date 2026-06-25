@@ -44,6 +44,20 @@ def _small_only_image(shape=(256, 256), seed=1):
     return img, labels
 
 
+def _disc_frame(radius, shape=(160, 160), center=(80, 80), seed=0):
+    """One whole-frame cell with a single bright flat-topped disc over noise.
+
+    Stands in for one timepoint of a time-lapse whose largest particle changes size
+    frame-to-frame (e.g. a dissolving granule washout).
+    """
+    rng = np.random.RandomState(seed)
+    img = rng.normal(100.0, 5.0, shape).astype(np.float32)
+    labels = np.ones(shape, dtype=np.int32)
+    rr, cc = disk(center, radius, shape=shape)
+    img[rr, cc] = 320.0
+    return img, labels
+
+
 # --------------------------------------------------------------------------- #
 # measure_largest_particle_diameter (LoG)
 # --------------------------------------------------------------------------- #
@@ -58,6 +72,58 @@ def test_measure_largest_diameter_empty_cells_returns_zero():
     img = np.random.RandomState(0).normal(100.0, 5.0, (64, 64)).astype(np.float32)
     labels = np.zeros((64, 64), dtype=np.int32)  # no cells
     assert measure_largest_particle_diameter(img, labels) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# U1: finer per-frame LoG sizing — the largest tracks per-frame size (R1, R2)
+# --------------------------------------------------------------------------- #
+def test_largest_diameter_within_tolerance_of_true():
+    """Pinned-tolerance guard: a known disc Ø is measured near 2·radius, so a future
+    grid change cannot silently drift the eye-validated sizing far off."""
+    img, labels = _disc_frame(10)  # true Ø = 20 px
+    d = measure_largest_particle_diameter(img, labels)
+    assert 16.0 <= d <= 24.0
+
+
+def test_largest_diameter_tracks_size_monotonically():
+    """The measured largest increases with the actual disc size across 'frames', so
+    the per-frame coarse window can track each frame (R1) — and proves the routine is
+    sized per-frame, not pinned to one value (R2)."""
+    ds = [measure_largest_particle_diameter(*_disc_frame(r)) for r in (6, 9, 12)]
+    assert ds[0] < ds[1] < ds[2]
+    for radius, d in zip((6, 9, 12), ds):
+        assert abs(d - 2 * radius) <= 6.0  # each near its true Ø
+
+
+def test_finer_grid_resolves_more_distinct_sizes_than_coarse():
+    """The finer SIZE_NUM_SIGMA grid distinguishes per-frame sizes that the old
+    12-scale grid collapsed into the same diameter bin (the pinned-window root cause)."""
+    from percell4.domain.measure.auto_extraction import SIZE_NUM_SIGMA
+
+    radii = (8, 9, 10, 11, 12)
+    coarse = {
+        round(measure_largest_particle_diameter(*_disc_frame(r), num_sigma=12), 1)
+        for r in radii
+    }
+    fine = {
+        round(measure_largest_particle_diameter(*_disc_frame(r), num_sigma=SIZE_NUM_SIGMA), 1)
+        for r in radii
+    }
+    # The coarse grid pins several distinct sizes to the same bin; the fine grid resolves them.
+    assert len(fine) > len(coarse)
+    assert len(fine) >= 4
+
+
+def test_coarse_window_tracks_per_frame_independently():
+    """Running auto_extract per 'frame' with a fixed supplied smallest yields a coarse
+    window that follows each frame's largest particle — the multi-time-point
+    'treat each timepoint as its own image' behavior."""
+    windows = []
+    for radius in (6, 10, 14):
+        _, report = auto_extract(*_disc_frame(radius), smallest_particle_px=2.0)
+        assert report.second_pass_used is True  # a large disc always triggers the coarse pass
+        windows.append(report.passes[-1][0])  # the coarse window
+    assert windows[0] < windows[1] < windows[2]
 
 
 def test_measure_smallest_diameter_finds_blobs():
