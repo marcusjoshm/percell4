@@ -245,11 +245,17 @@ def _build_compress_plan(
         getattr(gui_state, "tile_config_override", None) if gui_state else None
     ) or getattr(cfg, "tile_config", None)
     if tile_config is not None:
+        ref = getattr(tile_config, "reference_channel", None)
         plan["tile_config"] = {
             "grid_rows": int(tile_config.grid_rows),
             "grid_cols": int(tile_config.grid_cols),
             "grid_type": str(tile_config.grid_type),
             "order": str(tile_config.order),
+            # Overlap-aware registration fields (hop 2). A dropped key here
+            # silently disables the feature, so they ride alongside the grid.
+            "overlap": float(getattr(tile_config, "overlap", 0.0)),
+            "register": bool(getattr(tile_config, "register", False)),
+            "reference_channel": str(ref) if ref else None,
         }
 
     return plan

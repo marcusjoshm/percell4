@@ -60,6 +60,9 @@ def test_compress_plan_serializes_global_tile_config() -> None:
         "grid_cols": 3,
         "grid_type": "row_by_row",
         "order": "right_down",
+        "overlap": 0.0,
+        "register": False,
+        "reference_channel": None,
     }
 
 
@@ -89,7 +92,45 @@ def test_compress_plan_per_dataset_override_beats_global() -> None:
         "grid_cols": 4,
         "grid_type": "row_by_row",
         "order": "right_down",
+        "overlap": 0.0,
+        "register": False,
+        "reference_channel": None,
     }
+
+
+def test_compress_plan_roundtrips_registration_fields() -> None:
+    """Hop 2: overlap/register/reference_channel survive the flatten.
+
+    A dropped key here silently disables registration downstream, so the
+    plan dict must carry all three when the TileConfig sets them.
+    """
+    ds = _spec("ds1", (Path("a.tif"), Path("b.tif")))
+    cfg = CompressConfig(
+        z_project_method="mip",
+        selected_channels={"00"},
+        tile_config=TileConfig(
+            grid_rows=2,
+            grid_cols=2,
+            overlap=0.1,
+            register=True,
+            reference_channel="ch00",
+        ),
+        datasets=[ds],
+    )
+
+    plan = _build_compress_plan(
+        ds=ds,
+        gui_state=None,
+        cfg=cfg,
+        selected_token_ids=["00"],
+        layer_assignments_payload={},
+    )
+
+    tc = plan.get("tile_config")
+    assert tc is not None
+    assert tc["overlap"] == 0.1
+    assert tc["register"] is True
+    assert tc["reference_channel"] == "ch00"
 
 
 def test_compress_plan_omits_tile_config_when_none() -> None:

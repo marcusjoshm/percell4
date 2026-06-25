@@ -121,6 +121,29 @@ class ImportDialog(QDialog):
         ])
         tile_layout.addRow("Start corner:", self._tile_order)
 
+        # ── Overlap-aware registration (phase-correlation) ──
+        # Overlap is stored as a FRACTION in TileConfig; the spinbox shows
+        # a percentage. Register opts into the phase-correlation path,
+        # gated at the importer on register ∧ overlap>0 ∧ grid>1×1.
+        self._tile_overlap = QDoubleSpinBox()
+        self._tile_overlap.setRange(0.0, 99.0)
+        self._tile_overlap.setSuffix("%")
+        self._tile_overlap.setValue(0.0)
+        tile_layout.addRow("Overlap:", self._tile_overlap)
+
+        self._tile_register = QCheckBox(
+            "Register overlapping tiles (phase correlation)"
+        )
+        tile_layout.addRow("", self._tile_register)
+
+        # Reference channel identified by NAME (stable). This dialog may not
+        # know channels at config time (they're discovered for FLIM only),
+        # so the combo is editable — discovered channels populate it, but a
+        # free-text name is also accepted. itemData carries the name verbatim.
+        self._tile_reference = QComboBox()
+        self._tile_reference.setEditable(True)
+        tile_layout.addRow("Reference channel:", self._tile_reference)
+
         self._tile_group.setVisible(False)
         self._tile_enabled.toggled.connect(self._tile_group.setVisible)
         layout.addWidget(self._tile_group)
@@ -307,6 +330,24 @@ class ImportDialog(QDialog):
                 "mod_spin": mod_spin,
             }
 
+        # Seed the registration reference-channel combo from discovered
+        # channels (identified by name). itemData carries the name verbatim
+        # (not an index) so reads round-trip the name. The combo stays
+        # editable so a free-text name is still accepted.
+        current_ref = self._tile_reference.currentText()
+        self._tile_reference.blockSignals(True)
+        self._tile_reference.clear()
+        for ch in sorted(channels):
+            ch_name = f"ch{ch}"
+            self._tile_reference.addItem(ch_name, ch_name)
+        if current_ref:
+            idx = self._tile_reference.findText(current_ref)
+            if idx >= 0:
+                self._tile_reference.setCurrentIndex(idx)
+            else:
+                self._tile_reference.setCurrentText(current_ref)
+        self._tile_reference.blockSignals(False)
+
     def _browse_output(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Dataset As", "", "HDF5 Files (*.h5)"
@@ -340,11 +381,16 @@ class ImportDialog(QDialog):
     def tile_config(self) -> TileConfig | None:
         if not self._tile_enabled.isChecked():
             return None
+        ref = self._tile_reference.currentText().strip()
         return TileConfig(
             grid_rows=self._tile_rows.value(),
             grid_cols=self._tile_cols.value(),
             grid_type=self._tile_type.currentText(),
             order=self._tile_order.currentText(),
+            # Spinbox shows a percentage; TileConfig stores a fraction.
+            overlap=self._tile_overlap.value() / 100.0,
+            register=self._tile_register.isChecked(),
+            reference_channel=ref or None,
         )
 
     @property

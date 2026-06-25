@@ -254,6 +254,27 @@ class CompressDialog(QDialog):
             ]
         )
         stitch_layout.addWidget(self._stitch_order)
+        # ── Overlap-aware registration (phase-correlation) ──
+        # Overlap is stored as a FRACTION in TileConfig; the spinbox shows
+        # a percentage. Register opts into the phase-correlation path,
+        # gated at the importer on register ∧ overlap>0 ∧ grid>1×1.
+        stitch_layout.addWidget(QLabel("Overlap:"))
+        self._stitch_overlap = QDoubleSpinBox()
+        self._stitch_overlap.setRange(0.0, 99.0)
+        self._stitch_overlap.setSuffix("%")
+        self._stitch_overlap.setValue(0.0)
+        stitch_layout.addWidget(self._stitch_overlap)
+        self._stitch_register = QCheckBox(
+            "Register overlapping tiles (phase correlation)"
+        )
+        stitch_layout.addWidget(self._stitch_register)
+        stitch_layout.addWidget(QLabel("Reference:"))
+        # Reference channel identified by NAME. Populated from discovered
+        # channels (``chXX``), editable so a free-text name is also accepted.
+        # itemData carries the name verbatim (not an index).
+        self._stitch_reference = QComboBox()
+        self._stitch_reference.setEditable(True)
+        stitch_layout.addWidget(self._stitch_reference)
         stitch_layout.addStretch()
         self._stitch_widget.setVisible(False)
         settings_layout.addWidget(self._stitch_widget)
@@ -425,11 +446,16 @@ class CompressDialog(QDialog):
 
         tile_config = None
         if self._stitch_check.isChecked():
+            ref = self._stitch_reference.currentText().strip()
             tile_config = TileConfig(
                 grid_rows=self._stitch_rows.value(),
                 grid_cols=self._stitch_cols.value(),
                 grid_type=self._stitch_type.currentText(),
                 order=self._stitch_order.currentText(),
+                # Spinbox shows a percentage; TileConfig stores a fraction.
+                overlap=self._stitch_overlap.value() / 100.0,
+                register=self._stitch_register.isChecked(),
+                reference_channel=ref or None,
             )
 
         # Dataset check states + name overrides
@@ -701,6 +727,24 @@ class CompressDialog(QDialog):
             item.setData(Qt.UserRole, ch)
             self._ch_list.addItem(item)
         self._ch_list.blockSignals(False)
+
+        # ── Registration reference-channel combo ──
+        # Seed from discovered channels (``chXX`` — matches the
+        # /metadata.channel_names default convention). itemData carries the
+        # name verbatim (not an index); editable so free-text still works.
+        current_ref = self._stitch_reference.currentText()
+        self._stitch_reference.blockSignals(True)
+        self._stitch_reference.clear()
+        for ch in self._all_channels:
+            ch_name = f"ch{ch}"
+            self._stitch_reference.addItem(ch_name, ch_name)
+        if current_ref:
+            idx = self._stitch_reference.findText(current_ref)
+            if idx >= 0:
+                self._stitch_reference.setCurrentIndex(idx)
+            else:
+                self._stitch_reference.setCurrentText(current_ref)
+        self._stitch_reference.blockSignals(False)
 
         # ── Channels (manual mode panel) ──
         self._build_manual_channel_panel()

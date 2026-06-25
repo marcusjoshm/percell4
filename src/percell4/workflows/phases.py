@@ -133,11 +133,18 @@ def compress_one(
     if tc_payload:
         from percell4.domain.io.models import TileConfig
 
+        _ref = tc_payload.get("reference_channel")
         tile_config = TileConfig(
             grid_rows=int(tc_payload.get("grid_rows", 1)),
             grid_cols=int(tc_payload.get("grid_cols", 1)),
             grid_type=str(tc_payload.get("grid_type", "row_by_row")),
             order=str(tc_payload.get("order", "right_down")),
+            # Overlap-aware registration fields (hop 3). ``.get()`` with
+            # defaults so old plan dicts (pre-feature) still load to the
+            # byte-identical grid path.
+            overlap=float(tc_payload.get("overlap", 0.0)),
+            register=bool(tc_payload.get("register", False)),
+            reference_channel=str(_ref) if _ref else None,
         )
 
     # import_dataset accepts ``files=`` as either DiscoveredFile-like
