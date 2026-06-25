@@ -29,7 +29,6 @@ import warnings
 
 import h5py
 import numpy as np
-import pytest
 import tifffile
 
 from percell4.adapters.importer import (

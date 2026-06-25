@@ -173,6 +173,9 @@ forbidden_modules = [
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+# Vendored third-party code (numpy-only grid_stitching core) is kept verbatim to
+# its upstream source; do not lint it against house style.
+extend-exclude = ["src/percell4/domain/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]

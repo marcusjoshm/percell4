@@ -14,18 +14,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+# Map PerCell4's two-field (grid_type, order) onto grid_positions' single
+# hyphenated order vocabulary. Imported from the module under test so the test
+# pins the public mapping table.
 from percell4.domain.io.assembler import (
+    _GRID_TYPE_TO_VENDOR_ORDER,
     RegistrationError,
     assemble_tiles_with_offsets,
     canvas_from_offsets,
     estimate_tile_offsets,
 )
-
-# Map PerCell4's two-field (grid_type, order) onto grid_positions' single
-# hyphenated order vocabulary. Imported from the module under test so the test
-# pins the public mapping table.
-from percell4.domain.io.assembler import _GRID_TYPE_TO_VENDOR_ORDER
-
 
 # ── Synthetic mosaic helpers ──────────────────────────────────
 
