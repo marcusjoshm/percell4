@@ -2437,8 +2437,15 @@ def export_run(
             f"measurements.parquet write failed: {e}",
         )
 
-    # Build the CSV export subset.
-    csv_cols = _ordered_csv_columns(df, config.selected_csv_columns)
+    # Build the CSV export subset. Keep `timepoint` as an identity column so time-lapse
+    # runs carry it in combined.csv and the per_dataset CSVs (it is present in the staged
+    # per-cell df but is neither a base identity nor a user-selectable metric, so it would
+    # otherwise be dropped). Self-gating: _ordered_csv_columns only retains it when present,
+    # so single-timepoint runs are unaffected. (complete_tracks.csv already does this; this
+    # brings combined.csv into line. particles.csv writes all columns, so it already has it.)
+    csv_cols = _ordered_csv_columns(
+        df, config.selected_csv_columns, extra_identity=("timepoint",)
+    )
 
     combined_csv = run_folder / "combined.csv"
     try:

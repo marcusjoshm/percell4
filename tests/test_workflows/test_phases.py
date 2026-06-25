@@ -1648,6 +1648,83 @@ def test_export_run_writes_parquet_and_csvs(tmp_path, fixture_store_with_labels)
     assert not (run_folder / "staging").exists()
 
 
+def test_export_run_keeps_timepoint_for_multitimepoint(tmp_path, fixture_store_with_labels):
+    """combined.csv + per_dataset CSVs must carry `timepoint` for time-lapse data — it's
+    in the staged per-cell df (like complete_tracks.csv), but the export column selection
+    dropped it because it is neither an identity nor a user-selected column. particles.csv
+    already carries it (no column selection); this also locks that behavior."""
+    run_folder = tmp_path / "run_tl"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    # A real measure_one df (so the summary-CSV builders find their identity/edge columns)
+    # with an injected `timepoint` column — exactly what the time-lapse measure path emits.
+    round_spec = ThresholdingRound(
+        name="R", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS, kmeans_n_clusters=2, gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+    df, failure, _ = measure_one(fixture_store_with_labels, round_specs=[round_spec])
+    assert failure is None
+    df = df.reset_index(drop=True)
+    df["timepoint"] = (df.index >= len(df) // 2).astype(int)  # first half t=0, rest t=1
+    write_staging_parquet(run_folder, "DS1", df)
+
+    # Particle staging carrying `timepoint` (the time-lapse particle path tags it).
+    pdf = pd.DataFrame(
+        {
+            "round_name": ["R", "R"],
+            "cell_id": [1, 2],
+            "particle_id": [1, 1],
+            "area": [5, 6],
+            "timepoint": [0, 1],
+            "GFP_mean_intensity": [9.0, 8.0],
+        }
+    )
+    write_staging_particles_parquet(run_folder, "DS1", pdf)
+
+    cfg = _sample_workflow_config(selected_cols=["GFP_mean_intensity"])
+    meta = _sample_run_metadata(run_folder)
+    failure, msg = export_run(run_folder, cfg, meta)
+    assert failure is None, msg
+
+    combined = pd.read_csv(run_folder / "combined.csv")
+    assert "timepoint" in combined.columns
+    assert sorted(combined["timepoint"].unique()) == [0, 1]
+    # timepoint is kept as identity even though it is NOT a user-selected metric
+    assert "RFP_mean_intensity" not in combined.columns
+
+    per_ds = pd.read_csv(run_folder / "per_dataset" / "DS1.csv")
+    assert "timepoint" in per_ds.columns
+
+    particles = pd.read_csv(run_folder / "particles.csv")
+    assert "timepoint" in particles.columns
+    assert sorted(particles["timepoint"].unique()) == [0, 1]
+
+
+def test_export_run_no_timepoint_for_single_timepoint(tmp_path):
+    """Single-timepoint exports have no `timepoint` column — the added identity is
+    self-gating (kept only when the column is present in the staged df)."""
+    run_folder = tmp_path / "run_st"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+    df = pd.DataFrame(
+        {"cell_id": [1, 2], "label": [1, 2], "GFP_mean_intensity": [10.0, 20.0]}
+    )
+    write_staging_parquet(run_folder, "DS1", df)
+
+    cfg = _sample_workflow_config(selected_cols=["GFP_mean_intensity"])
+    meta = _sample_run_metadata(run_folder)
+    failure, msg = export_run(run_folder, cfg, meta)
+    assert failure is None, msg
+
+    combined = pd.read_csv(run_folder / "combined.csv")
+    assert "timepoint" not in combined.columns
+    per_ds = pd.read_csv(run_folder / "per_dataset" / "DS1.csv")
+    assert "timepoint" not in per_ds.columns
+
+
 def test_export_run_fails_if_staging_missing(tmp_path):
     run_folder = tmp_path / "run_02"
     run_folder.mkdir()
