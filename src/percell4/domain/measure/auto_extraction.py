@@ -61,7 +61,18 @@ __all__ = [
     "measure_smallest_particle_diameter",
     "noise_symmetry_floor_k",
     "AutoExtractReport",
+    "NoParticlesFound",
 ]
+
+
+class NoParticlesFound(ValueError):
+    """Auto-detect-smallest found no particles to size (no LoG blobs).
+
+    A ``ValueError`` subclass so existing ``except ValueError`` handlers keep working,
+    but a distinct type lets callers branch on the recoverable "no particles" case
+    (e.g. the dissolved end of a washout time-lapse → an empty frame, not a failure)
+    without matching on the message string.
+    """
 
 # Reference (eye-validated) defaults — not user-facing knobs.
 FILL_FACTOR = 3.0          # window = FILL_FACTOR × particle diameter (no-hole floor)
@@ -311,7 +322,7 @@ def auto_extract(
             presmooth_sigma_px=log_presmooth, max_sigma=max_sigma,
         )
         if d_small <= 0:
-            raise ValueError(
+            raise NoParticlesFound(
                 "smallest-particle autodetection found no blobs; supply a smallest "
                 "particle Ø (turn off Auto-detect smallest) instead"
             )

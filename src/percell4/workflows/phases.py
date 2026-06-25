@@ -807,7 +807,12 @@ def _apply_auto_extract_cells(
     needed). Unions the ``{0,1}`` result into ``combined`` in place. Returns an error
     string on failure, else ``""``.
     """
-    from percell4.domain.measure.auto_extraction import FILL_FACTOR, _win, auto_extract
+    from percell4.domain.measure.auto_extraction import (
+        FILL_FACTOR,
+        NoParticlesFound,
+        _win,
+        auto_extract,
+    )
 
     smallest_particle_px: float | None = None
     if settings.smallest_particle_um is not None:
@@ -843,18 +848,15 @@ def _apply_auto_extract_cells(
             smallest_particle_px=smallest_particle_px,
             presmooth_sigma_px=float(settings.presmooth_sigma_px),
         )
-    except ValueError as e:
-        if smallest_particle_px is None and "no blobs" in str(e):
-            # Auto-detect found no particles to size in this frame. That is a recoverable
-            # "no particles" outcome (e.g. the dissolved end of a washout time-lapse), NOT
-            # a dataset error: the time-lapse loop turns it into an empty frame (R9). The
-            # single-timepoint caller still treats this sentinel as a clear failure.
-            logger.info(
-                "round %s: auto extraction auto-detect found no particles to size", round_name
-            )
-            return _AUTO_EXTRACT_NO_PARTICLES
-        logger.exception("auto extraction failed for round %s", round_name)
-        return f"auto extraction: {e}"
+    except NoParticlesFound:
+        # Auto-detect found no particles to size in this frame. A recoverable "no
+        # particles" outcome (e.g. the dissolved end of a washout time-lapse), NOT a
+        # dataset error: the time-lapse loop turns it into an empty frame (R9). The
+        # single-timepoint caller still treats this sentinel as a clear failure.
+        logger.info(
+            "round %s: auto extraction auto-detect found no particles to size", round_name
+        )
+        return _AUTO_EXTRACT_NO_PARTICLES
     except Exception as e:
         logger.exception("auto extraction failed for round %s", round_name)
         return f"auto extraction: {e}"
@@ -1129,6 +1131,10 @@ def _classify_and_write_cnr_stack(
                 store.write_mask(name, stack.astype(np.uint8))
             except Exception as e:
                 logger.exception("write_mask failed for CNR population %s", name)
+                # Don't leave a half-written split (e.g. _low on disk, _high failed):
+                # clear both so a re-run / batch-measure never sees an orphaned mask.
+                for s in ("_low", "_high"):
+                    store.delete_item(f"masks/{round_spec.name}{s}")
                 return (
                     DatasetFailure.THRESHOLD_ERROR,
                     f"CNR population write failed ({name}): {e}",

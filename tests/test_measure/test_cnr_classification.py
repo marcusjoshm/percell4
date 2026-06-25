@@ -337,6 +337,18 @@ def test_classify_stack_single_population_frame_flagged_not_dim():
     assert (f1["n_subpopulations"] == 1).all()
 
 
+def test_classify_stack_all_single_population_no_high(monkeypatch):
+    """Every frame single-population (all <4 foci): high_stack is all-zero and every
+    timepoint is flagged n_subpopulations==1 (the full-washout endpoint)."""
+    thr = _guided_threshold()
+    few = np.full(3, 200.0)  # 3 foci < 4 -> single population per frame
+    img, mask, labels = _stack([_make_foci(few, seed=s) for s in (0, 1)])
+    res = classify_by_cnr_stack(img, mask, labels, mode="guided", threshold=thr)
+    assert res.high_stack.sum() == 0
+    assert res.low_stack.sum() > 0  # the foci land in low (unclassified, not dim)
+    assert all(f["n_subpopulations"] == 1 for f in res.per_frame)
+
+
 def test_classify_stack_discover_mode_per_frame():
     """Discover mode (no threshold) splits each frame on its own CNR gap."""
     img, mask, labels = _stack([_make_foci(_SPLIT_LEVELS, seed=s) for s in (0, 1)])

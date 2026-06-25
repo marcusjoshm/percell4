@@ -270,3 +270,45 @@ def test_auto_extract_timelapse_blank_frame_degrades_not_aborts(tmp_path):
     assert mask.shape == (2, 100, 100)
     assert int(mask[0].sum()) > 0   # frame 0 detected its blob
     assert int(mask[1].sum()) == 0  # frame 1 is an empty plane
+
+
+def test_auto_extract_timelapse_genuine_error_aborts(tmp_path, monkeypatch):
+    """R9 only degrades the recoverable 'no particles' case: a GENUINE per-frame
+    auto_extract failure aborts the whole dataset (it is not turned into an empty frame)."""
+    import percell4.domain.measure.auto_extraction as ae_mod
+
+    store = _adaptive_timelapse_store(tmp_path / "ae_err.h5", n_t=2)
+    rnd = ThresholdingRound(
+        name="ae", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS, kmeans_n_clusters=2,
+        auto_extract=AutoExtractSettings(),
+    )
+
+    def boom(*a, **k):
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr(ae_mod, "auto_extract", boom)
+    grouping, _f, _m = threshold_compute_one(store, rnd)
+    failure, _msg = apply_threshold_headless(store, rnd, grouping)
+    assert failure is DatasetFailure.THRESHOLD_ERROR
+    assert "ae" not in store.list_masks()  # genuine error -> nothing written
+
+
+def test_cnr_timelapse_stale_population_masks_deleted_on_reclassify(tmp_path, monkeypatch):
+    """A time-lapse 2->1 population re-run leaves no stale (T,H,W) _low/_high masks
+    (the delete-before-write cleanup fires for the stacks)."""
+    store = _adaptive_timelapse_store(tmp_path / "cnr_tl_stale.h5", n_t=2)
+    rnd = _cnr_round()
+
+    _patch_classify(monkeypatch, _two_pop_result())
+    grouping, _f, _m = threshold_compute_one(store, rnd)
+    apply_threshold_headless(store, rnd, grouping)
+    assert "ac_low" in store.list_masks() and "ac_high" in store.list_masks()
+    assert store.read_mask("ac_low").shape == (2, 100, 100)
+
+    _patch_classify(monkeypatch, _one_pop_result())
+    grouping, _f, _m = threshold_compute_one(store, rnd)
+    failure, _msg = apply_threshold_headless(store, rnd, grouping)
+    assert failure is None
+    assert "ac_low" not in store.list_masks()  # stale (T,H,W) populations cleared
+    assert "ac_high" not in store.list_masks()

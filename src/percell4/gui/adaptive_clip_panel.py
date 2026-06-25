@@ -37,6 +37,8 @@ def run_adaptive_detection(image, gaussian_sigma, settings, auto_window, window_
     """
     from percell4.domain.measure.adaptive_clip import (
         auto_window as compute_auto_window,
+    )
+    from percell4.domain.measure.adaptive_clip import (
         detect_adaptive_whole_frame,
     )
     from percell4.workflows.models import PunctaDetectorSettings
@@ -201,7 +203,7 @@ def run_adaptive_auto_extract_stack(
     ``run_adaptive_detection_stack``'s per-frame dispatch. Pure (no Qt) so it is
     unit-testable and worker-safe.
     """
-    from percell4.domain.measure.auto_extraction import auto_extract
+    from percell4.domain.measure.auto_extraction import NoParticlesFound, auto_extract
 
     image = np.asarray(image)
     labels = np.asarray(labels)
@@ -216,14 +218,12 @@ def run_adaptive_auto_extract_stack(
                 presmooth_sigma_px=presmooth_sigma_px,
                 min_spot_px=min_spot_px,
             )
-        except ValueError as e:
+        except NoParticlesFound:
             # Auto-detect found no particles to size this frame — a recoverable empty
-            # frame, not a failed run (R9). A supplied smallest never hits this.
-            if smallest_particle_px is None and "no blobs" in str(e):
-                mask_t = np.zeros(labels[t].shape, dtype=np.uint8)
-                report_t = None
-            else:
-                raise
+            # frame, not a failed run (R9). Only raised in auto-detect mode; genuine
+            # errors propagate to the worker's error signal.
+            mask_t = np.zeros(labels[t].shape, dtype=np.uint8)
+            report_t = None
         frames.append(np.asarray(mask_t, dtype=np.uint8))
         reports.append(report_t)
     return np.stack(frames, axis=0), reports
@@ -288,7 +288,7 @@ def run_cnr_classification_stack(image, feature_mask, labels, *, mode, threshold
         # Single population in every frame: all foci in one mask under the base name.
         pop_masks = [("", res.low_stack)]
     pop_masks = [(suffix, m) for suffix, m in pop_masks if int(m.sum()) > 0]
-    components = res.table.to_dict("records") if hasattr(res.table, "to_dict") else []
+    components = res.table.to_dict("records")  # res.table is always a DataFrame
     report = {
         "decision": f"time-lapse CNR: {n_split}/{n_frames} timepoint(s) split",
         "mode": mode,

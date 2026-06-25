@@ -348,6 +348,7 @@ def test_batch_threshold_cnr_classify_timelapse_runs_per_frame(tmp_path, capsys)
     store = DatasetStore(p)
     assert store.read_mask("ae").shape == (2, 100, 100)  # (T,H,W) base mask
     table = store.read_dataframe("/classification/ae")
+    assert len(table) >= 1  # non-empty (the <= subset check below is vacuous on empty)
     assert "timepoint" in table.columns
     assert set(table["timepoint"].unique()) <= {0, 1}
 

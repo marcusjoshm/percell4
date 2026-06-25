@@ -53,9 +53,12 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pandas as pd
 from scipy.ndimage import binary_dilation, center_of_mass, find_objects, label
 
 from percell4.domain.measure.adaptive_clip import per_cell_sigma
@@ -145,7 +148,7 @@ class StackClassificationResult:
 
     low_stack: np.ndarray
     high_stack: np.ndarray
-    table: Any
+    table: pd.DataFrame
     per_frame: list[dict]
 
 
