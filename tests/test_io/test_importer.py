@@ -632,12 +632,15 @@ def test_register_gate_no_reference_channel_raises(tmp_path):
     assert not h5.exists()
 
 
-def test_register_degenerate_uniform_tiles_raises(tmp_path):
-    """A low-texture (uniform) reference → degenerate solve → RegistrationError
-    propagates; stitch_registered is never written.
-    """
-    from percell4.domain.io.assembler import RegistrationError
+def test_register_degenerate_falls_back_to_grid(tmp_path):
+    """A low-texture (uniform) reference → degenerate solve → fall back to
+    nominal-overlap GRID placement (warns), NOT a hard failure.
 
+    The dataset is still produced — on the overlap-aware grid canvas, strictly
+    better than the 0%-overlap edge-to-edge grid and never an arbitrary
+    overlap — but left UN-registered (no stitch geometry committed), so the
+    file is honest that no drift correction happened.
+    """
     src = tmp_path / "raw"
     src.mkdir()
     for i in range(4):
@@ -646,11 +649,16 @@ def test_register_degenerate_uniform_tiles_raises(tmp_path):
         tifffile.imwrite(str(src / f"img_s{i:02d}_ch00.tif"), tile)
 
     h5 = tmp_path / "out.h5"
-    with pytest.raises(RegistrationError):
-        import_dataset(src, h5, tile_config=_reg_tile_config())
-    # The file may not even be created; if it is, it must not be registered.
-    if h5.exists():
-        assert DatasetStore(h5).read_stitch_geometry().registered is False
+    with pytest.warns(UserWarning, match="nominal-overlap grid"):
+        n = import_dataset(src, h5, tile_config=_reg_tile_config())
+
+    assert n == 1
+    store = DatasetStore(h5)
+    # Degenerate solve never commits stitch geometry → not registered.
+    assert store.read_stitch_geometry().registered is False
+    # But the mosaic WAS produced, on the nominal-overlap grid canvas.
+    assert store.read_array("intensity").shape == _REG_CANVAS
+    assert tuple(store.metadata["native_shape"]) == _REG_CANVAS
 
 
 def test_register_reimport_guard_refuses(tmp_path):

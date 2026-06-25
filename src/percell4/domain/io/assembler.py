@@ -205,6 +205,56 @@ def canvas_from_offsets(
     return h, w
 
 
+def grid_seed_offsets(
+    tile_shape: tuple[int, int],
+    grid_rows: int,
+    grid_cols: int,
+    grid_type: str,
+    order: str,
+    overlap: float,
+) -> tuple[NDArray, tuple[int, int]]:
+    """Nominal-overlap grid offsets — the registration-free fallback.
+
+    Places each tile at its grid-seed position (the ``overlap`` IS accounted
+    for via ``step = dim·(1-overlap)``, but NO phase-correlation refinement is
+    applied). This is the clean mosaic floor a caller uses when a registered
+    solve is degenerate: strictly better than the 0%-overlap edge-to-edge grid,
+    never an arbitrary overlap. Returns the same ``(offsets, canvas)`` shape and
+    invariants as :func:`estimate_tile_offsets` (int32 ``(y0, x0)``, per-axis
+    min 0, canvas via :func:`canvas_from_offsets`) so the two are interchangeable
+    at the placement call site.
+
+    Parameters
+    ----------
+    tile_shape : ``(th, tw)`` — the uniform tile height and width.
+    grid_rows, grid_cols, grid_type, order, overlap : as in
+        :func:`estimate_tile_offsets`.
+    """
+    if grid_type not in _GRID_TYPE_TO_VENDOR_ORDER:
+        raise ValueError(f"Unknown grid_type: {grid_type!r}")
+    th, tw = int(tile_shape[0]), int(tile_shape[1])
+    vendor_order = _GRID_TYPE_TO_VENDOR_ORDER[grid_type]
+    _tile_positions(grid_rows, grid_cols, grid_type, order)  # validate order
+    seed_tiles = grid_positions(
+        grid_size_x=grid_cols,
+        grid_size_y=grid_rows,
+        tile_width=tw,
+        tile_height=th,
+        overlap=float(overlap),
+        order=vendor_order,
+    )
+    n = len(seed_tiles)
+    offsets = np.zeros((n, 2), dtype=np.int32)
+    for idx, tile in enumerate(seed_tiles):
+        x, y = tile.position  # (x, y) order
+        offsets[idx, 0] = int(round(float(y)))  # y0
+        offsets[idx, 1] = int(round(float(x)))  # x0
+    offsets[:, 0] -= int(offsets[:, 0].min())
+    offsets[:, 1] -= int(offsets[:, 1].min())
+    canvas_hw = canvas_from_offsets(offsets, (th, tw))
+    return offsets, canvas_hw
+
+
 def estimate_tile_offsets(
     reference_tiles: dict[int, NDArray],
     grid_rows: int,

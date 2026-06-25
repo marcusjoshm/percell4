@@ -271,6 +271,34 @@ def test_perfect_5x5_mosaic_does_not_raise():
     assert quality["accepted_pair_fraction"] >= 0.5
 
 
+# ── grid_seed_offsets: nominal-overlap fallback placement ─────
+
+
+def test_grid_seed_offsets_nominal_overlap_layout():
+    """grid_seed_offsets places tiles at the nominal-overlap grid (no
+    correlation): step = dim*(1-overlap), per-axis min 0, int32, canvas matches.
+    """
+    from percell4.domain.io.assembler import grid_seed_offsets
+
+    th = tw = 100
+    overlap = 0.10
+    offsets, canvas = grid_seed_offsets(
+        (th, tw), grid_rows=2, grid_cols=3,
+        grid_type="row_by_row", order="right_down", overlap=overlap,
+    )
+    step = int(round(100 * (1 - overlap)))  # 90
+    assert offsets.dtype == np.int32
+    assert offsets.shape == (6, 2)
+    assert int(offsets[:, 0].min()) == 0 and int(offsets[:, 1].min()) == 0
+    # row_by_row: idx 0 -> (0,0); idx 1 -> one step right; idx 3 -> one step down
+    assert tuple(int(v) for v in offsets[0]) == (0, 0)
+    assert int(offsets[1][1]) == step and int(offsets[1][0]) == 0
+    assert int(offsets[3][0]) == step and int(offsets[3][1]) == 0
+    assert canvas == canvas_from_offsets(offsets, (th, tw))
+    # 2 rows, 3 cols, 100px tile, step 90 → (90*1 + 100, 90*2 + 100)
+    assert canvas == (90 * 1 + 100, 90 * 2 + 100)
+
+
 # ── degenerate solve gate ─────────────────────────────────────
 
 

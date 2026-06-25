@@ -372,11 +372,16 @@ def import_dataset(
     stitch_quality: dict | None = None
     stitch_offsets_dict: dict[int, tuple[int, int]] | None = None
     stitch_ref_tile_shape: tuple[int, int] | None = None
+    # True only when phase-correlation registration succeeded. A degenerate
+    # solve falls back to nominal-overlap grid placement with this left False,
+    # so the dataset is assembled (>= grid floor) but never marked registered.
+    stitch_registered = False
     if do_register:
         from percell4.domain.io.assembler import (
             assemble_tiles_with_offsets,
             canvas_from_offsets,
             estimate_tile_offsets,
+            grid_seed_offsets,
         )
 
         ref_name = tile_config.reference_channel
@@ -413,14 +418,44 @@ def import_dataset(
         # step 4b is non-vacuous (FIX G). All tiles share this shape (R14).
         _ref_tile = next(iter(ref_tiles_first.values()))
         stitch_ref_tile_shape = (int(_ref_tile.shape[0]), int(_ref_tile.shape[1]))
-        stitch_offsets, stitch_canvas, stitch_quality = estimate_tile_offsets(
-            ref_tiles_first,
-            grid_rows=tile_config.grid_rows,
-            grid_cols=tile_config.grid_cols,
-            grid_type=tile_config.grid_type,
-            order=tile_config.order,
-            overlap=tile_config.overlap,
-        )
+        try:
+            stitch_offsets, stitch_canvas, stitch_quality = estimate_tile_offsets(
+                ref_tiles_first,
+                grid_rows=tile_config.grid_rows,
+                grid_cols=tile_config.grid_cols,
+                grid_type=tile_config.grid_type,
+                order=tile_config.order,
+                overlap=tile_config.overlap,
+            )
+            stitch_registered = True
+        except RegistrationError as exc:
+            # Degenerate solve (reference channel too ambiguous to register
+            # within the overlap band). Fall back to nominal-overlap grid
+            # placement: a clean mosaic that accounts for the overlap but
+            # applies no drift correction — strictly better than the 0%-overlap
+            # grid, never an arbitrary overlap. Left NOT registered (no geometry
+            # committed), so the file is honest about what happened.
+            stitch_offsets, stitch_canvas = grid_seed_offsets(
+                stitch_ref_tile_shape,
+                grid_rows=tile_config.grid_rows,
+                grid_cols=tile_config.grid_cols,
+                grid_type=tile_config.grid_type,
+                order=tile_config.order,
+                overlap=tile_config.overlap,
+            )
+            stitch_quality = {
+                "fallback": "grid_seed_nominal_overlap",
+                "degenerate_reason": str(exc),
+                "disconnected": [],
+                "coverage_fraction": 1.0,
+            }
+            warnings.warn(
+                "Registration was degenerate on the reference channel "
+                f"{ref_name!r}; placed tiles at the nominal-overlap grid "
+                "positions instead (NOT registered — no drift correction). "
+                f"{exc}",
+                stacklevel=2,
+            )
         stitch_disconnected = tuple(stitch_quality["disconnected"])
         stitch_offsets_dict = {
             i: (int(stitch_offsets[i, 0]), int(stitch_offsets[i, 1]))
@@ -447,7 +482,8 @@ def import_dataset(
         # Time-lapse drift re-check on the LAST timepoint (R14): re-solve on
         # the last frame's reference tiles and warn if any tile drifted beyond
         # the overlap budget. Offsets still come from the first timepoint.
-        if n_timepoints > 1:
+        # Skipped on the grid fallback (offsets are seed positions, not solved).
+        if stitch_registered and n_timepoints > 1:
             ref_tiles_last = _bin_tiles(
                 reg_channel_tiles[ref_name][-1], "channel"
             )
@@ -948,7 +984,9 @@ def import_dataset(
     # Done after /intensity + /decay are durably on disk so a crash before the
     # commit leaves an un-registered (recoverable) file, never the AE4 brick.
     # store.write_stitch_geometry orders stitch_registered=True last internally.
-    if do_register:
+    # Skipped on the grid fallback (stitch_registered False): tiles were placed
+    # at nominal-overlap seed positions, so the file is left un-registered.
+    if do_register and stitch_registered:
         import json
         from datetime import UTC, datetime
 
