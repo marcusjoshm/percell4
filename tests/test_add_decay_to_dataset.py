@@ -849,7 +849,7 @@ def _tile_id_reader():
 
 
 def _write_registered_geometry(store, offsets, *, reference_channel="ch00",
-                               overlap=0.25):
+                               overlap=0.25, disconnected=()):
     """Persist registered overlap-stitch geometry via the store boundary."""
     from percell4.domain.io.models import StitchProvenanceRecord
 
@@ -867,6 +867,7 @@ def _write_registered_geometry(store, offsets, *, reference_channel="ch00",
         prov,
         reference_channel=reference_channel,
         overlap=overlap,
+        disconnected=disconnected,
     )
 
 
@@ -1035,4 +1036,128 @@ def test_add_decay_registered_rotate_k_odd_guard_transpose(tmp_path, monkeypatch
     with h5py.File(store.path, "r") as f:
         # Pre-rotation registered canvas (8, 14) → post-rotation (14, 8).
         assert f["decay/ch00"].shape == (14, 8, 2)
+
+
+# ── FIX C: registered append completeness + disconnected winner ──────────
+
+
+def test_add_decay_registered_missing_tile_raises(tmp_path, monkeypatch):
+    """FIX C: a registered append that omits a registered tile is reported as
+    an error — partial registered decay is unsupported (it would leave the
+    missing tile's region empty and mis-resolve overlaps).
+    """
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # 2-tile registered mosaic, canvas (8, 14) — but supply only tile 0.
+    offsets = [(0, 0), (0, 6)]
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 14))
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin"])  # tile 1 (_s1) deliberately absent
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+
+    # The per-channel error reports the missing tile; nothing was written.
+    assert report.written == ()
+    assert "ch00" in report.errors
+    assert "requires all 2 tiles" in report.errors["ch00"]
+    with h5py.File(store.path, "r") as f:
+        assert "decay" not in f
+
+
+def test_add_decay_registered_disconnected_winner(tmp_path, monkeypatch):
+    """FIX C: a persisted disconnected tile is demoted (placed first) on the
+    append, so its registered neighbour wins the overlap even though the
+    disconnected tile has the higher index — reproducing the import exactly.
+    """
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # 2-tile horizontal mosaic, canvas (8, 14); tile 1 (higher index) is
+    # disconnected, so the overlap must go to registered tile 0.
+    offsets = [(0, 0), (0, 6)]
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 14))
+    _write_registered_geometry(store, offsets, disconnected=(1,))
+
+    # Sanity: the persisted disconnected set round-trips.
+    assert store.read_stitch_geometry().disconnected == (1,)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+
+    assert report.written == ("ch00",), report.errors
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+    assert decay.shape == (8, 14, 2)
+    # Overlap columns 6-7: registered tile 0 (value 1) wins because the
+    # disconnected tile 1 was placed FIRST (lowest priority).
+    assert (decay[:, 6:8, 0] == 1).all()
+    # Tile 1's exclusive region 8-13 still shows its own value (2).
+    assert (decay[:, 8:14, 0] == 2).all()
+
+
+# ── FIX F: corrupt-state guards (both states raise) ──────────────────────
+
+
+def test_add_decay_offsets_present_flag_absent_raises(tmp_path, mock_read_flim_bin):
+    """FIX F: stitch/tile_offsets present but stitch_registered absent (a
+    partial/aborted registered import) raises before the per-channel loop.
+    """
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 8))
+    # Write the offset array WITHOUT the commit marker — the aborted state.
+    store.write_array(
+        "stitch/tile_offsets",
+        np.array([[0, 0], [0, 6]], dtype=np.int32),
+    )
+    geom = store.read_stitch_geometry()
+    assert geom.offsets is not None and geom.registered is False
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    with pytest.raises(ValueError, match="stitch_registered is False"):
+        add_decay_to_dataset(
+            h5_path=store.path,
+            source_dir=src,
+            token_config=TokenConfig(),
+            tile_config=TileConfig(grid_rows=1, grid_cols=1),
+            flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+            cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        )
+
+    # Nothing was written.
+    with h5py.File(store.path, "r") as f:
+        assert "decay" not in f
 

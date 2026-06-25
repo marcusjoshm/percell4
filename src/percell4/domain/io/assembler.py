@@ -168,9 +168,11 @@ _GRID_TYPE_TO_VENDOR_ORDER: dict[str, str] = {
     "snake_by_column": "snake-by-columns",
 }
 
-# Below this accepted-pair fraction (or with >half the tiles disconnected) the
-# solve is treated as degenerate and rejected (R11 success gate).
-_MIN_ACCEPTED_PAIR_FRACTION = 0.25
+# Below this fraction of the expected grid-adjacent pairs (or with >half the
+# tiles disconnected) the solve is treated as degenerate and rejected (R11
+# success gate). Measured against grid adjacency (not the C(n, 2) combinatorial
+# count), so a healthy mosaic where most adjacent pairs register passes.
+_MIN_ACCEPTED_PAIR_FRACTION = 0.5
 
 
 def canvas_from_offsets(
@@ -315,9 +317,9 @@ def estimate_tile_offsets(
     # Normalise to a non-negative origin: subtract per-axis min so min is 0.
     offsets[:, 0] -= int(offsets[:, 0].min())
     offsets[:, 1] -= int(offsets[:, 1].min())
-    assert int(offsets[:, 0].min()) == 0 and int(offsets[:, 1].min()) == 0, (
-        "offset normalisation must leave per-axis min == 0"
-    )
+    if not (int(offsets[:, 0].min()) == 0 and int(offsets[:, 1].min()) == 0):
+        # Data invariant, not a debug check — must survive ``python -O``.
+        raise ValueError("offset normalisation must leave per-axis min == 0")
     offsets = offsets.astype(np.int32)
 
     # Index offsets by the caller's tile index (offsets[tile_index]).
@@ -329,9 +331,16 @@ def estimate_tile_offsets(
     canvas_hw = canvas_from_offsets(offsets, (th, tw))
 
     # Quality metrics.
-    n_possible_pairs = n_tiles * (n_tiles - 1) // 2 if n_tiles > 1 else 0
+    #
+    # ``compute_pairwise_shifts`` only emits shifts for SEED-OVERLAPPING
+    # (grid-adjacent) tile pairs, never every C(n, 2) combination — so the
+    # denominator must be the expected grid adjacency count, not
+    # ``n_tiles*(n_tiles-1)//2``. Using the combinatorial count false-rejected
+    # every mosaic >=4x4 (a perfect 4x4 emits ~24 shifts / 120 combos = 0.20).
+    # n_adjacent = horizontal edges + vertical edges in the grid.
+    n_adjacent = (grid_cols - 1) * grid_rows + (grid_rows - 1) * grid_cols
     accepted_pair_fraction = (
-        len(shifts) / n_possible_pairs if n_possible_pairs else 0.0
+        len(shifts) / n_adjacent if n_adjacent else 0.0
     )
     coverage_fraction = _coverage_fraction(offsets, (th, tw), canvas_hw)
     correlations = [float(s.weight) for s in shifts]
@@ -342,17 +351,21 @@ def estimate_tile_offsets(
         "coverage_fraction": float(coverage_fraction),
         "regression_threshold": float(regression_threshold),
         "n_peaks": int(n_peaks),
+        "n_adjacent": int(n_adjacent),
     }
 
     # Degenerate-solve gate (R11): refuse to return a grid-equivalent canvas
-    # that a caller would store as "registered".
+    # that a caller would store as "registered". Measured against the expected
+    # grid adjacency (above) so a healthy large mosaic — where most adjacent
+    # pairs register — passes, while a low-contrast solve (few adjacent pairs
+    # accepted, or most tiles left at their seed) is rejected.
     if n_tiles > 1 and (
-        accepted_pair_fraction < _MIN_ACCEPTED_PAIR_FRACTION
-        or len(disconnected) > n_tiles // 2
+        len(disconnected) > n_tiles // 2
+        or (n_adjacent and accepted_pair_fraction < _MIN_ACCEPTED_PAIR_FRACTION)
     ):
         raise RegistrationError(
             "Degenerate registration: only "
-            f"{len(shifts)}/{n_possible_pairs} tile pairs cleared "
+            f"{len(shifts)}/{n_adjacent} adjacent tile pairs cleared "
             f"regression_threshold={regression_threshold} "
             f"({len(disconnected)}/{n_tiles} tiles disconnected). "
             "The reference channel is likely too low-contrast to register; "

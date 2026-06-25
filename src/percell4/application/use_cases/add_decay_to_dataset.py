@@ -137,6 +137,16 @@ def add_decay_to_dataset(
             "is absent; cannot place decay at the registered geometry. "
             "Re-import via the Compress dialog to a fresh output path."
         )
+    # The complementary corruption (FIX F): the offset array is present but the
+    # commit marker is absent — a partial/aborted registered import. Placing
+    # decay on either path (grid or registered) would risk mis-aligning against
+    # an /intensity that may itself be half-written. Refuse here too, before the
+    # per-channel loop, so the per-channel except can't swallow it.
+    if geom.offsets is not None and not geom.registered:
+        raise ValueError(
+            "stitch/tile_offsets present but stitch_registered is False — "
+            "partial/aborted registered import; re-import to a fresh path."
+        )
     channel_names = list(metadata.get("channel_names", []))
     if not channel_names:
         return AppendReport(
@@ -257,6 +267,21 @@ def add_decay_to_dataset(
                 # SAME 0-based normalized tile index used for tile_to_path
                 # (offsets[index] is the persisted (y0, x0) top-left corner).
                 offsets = np.asarray(geom.offsets)
+                # COMPLETENESS (FIX C): a registered append must cover EVERY
+                # registered tile. The canvas (out_h/out_w) is derived from the
+                # full persisted geometry, so a partial set of tiles would
+                # leave registered regions empty AND mis-resolve overlaps the
+                # import placed against the missing tiles — silently misaligning
+                # /decay from /intensity. Partial registered decay is unsupported.
+                expected = set(range(len(offsets)))
+                present = set(tile_to_path)
+                if present != expected:
+                    raise ValueError(
+                        f"registered decay append requires all {len(offsets)} "
+                        f"tiles; got {len(present)} "
+                        f"(missing {sorted(expected - present)}, "
+                        f"extra {sorted(present - expected)})."
+                    )
                 pixel_offsets: dict[int, tuple[int, int]] = {
                     idx: (int(offsets[idx][0]), int(offsets[idx][1]))
                     for idx in tile_to_path
@@ -327,9 +352,11 @@ def add_decay_to_dataset(
                 positions=positions,
                 use_tiling=use_tiling,
                 pixel_offsets=pixel_offsets,
-                # geom does not carry disconnected indices; pass () (the
-                # registered solve already demoted them at import time).
-                disconnected=(),
+                # Thread the persisted disconnected set through (FIX C) so the
+                # append reproduces the import's overlap winner EXACTLY: any
+                # tile the solve demoted is placed first (lowest priority) here
+                # too. ``()`` on the grid path (geom.disconnected is empty).
+                disconnected=geom.disconnected if geom.registered else (),
             )
 
         except Exception as e:  # noqa: BLE001

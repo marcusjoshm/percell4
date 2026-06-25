@@ -165,7 +165,68 @@ def test_estimate_quality_carries_engine_params():
     assert "disconnected" in quality
     assert "accepted_pair_fraction" in quality
     assert "coverage_fraction" in quality
+    assert "n_adjacent" in quality
     assert 0.0 <= quality["coverage_fraction"] <= 1.0
+
+
+# ── large-mosaic success gate (FIX A) ─────────────────────────
+
+
+def _overlapping_grid_tiles(grid_rows, grid_cols, overlap, h=48, w=48, seed=0):
+    """Cut a perfect overlapping grid of richly-textured tiles from one field.
+
+    Returns a row-by-row tile dict (idx -> array). Every adjacent pair shares
+    the requested overlap so phase correlation has a sharp peak on each edge.
+    """
+    rng = np.random.default_rng(seed)
+    step_y = int(round(h * (1 - overlap)))
+    step_x = int(round(w * (1 - overlap)))
+    big_h = step_y * (grid_rows - 1) + h
+    big_w = step_x * (grid_cols - 1) + w
+    big = (rng.random((big_h, big_w)) * 1000).astype(np.float32)
+    tiles: dict[int, np.ndarray] = {}
+    idx = 0
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            y0 = r * step_y
+            x0 = c * step_x
+            tiles[idx] = big[y0 : y0 + h, x0 : x0 + w].copy()
+            idx += 1
+    return tiles
+
+
+def test_perfect_4x4_mosaic_does_not_raise():
+    """FIX A: a perfect 4x4 overlapping mosaic registers (no false-reject).
+
+    With the old C(n, 2) denominator a perfect 4x4 emitted ~24 shifts / 120
+    combinations = 0.20 < 0.25 and wrongly raised RegistrationError. Against
+    the grid-adjacency count (24 edges) the fraction is ~1.0 and it passes.
+    """
+    tiles = _overlapping_grid_tiles(4, 4, overlap=0.25, seed=4)
+    offsets, canvas, quality = estimate_tile_offsets(
+        tiles, grid_rows=4, grid_cols=4, grid_type="row_by_row",
+        order="right_down", overlap=0.25,
+    )
+    assert offsets.shape == (16, 2)
+    assert canvas == canvas_from_offsets(offsets, tiles[0].shape)
+    # 24 grid-adjacent edges for a 4x4: 3*4 horizontal + 3*4 vertical.
+    assert quality["n_adjacent"] == 24
+    # A clean solve clears (nearly) all adjacent pairs; well above 0.5.
+    assert quality["accepted_pair_fraction"] >= 0.5
+
+
+def test_perfect_5x5_mosaic_does_not_raise():
+    """FIX A: a perfect 5x5 overlapping mosaic registers (no false-reject)."""
+    tiles = _overlapping_grid_tiles(5, 5, overlap=0.25, seed=5)
+    offsets, canvas, quality = estimate_tile_offsets(
+        tiles, grid_rows=5, grid_cols=5, grid_type="row_by_row",
+        order="right_down", overlap=0.25,
+    )
+    assert offsets.shape == (25, 2)
+    assert canvas == canvas_from_offsets(offsets, tiles[0].shape)
+    # 40 grid-adjacent edges for a 5x5: 4*5 horizontal + 4*5 vertical.
+    assert quality["n_adjacent"] == 40
+    assert quality["accepted_pair_fraction"] >= 0.5
 
 
 # ── degenerate solve gate ─────────────────────────────────────

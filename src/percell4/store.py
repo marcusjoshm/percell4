@@ -203,12 +203,19 @@ class StitchGeometry:
     top-left corners, with per-axis min exactly 0 (asserted on both write
     and read) so the canvas derivation is unconditionally
     ``max(offset + extent)``.
+
+    ``disconnected`` is the persisted set of tile indices that the import
+    solve left at their grid seed (lowest overwrite priority). A later
+    decay-only append threads this back through ``write_decay_streaming`` so
+    the append reproduces the import's overlap winner exactly. Defaults to
+    ``()`` for back-compat with files written before it was persisted.
     """
 
     registered: bool
     offsets: NDArray | None
     reference_channel: str | None
     overlap: float | None
+    disconnected: tuple[int, ...] = ()
 
 
 def _choose_chunks(shape: tuple[int, ...], is_decay: bool = False) -> tuple[int, ...]:
@@ -390,6 +397,7 @@ class DatasetStore:
         *,
         reference_channel: str,
         overlap: float,
+        disconnected: tuple[int, ...] = (),
     ) -> None:
         """Persist registered overlap-stitch geometry through the store boundary.
 
@@ -402,13 +410,21 @@ class DatasetStore:
            view-bin, lossless, no ``is_decay``/``dims`` requirement).
         2. ``/provenance/stitch`` group attrs from ``provenance.to_attrs()``
            (mirrors how decay provenance is written -- group attrs).
-        3. ``/metadata`` attrs ``stitch_reference_channel`` (str) and
-           ``stitch_overlap`` (float), then ``stitch_registered = True``
-           **last** (the commit point, R4/U6 ordering).
+        3. ``/metadata`` attrs ``stitch_reference_channel`` (str),
+           ``stitch_overlap`` (float), and ``stitch_disconnected`` (a
+           JSON-encoded list of int tile indices), then
+           ``stitch_registered = True`` **last** (the commit point,
+           R4/U6 ordering).
+
+        ``disconnected`` is the set of tile indices the solve left at their
+        grid seed; it is persisted so a later decay-only append can reproduce
+        the import's overlap winner exactly.
 
         ``offsets`` must have per-axis min exactly 0 (the canvas
-        derivation depends on it); this is asserted before any write.
+        derivation depends on it); this is enforced before any write.
         """
+        import json
+
         offsets = np.asarray(offsets, dtype=np.int32)
         if offsets.ndim != 2 or offsets.shape[1] != 2:
             raise ValueError(
@@ -416,9 +432,13 @@ class DatasetStore:
             )
         if offsets.size:
             mins = offsets.min(axis=0)
-            assert int(mins[0]) == 0 and int(mins[1]) == 0, (
-                f"offsets per-axis min must be 0; got {tuple(int(m) for m in mins)}"
-            )
+            # Data invariant (the canvas derivation depends on min==0) — a
+            # ``raise``, not an ``assert``, so it survives ``python -O``.
+            if not (int(mins[0]) == 0 and int(mins[1]) == 0):
+                raise ValueError(
+                    f"offsets per-axis min must be 0; "
+                    f"got {tuple(int(m) for m in mins)}"
+                )
 
         # 1. Offset array (own write boundary).
         self.write_array("stitch/tile_offsets", offsets)
@@ -437,6 +457,9 @@ class DatasetStore:
             {
                 "stitch_reference_channel": str(reference_channel),
                 "stitch_overlap": float(overlap),
+                "stitch_disconnected": json.dumps(
+                    [int(i) for i in disconnected]
+                ),
             }
         )
         self.set_metadata({"stitch_registered": True})
@@ -444,37 +467,52 @@ class DatasetStore:
     def read_stitch_geometry(self) -> StitchGeometry:
         """Read registered overlap-stitch geometry back from the dataset.
 
-        Flags are read **fresh** from ``/metadata`` on every call (never
-        cached on the store) so an in-session write is always observed.
-        When ``stitch/tile_offsets`` is absent (an older / never-registered
-        ``.h5``), the :class:`KeyError` from :meth:`read_array` is caught
-        and reported as ``registered=False`` / ``offsets=None`` -- the
-        back-compat grid-path signal.
+        The ``registered`` flag is read **first** from ``/metadata``, fully
+        independent of whether ``stitch/tile_offsets`` is present, so the two
+        corrupt states the consumers guard against are observable rather than
+        silently collapsed to ``registered=False``:
 
-        Asserts the read-back offsets have per-axis min 0 (the same
-        invariant enforced on write).
+        * flag True + offsets absent → ``registered=True, offsets=None``
+          (AE4: a crash after the commit marker but before — or after losing —
+          the offset array; the consumer refuses the append).
+        * offsets present + flag absent → ``registered=False`` with offsets
+          present (a partial/aborted registered import; the consumer refuses).
+
+        Flags are read fresh on every call (never cached on the store) so an
+        in-session write is always observed. ``stitch_disconnected`` (JSON list
+        of ints) round-trips here, defaulting to ``()``.
+
+        Enforces (via ``raise``, ``-O``-safe) that read-back offsets have
+        per-axis min 0 — the same invariant enforced on write.
         """
+        import json
+
+        meta = self.metadata
+        registered_flag = bool(meta.get("stitch_registered", False))
+        disconnected_raw = meta.get("stitch_disconnected")
+        if disconnected_raw is None:
+            disconnected: tuple[int, ...] = ()
+        else:
+            disconnected = tuple(int(i) for i in json.loads(disconnected_raw))
+
         try:
             offsets = self.read_array("stitch/tile_offsets")
         except KeyError:
-            return StitchGeometry(
-                registered=False,
-                offsets=None,
-                reference_channel=None,
-                overlap=None,
-            )
-        if offsets.size:
+            offsets = None
+
+        if offsets is not None and offsets.size:
             mins = offsets.min(axis=0)
-            assert int(mins[0]) == 0 and int(mins[1]) == 0, (
-                f"persisted offsets per-axis min must be 0; "
-                f"got {tuple(int(m) for m in mins)}"
-            )
-        meta = self.metadata
+            if not (int(mins[0]) == 0 and int(mins[1]) == 0):
+                raise ValueError(
+                    f"persisted offsets per-axis min must be 0; "
+                    f"got {tuple(int(m) for m in mins)}"
+                )
         return StitchGeometry(
-            registered=bool(meta.get("stitch_registered", False)),
+            registered=registered_flag,
             offsets=offsets,
             reference_channel=meta.get("stitch_reference_channel"),
             overlap=meta.get("stitch_overlap"),
+            disconnected=disconnected,
         )
 
     def read_channel(

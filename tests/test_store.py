@@ -1116,9 +1116,13 @@ def test_read_stitch_geometry_absent(store):
 
 
 def test_write_stitch_geometry_min_zero_invariant(store):
-    """Offsets whose per-axis min != 0 raise on write (assert-on-write)."""
+    """Offsets whose per-axis min != 0 raise on write.
+
+    FIX G: this is a data invariant, so it raises ``ValueError`` (``-O``-safe)
+    rather than ``AssertionError`` (elided under ``python -O``).
+    """
     bad = np.array([[5, 0], [7, 64]], dtype=np.int32)  # y-axis min is 5, not 0
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="per-axis min must be 0"):
         store.write_stitch_geometry(
             bad, _stitch_provenance(), reference_channel="ch00", overlap=0.1
         )
@@ -1158,3 +1162,56 @@ def test_stitch_registered_written_last(store):
         assert f["metadata"].attrs["stitch_registered"]
         assert "stitch/tile_offsets" in f
         assert "provenance/stitch" in f
+
+
+# ── FIX E: flag/offsets decoupling + disconnected persistence ─────────
+
+
+def test_read_geometry_flag_set_offsets_absent(store):
+    """FIX E: stitch_registered=True with the offset array absent reads back
+    registered=True, offsets=None — so the AE4 guard (registered + offsets is
+    None) is reachable rather than masked into registered=False.
+    """
+    # Simulate a crash that left the commit marker but lost the offset array.
+    store.set_metadata({"stitch_registered": True})
+    geo = store.read_stitch_geometry()
+    assert geo.registered is True
+    assert geo.offsets is None
+
+
+def test_read_geometry_offsets_present_flag_absent(store):
+    """FIX E: offsets present but stitch_registered absent reads back
+    registered=False with offsets present — the partial/aborted-import state
+    consumers refuse, no longer collapsed to a silent grid path.
+    """
+    offsets = np.array([[0, 0], [0, 32]], dtype=np.int32)
+    store.write_array("stitch/tile_offsets", offsets)
+    geo = store.read_stitch_geometry()
+    assert geo.registered is False
+    assert geo.offsets is not None
+    assert np.array_equal(geo.offsets, offsets)
+
+
+def test_stitch_disconnected_roundtrips(store):
+    """FIX E: the persisted disconnected set round-trips through read."""
+    offsets = np.array([[0, 0], [0, 40], [30, 0], [30, 40]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets,
+        _stitch_provenance(),
+        reference_channel="ch00",
+        overlap=0.1,
+        disconnected=(2, 3),
+    )
+    geo = DatasetStore(store.path).read_stitch_geometry()
+    assert geo.disconnected == (2, 3)
+    assert all(isinstance(i, int) for i in geo.disconnected)
+
+
+def test_stitch_disconnected_defaults_empty(store):
+    """FIX E: a registered geometry written without disconnected reads ()."""
+    offsets = np.array([[0, 0], [0, 40]], dtype=np.int32)
+    store.write_stitch_geometry(
+        offsets, _stitch_provenance(), reference_channel="ch00", overlap=0.1
+    )
+    geo = DatasetStore(store.path).read_stitch_geometry()
+    assert geo.disconnected == ()

@@ -175,20 +175,30 @@ def import_dataset(
     # ── Re-import guard (S1) ──────────────────────────────────────────────
     # Refuse to re-solve over an already-registered dataset that has appended
     # decay: re-registration would rewrite offsets the existing decay was
-    # placed against, silently misaligning /decay from /intensity.
+    # placed against, silently misaligning /decay from /intensity. A registered
+    # dataset with NO decay yet is still safe to re-import (nothing was placed
+    # against the old offsets), so the refusal is conditioned on both flags.
     if do_register and output_h5.exists():
+        # Narrow except: only an absent file / absent geometry is a benign
+        # "nothing to guard against" — let OSError and real corruption
+        # (e.g. a raised ValueError from read_stitch_geometry) propagate.
+        _existing_store = DatasetStore(output_h5)
         try:
-            _existing = DatasetStore(output_h5).read_stitch_geometry()
-        except Exception:
+            _existing = _existing_store.read_stitch_geometry()
+        except (KeyError, FileNotFoundError):
             _existing = None
         if _existing is not None and _existing.registered:
-            raise ValueError(
-                f"Refusing to re-import over {output_h5}: it already carries "
-                "registered stitch geometry (stitch_registered=True). "
-                "Re-solving would rewrite the offsets that the existing decay "
-                "was placed against, silently misaligning /decay from "
-                "/intensity. Import to a fresh output path instead."
-            )
+            has_decay = bool(_existing_store.list_groups("decay"))
+            if has_decay:
+                raise ValueError(
+                    f"Refusing to re-import over {output_h5}: it is a "
+                    "registered dataset with appended decay "
+                    "(stitch_registered=True and at least one /decay layer "
+                    "present). Re-solving would rewrite the offsets the "
+                    "existing decay was placed against, silently misaligning "
+                    "/decay from /intensity. Import to a fresh output path "
+                    "instead."
+                )
 
     def _progress(current: int, total: int, msg: str) -> None:
         if progress_callback is not None:
@@ -361,6 +371,7 @@ def import_dataset(
     stitch_canvas: tuple[int, int] | None = None
     stitch_quality: dict | None = None
     stitch_offsets_dict: dict[int, tuple[int, int]] | None = None
+    stitch_ref_tile_shape: tuple[int, int] | None = None
     if do_register:
         from percell4.domain.io.assembler import (
             assemble_tiles_with_offsets,
@@ -397,6 +408,11 @@ def import_dataset(
 
         # Reference tiles, post-bin, from the FIRST timepoint (register once).
         ref_tiles_first = _bin_tiles(reg_channel_tiles[ref_name][0], "channel")
+        # Capture the ACTUAL post-bin reference tile (h, w) — the real extent
+        # the offsets were placed against — so the canvas consistency check at
+        # step 4b is non-vacuous (FIX G). All tiles share this shape (R14).
+        _ref_tile = next(iter(ref_tiles_first.values()))
+        stitch_ref_tile_shape = (int(_ref_tile.shape[0]), int(_ref_tile.shape[1]))
         stitch_offsets, stitch_canvas, stitch_quality = estimate_tile_offsets(
             ref_tiles_first,
             grid_rows=tile_config.grid_rows,
@@ -496,6 +512,18 @@ def import_dataset(
     # 4. Handle TCSPC data (FLIM)
     _progress(3, 5, "Processing TCSPC data...")
     tcspc_data: dict[str, np.ndarray] = {}  # channel -> (H, W, T) array
+
+    if do_register and tcspc_files:
+        # Registered overlap stitching of 3D TCSPC-TIFF decay is deferred to a
+        # follow-up (the registered canvas is solved on 2D intensity; properly
+        # re-stitching the (H, W, T) TCSPC-TIFF volume at those offsets is out
+        # of v1 scope). Without this guard the loop below grid-stitches decay
+        # while /intensity uses the registered canvas — a silent /decay vs
+        # /intensity misalignment. Mirror the z-stack-mosaic deferral.
+        raise ValueError(
+            "Overlap registration with TCSPC-TIFF decay is deferred to "
+            "follow-up — use .bin decay, or import without register."
+        )
 
     if flim_params and tcspc_files:
         # TCSPC TIFFs with "TCSPC" token — stitch same as intensity
@@ -762,23 +790,27 @@ def import_dataset(
     native_shape: tuple[int, int] | None = None
     if do_register and stitch_canvas is not None:
         # The registered canvas (already post-bin) is the ONLY native_shape —
-        # never the grid-derived value. Assert it matches the assembled
-        # arrays before committing (the consistency lock store enforces via
-        # MetadataConsistencyError on /intensity.shape[-2:]).
+        # never the grid-derived value. Verify it matches the assembled arrays
+        # before committing (the consistency lock store enforces via
+        # MetadataConsistencyError on /intensity.shape[-2:]). These are data
+        # invariants → raise (not assert), so they survive ``python -O``.
         from percell4.domain.io.assembler import canvas_from_offsets
 
-        th, tw = (
-            int(stitch_canvas[0]) - int(stitch_offsets[:, 0].max()),
-            int(stitch_canvas[1]) - int(stitch_offsets[:, 1].max()),
-        )
-        derived = canvas_from_offsets(stitch_offsets, (th, tw))
-        assert tuple(derived) == tuple(stitch_canvas), (
-            f"canvas_from_offsets {derived} != pinned canvas {stitch_canvas}"
-        )
-        if pre_bin_shape is not None:
-            assert tuple(pre_bin_shape) == tuple(stitch_canvas), (
-                f"assembled (H, W) {pre_bin_shape} != registered canvas "
-                f"{stitch_canvas}"
+        # Re-derive the canvas from the offsets and the ACTUAL post-bin
+        # reference tile shape captured at registration time (FIX G). The old
+        # code back-solved (th, tw) from the canvas itself, which made this a
+        # tautology that could never catch a real inconsistency.
+        derived = canvas_from_offsets(stitch_offsets, stitch_ref_tile_shape)
+        if tuple(derived) != tuple(stitch_canvas):
+            raise RegistrationError(
+                f"canvas_from_offsets {tuple(derived)} (offsets + post-bin "
+                f"ref tile {stitch_ref_tile_shape}) != pinned canvas "
+                f"{tuple(stitch_canvas)}"
+            )
+        if pre_bin_shape is not None and tuple(pre_bin_shape) != tuple(stitch_canvas):
+            raise ValueError(
+                f"assembled (H, W) {tuple(pre_bin_shape)} != registered canvas "
+                f"{tuple(stitch_canvas)}"
             )
         native_shape = (int(stitch_canvas[0]), int(stitch_canvas[1]))
     elif pre_bin_shape is not None:
@@ -925,11 +957,13 @@ def import_dataset(
 
         # Final consistency lock: the stored /intensity canvas must equal the
         # registered canvas the offsets were placed against, before committing.
+        # Data invariant → raise (not assert), so it survives ``python -O``.
         stored_intensity = store.read_array("intensity")
-        assert tuple(stored_intensity.shape[-2:]) == tuple(stitch_canvas), (
-            f"stored /intensity (H, W) {stored_intensity.shape[-2:]} != "
-            f"registered canvas {stitch_canvas}"
-        )
+        if tuple(stored_intensity.shape[-2:]) != tuple(stitch_canvas):
+            raise RegistrationError(
+                f"stored /intensity (H, W) {tuple(stored_intensity.shape[-2:])} "
+                f"!= registered canvas {tuple(stitch_canvas)}"
+            )
 
         provenance = StitchProvenanceRecord(
             reference_channel=str(tile_config.reference_channel),
@@ -945,6 +979,7 @@ def import_dataset(
             provenance,
             reference_channel=str(tile_config.reference_channel),
             overlap=float(tile_config.overlap),
+            disconnected=stitch_disconnected,
         )
 
     # 6. Update project.csv
@@ -1158,19 +1193,24 @@ def write_decay_streaming(
     import h5py
 
     from percell4.adapters.readers import read_flim_bin
-    from percell4.domain.io.assembler import canvas_from_offsets
 
     if spatial_bin < 1:
         raise ValueError(f"spatial_bin must be >= 1, got {spatial_bin}")
 
     registered = pixel_offsets is not None
     if registered:
-        # Single canvas computation — never recompute (out_h/out_w) inline on
-        # the offset path. tile_h/tile_w are already post-bin.
-        offsets_array = np.array(
-            [pixel_offsets[i] for i in sorted(pixel_offsets)], dtype=np.int64
-        )
-        out_h, out_w = canvas_from_offsets(offsets_array, (tile_h, tile_w))
+        # Canvas computed ONCE by the caller from the FULL registered geometry
+        # and passed in as out_h/out_w — trusted here verbatim. Recomputing it
+        # from this subset of pixel_offsets would under-allocate /decay (smaller
+        # than native_shape) and silently mis-align tiles when only some tiles
+        # are streamed. Guard that every tile fits within the trusted canvas.
+        for idx, (y0, x0) in pixel_offsets.items():
+            if y0 < 0 or x0 < 0 or y0 + tile_h > out_h or x0 + tile_w > out_w:
+                raise ValueError(
+                    f"tile {idx} at (y0={y0}, x0={x0}) with shape "
+                    f"({tile_h}, {tile_w}) does not fit the caller canvas "
+                    f"({out_h}, {out_w})."
+                )
 
     decay_path = f"decay/{channel_name}"
     with h5py.File(h5_path, "a") as f:

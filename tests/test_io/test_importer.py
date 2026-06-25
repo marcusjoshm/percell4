@@ -654,7 +654,7 @@ def test_register_degenerate_uniform_tiles_raises(tmp_path):
 
 
 def test_register_reimport_guard_refuses(tmp_path):
-    """Re-importing over a registered dataset that has appended decay is
+    """FIX H: re-importing over a registered dataset that HAS appended decay is
     refused (re-solving would rewrite offsets the decay was placed against).
     """
     src = tmp_path / "raw"
@@ -671,10 +671,35 @@ def test_register_reimport_guard_refuses(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         import_dataset(src, h5, tile_config=_reg_tile_config(), flim_params=flim)
+    # Sanity: the import created at least one /decay layer.
+    assert DatasetStore(h5).list_groups("decay")
 
-    # Re-import over the SAME registered output → refused.
-    with pytest.raises(ValueError, match="already carries registered"):
+    # Re-import over the SAME registered+decay output → refused.
+    with pytest.raises(ValueError, match="registered dataset with appended decay"):
         import_dataset(src, h5, tile_config=_reg_tile_config(), flim_params=flim)
+
+
+def test_register_reimport_over_registered_no_decay_allowed(tmp_path):
+    """FIX H: a registered dataset with NO appended decay may be re-imported —
+    nothing was placed against the old offsets, so re-solving is safe.
+    """
+    src = tmp_path / "raw"
+    # No .bin / no flim → registered intensity only, zero /decay layers.
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import_dataset(src, h5, tile_config=_reg_tile_config())
+    store = DatasetStore(h5)
+    assert store.read_stitch_geometry().registered is True
+    assert store.list_groups("decay") == []  # no decay was appended
+
+    # Re-import is ALLOWED (does not raise) and the dataset stays registered.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        n = import_dataset(src, h5, tile_config=_reg_tile_config())
+    assert n == 1
+    assert DatasetStore(h5).read_stitch_geometry().registered is True
 
 
 def test_register_zstack_mosaic_deferred_error(tmp_path):
@@ -695,6 +720,38 @@ def test_register_zstack_mosaic_deferred_error(tmp_path):
     h5 = tmp_path / "out.h5"
     with pytest.raises(ValueError, match="z-stack-mosaic overlap"):
         import_dataset(src, h5, tile_config=_reg_tile_config())
+
+
+def test_register_tcspc_tiff_decay_deferred_error(tmp_path):
+    """FIX D: register=True with TCSPC-TIFF decay → clear deferred error
+    (proper 3D TCSPC-TIFF registration is out of v1 scope). Without the guard,
+    /decay would be grid-stitched while /intensity uses the registered canvas
+    — a silent /decay vs /intensity misalignment.
+    """
+    src = tmp_path / "raw"
+    src.mkdir()
+    scene = _textured_scene(7)
+    for i, (y, x) in _REG_CORNERS.items():
+        tile = scene[y : y + _REG_TH, x : x + _REG_TW]
+        # Overlapping intensity tile (registration solves on these).
+        tifffile.imwrite(str(src / f"img_s{i:02d}_ch00.tif"), tile)
+        # A matching TCSPC-TIFF decay tile (3D, detected via "TCSPC" in stem).
+        decay = np.full((_REG_TH, _REG_TW, 4), i + 1, dtype=np.uint16)
+        tifffile.imwrite(str(src / f"img_TCSPC_s{i:02d}_ch00.tif"), decay)
+
+    h5 = tmp_path / "out.h5"
+    flim = {
+        "frequency_mhz": 80.0,
+        "channel_calibrations": {},
+        "bin_dimensions": {
+            "x_dim": _REG_TW, "y_dim": _REG_TH, "t_dim": 4,
+            "dtype": "uint16", "dim_order": "YXT", "header_bytes": 0,
+        },
+    }
+    with pytest.raises(ValueError, match="TCSPC-TIFF decay is deferred"):
+        import_dataset(
+            src, h5, tile_config=_reg_tile_config(), flim_params=flim
+        )
 
 
 def test_register_with_creation_bin_canvas_post_bin(tmp_path):

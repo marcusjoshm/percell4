@@ -131,8 +131,10 @@ def test_decay_offset_overlap_higher_index_wins(tmp_path, patched_flim_reader):
         tile_h=_TILE_H,
         tile_w=_TILE_W,
         n_bins=_N_BINS,
-        out_h=0,  # ignored on the offset path (canvas_from_offsets drives it)
-        out_w=0,
+        # Caller computes the canvas once (FIX B trusts out_h/out_w):
+        # max(y0+h)=8 by max(x0+w)=12.
+        out_h=8,
+        out_w=12,
         positions={},
         use_tiling=True,
         pixel_offsets=pixel_offsets,
@@ -170,8 +172,8 @@ def test_decay_offset_disconnected_demoted(tmp_path, patched_flim_reader):
         tile_h=_TILE_H,
         tile_w=_TILE_W,
         n_bins=_N_BINS,
-        out_h=0,
-        out_w=0,
+        out_h=8,  # caller-trusted canvas (FIX B)
+        out_w=12,
         positions={},
         use_tiling=True,
         pixel_offsets=pixel_offsets,
@@ -207,8 +209,8 @@ def test_decay_offset_path_invalidates_phasor(tmp_path, patched_flim_reader):
         tile_h=_TILE_H,
         tile_w=_TILE_W,
         n_bins=_N_BINS,
-        out_h=0,
-        out_w=0,
+        out_h=8,  # caller-trusted canvas (FIX B)
+        out_w=12,
         positions={},
         use_tiling=True,
         pixel_offsets=pixel_offsets,
@@ -266,8 +268,8 @@ def test_decay_grid_path_byte_identical_to_offset_none(tmp_path, patched_flim_re
         tile_h=_TILE_H,
         tile_w=_TILE_W,
         n_bins=_N_BINS,
-        out_h=0,
-        out_w=0,
+        out_h=out_h,  # caller-trusted canvas (FIX B): 16x16 grid canvas
+        out_w=out_w,
         positions={},
         use_tiling=True,
         pixel_offsets=offsets,
@@ -304,4 +306,73 @@ def test_decay_single_tile_fast_path_unchanged(tmp_path, patched_flim_reader):
         decay = f["decay/ch00"][...]
 
     assert decay.shape == (_TILE_H, _TILE_W, _N_BINS)
-    assert np.all(decay[..., 0] == 1)
+
+
+def test_decay_offset_honors_caller_canvas_not_subset(tmp_path, patched_flim_reader):
+    """FIX B: the offset path allocates the CALLER's canvas, not one recomputed
+    from the (possibly subset) pixel_offsets.
+
+    Here the two tiles only span (8, 12), but the caller — which computed the
+    canvas once from the FULL registered geometry — passes a larger (16, 20).
+    The decay must be allocated at (16, 20) so it stays aligned with the
+    registered /intensity native_shape; the old recompute would have produced
+    (8, 12) and silently mis-aligned.
+    """
+    h5 = tmp_path / "decay.h5"
+    bins = _make_bins(tmp_path / "bin", 2)
+    pixel_offsets = {0: (0, 0), 1: (0, 4)}
+
+    write_decay_streaming(
+        h5_path=h5,
+        channel_name="ch00",
+        tile_bins=bins,
+        bin_dims={"x_dim": _TILE_W, "y_dim": _TILE_H, "t_dim": _N_BINS,
+                  "dtype": "uint16", "dim_order": "YXT"},
+        tile_h=_TILE_H,
+        tile_w=_TILE_W,
+        n_bins=_N_BINS,
+        out_h=16,  # caller's full-geometry canvas, larger than the subset bbox
+        out_w=20,
+        positions={},
+        use_tiling=True,
+        pixel_offsets=pixel_offsets,
+    )
+
+    with h5py.File(h5, "r") as f:
+        decay = f["decay/ch00"][...]
+
+    # Honored the caller canvas, did NOT shrink to the subset's (8, 12).
+    assert decay.shape == (16, 20, _N_BINS)
+    # The two 8x8 placed tiles still land at their offsets (rows [0, 8)).
+    assert np.all(decay[0:8, 0:4, 0] == 1)
+    assert np.all(decay[0:8, 4:8, 0] == 2)
+    # Pixels outside the placed tiles are the HDF5 fill (0).
+    assert np.all(decay[8:16, :, 0] == 0)
+    assert np.all(decay[0:8, 12:20, 0] == 0)
+
+
+def test_decay_offset_tile_outside_canvas_raises(tmp_path, patched_flim_reader):
+    """FIX B guard: a tile that does not fit the caller-supplied canvas raises
+    rather than silently truncating / mis-writing.
+    """
+    h5 = tmp_path / "decay.h5"
+    bins = _make_bins(tmp_path / "bin", 2)
+    # Tile 1 at x0=4 spans cols [4, 12); a canvas of width 10 cannot hold it.
+    pixel_offsets = {0: (0, 0), 1: (0, 4)}
+
+    with pytest.raises(ValueError, match="does not fit the caller canvas"):
+        write_decay_streaming(
+            h5_path=h5,
+            channel_name="ch00",
+            tile_bins=bins,
+            bin_dims={"x_dim": _TILE_W, "y_dim": _TILE_H, "t_dim": _N_BINS,
+                      "dtype": "uint16", "dim_order": "YXT"},
+            tile_h=_TILE_H,
+            tile_w=_TILE_W,
+            n_bins=_N_BINS,
+            out_h=8,
+            out_w=10,  # too narrow for tile 1 (needs x0+tw = 12)
+            positions={},
+            use_tiling=True,
+            pixel_offsets=pixel_offsets,
+        )
