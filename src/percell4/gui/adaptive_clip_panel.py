@@ -185,6 +185,50 @@ def run_adaptive_auto_extract(
     return mask, report
 
 
+def run_adaptive_auto_extract_stack(
+    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px
+):
+    """Worker body for a time-lapse ``(T,H,W)`` channel: auto-extract each frame.
+
+    Loops the leading time axis and runs :func:`run_adaptive_auto_extract` on each
+    frame independently — so every timepoint gets its OWN largest-particle sizing,
+    coarse window and noise floor (the multi-time-point 'treat each frame as its own
+    image' behaviour). Stacks the per-frame masks into ``(T,H,W)``. A frame with no
+    detectable particles in auto-detect mode (``smallest_particle_px is None``) yields
+    an empty plane rather than aborting the whole run (R9: the dissolved end of a
+    washout). Returns ``(mask (T,H,W) uint8, reports list[AutoExtractReport | None])``;
+    a frame that degraded to empty has a ``None`` report. Mirrors
+    ``run_adaptive_detection_stack``'s per-frame dispatch. Pure (no Qt) so it is
+    unit-testable and worker-safe.
+    """
+    from percell4.domain.measure.auto_extraction import auto_extract
+
+    image = np.asarray(image)
+    labels = np.asarray(labels)
+    frames: list[np.ndarray] = []
+    reports: list = []
+    for t in range(image.shape[0]):
+        try:
+            mask_t, report_t = auto_extract(
+                image[t],
+                labels[t],
+                smallest_particle_px=smallest_particle_px,
+                presmooth_sigma_px=presmooth_sigma_px,
+                min_spot_px=min_spot_px,
+            )
+        except ValueError as e:
+            # Auto-detect found no particles to size this frame — a recoverable empty
+            # frame, not a failed run (R9). A supplied smallest never hits this.
+            if smallest_particle_px is None and "no blobs" in str(e):
+                mask_t = np.zeros(labels[t].shape, dtype=np.uint8)
+                report_t = None
+            else:
+                raise
+        frames.append(np.asarray(mask_t, dtype=np.uint8))
+        reports.append(report_t)
+    return np.stack(frames, axis=0), reports
+
+
 def run_cnr_classification(image, feature_mask, labels, *, mode, threshold):
     """Worker body for CNR subpopulation classification (per-cell, pure).
 
@@ -738,11 +782,9 @@ class AdaptiveClipPanel(QWidget):
         "Auto-detect smallest" lets the user supply the optical-resolution Ø (px,
         or µm via the dataset pixel size). The largest is always measured by LoG
         and the coarse k by the noise-symmetry floor. Per-cell ⇒ requires an
-        active segmentation, single-frame.
+        active segmentation. A time-lapse ``(T,H,W)`` channel is auto-extracted per
+        frame (each frame sized independently) and saved as one ``(T,H,W)`` mask.
         """
-        if is_timelapse:
-            self._show_status("Auto extraction supports single-frame channels only")
-            return
         seg = self.data_model.session.active_segmentation
         if not seg:
             self._show_status("Auto extraction needs an active segmentation")
@@ -818,8 +860,13 @@ class AdaptiveClipPanel(QWidget):
 
         from percell4.gui.workers import Worker
 
+        # Time-lapse: auto-extract each frame independently and stack to (T,H,W);
+        # single-frame: the 2D worker. Both share the same call signature.
+        worker_fn = (
+            run_adaptive_auto_extract_stack if is_timelapse else run_adaptive_auto_extract
+        )
         self._worker = Worker(
-            run_adaptive_auto_extract,
+            worker_fn,
             image,
             labels,
             smallest_px,
@@ -844,17 +891,31 @@ class AdaptiveClipPanel(QWidget):
         )
 
     def _on_auto_extract_done(self, result) -> None:
-        """Finished handler for auto-extraction: print the report, then Creator-save."""
+        """Finished handler for auto-extraction: print the report(s), then Creator-save.
+
+        The time-lapse stack worker returns ``(mask (T,H,W), reports list)`` (a per-frame
+        report, ``None`` for a frame that degraded to empty); the single-frame worker
+        returns ``(mask 2D, report)``. Both route to the shared ``(T,H,W)``-aware save.
+        """
         mask, report = result
-        self._print_auto_extract_report(report)
-        # When the smallest was auto-detected, surface the value in the (readout)
-        # smallest-Ø field so the user sees it adapt per dataset.
-        if getattr(self, "_pending_ae_auto", False):
-            self._settings.set_smallest_value(report.smallest_diameter_px)
+        is_stack = isinstance(report, (list, tuple))
+        reports = list(report) if is_stack else [report]
+        valid = [r for r in reports if r is not None]
+        for r in valid:
+            self._print_auto_extract_report(r)
+        # When the smallest was auto-detected, surface the first frame's value in the
+        # (readout) smallest-Ø field so the user sees it adapt per dataset.
+        if getattr(self, "_pending_ae_auto", False) and valid:
+            self._settings.set_smallest_value(valid[0].smallest_diameter_px)
         self._pending_ae_auto = False
-        # Reuse the standard single-mask Creator save (no window write-back; the
-        # pending flags were cleared so no auto/particle note is fabricated).
-        self._on_detect_done((mask, report.fine_window))
+        # Reuse the standard Creator save (no window write-back; the pending flags were
+        # cleared so no auto/particle note is fabricated). For a stack, pass the per-frame
+        # fine-window list so _on_detect_done's is_stack handling applies.
+        if is_stack:
+            windows = [(r.fine_window if r is not None else 0) for r in reports]
+            self._on_detect_done((mask, windows))
+        else:
+            self._on_detect_done((mask, report.fine_window))
 
     def _run_particle_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
         """Creator path for the one-knob particle-size detector (per-cell).

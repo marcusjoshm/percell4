@@ -3,8 +3,27 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import percell4.gui.adaptive_clip_panel as acp
+
+
+def _fake_report(image, presmooth_sigma_px, n_pos):
+    """A minimal AutoExtractReport whose fine_window encodes the frame's mean."""
+    from percell4.domain.measure.auto_extraction import AutoExtractReport
+
+    return AutoExtractReport(
+        passes=[(int(image.mean()), 1.0)],
+        fine_window=int(image.mean()),
+        largest_particle_px=float(image.max()),
+        second_pass_used=False,
+        presmooth_sigma_px=presmooth_sigma_px,
+        n_cells=1,
+        n_components=n_pos,
+        area_px=n_pos,
+        smallest_diameter_px=2.0,
+        smallest_source="auto",
+    )
 
 
 def test_run_adaptive_detection_stack_loops_and_stacks(monkeypatch):
@@ -39,6 +58,77 @@ def test_run_adaptive_detection_stack_loops_and_stacks(monkeypatch):
     # Frame 1's mask flags only its bright pixel; frame 0 is uniform -> all zero.
     assert mask[0].sum() == 0
     assert mask[1, 0, 0] == 1
+
+
+def test_run_adaptive_auto_extract_stack_loops_and_stacks(monkeypatch):
+    """The auto-extract stack worker runs auto_extract per frame and stacks to (T,H,W);
+    each frame is sized on its own data (not frame 0 broadcast)."""
+    import percell4.domain.measure.auto_extraction as ae_mod
+
+    def fake_auto_extract(image, labels, *, smallest_particle_px=None,
+                          presmooth_sigma_px=1.0, min_spot_px=2):
+        m = (image > image.mean()).astype(np.uint8)
+        return m, _fake_report(image, presmooth_sigma_px, int(m.sum()))
+
+    monkeypatch.setattr(ae_mod, "auto_extract", fake_auto_extract)
+
+    image = np.stack(
+        [np.full((4, 4), 1.0, np.float32), np.full((4, 4), 10.0, np.float32)], axis=0
+    )
+    image[1, 0, 0] = 100.0  # frame 1 has a bright pixel
+    labels = np.ones((2, 4, 4), dtype=np.int32)
+
+    mask, reports = acp.run_adaptive_auto_extract_stack(image, labels, 2.0, 1.0, 1)
+
+    assert mask.shape == (2, 4, 4) and mask.dtype == np.uint8
+    assert len(reports) == 2 and all(r is not None for r in reports)
+    # Per-frame sizing: the two frames' reported fine_windows differ.
+    assert reports[0].fine_window != reports[1].fine_window
+    assert mask[0].sum() == 0          # uniform frame 0 -> empty
+    assert mask[1, 0, 0] == 1          # frame 1's own bright pixel
+
+
+def test_run_adaptive_auto_extract_stack_blank_frame_degrades(monkeypatch):
+    """R9: in auto-detect mode a frame with no blobs becomes an empty plane, not an
+    aborted run."""
+    import percell4.domain.measure.auto_extraction as ae_mod
+
+    def fake_auto_extract(image, labels, *, smallest_particle_px=None,
+                          presmooth_sigma_px=1.0, min_spot_px=2):
+        if image.max() < 50:  # a "blank" frame: auto-detect finds nothing
+            raise ValueError("smallest-particle autodetection found no blobs; supply ...")
+        m = (image > image.mean()).astype(np.uint8)
+        return m, _fake_report(image, presmooth_sigma_px, int(m.sum()))
+
+    monkeypatch.setattr(ae_mod, "auto_extract", fake_auto_extract)
+
+    image = np.stack(
+        [np.full((4, 4), 100.0, np.float32), np.full((4, 4), 1.0, np.float32)], axis=0
+    )
+    image[0, 0, 0] = 200.0
+    labels = np.ones((2, 4, 4), dtype=np.int32)
+
+    # auto-detect mode: smallest_particle_px=None
+    mask, reports = acp.run_adaptive_auto_extract_stack(image, labels, None, 1.0, 1)
+
+    assert mask.shape == (2, 4, 4)
+    assert reports[0] is not None      # frame 0 detected
+    assert reports[1] is None          # frame 1 degraded to empty
+    assert mask[1].sum() == 0          # empty plane, no abort
+
+
+def test_run_adaptive_auto_extract_stack_supplied_smallest_reraises(monkeypatch):
+    """A raise with a SUPPLIED smallest is not the recoverable no-blobs case -> propagates."""
+    import percell4.domain.measure.auto_extraction as ae_mod
+
+    def boom(image, labels, **kwargs):
+        raise ValueError("some other failure")
+
+    monkeypatch.setattr(ae_mod, "auto_extract", boom)
+    image = np.zeros((2, 4, 4), np.float32)
+    labels = np.ones((2, 4, 4), np.int32)
+    with pytest.raises(ValueError):
+        acp.run_adaptive_auto_extract_stack(image, labels, 3.0, 1.0, 1)  # supplied smallest
 
 
 def test_accept_puncta_mask_persists_thw(tmp_h5):

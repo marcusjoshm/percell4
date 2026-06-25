@@ -1052,17 +1052,26 @@ def test_auto_extract_without_segmentation_aborts(qtbot, monkeypatch):
     assert panel._worker is None
 
 
-def test_auto_extract_timelapse_aborts(qtbot, monkeypatch):
-    panel, _model, _repo, viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
+def test_auto_extract_timelapse_dispatches_stack_and_saves_THW(qtbot, monkeypatch):
+    """A (T,H,W) channel auto-extracts per frame (the stack worker) and saves one
+    (T,H,W) mask — no longer refused."""
+    tl_lab = np.stack([_labels_one_cell(), _labels_one_cell()], axis=0)  # (2,120,120)
+    panel, model, repo, viewer_win = _build(
+        qtbot, monkeypatch, segmentation="cells", labels=tl_lab
+    )
     store = panel._get_store()
-    store.metadata = {"n_timepoints": 3}
-    viewer_win.viewer.layers[0].data = np.zeros((3, 120, 120), dtype=np.float32)
+    store.metadata = {"n_timepoints": 2}
+    viewer_win.viewer.layers[0].data = np.stack([_blob_image(), _blob_image()], axis=0)
     _select_auto_extract(panel)
-    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "axtl")
 
     panel._on_run()
 
-    assert panel._worker is None
+    assert panel._worker._fn is panel_module.run_adaptive_auto_extract_stack
+    assert "axtl" in repo.masks
+    assert repo.masks["axtl"].shape == (2, 120, 120)
+    assert set(np.unique(repo.masks["axtl"])).issubset({0, 1})
+    assert model.session.active_mask == "axtl"
 
 
 def test_auto_extract_prints_report(qtbot, monkeypatch, capsys):
