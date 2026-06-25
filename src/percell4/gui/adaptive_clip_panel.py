@@ -341,9 +341,8 @@ def run_cnr_measure_stack(image, feature_mask, labels):
     offset = 0
     for t in range(image.shape[0]):
         recs = measure_cnr(image[t], feature_mask[t], labels[t])
-        comp_t, n_t = label(feature_mask[t] > 0)
-        comp_t = comp_t.astype(np.int64)
-        comp_t[comp_t > 0] += offset  # globally-unique ids across frames
+        comp_t, n_t = label(feature_mask[t] > 0)  # scipy returns int32
+        comp_t[comp_t > 0] += offset  # globally-unique ids across frames (total ids ≪ 2³¹)
         for r in recs:
             r = dict(r)
             r["timepoint"] = int(t)
@@ -1183,10 +1182,11 @@ class AdaptiveClipPanel(QWidget):
         store. Returns ``(image, labels, feature_mask, cfg)`` or ``None`` after setting a
         status message on any failure.
 
-        ``allow_timelapse`` lets the classify Action accept a ``(T,H,W)`` channel
-        (classified per frame at one shared threshold); the interactive segmenter keeps
-        the single-frame-only refusal (its live histogram + napari preview are
-        single-frame).
+        ``allow_timelapse`` lets a caller accept a ``(T,H,W)`` channel — both CNR tools
+        pass it: the classify Action splits each frame at the one shared threshold, and
+        the interactive segmenter pools the foci of all frames into one histogram and
+        applies the divider(s) per frame (``run_cnr_measure_stack``). It defaults to
+        ``False`` (single-frame only) for any future caller that has not opted in.
         """
         viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
