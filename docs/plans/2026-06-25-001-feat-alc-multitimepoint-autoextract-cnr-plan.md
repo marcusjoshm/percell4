@@ -1,7 +1,7 @@
 ---
 title: "feat: Per-timepoint multi-time-point support for ALC two-pass auto-extraction + guided CNR classification (GUI + CLI)"
 type: feat
-status: active
+status: completed
 date: 2026-06-25
 ---
 
