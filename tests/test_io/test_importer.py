@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+import pytest
 import tifffile
 
 from percell4.adapters.importer import import_dataset
-from percell4.domain.io.models import TokenConfig
+from percell4.domain.io.models import TileConfig, TokenConfig
 from percell4.store import DatasetStore
 
 
@@ -258,6 +261,7 @@ def test_import_single_timepoint_unchanged(tmp_path):
 def test_import_timepoint_missing_channel_frame_raises(tmp_path):
     """A channel that doesn't cover every timepoint aborts cleanly."""
     import pytest
+
     from percell4.store import SourceShapeMismatchError
 
     src = tmp_path / "raw"
@@ -400,6 +404,7 @@ def test_import_creation_bin_truncates_residual(tmp_path):
 def test_import_source_shape_mismatch_raises(tmp_path):
     """When two TIFFs at the same level disagree on (H, W), abort cleanly."""
     import pytest
+
     from percell4.store import SourceShapeMismatchError
 
     src = tmp_path / "raw"
@@ -413,3 +418,436 @@ def test_import_source_shape_mismatch_raises(tmp_path):
 
     # No partial file written.
     assert not h5_path.exists()
+
+
+# ── Overlap-aware (phase-correlation) registered stitching (U6) ─────────────
+#
+# These build small *textured* overlapping tiles (random-but-seeded + a smooth
+# gradient) so phase correlation is well-conditioned and recovers an exact
+# integer offset. The non-registered byte-identical path is guarded by every
+# test above; these only exercise the registered branch.
+
+_REG_TH = 60
+_REG_TW = 60
+_REG_OVERLAP = 0.25
+_REG_STEP = int(_REG_TW * (1 - _REG_OVERLAP))  # 45
+# 2x2 grid of 60px tiles stepping 45px → 105x105 canvas.
+_REG_CANVAS = (_REG_TH + _REG_STEP, _REG_TW + _REG_STEP)  # (105, 105)
+_REG_CORNERS = {
+    0: (0, 0),
+    1: (0, _REG_STEP),
+    2: (_REG_STEP, 0),
+    3: (_REG_STEP, _REG_STEP),
+}
+
+
+def _textured_scene(seed: int, h: int = 110, w: int = 110) -> np.ndarray:
+    """Seeded random texture + smooth gradient → phase-correlation friendly."""
+    rng = np.random.default_rng(seed)
+    noise = rng.integers(0, 5000, size=(h, w))
+    grad = np.add.outer(np.arange(h) * 7, np.arange(w) * 5)
+    return (noise + grad).astype(np.uint16)
+
+
+def _write_overlapping_tiles(
+    src, scene: np.ndarray, *, channel: str = "00", make_bin: bool = False,
+    t_bins: int = 4,
+):
+    """Write 2x2 overlapping TIFF tiles (and optionally stamped .bin decay).
+
+    The decay .bin for tile ``i`` stamps the value ``i + 1`` into every
+    photon so overlap-winner assertions can read which tile won a pixel.
+    """
+    src.mkdir(parents=True, exist_ok=True)
+    for i, (y, x) in _REG_CORNERS.items():
+        tile = scene[y : y + _REG_TH, x : x + _REG_TW]
+        tifffile.imwrite(str(src / f"img_s{i:02d}_ch{channel}.tif"), tile)
+        if make_bin:
+            decay = np.full((_REG_TH, _REG_TW, t_bins), i + 1, dtype=np.uint32)
+            (src / f"img_s{i:02d}_ch{channel}.bin").write_bytes(decay.tobytes())
+
+
+def _reg_tile_config(**overrides) -> TileConfig:
+    base = dict(
+        grid_rows=2, grid_cols=2, grid_type="row_by_row", order="right_down",
+        overlap=_REG_OVERLAP, register=True, reference_channel="ch00",
+    )
+    base.update(overrides)
+    return TileConfig(**base)
+
+
+def test_register_2x2_persists_offsets_and_canvas(tmp_path):
+    """Happy path: a 2x2 overlapping import registers, persists offsets, and
+    stores /intensity on canvas_from_offsets; native_shape == canvas (R1-R4).
+    """
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+
+    h5 = tmp_path / "out.h5"
+    n = import_dataset(src, h5, tile_config=_reg_tile_config())
+
+    assert n == 1
+    store = DatasetStore(h5)
+    geo = store.read_stitch_geometry()
+    assert geo.registered is True
+    # Exact integer offsets recovered (no overlap ambiguity at this texture).
+    np.testing.assert_array_equal(
+        geo.offsets,
+        np.array([[0, 0], [0, 45], [45, 0], [45, 45]], dtype=np.int32),
+    )
+    assert geo.reference_channel == "ch00"
+    assert geo.overlap == pytest.approx(_REG_OVERLAP)
+
+    intensity = store.read_array("intensity")
+    assert intensity.shape == _REG_CANVAS
+    assert tuple(store.metadata["native_shape"]) == _REG_CANVAS
+
+
+def test_register_provenance_recorded(tmp_path):
+    """The /provenance/stitch record carries the library identity + quality."""
+    import json
+
+    import h5py
+
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+    import_dataset(src, h5, tile_config=_reg_tile_config())
+
+    with h5py.File(h5, "r") as f:
+        attrs = dict(f["provenance/stitch"].attrs)
+    assert "grid_stitching" in attrs["library"]
+    assert attrs["reference_channel"] == "ch00"
+    quality = json.loads(attrs["quality_json"])
+    assert "coverage_fraction" in quality
+    assert "regression_threshold" in quality
+    assert "n_peaks" in quality
+
+
+def test_register_intensity_decay_same_canvas_and_winner(tmp_path):
+    """AE1: an overlap pixel resolves to the SAME tile in /intensity and in
+    decay.sum(axis=-1); both share one registered canvas (R5/R7).
+    """
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(11), make_bin=True)
+
+    h5 = tmp_path / "out.h5"
+    flim = {
+        "frequency_mhz": 80.0,
+        "channel_calibrations": {},
+        "bin_dimensions": {
+            "x_dim": _REG_TW, "y_dim": _REG_TH, "t_dim": 4,
+            "dtype": "uint32", "dim_order": "YXT", "header_bytes": 0,
+        },
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import_dataset(src, h5, tile_config=_reg_tile_config(), flim_params=flim)
+
+    store = DatasetStore(h5)
+    intensity = store.read_array("intensity")  # ch00 TIFF wins; .bin decay-only
+    decay = store.read_array("decay/ch00")
+    assert intensity.shape == _REG_CANVAS
+    assert decay.shape[:2] == _REG_CANVAS
+    winner = decay[..., 0]  # each photon stamped with tile_index + 1
+    # Ascending-index priority: highest index wins each overlap region.
+    assert winner[10, 50] == 2  # tile0 vs tile1 overlap → tile1
+    assert winner[50, 10] == 3  # tile0 vs tile2 overlap → tile2
+    assert winner[50, 50] == 4  # 4-way center overlap → tile3
+    assert winner[10, 10] == 1  # tile0 exclusive region
+
+
+def test_register_byte_identical_to_grid_when_register_false(tmp_path):
+    """AE3 (critical): the SAME source with register=False yields /intensity
+    bytes identical to the pre-feature grid path. Golden np.array_equal.
+    """
+    scene = _textured_scene(7)
+
+    # Grid path (register=False, overlap=0): the legacy edge-to-edge stitch.
+    src_grid = tmp_path / "grid"
+    _write_overlapping_tiles(src_grid, scene)
+    h5_grid = tmp_path / "grid.h5"
+    import_dataset(
+        src_grid, h5_grid,
+        tile_config=TileConfig(grid_rows=2, grid_cols=2),  # no register
+    )
+    grid_intensity = DatasetStore(h5_grid).read_array("intensity")
+
+    # Registered path on the SAME tiles.
+    src_reg = tmp_path / "reg"
+    _write_overlapping_tiles(src_reg, scene)
+    h5_reg = tmp_path / "reg.h5"
+    import_dataset(src_reg, h5_reg, tile_config=_reg_tile_config())
+    reg_intensity = DatasetStore(h5_reg).read_array("intensity")
+
+    # Grid is edge-to-edge (120x120, no overlap fusion); registered is the
+    # overlap-fused 105x105 canvas. They MUST differ in shape — the point of
+    # this test is that the *grid* path is unchanged from pre-feature.
+    assert grid_intensity.shape == (120, 120)
+    assert reg_intensity.shape == _REG_CANVAS
+
+    # The grid output is byte-identical to a direct assemble_tiles call (the
+    # pre-feature behaviour) — proving register=False does not touch it.
+    from percell4.adapters.readers import read_tiff
+    from percell4.domain.io.assembler import assemble_tiles
+    tiles = {
+        i: read_tiff(str(src_grid / f"img_s{i:02d}_ch00.tif"))["array"]
+        for i in range(4)
+    }
+    golden = assemble_tiles(tiles, grid_rows=2, grid_cols=2).astype(np.float32)
+    assert np.array_equal(grid_intensity, golden)
+    # And register=False persisted NO stitch geometry.
+    assert DatasetStore(h5_grid).read_stitch_geometry().registered is False
+
+
+def test_register_gate_overlap_zero_raises(tmp_path):
+    """register=True with overlap=0 → ValueError at the importer gate."""
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+    with pytest.raises(ValueError, match="overlap"):
+        import_dataset(
+            src, h5,
+            tile_config=TileConfig(
+                grid_rows=2, grid_cols=2, register=True, overlap=0.0,
+                reference_channel="ch00",
+            ),
+        )
+    assert not h5.exists()
+
+
+def test_register_gate_no_reference_channel_raises(tmp_path):
+    """register=True without a reference_channel → ValueError at the gate."""
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+    with pytest.raises(ValueError, match="reference_channel"):
+        import_dataset(
+            src, h5,
+            tile_config=TileConfig(
+                grid_rows=2, grid_cols=2, register=True, overlap=0.25,
+                reference_channel=None,
+            ),
+        )
+    assert not h5.exists()
+
+
+def test_register_degenerate_uniform_tiles_raises(tmp_path):
+    """A low-texture (uniform) reference → degenerate solve → RegistrationError
+    propagates; stitch_registered is never written.
+    """
+    from percell4.domain.io.assembler import RegistrationError
+
+    src = tmp_path / "raw"
+    src.mkdir()
+    for i in range(4):
+        # Flat tiles — no texture for phase correlation to lock onto.
+        tile = np.full((_REG_TH, _REG_TW), 1234, dtype=np.uint16)
+        tifffile.imwrite(str(src / f"img_s{i:02d}_ch00.tif"), tile)
+
+    h5 = tmp_path / "out.h5"
+    with pytest.raises(RegistrationError):
+        import_dataset(src, h5, tile_config=_reg_tile_config())
+    # The file may not even be created; if it is, it must not be registered.
+    if h5.exists():
+        assert DatasetStore(h5).read_stitch_geometry().registered is False
+
+
+def test_register_reimport_guard_refuses(tmp_path):
+    """Re-importing over a registered dataset that has appended decay is
+    refused (re-solving would rewrite offsets the decay was placed against).
+    """
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(11), make_bin=True)
+    h5 = tmp_path / "out.h5"
+    flim = {
+        "frequency_mhz": 80.0,
+        "channel_calibrations": {},
+        "bin_dimensions": {
+            "x_dim": _REG_TW, "y_dim": _REG_TH, "t_dim": 4,
+            "dtype": "uint32", "dim_order": "YXT", "header_bytes": 0,
+        },
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import_dataset(src, h5, tile_config=_reg_tile_config(), flim_params=flim)
+
+    # Re-import over the SAME registered output → refused.
+    with pytest.raises(ValueError, match="already carries registered"):
+        import_dataset(src, h5, tile_config=_reg_tile_config(), flim_params=flim)
+
+
+def test_register_zstack_mosaic_deferred_error(tmp_path):
+    """register=True combined with a z-stack mosaic → clear deferred error."""
+    src = tmp_path / "raw"
+    src.mkdir()
+    scene = _textured_scene(7)
+    # Each tile has 2 z-slices → _assemble_plane z-projects → registered path
+    # cannot capture per-tile arrays at the post-projection plane in v1.
+    for i, (y, x) in _REG_CORNERS.items():
+        tile = scene[y : y + _REG_TH, x : x + _REG_TW]
+        for z in range(2):
+            tifffile.imwrite(
+                str(src / f"img_s{i:02d}_z{z:02d}_ch00.tif"),
+                (tile + z).astype(np.uint16),
+            )
+
+    h5 = tmp_path / "out.h5"
+    with pytest.raises(ValueError, match="z-stack-mosaic overlap"):
+        import_dataset(src, h5, tile_config=_reg_tile_config())
+
+
+def test_register_with_creation_bin_canvas_post_bin(tmp_path):
+    """A binned (creation_bin>1) registered import: bbox(offsets)==native_shape
+    in post-bin units; no MetadataConsistencyError.
+    """
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import_dataset(src, h5, tile_config=_reg_tile_config(), creation_bin=2)
+
+    store = DatasetStore(h5)
+    geo = store.read_stitch_geometry()
+    assert geo.registered is True
+    intensity = store.read_array("intensity")
+    # Post-bin canvas: 60px tiles → 30px tiles, step 45 → 22 (sum_bin floor div).
+    # native_shape must equal the assembled intensity shape (the lock).
+    assert tuple(store.metadata["native_shape"]) == intensity.shape[-2:]
+    # Offsets per-axis min is 0 (read-back invariant).
+    assert int(geo.offsets[:, 0].min()) == 0
+    assert int(geo.offsets[:, 1].min()) == 0
+
+
+def test_register_full_coverage_solve_warning_clean(tmp_path):
+    """A full-coverage, fully-connected 2x2 solve surfaces NO coverage or
+    disconnected warning (R11 — warnings only fire on actual gaps).
+    """
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        import_dataset(src, h5, tile_config=_reg_tile_config())
+    msgs = [str(w.message) for w in caught]
+    assert not any("covers only" in m.lower() for m in msgs)
+    assert not any("disconnected" in m.lower() for m in msgs)
+
+
+def test_register_coverage_below_one_warns(tmp_path):
+    """When the registered canvas has uncovered pixels (coverage < 1.0) a
+    warning is surfaced (R11). The binned 2x2 (post-bin step > tile extent
+    overlap) leaves a corner band uncovered, which deterministically warns.
+    """
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        import_dataset(src, h5, tile_config=_reg_tile_config(), creation_bin=2)
+    msgs = [str(w.message) for w in caught]
+    assert any("covers only" in m.lower() for m in msgs), msgs
+    # Despite the gap, the import succeeds and is registered.
+    assert DatasetStore(h5).read_stitch_geometry().registered is True
+
+
+def test_register_timelapse_registers_once(tmp_path):
+    """A 2-timepoint registered import solves once (first timepoint) and reuses
+    offsets for all frames; the output is (T, H, W) on the registered canvas.
+    """
+    src = tmp_path / "raw"
+    src.mkdir()
+    scene = _textured_scene(7)
+    for t in range(2):
+        for i, (y, x) in _REG_CORNERS.items():
+            tile = scene[y : y + _REG_TH, x : x + _REG_TW]
+            tifffile.imwrite(
+                str(src / f"img_t{t:02d}_s{i:02d}_ch00.tif"),
+                (tile + t).astype(np.uint16),
+            )
+
+    h5 = tmp_path / "out.h5"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import_dataset(src, h5, tile_config=_reg_tile_config())
+
+    store = DatasetStore(h5)
+    intensity = store.read_array("intensity")
+    assert intensity.shape == (2, *_REG_CANVAS)
+    assert store.read_stitch_geometry().registered is True
+    assert store.metadata["n_timepoints"] == 2
+
+
+def test_register_timelapse_drift_warns(tmp_path):
+    """A time-lapse whose LAST frame drifts beyond the overlap budget surfaces
+    a drift warning; offsets still come from the first timepoint (R14).
+    """
+    src = tmp_path / "raw"
+    src.mkdir()
+    scene = _textured_scene(7, h=140, w=140)
+    # First timepoint carves tiles at the nominal 45px step. The last
+    # timepoint carves at a much SMALLER step (28px) so the registered relative
+    # offsets drift |45-28| = 17px, beyond the overlap budget (0.25*60 = 15px),
+    # while keeping heavy overlap so the last-frame re-check still solves — a
+    # real inter-frame stage-drift simulation.
+    step_by_t = {0: _REG_STEP, 1: 28}
+    for t in range(2):
+        step = step_by_t[t]
+        corners = {
+            0: (0, 0), 1: (0, step), 2: (step, 0), 3: (step, step),
+        }
+        for i, (y, x) in corners.items():
+            tile = scene[y : y + _REG_TH, x : x + _REG_TW]
+            tifffile.imwrite(
+                str(src / f"img_t{t:02d}_s{i:02d}_ch00.tif"), tile
+            )
+
+    h5 = tmp_path / "out.h5"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        import_dataset(src, h5, tile_config=_reg_tile_config())
+
+    store = DatasetStore(h5)
+    assert store.read_stitch_geometry().registered is True
+    # Offsets come from the first timepoint (the clean scene0).
+    np.testing.assert_array_equal(
+        store.read_stitch_geometry().offsets,
+        np.array([[0, 0], [0, 45], [45, 0], [45, 45]], dtype=np.int32),
+    )
+    # A drift OR degenerate-recheck warning is surfaced for the last frame.
+    msgs = [str(w.message).lower() for w in caught]
+    assert any("drift" in m for m in msgs), msgs
+
+
+def test_register_commit_flag_written_last_crash_safe(tmp_path, monkeypatch):
+    """Atomicity: a failure after offsets are written but before the
+    stitch_registered flag leaves a NON-registered (recoverable) dataset, never
+    the AE4 brick (offsets present + flag missing → 'not committed').
+    """
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(7))
+    h5 = tmp_path / "out.h5"
+
+    from percell4.store import DatasetStore as _Store
+
+    real_set_metadata = _Store.set_metadata
+
+    def _failing_set_metadata(self, meta):
+        # Let the reference_channel/overlap scalars through, but blow up on the
+        # commit marker (stitch_registered) — simulating a crash mid-commit.
+        if "stitch_registered" in meta:
+            raise RuntimeError("simulated crash before commit flag")
+        return real_set_metadata(self, meta)
+
+    monkeypatch.setattr(_Store, "set_metadata", _failing_set_metadata)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        import_dataset(src, h5, tile_config=_reg_tile_config())
+
+    # The offsets dataset may be present, but without the commit flag the
+    # dataset reads back as NOT registered → safe to re-import.
+    monkeypatch.undo()
+    geo = DatasetStore(h5).read_stitch_geometry()
+    assert geo.registered is False
