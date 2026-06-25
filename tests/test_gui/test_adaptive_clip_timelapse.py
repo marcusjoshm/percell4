@@ -131,6 +131,63 @@ def test_run_adaptive_auto_extract_stack_supplied_smallest_reraises(monkeypatch)
         acp.run_adaptive_auto_extract_stack(image, labels, 3.0, 1.0, 1)  # supplied smallest
 
 
+def test_run_cnr_classification_stack_returns_THW_pop_masks(monkeypatch):
+    """The CNR stack worker classifies each frame and returns (T,H,W) population masks
+    + per-focus components carrying a timepoint, mirroring run_cnr_classification's
+    contract."""
+    import percell4.domain.measure.cnr_classification as cnr_mod
+    from percell4.domain.measure.cnr_classification import ClassificationResult
+
+    labels_image = np.zeros((6, 6), dtype=np.int32)
+    labels_image[1, 1] = 1   # low-CNR focus
+    labels_image[4, 4] = 2   # high-CNR focus
+    result = ClassificationResult(
+        n_subpopulations=2, labels_image=labels_image,
+        components=[
+            {"label": 1, "cnr": 3.0, "subpopulation": 1},
+            {"label": 2, "cnr": 8.0, "subpopulation": 2},
+        ],
+        split_axis="cnr", threshold=5.0, report={"decision": "guided"},
+    )
+    monkeypatch.setattr(cnr_mod, "classify_by_cnr", lambda *a, **k: result)
+
+    image = np.zeros((2, 6, 6), np.float32)
+    mask = np.ones((2, 6, 6), np.uint8)
+    labels = np.ones((2, 6, 6), np.int32)
+    pop_masks, components, report = acp.run_cnr_classification_stack(
+        image, mask, labels, mode="guided", threshold=5.0
+    )
+
+    assert [s for s, _ in pop_masks] == ["_low", "_high"]
+    for _suffix, m in pop_masks:
+        assert m.shape == (2, 6, 6) and m.dtype == np.uint8
+    assert any("timepoint" in c for c in components)
+    assert report["n_timepoints"] == 2
+
+
+def test_run_cnr_classification_stack_single_population_one_mask(monkeypatch):
+    """When no frame splits, the worker returns one base-name mask (all foci), matching
+    the single-frame worker's single-population contract."""
+    import percell4.domain.measure.cnr_classification as cnr_mod
+    from percell4.domain.measure.cnr_classification import ClassificationResult
+
+    labels_image = np.zeros((6, 6), dtype=np.int32)
+    labels_image[1, 1] = 1
+    result = ClassificationResult(
+        n_subpopulations=1, labels_image=labels_image,
+        components=[{"label": 1, "cnr": 3.0, "subpopulation": 1}],
+        split_axis=None, threshold=None, report={"decision": "single population"},
+    )
+    monkeypatch.setattr(cnr_mod, "classify_by_cnr", lambda *a, **k: result)
+
+    pop_masks, _components, _report = acp.run_cnr_classification_stack(
+        np.zeros((2, 6, 6), np.float32), np.ones((2, 6, 6), np.uint8),
+        np.ones((2, 6, 6), np.int32), mode="guided", threshold=5.0,
+    )
+    assert [s for s, _ in pop_masks] == [""]   # one mask under the base name
+    assert pop_masks[0][1].shape == (2, 6, 6)
+
+
 def test_accept_puncta_mask_persists_thw(tmp_h5):
     """AcceptPunctaMask is shape-transparent: a (T,H,W) mask round-trips (so the
     panel only needs to hand it a per-frame stack)."""

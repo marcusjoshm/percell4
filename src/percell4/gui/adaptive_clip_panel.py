@@ -264,6 +264,40 @@ def run_cnr_classification(image, feature_mask, labels, *, mode, threshold):
     return pop_masks, res.components, res.report
 
 
+def run_cnr_classification_stack(image, feature_mask, labels, *, mode, threshold):
+    """Worker body for time-lapse ``(T,H,W)`` CNR classification (per frame, pure).
+
+    Classifies each timepoint independently via
+    :func:`percell4.domain.measure.cnr_classification.classify_by_cnr_stack` — guided
+    applies the **one shared** ``threshold`` to every frame. Returns the SAME
+    ``(pop_masks: list[(suffix, mask)], components: list[dict], report: dict)`` contract as
+    :func:`run_cnr_classification`, but the masks are ``(T,H,W)``:
+    ``[("_low", low), ("_high", high)]`` when any frame splits, else ``[("", all-foci)]``
+    (single population everywhere). The panel has no producing ALC round, so CNR presmooth
+    stays at the 1px default (matching the panel detector default). Pure (no Qt / store).
+    """
+    from percell4.domain.measure.cnr_classification import classify_by_cnr_stack
+
+    thr = float(threshold) if (mode == "guided" and threshold is not None) else None
+    res = classify_by_cnr_stack(image, feature_mask, labels, mode=mode, threshold=thr)
+    n_frames = len(res.per_frame)
+    n_split = sum(1 for f in res.per_frame if f["n_subpopulations"] >= 2)
+    if n_split > 0:
+        pop_masks = [("_low", res.low_stack), ("_high", res.high_stack)]
+    else:
+        # Single population in every frame: all foci in one mask under the base name.
+        pop_masks = [("", res.low_stack)]
+    pop_masks = [(suffix, m) for suffix, m in pop_masks if int(m.sum()) > 0]
+    components = res.table.to_dict("records") if hasattr(res.table, "to_dict") else []
+    report = {
+        "decision": f"time-lapse CNR: {n_split}/{n_frames} timepoint(s) split",
+        "mode": mode,
+        "n_components_total": len(components),
+        "n_timepoints": n_frames,
+    }
+    return pop_masks, components, report
+
+
 def run_cnr_measure(image, feature_mask, labels):
     """Worker body for the interactive segmenter: measure per-focus CNR.
 
@@ -1100,13 +1134,18 @@ class AdaptiveClipPanel(QWidget):
             flush=True,
         )
 
-    def _resolve_cnr_inputs(self):
+    def _resolve_cnr_inputs(self, *, allow_timelapse: bool = False):
         """Shared pre-flight for the CNR tools (classify + interactive segmenter).
 
-        Validates an open dataset/viewer, an active channel image, single-frame
-        (per-cell σ), an active segmentation matching the channel, and a selected
-        source mask read from the store. Returns ``(image, labels, feature_mask,
-        cfg)`` or ``None`` after setting a status message on any failure.
+        Validates an open dataset/viewer, an active channel image, an active
+        segmentation matching the channel, and a selected source mask read from the
+        store. Returns ``(image, labels, feature_mask, cfg)`` or ``None`` after setting a
+        status message on any failure.
+
+        ``allow_timelapse`` lets the classify Action accept a ``(T,H,W)`` channel
+        (classified per frame at one shared threshold); the interactive segmenter keeps
+        the single-frame-only refusal (its live histogram + napari preview are
+        single-frame).
         """
         viewer_win = self._get_viewer_window()
         if viewer_win is None or viewer_win.viewer is None:
@@ -1126,9 +1165,10 @@ class AdaptiveClipPanel(QWidget):
             self._show_status(f"Channel '{channel}' not found in viewer")
             return None
 
-        # Per-cell σ ⇒ single-frame only (mirrors the per-cell detector modes).
+        # Per-cell σ is per frame. The classify Action handles a (T,H,W) channel per
+        # frame (allow_timelapse=True); the interactive segmenter stays single-frame.
         n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
-        if image.ndim == 3 and n_timepoints > 1:
+        if image.ndim == 3 and n_timepoints > 1 and not allow_timelapse:
             self._show_status("CNR tools support single-frame channels only")
             return None
 
@@ -1161,7 +1201,7 @@ class AdaptiveClipPanel(QWidget):
         return image, labels, feature_mask, cfg
 
     def _on_classify(self) -> None:
-        resolved = self._resolve_cnr_inputs()
+        resolved = self._resolve_cnr_inputs(allow_timelapse=True)
         if resolved is None:
             return
         image, labels, feature_mask, cfg = resolved
@@ -1190,8 +1230,16 @@ class AdaptiveClipPanel(QWidget):
 
         from percell4.gui.workers import Worker
 
+        # Time-lapse (T,H,W) channel: classify each frame independently and save (T,H,W)
+        # population masks; single-frame: the 2D worker. Same (pop_masks, components,
+        # report) contract, so _on_classify_done handles both unchanged.
+        worker_fn = (
+            run_cnr_classification_stack
+            if np.asarray(image).ndim == 3
+            else run_cnr_classification
+        )
         self._cnr_worker = Worker(
-            run_cnr_classification,
+            worker_fn,
             image,
             feature_mask,
             labels,

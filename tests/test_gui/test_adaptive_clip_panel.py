@@ -825,17 +825,60 @@ def test_classify_without_source_mask_aborts(qtbot, monkeypatch):
     assert panel._cnr_worker is None
 
 
-def test_classify_timelapse_aborts(qtbot, monkeypatch):
+def test_classify_timelapse_dispatches_stack_and_saves_THW(qtbot, monkeypatch):
+    """A (T,H,W) channel classifies per frame (the stack worker) and saves (T,H,W)
+    population masks — no longer refused."""
+    tl_lab = np.stack([_labels_one_cell(), _labels_one_cell()], axis=0)
     panel, model, repo, viewer_win = _build(
+        qtbot, monkeypatch, segmentation="cells", existing=["adaptive"], labels=tl_lab
+    )
+    store = panel._get_store()
+    store.metadata = {"n_timepoints": 2}
+    viewer_win.viewer.layers[0].data = np.stack([_blob_image(), _blob_image()], axis=0)
+    store.read_mask.return_value = np.ones((2, 120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+    panel._cnr_settings._mode.setCurrentText("Guided (CNR threshold)")
+    panel._cnr_settings._threshold.setValue(5.0)
+
+    low = np.zeros((2, 120, 120), dtype=np.uint8)
+    low[:, 10:20, 10:20] = 1
+    high = np.zeros((2, 120, 120), dtype=np.uint8)
+    high[:, 30:40, 30:40] = 1
+    comps = [{"label": 1, "cnr": 3.0, "subpopulation": 1, "timepoint": 0}]
+    report = {"decision": "time-lapse CNR: 2/2 split", "warnings": []}
+    captured = {}
+
+    def _stub(image, feature_mask, labels, *, mode, threshold):
+        captured["shape"] = np.asarray(image).shape
+        return [("_low", low), ("_high", high)], comps, report
+
+    monkeypatch.setattr(panel_module, "run_cnr_classification_stack", _stub)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "out")
+
+    panel._on_classify()
+
+    assert panel._cnr_worker._fn is panel_module.run_cnr_classification_stack
+    assert captured["shape"] == (2, 120, 120)  # the (T,H,W) channel reached the worker
+    assert "out_low" in repo.masks and "out_high" in repo.masks
+    assert repo.masks["out_low"].shape == (2, 120, 120)
+    paths = [c.args[0] for c in store.write_dataframe.call_args_list]
+    assert "/classification/out" in paths
+
+
+def test_segment_cnr_timelapse_still_refused(qtbot, monkeypatch):
+    """The interactive CNR segmenter stays single-frame (its live histogram/preview
+    are single-frame) even though the classify Action now handles time-lapse."""
+    panel, _model, _repo, viewer_win = _build(
         qtbot, monkeypatch, segmentation="cells", existing=["adaptive"]
     )
     store = panel._get_store()
-    store.metadata = {"n_timepoints": 3}
-    # a (T,H,W) channel layer
-    viewer_win.viewer.layers[0].data = np.zeros((3, 120, 120), dtype=np.float32)
+    store.metadata = {"n_timepoints": 2}
+    viewer_win.viewer.layers[0].data = np.stack([_blob_image(), _blob_image()], axis=0)
     _select_source_mask(panel, "adaptive")
-    panel._on_classify()
-    assert panel._cnr_worker is None
+
+    panel._on_segment_cnr()
+
+    assert panel._measure_worker is None  # segmenter never dispatched on a time-lapse
 
 
 def test_classify_reads_source_mask_and_passes_mode(qtbot, monkeypatch):
