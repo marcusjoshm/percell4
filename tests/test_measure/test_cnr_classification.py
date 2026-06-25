@@ -254,6 +254,25 @@ def test_segment_label_image_invalid_focus_stays_zero():
     assert set(np.unique(seg_img)) == {0, 1}
 
 
+def test_segment_label_image_thw_applies_shared_dividers_per_frame():
+    """segment_label_image is shape-agnostic: a (T,H,W) component image with globally-
+    unique ids + pooled per-focus CNR + one divider segments each frame from the SAME
+    threshold (the interactive segmenter's time-lapse contract)."""
+    comp = np.zeros((2, 10, 10), dtype=np.int32)
+    comp[0, 1:3, 1:3] = 1   # frame 0, focus id 1 (low CNR)
+    comp[0, 6:8, 6:8] = 2   # frame 0, focus id 2 (high CNR)
+    comp[1, 1:3, 1:3] = 3   # frame 1, focus id 3 (low CNR)
+    focus_labels = np.array([1, 2, 3], dtype=np.int64)
+    focus_cnr = np.array([2.0, 9.0, 2.5], dtype=float)
+
+    seg = segment_label_image(comp, focus_labels, focus_cnr, [5.0])  # one shared divider
+
+    assert seg.shape == (2, 10, 10)
+    assert set(np.unique(seg[0]).tolist()) == {0, 1, 2}  # frame 0 split low/high
+    assert set(np.unique(seg[1]).tolist()) == {0, 1}     # frame 1 only low
+    assert seg[0][1, 1] == 1 and seg[0][6, 6] == 2 and seg[1][1, 1] == 1
+
+
 def test_segment_masks_from_label_image():
     seg_img = np.array([[0, 1], [2, 2]], dtype=np.int32)
     masks = segment_masks_from_label_image(seg_img, 3)

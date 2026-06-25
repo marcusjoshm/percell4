@@ -15,6 +15,14 @@ one gives the user direct control. Both consume :func:`measure_cnr`. The window
 does only fast lookup-table work; the heavy CNR measurement runs off-thread in
 the panel before the window opens.
 
+Time-lapse: the window is **shape-agnostic**. When the panel passes a ``(T,H,W)``
+``component_labels`` (globally-unique ids across frames) with the foci of all
+timepoints pooled into ``records`` (see ``run_cnr_measure_stack``), the histogram is
+built from every timepoint's foci at once, the divider threshold(s) apply to all frames
+equally, and the live preview + saved ``<base>_segN`` masks come out ``(T,H,W)`` — no
+window-side branching needed (``segment_label_image`` / ``segment_masks_from_label_image``
+/ ``add_labels`` / ``add_mask`` all operate per-element on any rank).
+
 Pattern: mirrors :mod:`percell4.gui.threshold_qc`'s separate-window + live
 ``add_labels`` preview + debounced update.
 """

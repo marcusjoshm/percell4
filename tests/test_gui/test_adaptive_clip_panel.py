@@ -865,20 +865,43 @@ def test_classify_timelapse_dispatches_stack_and_saves_THW(qtbot, monkeypatch):
     assert "/classification/out" in paths
 
 
-def test_segment_cnr_timelapse_still_refused(qtbot, monkeypatch):
-    """The interactive CNR segmenter stays single-frame (its live histogram/preview
-    are single-frame) even though the classify Action now handles time-lapse."""
+def test_segment_cnr_timelapse_pools_and_opens_window(qtbot, monkeypatch):
+    """A (T,H,W) channel pools foci across frames (run_cnr_measure_stack) and opens the
+    segmenter with a (T,H,W) component image — no longer refused."""
+    tl_lab = np.stack([_labels_one_cell(), _labels_one_cell()], axis=0)
     panel, _model, _repo, viewer_win = _build(
-        qtbot, monkeypatch, segmentation="cells", existing=["adaptive"]
+        qtbot, monkeypatch, segmentation="cells", existing=["adaptive"], labels=tl_lab
     )
     store = panel._get_store()
     store.metadata = {"n_timepoints": 2}
     viewer_win.viewer.layers[0].data = np.stack([_blob_image(), _blob_image()], axis=0)
+    store.read_mask.return_value = np.ones((2, 120, 120), dtype=np.uint8)
     _select_source_mask(panel, "adaptive")
+
+    comp = np.zeros((2, 120, 120), dtype=np.int32)
+    comp[0, 10:20, 10:20] = 1
+    comp[1, 30:40, 30:40] = 2  # globally-unique ids across frames
+    records = [
+        {"label": 1, "cnr": 3.0, "timepoint": 0},
+        {"label": 2, "cnr": 30.0, "timepoint": 1},
+    ]
+    captured = {}
+
+    def _stub(image, feature_mask, labels):
+        captured["shape"] = np.asarray(image).shape
+        return records, comp
+
+    monkeypatch.setattr(panel_module, "run_cnr_measure_stack", _stub)
 
     panel._on_segment_cnr()
 
-    assert panel._measure_worker is None  # segmenter never dispatched on a time-lapse
+    assert panel._measure_worker._fn is panel_module.run_cnr_measure_stack
+    assert captured["shape"] == (2, 120, 120)  # the (T,H,W) channel reached the pooler
+    from percell4.gui.cnr_segmenter import CnrSegmenterWindow
+
+    assert isinstance(panel._cnr_segmenter, CnrSegmenterWindow)
+    assert panel._cnr_segmenter._comp.shape == (2, 120, 120)  # window got (T,H,W)
+    panel._cnr_segmenter.close()
 
 
 def test_classify_reads_source_mask_and_passes_mode(qtbot, monkeypatch):

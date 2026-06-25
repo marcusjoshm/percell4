@@ -92,7 +92,6 @@ def test_run_adaptive_auto_extract_stack_blank_frame_degrades(monkeypatch):
     """R9: in auto-detect mode a frame with no blobs becomes an empty plane, not an
     aborted run."""
     import percell4.domain.measure.auto_extraction as ae_mod
-
     from percell4.domain.measure.auto_extraction import NoParticlesFound
 
     def fake_auto_extract(image, labels, *, smallest_particle_px=None,
@@ -188,6 +187,55 @@ def test_run_cnr_classification_stack_single_population_one_mask(monkeypatch):
     )
     assert [s for s, _ in pop_masks] == [""]   # one mask under the base name
     assert pop_masks[0][1].shape == (2, 6, 6)
+
+
+def test_run_cnr_measure_stack_pools_and_globally_relabels():
+    """The stack measure worker pools foci across frames into one record list with
+    globally-unique component ids that match the (T,H,W) component image per frame —
+    so the segmenter builds ONE histogram and applies the dividers to every frame."""
+    from skimage.draw import disk
+
+    def _frame(levels, seed):
+        rng = np.random.RandomState(seed)
+        img = rng.normal(100.0, 5.0, (200, 200)).astype(np.float32)
+        lab = np.ones((200, 200), dtype=np.int32)
+        m = np.zeros((200, 200), dtype=np.uint8)
+        for (cy, cx), lvl in zip([(40, 40), (40, 120), (120, 40), (120, 120)], levels):
+            rr, cc = disk((cy, cx), 3, shape=(200, 200))
+            img[rr, cc] = 100.0 + lvl
+            m[rr, cc] = 1
+        return img, m, lab
+
+    f0 = _frame([30, 30, 400, 400], 0)
+    f1 = _frame([30, 30, 30, 400], 1)
+    img = np.stack([f0[0], f1[0]])
+    mask = np.stack([f0[1], f1[1]])
+    lab = np.stack([f0[2], f1[2]])
+
+    records, comp = acp.run_cnr_measure_stack(img, mask, lab)
+
+    assert comp.shape == (2, 200, 200)
+    assert sorted({r["timepoint"] for r in records}) == [0, 1]
+    ids0 = set(np.unique(comp[0]).tolist()) - {0}
+    ids1 = set(np.unique(comp[1]).tolist()) - {0}
+    assert ids0 and ids1 and ids0.isdisjoint(ids1)  # globally unique across frames
+    # every valid record's label exists in its OWN frame's component image (alignment)
+    for r in records:
+        if np.isfinite(r["cnr"]) and r["cnr"] > 0:
+            frame_ids = ids0 if r["timepoint"] == 0 else ids1
+            assert r["label"] in frame_ids
+
+
+def test_run_cnr_measure_stack_empty_frame_contributes_no_ids():
+    """A frame with no foci adds an all-zero plane and no records (offset unchanged)."""
+    rng = np.random.RandomState(0)
+    img = rng.normal(100.0, 5.0, (2, 80, 80)).astype(np.float32)
+    lab = np.ones((2, 80, 80), dtype=np.int32)
+    mask = np.zeros((2, 80, 80), dtype=np.uint8)  # no foci in either frame
+    records, comp = acp.run_cnr_measure_stack(img, mask, lab)
+    assert comp.shape == (2, 80, 80)
+    assert int(comp.max()) == 0
+    assert records == []
 
 
 def test_accept_puncta_mask_persists_thw(tmp_h5):

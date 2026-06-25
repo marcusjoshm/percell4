@@ -315,6 +315,47 @@ def run_cnr_measure(image, feature_mask, labels):
     return records, component_labels
 
 
+def run_cnr_measure_stack(image, feature_mask, labels):
+    """Worker body for the interactive segmenter on a time-lapse ``(T,H,W)`` channel.
+
+    Measures per-focus CNR for **every frame** and POOLS the foci into one flat record
+    list, offsetting each frame's component ids so they are globally unique across the
+    stack. Returns ``(records, component_labels)`` where ``component_labels`` is a
+    ``(T,H,W)`` label image whose ids match the pooled records' ``label`` field — so the
+    shape-agnostic :class:`~percell4.gui.cnr_segmenter.CnrSegmenterWindow` builds ONE
+    histogram from all timepoints and applies the divider threshold(s) to every frame
+    (its segment image + saved masks come out ``(T,H,W)``). Each record also carries its
+    ``timepoint``. Mirrors :func:`run_cnr_measure`'s per-frame ``measure_cnr`` + matching
+    ``scipy.ndimage.label`` so the record/label alignment that the window relies on holds
+    globally. Pure (no Qt / store) so it is worker-safe and unit-testable.
+    """
+    from scipy.ndimage import label
+
+    from percell4.domain.measure.cnr_classification import measure_cnr
+
+    image = np.asarray(image)
+    feature_mask = np.asarray(feature_mask)
+    labels = np.asarray(labels)
+    records: list[dict] = []
+    comp_frames: list[np.ndarray] = []
+    offset = 0
+    for t in range(image.shape[0]):
+        recs = measure_cnr(image[t], feature_mask[t], labels[t])
+        comp_t, n_t = label(feature_mask[t] > 0)
+        comp_t = comp_t.astype(np.int64)
+        comp_t[comp_t > 0] += offset  # globally-unique ids across frames
+        for r in recs:
+            r = dict(r)
+            r["timepoint"] = int(t)
+            if int(r.get("label", 0)) > 0:
+                r["label"] = int(r["label"]) + offset
+            records.append(r)
+        comp_frames.append(comp_t)
+        offset += int(n_t)
+    component_labels = np.stack(comp_frames, axis=0)
+    return records, component_labels
+
+
 class AdaptiveClipPanel(QWidget):
     """Interactive Adaptive Local Clipping panel (Creator)."""
 
@@ -1318,20 +1359,27 @@ class AdaptiveClipPanel(QWidget):
         """Open the interactive CNR histogram segmenter for the selected mask.
 
         Shares the CNR source-mask selector + pre-flight with the auto classifier;
-        measures per-focus CNR off-thread, then opens :class:`CnrSegmenterWindow`.
+        measures per-focus CNR off-thread, then opens :class:`CnrSegmenterWindow`. For a
+        time-lapse ``(T,H,W)`` channel the foci of ALL timepoints are pooled into one
+        histogram and the divider threshold(s) apply to every frame equally.
         """
-        resolved = self._resolve_cnr_inputs()
+        resolved = self._resolve_cnr_inputs(allow_timelapse=True)
         if resolved is None:
             return
         image, labels, feature_mask, cfg = resolved
 
         self._pending_segment_source = cfg.source_mask
         self._segment_btn.setEnabled(False)
-        self._show_status(f"Measuring CNR for '{cfg.source_mask}'...")
+        # Time-lapse: pool foci across frames (one histogram); single-frame: the 2D
+        # worker. Both return (records, component_labels) for the shape-agnostic window.
+        is_timelapse = np.asarray(image).ndim == 3
+        worker_fn = run_cnr_measure_stack if is_timelapse else run_cnr_measure
+        tl_note = f" across {np.asarray(image).shape[0]} timepoints" if is_timelapse else ""
+        self._show_status(f"Measuring CNR for '{cfg.source_mask}'{tl_note}...")
 
         from percell4.gui.workers import Worker
 
-        self._measure_worker = Worker(run_cnr_measure, image, feature_mask, labels)
+        self._measure_worker = Worker(worker_fn, image, feature_mask, labels)
         self._measure_worker.finished.connect(self._on_measure_done)
         self._measure_worker.error.connect(self._on_measure_error)
         self._measure_worker.start()
