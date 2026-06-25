@@ -6,8 +6,7 @@ import numpy as np
 import pytest
 from skimage.draw import disk
 
-import pytest
-
+from percell4.domain.measure.adaptive_clip import per_cell_sigma
 from percell4.domain.measure.auto_extraction import (
     AutoExtractReport,
     auto_extract,
@@ -15,7 +14,6 @@ from percell4.domain.measure.auto_extraction import (
     measure_smallest_particle_diameter,
     noise_symmetry_floor_k,
 )
-from percell4.domain.measure.adaptive_clip import per_cell_sigma
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 
 
