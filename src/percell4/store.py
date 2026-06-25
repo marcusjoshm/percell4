@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from percell4.domain.io.models import (
     CrossFormatRule,
     ExplicitRule,
     ProvenanceRecord,
+    StitchProvenanceRecord,
 )
 from percell4.domain.io.view_bin import (
     majority_vote_mask,
@@ -185,6 +187,28 @@ class DimsConsistencyError(Exception):
 # ``from percell4.store import LayerAlreadyExists`` still work.
 LayerAlreadyExists = LayerAlreadyExistsError
 CrossFormatRuleConflict = CrossFormatRuleConflictError
+
+
+@dataclass(frozen=True)
+class StitchGeometry:
+    """Registered overlap-stitch geometry read back from a dataset.
+
+    ``registered`` is the commit marker (``/metadata.stitch_registered``).
+    When a dataset was never registered (or predates the feature), the
+    ``stitch/tile_offsets`` dataset is absent and this reads back as
+    ``registered=False`` with ``offsets=None`` — the back-compat / grid
+    path signal for consumers (R6/AE4).
+
+    ``offsets`` is the ``(N, 2) int32`` array of per-tile ``(y0, x0)``
+    top-left corners, with per-axis min exactly 0 (asserted on both write
+    and read) so the canvas derivation is unconditionally
+    ``max(offset + extent)``.
+    """
+
+    registered: bool
+    offsets: NDArray | None
+    reference_channel: str | None
+    overlap: float | None
 
 
 def _choose_chunks(shape: tuple[int, ...], is_decay: bool = False) -> tuple[int, ...]:
@@ -356,6 +380,102 @@ class DatasetStore:
         used to open ``h5py.File`` directly).
         """
         return self.read_array(f"decay/{channel}", view_bin=view_bin)
+
+    # ── Stitch geometry (registered overlap mosaics) ──────────
+
+    def write_stitch_geometry(
+        self,
+        offsets: NDArray,
+        provenance: StitchProvenanceRecord,
+        *,
+        reference_channel: str,
+        overlap: float,
+    ) -> None:
+        """Persist registered overlap-stitch geometry through the store boundary.
+
+        Writes three things, with the commit marker written **strictly
+        last** so a crash mid-write leaves an un-registered (recoverable)
+        file rather than a half-registered brick:
+
+        1. ``stitch/tile_offsets`` -- the ``(N, 2) int32`` per-tile
+           ``(y0, x0)`` array, via :meth:`write_array` (pass-through
+           view-bin, lossless, no ``is_decay``/``dims`` requirement).
+        2. ``/provenance/stitch`` group attrs from ``provenance.to_attrs()``
+           (mirrors how decay provenance is written -- group attrs).
+        3. ``/metadata`` attrs ``stitch_reference_channel`` (str) and
+           ``stitch_overlap`` (float), then ``stitch_registered = True``
+           **last** (the commit point, R4/U6 ordering).
+
+        ``offsets`` must have per-axis min exactly 0 (the canvas
+        derivation depends on it); this is asserted before any write.
+        """
+        offsets = np.asarray(offsets, dtype=np.int32)
+        if offsets.ndim != 2 or offsets.shape[1] != 2:
+            raise ValueError(
+                f"offsets must be (N, 2); got shape {offsets.shape}"
+            )
+        if offsets.size:
+            mins = offsets.min(axis=0)
+            assert int(mins[0]) == 0 and int(mins[1]) == 0, (
+                f"offsets per-axis min must be 0; got {tuple(int(m) for m in mins)}"
+            )
+
+        # 1. Offset array (own write boundary).
+        self.write_array("stitch/tile_offsets", offsets)
+
+        # 2. Provenance group attrs (mirror /provenance/decay/<ch>).
+        with h5py.File(self.path, "a") as f:
+            prov_path = "provenance/stitch"
+            if prov_path in f:
+                del f[prov_path]
+            grp = f.require_group(prov_path)
+            for key, val in provenance.to_attrs().items():
+                grp.attrs[key] = val
+
+        # 3. Metadata scalars, with the commit marker STRICTLY LAST.
+        self.set_metadata(
+            {
+                "stitch_reference_channel": str(reference_channel),
+                "stitch_overlap": float(overlap),
+            }
+        )
+        self.set_metadata({"stitch_registered": True})
+
+    def read_stitch_geometry(self) -> StitchGeometry:
+        """Read registered overlap-stitch geometry back from the dataset.
+
+        Flags are read **fresh** from ``/metadata`` on every call (never
+        cached on the store) so an in-session write is always observed.
+        When ``stitch/tile_offsets`` is absent (an older / never-registered
+        ``.h5``), the :class:`KeyError` from :meth:`read_array` is caught
+        and reported as ``registered=False`` / ``offsets=None`` -- the
+        back-compat grid-path signal.
+
+        Asserts the read-back offsets have per-axis min 0 (the same
+        invariant enforced on write).
+        """
+        try:
+            offsets = self.read_array("stitch/tile_offsets")
+        except KeyError:
+            return StitchGeometry(
+                registered=False,
+                offsets=None,
+                reference_channel=None,
+                overlap=None,
+            )
+        if offsets.size:
+            mins = offsets.min(axis=0)
+            assert int(mins[0]) == 0 and int(mins[1]) == 0, (
+                f"persisted offsets per-axis min must be 0; "
+                f"got {tuple(int(m) for m in mins)}"
+            )
+        meta = self.metadata
+        return StitchGeometry(
+            registered=bool(meta.get("stitch_registered", False)),
+            offsets=offsets,
+            reference_channel=meta.get("stitch_reference_channel"),
+            overlap=meta.get("stitch_overlap"),
+        )
 
     def read_channel(
         self,
@@ -1097,6 +1217,10 @@ class DatasetStore:
                 attrs["creation_bin"] = int(attrs["creation_bin"])
             if "n_timepoints" in attrs:
                 attrs["n_timepoints"] = int(attrs["n_timepoints"])
+            if "stitch_overlap" in attrs:
+                attrs["stitch_overlap"] = float(attrs["stitch_overlap"])
+            if "stitch_registered" in attrs:
+                attrs["stitch_registered"] = bool(attrs["stitch_registered"])
             return attrs
         finally:
             self._close_if_not_session(f)
