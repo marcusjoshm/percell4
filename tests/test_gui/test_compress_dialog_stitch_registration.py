@@ -70,6 +70,27 @@ def test_reference_combo_is_editable(qtbot) -> None:
     assert dlg._stitch_reference.isEditable()
 
 
+def test_fusion_defaults_to_none_and_threads_into_tile_config(qtbot) -> None:
+    """The Fusion combo defaults to None and threads its value into TileConfig."""
+    from percell4.gui.compress_dialog import CompressDialog
+
+    dlg = CompressDialog()
+    qtbot.addWidget(dlg)
+    dlg._stitch_check.setChecked(True)
+    dlg._stitch_rows.setValue(2)
+    dlg._stitch_cols.setValue(2)
+
+    # Default is None.
+    assert dlg._stitch_fusion.currentData() == "none"
+    assert dlg.compress_config.tile_config.fusion_method == "none"
+
+    # Selecting Linear Blending threads through.
+    idx = dlg._stitch_fusion.findData("linear_blending")
+    assert idx >= 0
+    dlg._stitch_fusion.setCurrentIndex(idx)
+    assert dlg.compress_config.tile_config.fusion_method == "linear_blending"
+
+
 def test_rename_channel_updates_reference_combo(qtbot) -> None:
     """Renaming a channel in Manual mode makes the new name selectable as the
     registration reference and drops the stale chXX id.

@@ -557,6 +557,68 @@ def test_register_intensity_decay_same_canvas_and_winner(tmp_path):
     assert winner[10, 10] == 1  # tile0 exclusive region
 
 
+def test_register_blending_forced_none_with_decay(tmp_path):
+    """linear_blending requested on a FLIM (.bin decay) dataset is forced to
+    'none' (warns) so /intensity stays single-tile and aligned with /decay."""
+    src = tmp_path / "raw"
+    _write_overlapping_tiles(src, _textured_scene(11), make_bin=True)
+    h5 = tmp_path / "out.h5"
+    flim = {
+        "frequency_mhz": 80.0,
+        "channel_calibrations": {},
+        "bin_dimensions": {
+            "x_dim": _REG_TW, "y_dim": _REG_TH, "t_dim": 4,
+            "dtype": "uint32", "dim_order": "YXT", "header_bytes": 0,
+        },
+    }
+    with pytest.warns(UserWarning, match="forcing 'none'"):
+        import_dataset(
+            src, h5,
+            tile_config=_reg_tile_config(fusion_method="linear_blending"),
+            flim_params=flim,
+        )
+    store = DatasetStore(h5)
+    # Forced to none → /intensity and /decay still resolve overlaps identically.
+    decay_winner = store.read_array("decay/ch00")[..., 0]
+    assert decay_winner[10, 50] == 2  # single-tile assignment preserved
+
+
+def test_register_blending_changes_intensity_only(tmp_path):
+    """Without decay, linear_blending is applied to /intensity: the overlap is
+    fused differently from 'none', so the two outputs differ on the same canvas.
+
+    Each tile carries a per-tile brightness bias (a DC offset phase correlation
+    is robust to) so the overlap regions actually DIFFER between neighbours —
+    otherwise blending identical cut-from-one-scene content equals overwrite.
+    """
+    scene = _textured_scene(11).astype(np.float32)
+
+    def _write_biased(src):
+        src.mkdir(parents=True, exist_ok=True)
+        for i, (y, x) in _REG_CORNERS.items():
+            tile = scene[y : y + _REG_TH, x : x + _REG_TW] + i * 200.0
+            tifffile.imwrite(
+                str(src / f"img_s{i:02d}_ch00.tif"), tile.astype(np.uint16)
+            )
+
+    src_n = tmp_path / "none"
+    _write_biased(src_n)
+    h5_n = tmp_path / "none.h5"
+    import_dataset(src_n, h5_n, tile_config=_reg_tile_config(fusion_method="none"))
+
+    src_b = tmp_path / "blend"
+    _write_biased(src_b)
+    h5_b = tmp_path / "blend.h5"
+    import_dataset(
+        src_b, h5_b, tile_config=_reg_tile_config(fusion_method="linear_blending")
+    )
+
+    inone = DatasetStore(h5_n).read_array("intensity")
+    iblend = DatasetStore(h5_b).read_array("intensity")
+    assert inone.shape == iblend.shape  # same registered canvas
+    assert not np.array_equal(inone, iblend)  # overlap fused differently
+
+
 def test_register_byte_identical_to_grid_when_register_false(tmp_path):
     """AE3 (critical): the SAME source with register=False yields /intensity
     bytes identical to the pre-feature grid path. Golden np.array_equal.

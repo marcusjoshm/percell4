@@ -518,9 +518,26 @@ def import_dataset(
                     stacklevel=2,
                 )
 
+        # Overlap fusion. Blending alters overlap intensities, so it is forced
+        # to "none" when FLIM decay is present (the decay stream hard-assigns
+        # each overlap pixel to one tile; /intensity must match it — R7) and is
+        # never applied to label/mask layers (averaging labels is meaningless).
+        has_decay = bool(bin_files) or bool(tcspc_files)
+        intensity_fusion = tile_config.fusion_method
+        if intensity_fusion != "none" and has_decay:
+            warnings.warn(
+                f"Fusion {intensity_fusion!r} requested but FLIM decay is "
+                "present; forcing 'none' so /intensity and /decay resolve every "
+                "overlap pixel to the same tile. Blending is offered only for "
+                "intensity-only datasets.",
+                stacklevel=2,
+            )
+            intensity_fusion = "none"
+
         # Assemble EVERY captured layer at the solved offsets (post-bin).
         for layer_name, layer_type in reg_channel_order:
             per_tp_sinks = reg_channel_tiles[layer_name]
+            fusion = intensity_fusion if layer_type == "channel" else "none"
             planes = []
             for sink in per_tp_sinks:
                 binned = _bin_tiles(sink, layer_type)
@@ -530,6 +547,7 @@ def import_dataset(
                         stitch_offsets,
                         stitch_canvas,
                         disconnected=stitch_disconnected,
+                        fusion_method=fusion,
                     )
                 )
             if n_timepoints > 1:

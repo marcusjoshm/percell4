@@ -482,6 +482,57 @@ def test_assemble_dtype_preserved():
     assert out.dtype == np.uint16
 
 
+# ── fusion methods (none / linear_blending) ───────────────────
+
+
+def test_linear_blending_blends_overlap():
+    """linear_blending feathers the overlap: an overlap pixel lies strictly
+    between the two tiles' values, while exclusive regions keep their tile."""
+    t0 = np.full((10, 10), 10, dtype=np.float32)
+    t1 = np.full((10, 10), 20, dtype=np.float32)
+    offsets = np.array([[0, 0], [0, 5]], dtype=np.int32)
+    canvas = canvas_from_offsets(offsets, (10, 10))
+    out = assemble_tiles_with_offsets(
+        {0: t0, 1: t1}, offsets, canvas, fusion_method="linear_blending"
+    )
+    ov = out[:, 5:10]  # overlap columns
+    assert np.all(ov > 10) and np.all(ov < 20)  # blended, not single-tile
+    assert np.allclose(out[:, 0:5], 10)   # tile 0 exclusive
+    assert np.allclose(out[:, 10:15], 20)  # tile 1 exclusive
+
+
+def test_fusion_none_is_single_tile_overwrite():
+    """fusion_method='none' (default) keeps the single-tile overwrite — the
+    overlap is exactly one tile's value (the decay-aligned, measurement path)."""
+    t0 = np.full((10, 10), 10, dtype=np.uint16)
+    t1 = np.full((10, 10), 20, dtype=np.uint16)
+    offsets = np.array([[0, 0], [0, 5]], dtype=np.int32)
+    canvas = canvas_from_offsets(offsets, (10, 10))
+    out = assemble_tiles_with_offsets(
+        {0: t0, 1: t1}, offsets, canvas, fusion_method="none"
+    )
+    assert np.all(out[:, 5:10] == 20)  # higher index wins, no blending
+
+
+def test_fusion_invalid_raises():
+    t0 = np.full((4, 4), 3, dtype=np.uint16)
+    with pytest.raises(ValueError, match="fusion_method"):
+        assemble_tiles_with_offsets(
+            {0: t0}, np.array([[0, 0]], dtype=np.int32), (4, 4),
+            fusion_method="bogus",
+        )
+
+
+def test_outlier_rejection_none_on_clean_mosaic():
+    """A perfect mosaic has no inconsistent pairs → zero outliers rejected (no
+    false positives that would needlessly disconnect tiles)."""
+    tiles = _overlapping_grid_tiles(3, 3, overlap=0.2, seed=3)
+    _o, _c, quality = estimate_tile_offsets(
+        tiles, 3, 3, "row_by_row", "right_down", overlap=0.2
+    )
+    assert quality["rejected_outliers"] == 0
+
+
 # ── disconnected demotion ─────────────────────────────────────
 
 

@@ -63,12 +63,24 @@ class TileConfig:
     overlap: float = 0.0  # tile overlap fraction in [0, 1)
     register: bool = False  # phase-correlation registration opt-in
     reference_channel: str | None = None  # channel name registration solves on
+    # Overlap fusion: how overlapping pixels combine. "none" = single tile wins
+    # (the only measurement-correct choice; required when FLIM decay is present
+    # so /intensity and /decay resolve every overlap pixel to the same tile).
+    # "linear_blending" = feathered weighted blend (seamless display; alters
+    # overlap intensities, so the importer forces "none" on FLIM datasets).
+    fusion_method: str = "none"  # none, linear_blending
 
     def __post_init__(self) -> None:
         valid_types = {"row_by_row", "column_by_column", "snake_by_row", "snake_by_column"}
         if self.grid_type not in valid_types:
             raise ValueError(
                 f"Unknown grid_type {self.grid_type!r}, must be one of {valid_types}"
+            )
+        valid_fusion = {"none", "linear_blending"}
+        if self.fusion_method not in valid_fusion:
+            raise ValueError(
+                f"Unknown fusion_method {self.fusion_method!r}, must be one of "
+                f"{valid_fusion}"
             )
         valid_orders = {
             "right_down", "right_up", "left_down", "left_up",

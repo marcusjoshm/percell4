@@ -275,6 +275,20 @@ class CompressDialog(QDialog):
         self._stitch_reference = QComboBox()
         self._stitch_reference.setEditable(True)
         stitch_layout.addWidget(self._stitch_reference)
+        # ── Overlap fusion ──
+        # "None" keeps each overlap pixel from a single tile (measurement-correct;
+        # forced for FLIM datasets). "Linear Blending" feathers the seam for a
+        # display mosaic. itemData carries the TileConfig value verbatim.
+        stitch_layout.addWidget(QLabel("Fusion:"))
+        self._stitch_fusion = QComboBox()
+        self._stitch_fusion.addItem("None", "none")
+        self._stitch_fusion.addItem("Linear Blending", "linear_blending")
+        self._stitch_fusion.setToolTip(
+            "How overlapping pixels combine. None = single tile (no intensity "
+            "distortion; required when FLIM decay is present). Linear Blending "
+            "= feathered seam for display (intensity-only datasets)."
+        )
+        stitch_layout.addWidget(self._stitch_fusion)
         stitch_layout.addStretch()
         self._stitch_widget.setVisible(False)
         settings_layout.addWidget(self._stitch_widget)
@@ -456,6 +470,7 @@ class CompressDialog(QDialog):
                 overlap=self._stitch_overlap.value() / 100.0,
                 register=self._stitch_register.isChecked(),
                 reference_channel=ref or None,
+                fusion_method=self._stitch_fusion.currentData() or "none",
             )
 
         # Dataset check states + name overrides

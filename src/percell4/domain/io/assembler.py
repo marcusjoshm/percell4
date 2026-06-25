@@ -495,34 +495,49 @@ def _coverage_fraction(
     return float(int(covered.sum()) / total)
 
 
+def _linear_blend_weight(th: int, tw: int) -> NDArray:
+    """Separable linear blend weight: per-axis distance to the nearest tile edge
+    (``+1`` so an edge keeps weight 1, never 0). Highest toward the tile centre,
+    so each overlap pixel is dominated by the tile whose centre is closest —
+    ImageJ-style feathering that fades a seam smoothly across the overlap.
+    """
+    y = np.minimum(np.arange(1, th + 1), np.arange(th, 0, -1)).astype(np.float64)
+    x = np.minimum(np.arange(1, tw + 1), np.arange(tw, 0, -1)).astype(np.float64)
+    return np.outer(y, x)
+
+
 def assemble_tiles_with_offsets(
     tiles: dict[int, NDArray],
     offsets: NDArray,
     canvas_hw: tuple[int, int],
     fill_value: int = 0,
     disconnected: tuple[int, ...] = (),
+    fusion_method: str = "none",
 ) -> NDArray:
-    """Place tiles at arbitrary integer offsets with overwrite fusion.
+    """Place tiles at arbitrary integer offsets and fuse the overlaps.
 
-    A hand-written integer overwrite loop — deliberately NOT the vendored
-    ``fuse`` (which upcasts to float64, re-clips, iterates in list order, and
-    recomputes the canvas). The canvas is pinned once and passed in.
+    ``fusion_method="none"`` (default): a hand-written integer overwrite loop —
+    deliberately NOT the vendored ``fuse``. Overlap priority is pinned **ascending
+    tile index** so the highest tile index wins every overlap pixel — identical to
+    the decay streamer's last-writer-wins, so intensity and decay resolve every
+    overlap pixel to the same tile (R7). **Disconnected tiles are placed first
+    (lowest priority)** so an untrusted, mis-placed tile can never overwrite a
+    correctly-registered neighbour. This is the only measurement-correct fusion
+    and the only one valid when FLIM decay is present.
 
-    Overlap priority is pinned **ascending tile index** so the highest tile
-    index wins every overlap pixel — identical to the decay streamer's
-    ``sorted(tile_bins.items())`` last-writer-wins, so intensity and decay
-    resolve every overlap pixel to the same tile (R7). **Disconnected tiles are
-    placed first (lowest priority)** so an untrusted, mis-placed tile can never
-    overwrite a correctly-registered neighbour's overlap region.
+    ``fusion_method="linear_blending"``: a feathered weighted average over every
+    covering tile (ImageJ's default), for a seamless DISPLAY mosaic. It alters
+    overlap intensities, so the importer forces ``none`` on FLIM datasets and
+    never blends label/mask layers.
 
     Parameters
     ----------
     tiles : dict mapping 0-based tile index to a 2D array.
     offsets : (N, 2) int array of ``(y0, x0)`` indexed by tile index.
     canvas_hw : ``(H, W)`` from :func:`canvas_from_offsets`.
-    fill_value : value for uncovered canvas pixels (distinguishable from genuine
-        zero signal when set non-zero).
-    disconnected : tile indices to demote to lowest overwrite priority.
+    fill_value : value for uncovered canvas pixels.
+    disconnected : tile indices to demote to lowest overwrite priority (``none``).
+    fusion_method : ``"none"`` (overwrite) or ``"linear_blending"``.
 
     Returns
     -------
@@ -530,18 +545,40 @@ def assemble_tiles_with_offsets(
     """
     if not tiles:
         raise ValueError("No tiles to assemble")
+    if fusion_method not in ("none", "linear_blending"):
+        raise ValueError(f"Unknown fusion_method {fusion_method!r}")
 
     first = next(iter(tiles.values()))
     h, w = int(canvas_hw[0]), int(canvas_hw[1])
-    output = np.full((h, w), fill_value, dtype=first.dtype)
+    offsets = np.asarray(offsets)
 
+    if fusion_method == "linear_blending":
+        acc = np.zeros((h, w), dtype=np.float64)
+        wsum = np.zeros((h, w), dtype=np.float64)
+        wcache: dict[tuple[int, int], NDArray] = {}
+        for tile_idx in sorted(tiles):
+            tile = tiles[tile_idx]
+            th, tw = tile.shape[:2]
+            wm = wcache.get((th, tw))
+            if wm is None:
+                wm = _linear_blend_weight(th, tw)
+                wcache[(th, tw)] = wm
+            y0 = int(offsets[tile_idx, 0])
+            x0 = int(offsets[tile_idx, 1])
+            acc[y0 : y0 + th, x0 : x0 + tw] += tile.astype(np.float64) * wm
+            wsum[y0 : y0 + th, x0 : x0 + tw] += wm
+        out = np.full((h, w), float(fill_value), dtype=np.float64)
+        covered = wsum > 0
+        out[covered] = acc[covered] / wsum[covered]
+        return out.astype(first.dtype)
+
+    output = np.full((h, w), fill_value, dtype=first.dtype)
     disconnected_set = set(disconnected)
     # Disconnected tiles first (lowest priority), then the rest in ascending
     # tile index so the highest registered index wins overlaps.
     placement_order = sorted(
         tiles, key=lambda idx: (idx not in disconnected_set, idx)
     )
-    offsets = np.asarray(offsets)
     for tile_idx in placement_order:
         tile = tiles[tile_idx]
         th, tw = tile.shape[:2]

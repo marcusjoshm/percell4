@@ -19,6 +19,18 @@ def test_defaults_are_backcompat() -> None:
     assert cfg.register is False
     assert cfg.overlap == 0.0
     assert cfg.reference_channel is None
+    assert cfg.fusion_method == "none"  # measurement-correct default
+
+
+def test_fusion_method_linear_blending_valid() -> None:
+    cfg = TileConfig(grid_rows=2, grid_cols=2, fusion_method="linear_blending")
+    assert cfg.fusion_method == "linear_blending"
+
+
+@pytest.mark.parametrize("bad", ["blend", "average", "Linear_Blending", ""])
+def test_invalid_fusion_method_raises(bad: str) -> None:
+    with pytest.raises(ValueError, match="fusion_method"):
+        TileConfig(grid_rows=2, grid_cols=2, fusion_method=bad)
 
 
 def test_frozen_and_hashable_equality() -> None:
