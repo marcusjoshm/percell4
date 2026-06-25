@@ -33,17 +33,58 @@ def _textured_tile(rng, h, w):
     return (rng.random((h, w)) * 1000).astype(np.float32)
 
 
-def _shifted_overlapping_pair(dy, dx, h=64, w=64):
-    """Two tiles cut from one big textured field, tile 1 offset by (dy, dx).
+def _inband_pair(overlap=0.25, h=64, w=64, jitter_y=5, jitter_x=-3, seed=1234):
+    """A 1x2 grid-adjacent pair: tile 1 at the grid step plus a small in-band
+    jitter (realistic stage drift), so it survives the overlap-band constraint.
 
-    Returns (tiles_dict, big_field) where tile 1's true image-axis offset
-    relative to tile 0 is exactly (dy, dx).
+    Returns ``(tiles, overlap, (dy, dx))`` where ``(dy, dx)`` is tile 1's true
+    image-axis offset relative to tile 0. The jitter keeps the pair within the
+    overlap band of its grid seed, so the grid-prior constraint keeps it.
     """
-    rng = np.random.default_rng(1234)
-    big = (rng.random((h + dy + 40, w + dx + 40)) * 1000).astype(np.float32)
+    step = int(round(w * (1 - overlap)))
+    dy = int(jitter_y)
+    dx = int(step + jitter_x)
+    rng = np.random.default_rng(seed)
+    big = (rng.random((h + dy + 8, w + dx + 8)) * 1000).astype(np.float32)
     t0 = big[0:h, 0:w].copy()
     t1 = big[dy : dy + h, dx : dx + w].copy()
-    return {0: t0, 1: t1}, big
+    return {0: t0, 1: t1}, overlap, (dy, dx)
+
+
+def _cell_like_grid(rows, cols, th, tw, overlap, seed=0):
+    """Cut a grid of quasi-repetitive 'cell-like' tiles (many similar blobs +
+    a faint periodic background) — the texture that makes UNCONSTRAINED
+    full-tile phase correlation lock onto spurious peaks and relocate tiles
+    1-2 tile-widths away. Adjacent tiles share the requested overlap.
+    """
+    rng = np.random.default_rng(seed)
+    step_y = int(round(th * (1 - overlap)))
+    step_x = int(round(tw * (1 - overlap)))
+    big_h = step_y * (rows - 1) + th
+    big_w = step_x * (cols - 1) + tw
+    field = np.zeros((big_h, big_w), np.float32)
+    # Sparse, quasi-repetitive blobs: dense enough to register confidently,
+    # sparse enough that full-tile correlation locks onto the wrong peak.
+    n_blobs = (big_h * big_w) // 3000
+    ys = rng.integers(0, big_h, n_blobs)
+    xs = rng.integers(0, big_w, n_blobs)
+    yy, xx = np.ogrid[-12:13, -12:13]
+    blob = np.exp(-(yy**2 + xx**2) / 40.0).astype(np.float32)
+    bh, bw = blob.shape
+    for y, x in zip(ys, xs):
+        y0 = min(int(y), big_h - bh)
+        x0 = min(int(x), big_w - bw)
+        field[y0 : y0 + bh, x0 : x0 + bw] += blob
+    gy, gx = np.mgrid[0:big_h, 0:big_w]
+    field += 0.3 * np.sin(2 * np.pi * gx / 47.0) * np.sin(2 * np.pi * gy / 47.0)
+    tiles: dict[int, np.ndarray] = {}
+    idx = 0
+    for r in range(rows):
+        for c in range(cols):
+            y0, x0 = r * step_y, c * step_x
+            tiles[idx] = field[y0 : y0 + th, x0 : x0 + tw].copy()
+            idx += 1
+    return tiles
 
 
 # ── canvas_from_offsets ───────────────────────────────────────
@@ -106,22 +147,23 @@ def test_estimate_recovers_known_offset_1x2():
 
 
 def test_axis_swap_guard_asymmetric_offset():
-    """CRITICAL: an asymmetric (dy=10, dx=3) shift recovers (y0,x0)=(10,3).
+    """CRITICAL: an asymmetric in-band shift recovers (y0,x0) image-axis order.
 
-    A symmetric shift could not distinguish (y,x) from (x,y). This pins the
-    image-axis convention that the prior FLIM cross-layer bug violated.
+    The asymmetry (dy != dx) distinguishes (y,x) from (x,y) and pins the
+    image-axis convention the prior FLIM cross-layer bug violated. The offset
+    stays within the overlap band of the grid seed (realistic stage drift), so
+    the grid-prior constraint keeps the pair instead of rejecting it.
     """
-    dy, dx = 10, 3
-    tiles, _ = _shifted_overlapping_pair(dy, dx)
+    tiles, overlap, (dy, dx) = _inband_pair(overlap=0.25, jitter_y=5, jitter_x=-3)
     offsets, _canvas, _quality = estimate_tile_offsets(
         tiles,
         grid_rows=1,
         grid_cols=2,
         grid_type="row_by_row",
         order="right_down",
-        overlap=0.4,
+        overlap=overlap,
     )
-    # tile 1 relative to tile 0 must be (dy, dx) == (10, 3), NOT (3, 10).
+    # tile 1 relative to tile 0 must be (dy, dx), NOT (dx, dy).
     rel_y = int(offsets[1][0]) - int(offsets[0][0])
     rel_x = int(offsets[1][1]) - int(offsets[0][1])
     assert (rel_y, rel_x) == (dy, dx), (
@@ -131,33 +173,33 @@ def test_axis_swap_guard_asymmetric_offset():
 
 def test_estimate_offsets_min_zero_per_axis():
     """Returned offsets always have per-axis min exactly 0."""
-    tiles, _ = _shifted_overlapping_pair(10, 3)
+    tiles, overlap, _ = _inband_pair()
     offsets, _canvas, _quality = estimate_tile_offsets(
         tiles,
         grid_rows=1,
         grid_cols=2,
         grid_type="row_by_row",
         order="right_down",
-        overlap=0.4,
+        overlap=overlap,
     )
     assert int(offsets[:, 0].min()) == 0
     assert int(offsets[:, 1].min()) == 0
 
 
 def test_estimate_offsets_dtype_int32():
-    tiles, _ = _shifted_overlapping_pair(10, 3)
+    tiles, overlap, _ = _inband_pair()
     offsets, _canvas, _quality = estimate_tile_offsets(
         tiles, grid_rows=1, grid_cols=2, grid_type="row_by_row",
-        order="right_down", overlap=0.4,
+        order="right_down", overlap=overlap,
     )
     assert offsets.dtype == np.int32
 
 
 def test_estimate_quality_carries_engine_params():
-    tiles, _ = _shifted_overlapping_pair(10, 3)
+    tiles, overlap, _ = _inband_pair()
     _offsets, _canvas, quality = estimate_tile_offsets(
         tiles, grid_rows=1, grid_cols=2, grid_type="row_by_row",
-        order="right_down", overlap=0.4,
+        order="right_down", overlap=overlap,
     )
     assert quality["regression_threshold"] == 0.3
     assert quality["n_peaks"] == 5
@@ -245,6 +287,65 @@ def test_degenerate_solve_raises():
             blank, grid_rows=2, grid_cols=2, grid_type="row_by_row",
             order="right_down", overlap=0.2,
         )
+
+
+# ── overlap-band constraint (grid-prior + final clamp) ────────
+
+
+def test_overlap_band_constrains_drift_on_ambiguous_texture():
+    """Regression: on quasi-repetitive cell-like texture the UNCONSTRAINED
+    engine relocated tiles 1-2 tile-widths away (~300px on a 200px tile). With
+    the grid-prior band filter + final clamp, no tile may sit more than the
+    overlap band from its grid seed — the user's 'a tile only ever moves within
+    its ~10% overlap'. Either the solve stays in-band or it raises (collapses to
+    grid); it must NEVER place a tile at an arbitrary overlap.
+    """
+    rows = cols = 3
+    th = tw = 200
+    overlap = 0.10
+    band = int(np.ceil(overlap * max(th, tw)))  # 20 px
+    tiles = _cell_like_grid(rows, cols, th, tw, overlap)
+    try:
+        offsets, _canvas, quality = estimate_tile_offsets(
+            tiles, rows, cols, "row_by_row", "right_down", overlap
+        )
+    except RegistrationError:
+        return  # acceptable: collapses to grid, never an arbitrary overlap
+    step_y = th * (1 - overlap)
+    step_x = tw * (1 - overlap)
+    for idx in range(rows * cols):
+        r, c = idx // cols, idx % cols
+        # deviation from the ideal grid, relative to tile 0 (normalisation-free)
+        rel_y = int(offsets[idx][0]) - int(offsets[0][0])
+        rel_x = int(offsets[idx][1]) - int(offsets[0][1])
+        assert abs(rel_y - r * step_y) <= 2 * band + 1, (idx, rel_y, r * step_y)
+        assert abs(rel_x - c * step_x) <= 2 * band + 1, (idx, rel_x, c * step_x)
+    assert quality["overlap_band_px"] == band
+
+
+def test_clean_mosaic_unaffected_by_band():
+    """A perfect overlapping mosaic still registers to the grid step exactly;
+    the band constraint must not perturb a good solve, and clamps nothing."""
+    tiles = _overlapping_grid_tiles(3, 3, overlap=0.2, seed=3)  # h=w=48
+    offsets, _canvas, quality = estimate_tile_offsets(
+        tiles, 3, 3, "row_by_row", "right_down", overlap=0.2
+    )
+    step = int(round(48 * (1 - 0.2)))  # 38
+    # tile 1 one step right of tile 0; tile 3 one step below tile 0.
+    assert abs((int(offsets[1][1]) - int(offsets[0][1])) - step) <= 1
+    assert abs((int(offsets[3][0]) - int(offsets[0][0])) - step) <= 1
+    assert quality["clamped_tiles"] == []
+
+
+def test_quality_carries_overlap_band():
+    """The band + clamp report into the quality dict for reproducibility."""
+    tiles, overlap, _ = _inband_pair()
+    _o, _c, quality = estimate_tile_offsets(
+        tiles, grid_rows=1, grid_cols=2, grid_type="row_by_row",
+        order="right_down", overlap=overlap,
+    )
+    assert quality["overlap_band_px"] == int(np.ceil(overlap * 64))
+    assert quality["clamped_tiles"] == []
 
 
 # ── seed mapping table ────────────────────────────────────────

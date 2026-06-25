@@ -282,6 +282,14 @@ def estimate_tile_offsets(
 
     initial_positions = [t.position for t in seed_tiles]  # (x, y) order
 
+    # Grid-prior band: the overlap distance in pixels. A solved tile may only
+    # move within this band of its grid seed, so registration refines WITHIN the
+    # overlap region and can never relocate a tile a tile-width away (the
+    # full-tile spurious-peak failure mode). Auto-derived from the overlap
+    # geometry — the in-house analogue of ASHLAR's max_shift / MIST's (4r)^2,
+    # but tied to the overlap fraction rather than a user micron value.
+    band_px = int(math.ceil(float(overlap) * max(int(th), int(tw))))
+
     # Phase-correlation pairwise shifts + global least-squares optimisation.
     regression_threshold = 0.3
     n_peaks = 5
@@ -290,10 +298,36 @@ def estimate_tile_offsets(
         ndim=2,
         n_peaks=n_peaks,
         regression_threshold=regression_threshold,
+        max_dev=band_px if band_px > 0 else None,
     )
+
+    # Iterative outlier rejection (ImageJ-style): solve, drop the single pairwise
+    # shift least consistent with the global solution, re-solve — until every
+    # surviving shift agrees within `outlier_threshold` px or only a spanning set
+    # of pairs remains. Removes the few mis-registered pairs that would otherwise
+    # pull the least-squares and bow the far-corner tiles.
+    outlier_threshold = 2.5
+    n_rejected = 0
     positions_xy = optimize_positions(
         n_tiles, shifts, initial_positions, ndim=2
     )  # (N, 2) in (x, y)
+    while len(shifts) > n_tiles:
+        residuals = [
+            float(
+                np.abs(
+                    np.asarray(s.shift) - (positions_xy[s.j] - positions_xy[s.i])
+                ).max()
+            )
+            for s in shifts
+        ]
+        worst = int(np.argmax(residuals))
+        if residuals[worst] <= outlier_threshold:
+            break
+        shifts.pop(worst)
+        n_rejected += 1
+        positions_xy = optimize_positions(
+            n_tiles, shifts, initial_positions, ndim=2
+        )
 
     # Disconnected = tiles touched by no accepted pair (optimize_positions left
     # them at their seed / initial position; never trusted to win an overlap).
@@ -306,6 +340,22 @@ def estimate_tile_offsets(
     disconnected = sorted(
         slot_to_index[slot] for slot in range(n_tiles) if slot not in connected
     )
+
+    # Final hard clamp (grid-prior band): pin every solved position to within
+    # band_px of its own grid seed on each axis. The per-pair band gate already
+    # keeps each measured shift in-band, but a global least-squares chain could
+    # in principle accumulate drift; this clamp makes a tile escaping its
+    # overlap band MATHEMATICALLY IMPOSSIBLE regardless of solver pathology.
+    clamped_tiles: list[int] = []
+    if band_px > 0:
+        init_xy = np.asarray(initial_positions, dtype=np.float64)
+        pos_xy = np.asarray(positions_xy, dtype=np.float64)
+        clipped = np.minimum(np.maximum(pos_xy, init_xy - band_px), init_xy + band_px)
+        moved = np.any(clipped != pos_xy, axis=1)
+        clamped_tiles = sorted(
+            slot_to_index[slot] for slot in range(n_tiles) if bool(moved[slot])
+        )
+        positions_xy = clipped
 
     # Convert (x, y) positions → image-axis (y0, x0); round to int.
     offsets = np.empty((n_tiles, 2), dtype=np.int64)
@@ -352,6 +402,10 @@ def estimate_tile_offsets(
         "regression_threshold": float(regression_threshold),
         "n_peaks": int(n_peaks),
         "n_adjacent": int(n_adjacent),
+        "overlap_band_px": int(band_px),
+        "clamped_tiles": list(clamped_tiles),
+        "outlier_threshold": float(outlier_threshold),
+        "rejected_outliers": int(n_rejected),
     }
 
     # Degenerate-solve gate (R11): refuse to return a grid-equivalent canvas

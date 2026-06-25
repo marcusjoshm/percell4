@@ -142,7 +142,9 @@ def _overlap_correlation(img1: np.ndarray, img2: np.ndarray,
 
 def register_pair(img1: np.ndarray, img2: np.ndarray,
                   n_peaks: int = 5,
-                  min_overlap_ratio: float = 0.05) -> PeakResult:
+                  min_overlap_ratio: float = 0.05,
+                  expected_shift=None,
+                  max_dev=None) -> PeakResult:
     """
     Estimate the translation that best maps img2 onto img1.
 
@@ -156,6 +158,14 @@ def register_pair(img1: np.ndarray, img2: np.ndarray,
     min_overlap_ratio : float
         Minimum fraction of the smaller image that must overlap for a
         candidate shift to be accepted.
+    expected_shift, max_dev :
+        PerCell4 grid-prior band constraint (both or neither). ``expected_shift``
+        is the image-axis (row, col[, plane]) shift the regular grid predicts for
+        this pair; ``max_dev`` is the per-axis pixel tolerance (the overlap band).
+        Candidate shifts deviating from ``expected_shift`` by more than ``max_dev``
+        on any axis are discarded BEFORE scoring, so the best IN-BAND candidate
+        wins and a spurious far peak can never be selected. Default ``None`` keeps
+        the unconstrained Preibisch behaviour.
 
     Returns
     -------
@@ -168,6 +178,11 @@ def register_pair(img1: np.ndarray, img2: np.ndarray,
     min_overlap = int(min_overlap_ratio * min(img1.size, img2.size))
     min_overlap = max(min_overlap, 1)
 
+    constrained = expected_shift is not None and max_dev is not None
+    if constrained:
+        exp = [int(round(float(e))) for e in expected_shift]
+        tol = int(max_dev)
+
     best = PeakResult(shift=(0,) * img1.ndim, correlation=-1.0, overlap_size=0)
     seen = set()
     for peak in peaks:
@@ -175,6 +190,12 @@ def register_pair(img1: np.ndarray, img2: np.ndarray,
             if cand in seen:
                 continue
             seen.add(cand)
+            # Grid-prior band gate: only consider shifts within the overlap
+            # band of the expected grid position (PerCell4 addition).
+            if constrained and any(
+                abs(int(cand[ax]) - exp[ax]) > tol for ax in range(img1.ndim)
+            ):
+                continue
             corr, n = _overlap_correlation(img1, img2, cand, min_overlap)
             if corr > best.correlation:
                 best = PeakResult(shift=cand, correlation=corr, overlap_size=n)

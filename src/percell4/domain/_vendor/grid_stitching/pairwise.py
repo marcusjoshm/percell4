@@ -89,52 +89,56 @@ def _imgshift_to_xy(shift, img_ndim, ndim):
 def compute_pairwise_shifts(tiles, ndim,
                             n_peaks=5,
                             regression_threshold=0.3,
-                            only_neighbors=True):
+                            only_neighbors=True,
+                            max_dev=None):
     """
     Estimate relative shifts for all overlapping tile pairs.
 
-    Full tiles are phase-correlated against each other (they share a
-    large textured overlap), and the multi-peak / sign-disambiguation
-    machinery in :func:`register_pair` selects the shift whose real-space
-    overlap correlation is highest.  Only pairs whose initial positions
-    overlap, and whose resulting correlation exceeds
-    ``regression_threshold``, are kept.
+    For every pair whose seed positions overlap, BOTH tiles are cropped to that
+    expected overlap region (from the grid prior) and the crops are phase-
+    correlated — never the whole tiles. This is the load-bearing choice at low
+    overlap: a 10%-overlap pair shares only ~10% of a full tile, so full-tile
+    correlation starves (the true peak is buried under the non-overlapping 90%)
+    and most pairs fail the ``regression_threshold``; cropping to the overlap
+    region makes the shared content ~100% of the correlated area, so the true
+    peak dominates. This mirrors Fiji's "use approximate grid coordinates" path
+    (Preibisch 2009) and recovers its pair-clearing rate.
+
+    The two crops are the regions that SHOULD coincide, so the residual shift is
+    ~0. ``max_dev`` (PerCell4 grid-prior band): when set, candidate residual
+    shifts are bounded to ``±max_dev`` px per axis, rejecting a spurious slip
+    along the strip; the pair's final ``rel = (pos[j]-pos[i]) - residual`` then
+    stays within the overlap band of the grid prior. ``None`` leaves the
+    residual unconstrained.
     """
     shifts = []
     positions = [t.position for t in tiles]
     shapes = [_img_shape_xy(t.image, ndim) for t in tiles]
+    expected_residual = np.zeros(ndim) if max_dev is not None else None
 
     for i, j in itertools.combinations(range(len(tiles)), 2):
-        # Skip pairs that are not expected to overlap at all.
+        # Skip pairs whose seed positions are not expected to overlap.
         reg = _overlap_region(positions[i], shapes[i],
                               positions[j], shapes[j], ndim)
         if reg is None:
             continue
-        if tiles[i].image.shape != tiles[j].image.shape:
-            # Full-tile correlation needs equal shapes; fall back to the
-            # cropped overlap region when tile sizes differ.
-            sl_i, sl_j = reg
-            a = _slice_xy(tiles[i].image, sl_i)
-            b = _slice_xy(tiles[j].image, sl_j)
-            if min(a.shape) < 4 or a.shape != b.shape:
-                continue
-            res = register_pair(a, b, n_peaks=n_peaks)
-            if res.correlation < regression_threshold:
-                continue
-            sub_shift = _imgshift_to_xy(res.shift, tiles[i].image.ndim, ndim)
-            rel = (positions[j] - positions[i]) - sub_shift
-            shifts.append(PairwiseShift(i=i, j=j, shift=rel,
-                                        weight=res.correlation))
+        # Crop both tiles to the expected overlap region and correlate THOSE.
+        sl_i, sl_j = reg
+        a = _slice_xy(tiles[i].image, sl_i)
+        b = _slice_xy(tiles[j].image, sl_j)
+        if min(a.shape) < 4 or a.shape != b.shape:
             continue
-
-        # Equal-sized tiles: correlate the whole tiles.
-        res = register_pair(tiles[i].image, tiles[j].image,
-                            n_peaks=n_peaks)
+        res = register_pair(a, b, n_peaks=n_peaks,
+                            expected_shift=expected_residual, max_dev=max_dev)
         if res.correlation < regression_threshold:
             continue
-        # res.shift maps tile j onto tile i in image-axis order; this *is*
-        # the relative offset pos[j]-pos[i] expressed as (x, y[, z]).
-        rel = _imgshift_to_xy(res.shift, tiles[i].image.ndim, ndim)
+        # Residual shift of the overlap crops (~0 when aligned); the relative
+        # tile offset is the seed delta corrected by that residual. register_pair
+        # returns s = (drift) mapping crop_j onto crop_i, so rel = seed_delta + s
+        # (derivation: crop_j[r,c]=crop_i[r+dy, c+dx-step] ⇒ s=(dy, dx-step) ⇒
+        # rel_xy = (step,0)+(dx-step, dy) = (dx, dy); the sign is ADD, not sub).
+        sub_shift = _imgshift_to_xy(res.shift, tiles[i].image.ndim, ndim)
+        rel = (positions[j] - positions[i]) + sub_shift
         shifts.append(PairwiseShift(i=i, j=j, shift=rel,
                                     weight=res.correlation))
     return shifts
