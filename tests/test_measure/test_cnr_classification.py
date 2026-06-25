@@ -14,8 +14,10 @@ from skimage.draw import disk
 
 from percell4.domain.measure.cnr_classification import (
     ClassificationResult,
+    StackClassificationResult,
     assign_segments,
     classify_by_cnr,
+    classify_by_cnr_stack,
     measure_cnr,
     segment_label_image,
     segment_masks_from_label_image,
@@ -260,3 +262,96 @@ def test_segment_masks_from_label_image():
     assert masks[0].sum() == 1   # one pixel in seg 1
     assert masks[1].sum() == 2   # two pixels in seg 2
     assert masks[2].sum() == 0   # seg 3 empty -> all-zero mask
+
+
+# --------------------------------------------------------------------------- #
+# U2: classify_by_cnr_stack — per-frame time-lapse classification (R4, R5, R6)
+# --------------------------------------------------------------------------- #
+_SPLIT_LEVELS = np.concatenate([np.full(32, 30.0), np.full(32, 400.0)])  # two CNR clusters
+
+
+def _guided_threshold():
+    """A CNR threshold sitting between the two _SPLIT_LEVELS clusters."""
+    img, mask, labels = _make_foci(_SPLIT_LEVELS, noise_std=5.0)
+    return float(classify_by_cnr(img, mask, labels).report["candidate_cnr_threshold"])
+
+
+def _stack(frames):
+    """Stack a list of (img, mask, labels) into ((T,H,W), (T,H,W), (T,H,W))."""
+    img = np.stack([f[0] for f in frames], axis=0)
+    mask = np.stack([f[1] for f in frames], axis=0)
+    labels = np.stack([f[2] for f in frames], axis=0)
+    return img, mask, labels
+
+
+def test_classify_stack_guided_splits_every_frame_same_threshold():
+    """Guided mode applies ONE shared threshold to every timepoint independently."""
+    thr = _guided_threshold()
+    img, mask, labels = _stack([_make_foci(_SPLIT_LEVELS, seed=s) for s in (0, 1, 2)])
+    res = classify_by_cnr_stack(img, mask, labels, mode="guided", threshold=thr)
+    assert isinstance(res, StackClassificationResult)
+    assert res.low_stack.shape == img.shape and res.high_stack.shape == img.shape
+    assert res.low_stack.dtype == np.uint8 and res.high_stack.dtype == np.uint8
+    for fr in res.per_frame:
+        assert fr["n_subpopulations"] == 2
+        assert fr["low_px"] > 0 and fr["high_px"] > 0
+    # per-focus table spans all timepoints and is flagged 2-population per frame
+    assert set(res.table["timepoint"].unique()) == {0, 1, 2}
+    assert (res.table["n_subpopulations"] == 2).all()
+
+
+def test_classify_stack_always_exactly_T_frames_with_empty_frame():
+    """A frame with no foci is an all-zero plane — the stacks keep exactly T frames
+    (so they round-trip a store mask whose leading axis must equal n_timepoints)."""
+    thr = _guided_threshold()
+    empty = (
+        _make_foci(_SPLIT_LEVELS, seed=0)[0],          # real image
+        np.zeros(SHAPE, dtype=np.uint8),                # empty feature mask
+        _make_foci(_SPLIT_LEVELS, seed=0)[2],          # labels
+    )
+    img, mask, labels = _stack([_make_foci(_SPLIT_LEVELS, seed=1), empty])
+    res = classify_by_cnr_stack(img, mask, labels, mode="guided", threshold=thr)
+    assert res.low_stack.shape[0] == 2 and res.high_stack.shape[0] == 2
+    # frame 1 (empty) contributes all-zero planes, no rows, no raise
+    assert res.low_stack[1].sum() == 0 and res.high_stack[1].sum() == 0
+    assert res.per_frame[1]["low_px"] == 0 and res.per_frame[1]["high_px"] == 0
+    assert (res.table["timepoint"] == 1).sum() == 0
+
+
+def test_classify_stack_single_population_frame_flagged_not_dim():
+    """A frame whose bright group falls below MIN_FRACTION collapses to one population:
+    all its foci land in `low` (unclassified, not 'dim') and it is flagged
+    n_subpopulations==1 so a _low time-course can exclude it (ADV2)."""
+    thr = _guided_threshold()
+    flip = np.concatenate([np.full(63, 30.0), np.full(1, 400.0)])  # smaller group < 2%
+    img, mask, labels = _stack(
+        [_make_foci(_SPLIT_LEVELS, seed=0), _make_foci(flip, seed=1)]
+    )
+    res = classify_by_cnr_stack(img, mask, labels, mode="guided", threshold=thr)
+    assert res.per_frame[0]["n_subpopulations"] == 2          # early frame splits
+    assert res.per_frame[1]["n_subpopulations"] == 1          # late frame does not
+    assert res.per_frame[1]["high_px"] == 0                   # bright focus dumped into low
+    assert res.per_frame[1]["low_px"] > 0
+    # the table marks the non-splitting frame so downstream can flag it
+    f1 = res.table[res.table["timepoint"] == 1]
+    assert (f1["n_subpopulations"] == 1).all()
+
+
+def test_classify_stack_discover_mode_per_frame():
+    """Discover mode (no threshold) splits each frame on its own CNR gap."""
+    img, mask, labels = _stack([_make_foci(_SPLIT_LEVELS, seed=s) for s in (0, 1)])
+    res = classify_by_cnr_stack(img, mask, labels, mode="discover")
+    for fr in res.per_frame:
+        assert fr["n_subpopulations"] == 2
+
+
+def test_classify_stack_guided_requires_threshold():
+    img, mask, labels = _stack([_make_foci(_SPLIT_LEVELS, seed=0)])
+    with pytest.raises(ValueError, match="guided mode requires a threshold"):
+        classify_by_cnr_stack(img, mask, labels, mode="guided", threshold=None)
+
+
+def test_classify_stack_shape_mismatch_raises():
+    img, mask, labels = _stack([_make_foci(_SPLIT_LEVELS, seed=0)])
+    with pytest.raises(ValueError, match="share shape"):
+        classify_by_cnr_stack(img, mask, labels[:, :10, :10], mode="discover")

@@ -63,9 +63,11 @@ from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 
 __all__ = [
     "classify_by_cnr",
+    "classify_by_cnr_stack",
     "measure_cnr",
     "to_dataframe",
     "ClassificationResult",
+    "StackClassificationResult",
     "assign_segments",
     "segment_label_image",
     "segment_masks_from_label_image",
@@ -118,6 +120,33 @@ class ClassificationResult:
     split_axis: str | None
     threshold: float | None
     report: dict = field(default_factory=dict)
+
+
+@dataclass
+class StackClassificationResult:
+    """Per-frame CNR classification of a ``(T,H,W)`` feature mask (time-lapse).
+
+    Attributes
+    ----------
+    low_stack, high_stack : np.ndarray
+        ``(T,H,W)`` ``{0,1}`` uint8 population masks with **exactly ``T`` frames** — an
+        empty or single-population frame is an all-zero plane, never dropped — so each
+        round-trips a store mask whose leading axis must equal ``n_timepoints``.
+    table : pandas.DataFrame
+        The per-focus CNR table for the whole stack: every ``classify_by_cnr`` record
+        plus a ``timepoint`` column and a per-frame ``n_subpopulations`` column (so a
+        ``_low`` time-course can flag frames that did not split — see the
+        single-population note on :func:`classify_by_cnr_stack`). Empty when no frame
+        has foci.
+    per_frame : list[dict]
+        One summary per frame (``timepoint``, ``n_subpopulations``, ``decision``,
+        ``low_px``, ``high_px``) for the run-log.
+    """
+
+    low_stack: np.ndarray
+    high_stack: np.ndarray
+    table: Any
+    per_frame: list[dict]
 
 
 # --------------------------------------------------------------------------- #
@@ -476,6 +505,108 @@ def to_dataframe(result: ClassificationResult):
     import pandas as pd
 
     return pd.DataFrame(result.components)
+
+
+def classify_by_cnr_stack(
+    image_thw: np.ndarray,
+    feature_mask_thw: np.ndarray,
+    labels_thw: np.ndarray,
+    *,
+    mode: str = "guided",
+    threshold: float | None = None,
+    presmooth_sigma_px: float = 1.0,
+) -> StackClassificationResult:
+    """Classify each timepoint of a ``(T,H,W)`` feature mask independently (time-lapse).
+
+    The per-frame analog of :func:`classify_by_cnr`: every frame is classified on its
+    OWN ``image[t]`` / ``feature_mask[t]`` / ``cell_labels[t]``, so the per-cell σ and
+    the CNR are per-frame. ``mode`` mirrors :func:`classify_by_cnr`:
+
+    * ``"guided"`` (default): split each frame at the **one shared** ``threshold`` — the
+      same CNR cut applied to every timepoint (the time-lapse spec'd path).
+    * ``"forced"``: a 2-way split each frame.
+    * ``"discover"``: gap-based discovery each frame.
+
+    Per-frame **single-population semantics**: a frame that does not split — ``< 4`` foci,
+    or (after a split) the smaller group below :data:`MIN_FRACTION` — has every focus
+    labelled ``1``, so its foci land in ``low_stack[t]`` and ``high_stack[t]`` is empty,
+    exactly as the single-frame path does. ``low`` on such a frame therefore means
+    "unclassified for that frame", **not** "dim". The per-frame ``n_subpopulations`` (on
+    the returned table and ``per_frame`` summary) flags these so a ``_low`` time-course is
+    not silently contaminated by an unclassified frame.
+
+    Caveat: because ``σ_cell = 1.4826·MAD`` is measured per frame, one shared ``threshold``
+    is a fixed CNR *number* but not a fixed statistical *stringency* across frames whose
+    texture/brightness drifts (the convention doc's caveat). Expected, not a bug.
+
+    Raises :class:`ValueError` on a shape mismatch (all three must be ``(T,H,W)`` with the
+    same shape) or a guided call with no ``threshold``. Pure (numpy + pandas via
+    :func:`to_dataframe`); does no I/O.
+    """
+    import pandas as pd
+
+    image = np.asarray(image_thw)
+    fmask = np.asarray(feature_mask_thw)
+    labels = np.asarray(labels_thw)
+    if image.ndim != 3:
+        raise ValueError(
+            f"classify_by_cnr_stack expects a (T,H,W) image; got shape {image.shape}"
+        )
+    if not (image.shape == fmask.shape == labels.shape):
+        raise ValueError(
+            "image, feature_mask and cell_labels must share shape (T,H,W); got "
+            f"{image.shape}, {fmask.shape}, {labels.shape}"
+        )
+    if mode == "guided" and threshold is None:
+        raise ValueError("guided mode requires a threshold")
+
+    n_t = int(image.shape[0])
+    low_frames: list[np.ndarray] = []
+    high_frames: list[np.ndarray] = []
+    tables: list = []
+    per_frame: list[dict] = []
+    for t in range(n_t):
+        if mode == "guided":
+            res = classify_by_cnr(
+                image[t], fmask[t], labels[t],
+                threshold=float(threshold), presmooth_sigma_px=presmooth_sigma_px,
+            )
+        elif mode == "forced":
+            res = classify_by_cnr(
+                image[t], fmask[t], labels[t],
+                n_populations=2, presmooth_sigma_px=presmooth_sigma_px,
+            )
+        else:  # discover
+            res = classify_by_cnr(
+                image[t], fmask[t], labels[t], presmooth_sigma_px=presmooth_sigma_px
+            )
+        lab_img = np.asarray(res.labels_image)
+        low = (lab_img == 1).astype(np.uint8)
+        high = (lab_img == 2).astype(np.uint8)
+        low_frames.append(low)
+        high_frames.append(high)
+        df_t = to_dataframe(res)
+        df_t["timepoint"] = t
+        df_t["n_subpopulations"] = res.n_subpopulations
+        tables.append(df_t)
+        per_frame.append(
+            {
+                "timepoint": t,
+                "n_subpopulations": int(res.n_subpopulations),
+                "decision": res.report.get("decision"),
+                "low_px": int(low.sum()),
+                "high_px": int(high.sum()),
+            }
+        )
+
+    # Always exactly T frames — empty/single-population frames are all-zero planes, so the
+    # stacks round-trip a store mask whose leading axis must equal n_timepoints.
+    low_stack = np.stack(low_frames, axis=0).astype(np.uint8)
+    high_stack = np.stack(high_frames, axis=0).astype(np.uint8)
+    table = pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+    return StackClassificationResult(
+        low_stack=low_stack, high_stack=high_stack, table=table, per_frame=per_frame
+    )
 
 
 # --------------------------------------------------------------------------- #
