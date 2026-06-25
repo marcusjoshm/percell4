@@ -619,59 +619,13 @@ def import_dataset(
             )
             continue
 
-        # Legacy path retained for the (unused-in-practice) non-streaming
-        # case so the loop body stays a single shape.
-        if isinstance(decay_info, dict) and decay_info.get("_streaming"):
-            import h5py
-            from percell4.adapters.readers import read_flim_bin
-            info = decay_info
-            with h5py.File(store.path, "a") as f:
-                if decay_path in f:
-                    del f[decay_path]
-                dset = f.create_dataset(
-                    decay_path,
-                    shape=(info["out_h"], info["out_w"], info["n_bins"]),
-                    dtype=np.float32,
-                    chunks=(
-                        min(64, info["tile_h"]),
-                        min(64, info["tile_w"]),
-                        info["n_bins"],
-                    ),
-                    compression="lzf",
-                )
-                dset.attrs["dims"] = ["H", "W", "T"]
-                dset.attrs["channel"] = ch_name
-                for tile_idx, bin_path in sorted(info["tile_bins"].items()):
-                    tile_data = read_flim_bin(
-                        bin_path,
-                        x_dim=info["bin_dims"].get("x_dim", 512),
-                        y_dim=info["bin_dims"].get("y_dim", 512),
-                        t_dim=info["bin_dims"].get("t_dim", 132),
-                        dtype=info["bin_dims"].get("dtype", "float32"),
-                        dim_order=info["bin_dims"].get("dim_order", "YXT"),
-                        header_bytes=info["bin_dims"].get("header_bytes", 0),
-                    )["array"].astype(np.float32)
-                    if info["use_tiling"] and tile_idx in info["positions"]:
-                        row, col = info["positions"][tile_idx]
-                        y0 = row * info["tile_h"]
-                        x0 = col * info["tile_w"]
-                        dset[
-                            y0:y0 + info["tile_h"],
-                            x0:x0 + info["tile_w"],
-                            :,
-                        ] = tile_data
-                    else:
-                        dset[:, :, :] = tile_data
-
-                    del tile_data  # free immediately
-        else:
-            # In-memory array (from TCSPC TIFFs or single .bin)
-            store.write_array(
-                decay_path,
-                decay_info,
-                attrs={"dims": ["H", "W", "T"], "channel": ch_name},
-                is_decay=True,
-            )
+        # In-memory array (from TCSPC TIFFs or single .bin)
+        store.write_array(
+            decay_path,
+            decay_info,
+            attrs={"dims": ["H", "W", "T"], "channel": ch_name},
+            is_decay=True,
+        )
 
     # 6. Update project.csv
     if project_csv is not None:
@@ -811,6 +765,8 @@ def write_decay_streaming(
     positions: dict[int, tuple[int, int]],
     use_tiling: bool,
     spatial_bin: int = 1,
+    pixel_offsets: dict[int, tuple[int, int]] | None = None,
+    disconnected: tuple[int, ...] = (),
 ) -> None:
     """Stream-write a TCSPC decay channel to ``/decay/<channel_name>`` in an
     .h5 file, tile by tile.
@@ -833,13 +789,37 @@ def write_decay_streaming(
     512×512 tile to 170×170, dropping the 2 residual pixels per axis.
     Sum (not mean) preserves Poisson photon counts. ``tile_h``, ``tile_w``,
     ``out_h`` and ``out_w`` are the POST-binning dimensions.
+
+    ``pixel_offsets`` selects the registered (overlap-aware) placement path.
+    When ``None`` (default), tiles land on the fixed edge-to-edge grid
+    (``y0 = row·tile_h``, ``x0 = col·tile_w``) and the output is
+    byte-identical to the legacy grid path. When provided, it maps each
+    0-based tile index to an absolute post-bin ``(y0, x0)`` top-left corner;
+    the canvas comes from :func:`canvas_from_offsets` (never recomputed
+    inline) and tiles are placed with plain overwrite. Placement priority is
+    pinned **ascending tile index** (highest index wins overlaps), with any
+    indices in ``disconnected`` placed **first** (lowest priority) so an
+    untrusted tile never overwrites a registered neighbour — mirroring
+    ``assemble_tiles_with_offsets`` so intensity and decay resolve every
+    overlap pixel to the same tile. ``disconnected`` is ignored on the grid
+    path.
     """
     import h5py
 
     from percell4.adapters.readers import read_flim_bin
+    from percell4.domain.io.assembler import canvas_from_offsets
 
     if spatial_bin < 1:
         raise ValueError(f"spatial_bin must be >= 1, got {spatial_bin}")
+
+    registered = pixel_offsets is not None
+    if registered:
+        # Single canvas computation — never recompute (out_h/out_w) inline on
+        # the offset path. tile_h/tile_w are already post-bin.
+        offsets_array = np.array(
+            [pixel_offsets[i] for i in sorted(pixel_offsets)], dtype=np.int64
+        )
+        out_h, out_w = canvas_from_offsets(offsets_array, (tile_h, tile_w))
 
     decay_path = f"decay/{channel_name}"
     with h5py.File(h5_path, "a") as f:
@@ -848,7 +828,8 @@ def write_decay_streaming(
         # Invalidate stale phasor for this channel — without this, the GUI
         # phasor plot shows the OLD computed (g, s) maps even after the
         # underlying /decay layer was overwritten, which looks like a
-        # broken import. compute_phasor must be re-run to refresh.
+        # broken import. compute_phasor must be re-run to refresh. This MUST
+        # fire on both the grid and the offset path.
         phasor_path = f"phasor/{channel_name}"
         if phasor_path in f:
             del f[phasor_path]
@@ -864,7 +845,20 @@ def write_decay_streaming(
         if spatial_bin > 1:
             dset.attrs["spatial_bin"] = spatial_bin
 
-        for tile_idx, bin_path in sorted(tile_bins.items()):
+        if registered:
+            # Disconnected tiles first (lowest priority), then ascending tile
+            # index so the highest registered index wins overlaps — identical
+            # ordering to assemble_tiles_with_offsets.
+            disconnected_set = set(disconnected)
+            placement_order = sorted(
+                tile_bins,
+                key=lambda idx: (idx not in disconnected_set, idx),
+            )
+        else:
+            placement_order = sorted(tile_bins)
+
+        for tile_idx in placement_order:
+            bin_path = tile_bins[tile_idx]
             tile_data = read_flim_bin(
                 bin_path,
                 x_dim=bin_dims.get("x_dim", 512),
@@ -878,7 +872,10 @@ def write_decay_streaming(
             if spatial_bin > 1:
                 tile_data = _spatial_bin_tile(tile_data, spatial_bin)
 
-            if use_tiling and tile_idx in positions:
+            if registered:
+                y0, x0 = pixel_offsets[tile_idx]
+                dset[y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
+            elif use_tiling and tile_idx in positions:
                 row, col = positions[tile_idx]
                 y0 = row * tile_h
                 x0 = col * tile_w
