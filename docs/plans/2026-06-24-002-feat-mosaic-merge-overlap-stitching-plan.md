@@ -1,7 +1,7 @@
 ---
 title: "feat: Overlap-aware (phase-correlation) mosaic stitching"
 type: feat
-status: active
+status: completed
 date: 2026-06-24
 deepened: 2026-06-24
 origin: docs/brainstorms/2026-06-24-mosaic-merge-overlap-stitching-requirements.md
