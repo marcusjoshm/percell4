@@ -186,7 +186,9 @@ def main(argv: list[str] | None = None) -> int:
             "After the feature mask is produced, split its foci by contrast-to-"
             "noise ratio at --cnr-threshold into <round>_low / <round>_high masks "
             "plus a per-focus CNR table at /classification/<round>. Guided mode "
-            "only; valid only with --strategy adaptive-clip or auto-extract."
+            "only; valid only with --strategy adaptive-clip or auto-extract. "
+            "Time-lapse data is classified per timepoint at the same threshold "
+            "(the masks gain a T axis; the table a timepoint column)."
         ),
     )
     cnr.add_argument(

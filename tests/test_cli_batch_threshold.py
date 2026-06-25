@@ -316,6 +316,42 @@ def test_batch_threshold_cnr_classify_requires_alc_strategy(tmp_path, capsys):
     assert "adaptive-clip or" in capsys.readouterr().err
 
 
+def _make_adaptive_timelapse_dataset(path: Path, *, n_t: int = 2, pixel_size_um=0.12) -> None:
+    """A time-lapse single-channel dataset: a cell with structured background + a blob
+    per frame (writing a T-axis intensity sets n_timepoints)."""
+    store = DatasetStore(path)
+    meta = {"channel_names": ["GFP"]}
+    if pixel_size_um is not None:
+        meta["pixel_size_um"] = pixel_size_um
+    store.create(metadata=meta)
+    frame = np.zeros((100, 100), dtype=np.float32)
+    rows = np.arange(100).reshape(-1, 1)
+    frame[20:60, 20:60] = 10 + (rows[20:60] % 3)
+    frame[35:45, 35:45] = 200.0
+    store.write_array("intensity", np.stack([frame] * n_t, 0), attrs={"dims": ["T", "H", "W"]})
+    lab = np.zeros((100, 100), dtype=np.int32)
+    lab[20:60, 20:60] = 1
+    store.write_labels("cellpose", np.stack([lab] * n_t, 0).astype(np.int32))
+
+
+def test_batch_threshold_cnr_classify_timelapse_runs_per_frame(tmp_path, capsys):
+    """A time-lapse auto-extract + guided CNR run completes (no single-timepoint abort)
+    and writes a (T,H,W) base mask + a timepoint-columned /classification table."""
+    p = tmp_path / "TL.h5"
+    _make_adaptive_timelapse_dataset(p, n_t=2)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+        "--smallest-particle-um", "0.36", "--cnr-classify", "--cnr-threshold", "5",
+    ])
+    assert rc == 0
+    store = DatasetStore(p)
+    assert store.read_mask("ae").shape == (2, 100, 100)  # (T,H,W) base mask
+    table = store.read_dataframe("/classification/ae")
+    assert "timepoint" in table.columns
+    assert set(table["timepoint"].unique()) <= {0, 1}
+
+
 def test_batch_threshold_cnr_classify_writes_classification_table(tmp_path, capsys):
     p = tmp_path / "DS1.h5"
     _make_adaptive_dataset(p)
