@@ -82,17 +82,6 @@ SMALL_PERCENTILE = 5.0     # low LoG percentile taken as the smallest particle (
 MIN_SIGMA_SMALL = 0.5      # LoG scale floor for autodetecting the smallest particle
 LOG_PRESMOOTH = 1.0        # fixed pre-smoothing for LoG SIZING (decoupled from detection)
 MAX_SIGMA = 20.0           # upper LoG scale (caps the largest detectable particle)
-# LoG scale-grid resolution for SIZING the largest particle. The grid is
-# ``linspace(1, MAX_SIGMA, SIZE_NUM_SIGMA)`` and a blob's diameter is ``2√2·σ``, so a
-# coarse grid quantizes the measured largest to wide bins (12 scales → ~5px Ø steps:
-# 12.6, 17.5, 22.4 …). That pins the per-cell COARSE window to one value across a
-# time-lapse even as particles change size (each frame's p99 largest snaps to the same
-# bin). A finer grid lets the per-frame largest take intermediate values so the coarse
-# window TRACKS each frame (e.g. a dissolving granule series). Cost is ∝ SIZE_NUM_SIGMA
-# (one Gaussian-Laplace convolution per scale), paid once per frame — negligible beside
-# detection. EYE-VALIDATION GATE: the exact value is tuned on real data (the eye is
-# ground truth); 30 (≈1.85px Ø steps) is a defensible default, not a final constant.
-SIZE_NUM_SIGMA = 30        # LoG scales for largest-particle sizing (per-frame window tracking)
 
 
 def _win(x: float) -> int:
@@ -171,17 +160,14 @@ def measure_largest_particle_diameter(
     percentile: float = SIZE_PERCENTILE,
     presmooth_sigma_px: float = LOG_PRESMOOTH,
     max_sigma: float = MAX_SIGMA,
-    num_sigma: int = SIZE_NUM_SIGMA,
+    num_sigma: int = 12,
     threshold_rel: float = 0.1,
 ) -> float:
     """Largest particle diameter (px), from a high percentile of LoG blob sizes.
 
     The largest particle is bright and isolated, so its LoG peak is unambiguous
     and this is reliable; the ``percentile`` (default 99th, not the bare maximum)
-    guards against a spurious large-scale blob. ``num_sigma`` defaults to the finer
-    :data:`SIZE_NUM_SIGMA` grid so the measured Ø (and the coarse window derived from
-    it) tracks per-frame size changes rather than snapping to a coarse bin. Returns
-    ``0.0`` if none found.
+    guards against a spurious large-scale blob. Returns ``0.0`` if none found.
     """
     d = _log_diameters(
         image, cell_labels, min_sigma=1.0, max_sigma=max_sigma,
