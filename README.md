@@ -76,7 +76,7 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
    The Compress TIFF Dataset window closes and the new dataset is added to the Datasets table. Repeat for every experiment you want to include in this run.
 
 4. **Configure Cellpose.**
-   Select the channel with the strongest cytoplasmic signal as the segmentation channel. The default settings work for most datasets. The default 300 px diameter corresponds to ~30 µm at optimal resolution on a 1.4 NA objective and suits most cells. For larger- or smaller-than-average cells, adjust the diameter accordingly.
+   Select the channel with the strongest cytoplasmic signal as the segmentation channel. The default settings work for most datasets. The default 300 px diameter corresponds to ~30 µm at optimal resolution on a 1.4 NA objective and suits most cells. For larger- or smaller-than-average cells, adjust the diameter accordingly. The default model is **`cpsam_v2`** (the improved CellposeSAM — most robust for low-contrast fluorescence); `cpsam` (original), `cpdino`, and `cpdino-vitb` are also selectable from the Model dropdown.
 
 5. **Choose the edge-cell mode.** Pick one of three options for how to handle cells touching the image border:
    - **exclude** (default) — discard edge cells
@@ -179,7 +179,7 @@ percell4-batch-cellpose-laptrack SOURCES [--output-dir DIR] [options]
 | `--channel-names CHANNEL_NAMES` | Comma-separated names to rename the imported channels, in order (e.g. `'DAPI,GFP,RFP'`). Must match the imported channel count. |
 | `--seg-name SEG_NAME` | Name for the segmentation layer. Default: `cellpose_<n_cells>`. With `--skip-segmentation`, this is the **existing** segmentation layer to track (required). |
 | `--skip-segmentation` | Skip Cellpose and only run laptrack on an existing segmentation. Requires `--seg-name` (the existing `(T,H,W)` layer) and a time-lapse dataset. |
-| `--cellpose-model {cpsam,cyto3,cyto2,cyto,nuclei}` | Cellpose model. Default: `cpsam`. Ignored on Cellpose 4.x (cpsam is the only model). |
+| `--cellpose-model {cpsam_v2,cpsam,cpdino,cpdino-vitb}` | Cellpose 4.x model. Default: `cpsam_v2` (improved CellposeSAM — better in low-contrast regions). `cpsam` = original; `cpdino` / `cpdino-vitb` = DINOv3 backbones (vitb is smaller). Requires cellpose >= 4.2. |
 | `--cellpose-diameter CELLPOSE_DIAMETER` | Cell diameter in pixels; `0` = auto-detect. Default: `30`. |
 | `--gpu` | Use GPU for Cellpose. |
 | `--flow-threshold FLOW_THRESHOLD` | Flow error threshold; higher = more permissive. Default: `0.4`. |
@@ -561,7 +561,7 @@ Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `fli
 
 - **HDF5-backed projects.** One `.h5` per experiment holds intensity channels, segmentation labels, masks, phasor maps, and measurement staging — no separate database, no scattered files.
 - **Overlap-aware tile stitching.** Stitch tile scans at import with phase-correlation registration on the tile *overlap region* (Fiji/ImageJ-style) — solved once on a reference channel and reused for every channel and the FLIM decay stream. Falls back to a nominal-overlap grid when a channel can't register, and offers **None** (measurement-correct, forced for FLIM) or **Linear Blending** overlap fusion.
-- **Cellpose segmentation with interactive QC.** Run Cellpose batch-style across many datasets, then QC each dataset's labels in the napari viewer with paint/erase/fill shortcuts.
+- **Cellpose segmentation with interactive QC.** Run Cellpose batch-style across many datasets, then QC each dataset's labels in the napari viewer with paint/erase/fill shortcuts. Pick any Cellpose 4.x model — `cpsam_v2` (default, improved low-contrast), `cpsam`, `cpdino`, or `cpdino-vitb`.
 - **Time-lapse tracking and lineage.** Import `.tiff` series with `_tN` timepoint tokens as a single multi-timepoint dataset, scroll the timepoints in napari, segment every frame, then track cells so each keeps one ID across time. Cells that die or leave the field of view end their track; dividing cells are linked parent → daughter as lineage (powered by [laptrack](https://github.com/yfukai/laptrack)). The tracked segmentation stores the track ID as the label value, and a napari Tracks layer shows trajectories and divisions.
 - **Grouped thresholding.** Cluster cells by intensity, apply per-group autothresholding, refine with a circular ROI per dataset, write the result to `/masks/<round>`. Run multiple rounds in one workflow.
 - **Puncta detection & subpopulation classification.** Adaptive Local Clipping (per-cell band-pass + z-score) finds puncta inside each cell, with auto-window sizing and two-pass auto-extraction. Split a feature mask into populations by contrast-to-noise ratio (discover/guided/forced) or interactively with the CNR segmenter. Runs per-frame on time-lapse data.

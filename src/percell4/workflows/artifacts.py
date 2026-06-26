@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import warnings
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
@@ -24,6 +25,7 @@ from typing import Any
 
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
+    CELLPOSE_MODELS,
     AdaptiveClipSettings,
     AutoExtractSettings,
     CellposeSettings,
@@ -166,8 +168,19 @@ def _cellpose_to_dict(c: CellposeSettings) -> dict[str, Any]:
 
 
 def _cellpose_from_dict(d: dict[str, Any]) -> CellposeSettings:
+    # A config saved against an older model list (e.g. a 3.x "cyto3" round, or
+    # a model dropped from CELLPOSE_MODELS) is coerced to the current default
+    # rather than carrying a name that no selector offers and no 4.x build ships.
+    model = d.get("model", CELLPOSE_MODELS[0])
+    if model not in CELLPOSE_MODELS:
+        warnings.warn(
+            f"Cellpose model {model!r} from the saved config is not an "
+            f"available model {CELLPOSE_MODELS}; using {CELLPOSE_MODELS[0]!r}.",
+            stacklevel=2,
+        )
+        model = CELLPOSE_MODELS[0]
     return CellposeSettings(
-        model=d.get("model", "cpsam"),
+        model=model,
         diameter=d.get("diameter", 30.0),
         gpu=d.get("gpu", True),
         flow_threshold=d.get("flow_threshold", 0.4),

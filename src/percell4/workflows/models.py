@@ -80,8 +80,14 @@ class EdgeMode(StrEnum):
 
 # Cellpose model identifiers, in display order. Qt-free single source of
 # truth shared by the GUI form (CellposeSettingsForm), the workflow dialog,
-# and the headless batch CLI. The first entry is the default model.
-CELLPOSE_MODELS = ("cpsam", "cyto3", "cyto2", "cyto", "nuclei")
+# the seg-QC re-run dropdown, and the headless batch CLI. The first entry is
+# the default model. These are the Cellpose 4.x built-in models, selected via
+# CellposeModel(pretrained_model=<name>); requires cellpose >= 4.2 (cpsam_v2 /
+# cpdino shipped June 2026). cpsam_v2 is the improved CellposeSAM (fewer
+# spurious masks in low-contrast regions — the better default for fluorescence);
+# cpsam is the original (kept for reproducing prior runs); cpdino / cpdino-vitb
+# are the DINOv3-backbone variants (vitb is the smaller model).
+CELLPOSE_MODELS = ("cpsam_v2", "cpsam", "cpdino", "cpdino-vitb")
 
 
 @dataclass(frozen=True)
@@ -93,7 +99,7 @@ class CellposeSettings:
     workflow invariant, not a config knob.
     """
 
-    model: str = "cpsam"
+    model: str = "cpsam_v2"
     diameter: float = 30.0  # 0 = auto
     gpu: bool = True
     flow_threshold: float = 0.4

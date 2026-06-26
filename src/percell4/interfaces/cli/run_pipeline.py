@@ -54,7 +54,7 @@ def run_pipeline(
     threshold_channel: str | None = None,
     threshold_method: str = "otsu",
     threshold_value: float | None = None,
-    cellpose_model: str = "cyto3",
+    cellpose_model: str = "cpsam_v2",
     cellpose_diameter: float | None = None,
     metrics: list[str] | None = None,
     output_csv: Path | None = None,
@@ -257,7 +257,7 @@ def main() -> int:
     parser.add_argument("--threshold-channel", help="Channel to threshold (default: first)")
     parser.add_argument("--threshold-method", default="otsu", help="Threshold algorithm")
     parser.add_argument("--threshold-value", type=float, help="Manual threshold value")
-    parser.add_argument("--cellpose-model", default="cyto3", help="Cellpose model type")
+    parser.add_argument("--cellpose-model", default="cpsam_v2", help="Cellpose 4.x model")
     parser.add_argument("--cellpose-diameter", type=float, help="Cell diameter (auto if omitted)")
     parser.add_argument("--output", "-o", type=Path, help="Output CSV path")
     parser.add_argument("--skip-segmentation", action="store_true", help="Use existing segmentation")

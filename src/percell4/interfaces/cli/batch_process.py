@@ -155,8 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     cp = parser.add_argument_group("Cellpose settings (match the GUI Segment tab)")
     cp.add_argument("--cellpose-model", default=defaults.model,
                     choices=CELLPOSE_MODELS,
-                    help=f"Cellpose model (default: {defaults.model}). Ignored "
-                         f"on Cellpose 4.x (cpsam is the only model).")
+                    help=f"Cellpose 4.x model (default: {defaults.model}). "
+                         f"cpsam_v2 = improved CellposeSAM (better low-contrast); "
+                         f"cpsam = original; cpdino / cpdino-vitb = DINOv3 backbones.")
     cp.add_argument("--cellpose-diameter", type=float, default=defaults.diameter,
                     help=f"Cell diameter in pixels, 0 = auto-detect "
                          f"(default: {defaults.diameter:g}).")

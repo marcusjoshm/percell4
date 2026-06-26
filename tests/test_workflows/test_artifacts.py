@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from percell4.workflows.artifacts import (
+    _cellpose_from_dict,
     _round_from_dict,
     _round_to_dict,
     config_from_dict,
@@ -797,3 +798,22 @@ def test_config_from_dict_defaults_existing_mask_fields_when_absent():
     restored = config_from_dict(data)
     assert restored.use_existing_masks is False
     assert restored.existing_mask_selections == {}
+
+
+def test_cellpose_from_dict_defaults_to_cpsam_v2():
+    """A cellpose dict without a model uses the current default."""
+    c = _cellpose_from_dict({"diameter": 30.0})
+    assert c.model == "cpsam_v2"
+
+
+def test_cellpose_from_dict_coerces_unknown_model(recwarn):
+    """An old/dropped model (e.g. a 3.x cyto3 config) is coerced to the default
+    with a warning rather than carrying a name no selector offers (R6)."""
+    c = _cellpose_from_dict({"model": "cyto3", "diameter": 30.0})
+    assert c.model == "cpsam_v2"
+    assert any("cyto3" in str(w.message) for w in recwarn.list)
+
+
+def test_cellpose_from_dict_keeps_valid_model():
+    """A still-valid model name round-trips unchanged."""
+    assert _cellpose_from_dict({"model": "cpdino"}).model == "cpdino"

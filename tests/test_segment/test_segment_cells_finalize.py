@@ -63,7 +63,7 @@ class FakeSegmenter:
     def __init__(self) -> None:
         self.call_shapes: list[tuple] = []
 
-    def run(self, image, model_type="cyto3", diameter=None, gpu=False, **kwargs):
+    def run(self, image, model_type="cpsam_v2", diameter=None, gpu=False, **kwargs):
         self.call_shapes.append(image.shape)
         return image.astype(np.int32)
 

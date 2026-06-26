@@ -22,7 +22,7 @@ def test_defaults_round_trip(qtbot) -> None:
     qtbot.addWidget(form)
     s = form.settings()
     assert s == CellposeSettings()
-    assert s.model == "cpsam"
+    assert s.model == "cpsam_v2"
     assert s.flow_threshold == 0.4
     assert s.cellprob_threshold == 0.0
     assert s.min_size == 15
@@ -46,11 +46,11 @@ def test_seeds_from_initial_and_round_trips(qtbot) -> None:
 
 def test_model_combo_items_match_constant(qtbot) -> None:
     """Model combo lists CELLPOSE_MODELS in order; default selects initial."""
-    form = CellposeSettingsForm(initial=CellposeSettings(model="cyto3"))
+    form = CellposeSettingsForm(initial=CellposeSettings(model="cpdino"))
     qtbot.addWidget(form)
     items = [form._model.itemText(i) for i in range(form._model.count())]
     assert tuple(items) == CELLPOSE_MODELS
-    assert form._model.currentText() == "cyto3"
+    assert form._model.currentText() == "cpdino"
 
 
 def test_diameter_is_double_spinbox(qtbot) -> None:

@@ -96,7 +96,7 @@ def test_cellpose_segmenter_forwards_to_run_cellpose(monkeypatch):
 
     cp.CellposeSegmenter().run(
         np.zeros((8, 8), dtype=np.float32),
-        model_type="cyto3",
+        model_type="cpdino",
         diameter=10.0,
         gpu=False,
         flow_threshold=0.6,
@@ -104,7 +104,7 @@ def test_cellpose_segmenter_forwards_to_run_cellpose(monkeypatch):
         min_size=21,
     )
 
-    assert seen["model_type"] == "cyto3"
+    assert seen["model_type"] == "cpdino"
     assert seen["diameter"] == 10.0
     assert seen["gpu"] is False
     assert seen["flow_threshold"] == 0.6

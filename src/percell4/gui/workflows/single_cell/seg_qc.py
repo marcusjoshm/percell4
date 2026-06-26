@@ -61,7 +61,7 @@ from percell4.domain.segmentation.postprocess import (
 )
 from percell4.domain.segmentation.preprocess import apply_lut
 from percell4.store import DatasetStore
-from percell4.workflows.models import WorkflowDatasetEntry
+from percell4.workflows.models import CELLPOSE_MODELS, WorkflowDatasetEntry
 
 logger = logging.getLogger(__name__)
 
@@ -502,7 +502,7 @@ class SegmentationQCController(QObject):
         model_row = QHBoxLayout()
         model_row.addWidget(QLabel("Model:"))
         self._rerun_model = QComboBox()
-        self._rerun_model.addItems(["cpsam", "cyto3", "cyto2", "cyto", "nuclei"])
+        self._rerun_model.addItems(list(CELLPOSE_MODELS))
         idx = self._rerun_model.findText(cfg.model)
         if idx >= 0:
             self._rerun_model.setCurrentIndex(idx)

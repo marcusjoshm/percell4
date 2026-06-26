@@ -21,7 +21,7 @@ class Worker(QThread):
 
     Usage::
 
-        worker = Worker(run_cellpose, image, model_type="cyto3")
+        worker = Worker(run_cellpose, image, model_type="cpsam_v2")
         worker.progress.connect(status_bar.showMessage)
         worker.finished.connect(on_result)
         worker.error.connect(on_error)  # receives WorkerError

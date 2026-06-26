@@ -106,7 +106,7 @@ def test_cellpose_settings_forwarded(tmp_path, captured):
     (tmp_path / "dishA").mkdir()
     rc = cli.main([
         str(tmp_path / "dishA"), "--output-dir", str(tmp_path / "o"),
-        "--cellpose-model", "cyto3", "--cellpose-diameter", "120",
+        "--cellpose-model", "cpdino", "--cellpose-diameter", "120",
         "--flow-threshold", "0.7", "--cellprob-threshold", "-1.0",
         "--min-size", "22", "--saturation", "2.5", "--blur-sigma", "1.5",
         "--gpu",
@@ -114,7 +114,7 @@ def test_cellpose_settings_forwarded(tmp_path, captured):
     assert rc == 0
     s = captured["kwargs"]["settings"]
     assert isinstance(s, CellposeSettings)
-    assert s.model == "cyto3"
+    assert s.model == "cpdino"
     assert s.diameter == 120.0
     assert s.gpu is True
     assert s.flow_threshold == 0.7
@@ -129,7 +129,7 @@ def test_defaults_match_gui(tmp_path, captured):
     rc = cli.main([str(tmp_path / "dishA"), "--output-dir", str(tmp_path / "o")])
     assert rc == 0
     s = captured["kwargs"]["settings"]
-    assert s.model == "cpsam"
+    assert s.model == "cpsam_v2"
     assert s.diameter == 30.0  # CellposeSettings() default
     assert s.flow_threshold == 0.4
     assert s.cellprob_threshold == 0.0

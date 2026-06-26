@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from percell4.workflows.models import (
+    CELLPOSE_MODELS,
     AdaptiveClipSettings,
     AutoExtractSettings,
     CellposeSettings,
@@ -552,10 +553,19 @@ def test_iterative_otsu_round_config_roundtrip():
 
 def test_cellpose_defaults():
     c = CellposeSettings()
-    assert c.model == "cpsam"
+    assert c.model == "cpsam_v2"
     assert c.diameter == 30.0
     assert c.gpu is True
     assert c.blur_sigma == 0.0
+
+
+def test_cellpose_models_registry():
+    """CELLPOSE_MODELS lists the four Cellpose 4.x built-ins, cpsam_v2 first
+    (the default), with no legacy 3.x cyto* names."""
+    assert CELLPOSE_MODELS == ("cpsam_v2", "cpsam", "cpdino", "cpdino-vitb")
+    assert CELLPOSE_MODELS[0] == "cpsam_v2"
+    assert CellposeSettings().model == CELLPOSE_MODELS[0]
+    assert not any(m.startswith("cyto") or m == "nuclei" for m in CELLPOSE_MODELS)
 
 
 def test_cellpose_rejects_bad_values():

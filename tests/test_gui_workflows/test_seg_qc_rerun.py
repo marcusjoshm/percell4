@@ -161,7 +161,7 @@ def test_rerun_passes_knob_values_to_cellpose(qtbot, controller, monkeypatch):
     ctrl._rerun_flow.setValue(0.8)
     ctrl._rerun_cellprob.setValue(-2.0)
     ctrl._rerun_min_size.setValue(99)
-    ctrl._rerun_model.setCurrentText("cyto3")
+    ctrl._rerun_model.setCurrentText("cpdino")
 
     ctrl._on_rerun_clicked()
     _await_rerun(qtbot, ctrl)
@@ -170,7 +170,7 @@ def test_rerun_passes_knob_values_to_cellpose(qtbot, controller, monkeypatch):
     assert captured["flow_threshold"] == pytest.approx(0.8)
     assert captured["cellprob_threshold"] == pytest.approx(-2.0)
     assert captured["min_size"] == 99
-    assert captured["model_type"] == "cyto3"
+    assert captured["model_type"] == "cpdino"
 
 
 def test_rerun_diameter_zero_passes_none_for_auto(qtbot, controller, monkeypatch):

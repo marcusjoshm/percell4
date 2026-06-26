@@ -58,7 +58,7 @@ class SegmentCells:
     def run_inference(
         self,
         image: NDArray,
-        model_type: str = "cyto3",
+        model_type: str = "cpsam_v2",
         diameter: float | None = None,
         gpu: bool = False,
         flow_threshold: float = 0.4,
@@ -97,7 +97,7 @@ class SegmentCells:
     def run_inference_stack(
         self,
         images: NDArray,
-        model_type: str = "cyto3",
+        model_type: str = "cpsam_v2",
         diameter: float | None = None,
         gpu: bool = False,
         flow_threshold: float = 0.4,

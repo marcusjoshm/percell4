@@ -255,7 +255,7 @@ def test_batch_forwards_cellpose_inference_settings(tmp_path):
         [DatasetSpec(source_dir=src, output_h5=tmp_path / "o.h5")],
         seg_channel="ch00",
         settings=CellposeSettings(
-            model="cyto3", diameter=120.0, flow_threshold=0.7,
+            model="cpdino", diameter=120.0, flow_threshold=0.7,
             cellprob_threshold=-1.0, min_size=22,
             saturation_pct=0.0, blur_sigma=0.0,
         ),
@@ -263,7 +263,7 @@ def test_batch_forwards_cellpose_inference_settings(tmp_path):
     )
 
     kw = seg.kwargs[0]
-    assert kw["model_type"] == "cyto3"
+    assert kw["model_type"] == "cpdino"
     assert kw["diameter"] == 120.0
     assert kw["flow_threshold"] == 0.7
     assert kw["cellprob_threshold"] == -1.0

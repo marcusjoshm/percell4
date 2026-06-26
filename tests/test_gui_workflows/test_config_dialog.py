@@ -169,7 +169,7 @@ def test_remove_selected_dataset(dialog, h5_ds1, h5_ds2):
 def test_cellpose_defaults(dialog):
     # Inference controls now live in the shared CellposeSettingsForm.
     s = dialog._cp_form.settings()
-    assert s.model == "cpsam"
+    assert s.model == "cpsam_v2"
     assert s.diameter == 300.0
     assert s.gpu is True
     assert s.min_size == 15
@@ -186,7 +186,7 @@ def test_cellpose_default_config_unchanged_by_extraction(dialog):
     from percell4.workflows.models import CellposeSettings
 
     assert dialog._cp_form.settings() == CellposeSettings(
-        model="cpsam",
+        model="cpsam_v2",
         diameter=300.0,
         gpu=True,
         flow_threshold=0.4,
@@ -717,7 +717,7 @@ def test_accept_with_valid_config_builds_workflow_config(
     assert len(cfg.datasets) == 2
     assert len(cfg.thresholding_rounds) == 1
     assert cfg.output_parent == tmp_path / "runs"
-    assert cfg.cellpose.model == "cpsam"
+    assert cfg.cellpose.model == "cpsam_v2"
     # Seg channel is auto-selected from the first channel in the intersection
     assert cfg.seg_channel_name in ("GFP", "RFP")
 

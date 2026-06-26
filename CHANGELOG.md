@@ -9,7 +9,24 @@ list.
 
 ## Unreleased
 
-- _Nothing pending — recent work is grouped under the dated headings below._
+### Added
+
+- **Cellpose 4.2 models are now selectable.** The Segment tab, workflow dialog,
+  and batch CLIs (`--cellpose-model`) offer the Cellpose 4.x built-ins —
+  `cpsam_v2` (new default; improved CellposeSAM, fewer spurious masks in
+  low-contrast regions), `cpsam` (original, for reproducing prior runs),
+  `cpdino`, and `cpdino-vitb` (DINOv3 backbones). The 4.x wrapper now forwards
+  the chosen model via `CellposeModel(pretrained_model=...)` (previously the
+  model name was dropped on 4.x).
+
+### Changed
+
+- Default segmentation model is now **`cpsam_v2`** (was `cpsam`) — re-running
+  Cellpose yields improved, slightly different masks.
+- Minimum Cellpose is now **4.2** (`cellpose>=4.2,<5`); the legacy 3.x code path
+  and the `cyto3`/`cyto2`/`cyto`/`nuclei` model names are removed. **Run
+  `pip install -U cellpose` (or reinstall the package) to pull 4.2.x.** A saved
+  workflow config referencing a removed model falls back to `cpsam_v2`.
 
 ## 2026-06 — Overlap-aware stitching, adaptive clipping, CNR
 
