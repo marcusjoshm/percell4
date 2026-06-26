@@ -7,7 +7,11 @@ Helper tools for turning a Leica **Phasor Calibration** table into the
 ## Files
 
 - `phasor_ocr_to_xlsx.py` — OCRs Leica Phasor Calibration screenshots (PNG) into
-  an Excel sheet of `Name / Channel / Phase / Modulation`.
+  an Excel sheet of `Name / Channel / Phase (°) / Phase (rad) / Modulation`. The
+  **Phase (rad)** column is the value the calibration CSV wants — the Leica phase
+  in degrees auto-converted with `-1*RADIANS` (negated radians) — so there is no
+  manual Excel step. Cells the OCR is unsure about are highlighted amber and
+  listed in the terminal.
 - `batch_tcspc_calibration_template.csv` — the empty calibration CSV (header row
   only: `dataset,channel,frequency_mhz,phase,modulation`).
 - `phasor_calibration.xlsx` — a sample output of the script.
@@ -42,12 +46,16 @@ pip install -e ".[ocr]"           # from the repo root — installs the python d
    ```
 
    With no `-o`, it writes `phasor_calibration.xlsx` in the current directory.
-   Open it and skim the **Name** column for OCR slips (e.g. `FLIM5` → `FLIM 5`);
-   Phase / Modulation / Channel are regex-anchored and almost always exact.
+   The terminal lists any cells the OCR was unsure about (by Excel cell, e.g.
+   `A5`), and those cells are highlighted **amber** in the file — open it and fix
+   just those. Channel, Phase, and Modulation numbers are anchored on the
+   reliable tokens and are almost always exact; names are best-effort.
 
 3. **Fill in the template CSV.** Copy `batch_tcspc_calibration_template.csv`,
-   then for each channel paste the `channel`, `phase`, and `modulation` values
-   from the xlsx and add the two values the screenshot doesn't carry:
+   then for each channel paste the `channel`, the **`Phase (rad)`** value (already
+   `-1*RADIANS`-converted — paste this into the CSV's `phase` column, *not* the
+   degrees), and `modulation` from the xlsx, plus the two values the screenshot
+   doesn't carry:
    - `dataset` — the dataset name (the `.h5` stem this calibration applies to),
      one row per `(dataset, channel)`.
    - `frequency_mhz` — your laser repetition rate (e.g. `78` or `80`).

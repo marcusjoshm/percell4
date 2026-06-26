@@ -1,7 +1,9 @@
 """
 phasor_ocr_to_xlsx.py
-Extract the data table from Leica Phasor Calibration screenshots (PNG)
-and save Name / Channel / Phase / Modulation to an Excel spreadsheet.
+Extract the data table from Leica Phasor Calibration screenshots (PNG) and save
+Name / Channel / Phase (degrees) / Phase (rad) / Modulation to an Excel sheet.
+"Phase (rad)" is the value the PerCell4 calibration CSV wants: the Leica phase
+in degrees auto-converted with -1*RADIANS, so there is no manual Excel step.
 
 ------------------------------------------------------------------------
 SETUP (one-time)
@@ -27,25 +29,24 @@ in more than one image (because of scroll overlap) are de-duplicated.
 ------------------------------------------------------------------------
 EXPECTED ACCURACY
 ------------------------------------------------------------------------
-- Phase, Modulation, and Channel are nearly always perfect (regex-anchored).
-- Names are usually clean. Common OCR slip-ups to look for:
-    * "FLIMS" or "FLIM5" should be "FLIM 5" (missing space)
-    * "Hpep1-1" should be "Hpep1 - 1" (missing spaces around dash)
-    * The very top row may be skipped if the table is scrolled and the
-      row is half-cut at the top of the image.
-  Open the output xlsx and skim the Name column; fix any oddities with
-  Excel's Find & Replace before using the data.
+- Phase, Modulation, and Channel are anchored on reliable tokens and are nearly
+  always exact. Every row with a channel + a modulation is emitted; a row is
+  never dropped because its name (or even its phase) is messy.
+- Cells the OCR is unsure about (a blank phase, or a name that still carries
+  checkmark-column junk) are highlighted amber in the xlsx AND listed in the
+  terminal by Excel cell (e.g. "A5"), so you can fix just those by hand.
 """
 
 import argparse
+import math
 import re
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageOps
 import pytesseract
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from PIL import Image, ImageOps
 
 # If tesseract isn't on PATH (common on Windows), set its full path here:
 # pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -223,12 +224,34 @@ def normalize_group_names(rows, threshold=0.90):
 # XLSX WRITER
 # ---------------------------------------------------------------------------
 
-def write_xlsx(rows, output_path):
+def review_issues(name, phase):
+    """Cells a user should double-check, derived from the final row values.
+
+    Returns a list of ``(column_letter, message)``. The numbers (phase /
+    modulation) are the load-bearing output, so a blank phase is the loudest
+    flag; names are best-effort, so an empty or non-capitalized name (a tell of
+    leftover OCR junk from the checkmark columns) is flagged for a quick look.
+    """
+    issues = []
+    if phase is None:
+        issues.append(("C", "phase blank — read it off the Leica window"))
+        issues.append(("D", "phase blank — no radians value computed"))
+    if not name:
+        issues.append(("A", "name blank — fill in from the Leica window"))
+    elif not name[:1].isupper():
+        issues.append(("A", f"name may carry OCR junk ({name!r}) — verify"))
+    return issues
+
+
+def write_xlsx(rows, output_path, issues=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "Phasor Calibration"
 
-    headers = ["Name", "Channel", "Phase (°)", "Modulation"]
+    # "Phase (rad)" is the value PerCell4's calibration CSV wants: the Leica
+    # phase in DEGREES converted with -1*RADIANS (negated radians). The raw
+    # degrees stay alongside for verification against the Leica window.
+    headers = ["Name", "Channel", "Phase (°)", "Phase (rad)", "Modulation"]
     ws.append(headers)
 
     header_font = Font(name="Arial", bold=True, color="FFFFFF")
@@ -238,14 +261,15 @@ def write_xlsx(rows, output_path):
     thin = Side(border_style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    for col in range(1, 5):
+    for col in range(1, 6):
         c = ws.cell(row=1, column=col)
         c.font, c.fill, c.alignment, c.border = header_font, header_fill, center, border
 
     body_font = Font(name="Arial")
-    for row in rows:
-        ws.append(row)
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=4):
+    for name, channel, phase, modulation in rows:
+        phase_rad = -math.radians(phase) if phase is not None else None
+        ws.append((name, channel, phase, phase_rad, modulation))
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=5):
         for cell in row:
             cell.font = body_font
             cell.border = border
@@ -254,12 +278,22 @@ def write_xlsx(rows, output_path):
     name_w = max((len(r[0]) for r in rows), default=20) + 2
     ws.column_dimensions["A"].width = max(22, name_w)
     ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["C"].width = 11
+    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["E"].width = 14
 
     for r in range(2, ws.max_row + 1):
         ws.cell(row=r, column=3).number_format = "0.00"
-        ws.cell(row=r, column=4).number_format = "0.0000"
+        ws.cell(row=r, column=4).number_format = "0.000000000"
+        ws.cell(row=r, column=5).number_format = "0.0000"
+
+    # Highlight (amber) the cells the user should double-check.
+    if issues:
+        warn_fill = PatternFill("solid", start_color="FFF2CC")
+        for i, (_channel, iss) in issues.items():
+            xrow = i + 2                                  # +1 header, +1 1-based
+            for col, _msg in iss:
+                ws[f"{col}{xrow}"].fill = warn_fill
 
     ws.freeze_panes = "A2"
     wb.save(output_path)
@@ -295,13 +329,35 @@ def main():
     # to correct; the numbers are the load-bearing output.
     print(f"Total after dedupe: {len(all_rows)} rows", file=sys.stderr)
 
+    # Cells that warrant a manual check, keyed to the xlsx row they land on.
+    issues = {}
+    for i, (name, channel, phase, _mod) in enumerate(all_rows):
+        iss = review_issues(name, phase)
+        if iss:
+            issues[i] = (channel, iss)
+
     if args.print_only:
         for r in all_rows:
             print(r)
         return
 
-    write_xlsx(all_rows, args.output)
+    write_xlsx(all_rows, args.output, issues)
     print(f"Wrote {args.output}", file=sys.stderr)
+
+    # Tell the user exactly which xlsx cells to eyeball (also highlighted amber).
+    if issues:
+        n = sum(len(iss) for _ch, iss in issues.values())
+        print(f"\n⚠ {n} cell(s) across {len(issues)} row(s) in {args.output} "
+              f"need a manual check (highlighted amber in the file):",
+              file=sys.stderr)
+        for i in sorted(issues):
+            channel, iss = issues[i]
+            xrow = i + 2                                  # +1 header, +1 1-based
+            for col, msg in iss:
+                print(f"   {col}{xrow}  ({channel}):  {msg}", file=sys.stderr)
+    else:
+        print("All cells parsed cleanly — nothing flagged for review.",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":
