@@ -286,13 +286,24 @@ def add_decay_to_dataset(
                     idx: (int(offsets[idx][0]), int(offsets[idx][1]))
                     for idx in tile_to_path
                 }
-                # Single canvas computation — canvas_from_offsets needs the
-                # tile shape (offsets are top-left corners); the append reads
-                # (tile_h, tile_w) from the first decay tile above.
-                out_h, out_w = canvas_from_offsets(offsets, (tile_h, tile_w))
+                # The LASX orientation fix (rotate_k/flip) is applied PER TILE on
+                # the registered path — the persisted offsets live in the
+                # /intensity frame, so each .bin tile is oriented to match its
+                # .tiff counterpart BEFORE placement and the assembled /decay
+                # reproduces native_shape directly. A whole-image rotation
+                # (correct only for the regular grid path) would instead
+                # transpose the registered mosaic off native_shape. An odd
+                # rotate_k transposes each tile, so the canvas is derived from
+                # the POST-rotation tile shape (a no-op for square tiles).
+                if (int(rotate_k) % 2) == 1:
+                    placed_h, placed_w = tile_w, tile_h
+                else:
+                    placed_h, placed_w = tile_h, tile_w
+                out_h, out_w = canvas_from_offsets(offsets, (placed_h, placed_w))
                 use_tiling = True
                 positions = {}
             else:
+                placed_h, placed_w = tile_h, tile_w
                 pixel_offsets = None
                 use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
                 if use_tiling:
@@ -309,20 +320,32 @@ def add_decay_to_dataset(
                     positions = {0: (0, 0)}
 
             # Source-shape validation: the FINAL stored (H, W) must equal
-            # /metadata.native_shape. Phase 2 below rotates each stitched
-            # /decay in place; odd ``rotate_k`` values transpose (H, W).
-            # The validation must therefore check the POST-rotation shape
-            # so the canonical "stitch + rotate to fit native" workflow
-            # (e.g. .bin tiles stitched at (2048, 2560) with rotate_k=1
-            # to land at native (2560, 2048)) isn't rejected pre-rotation.
+            # /metadata.native_shape.
+            #  - Registered path: rotate_k is applied PER TILE, so (out_h, out_w)
+            #    is already the final, native-oriented canvas — compare directly.
+            #  - Grid path: Phase 2 below whole-image-rotates each stitched
+            #    /decay, so odd ``rotate_k`` transposes (H, W); the check uses
+            #    the POST-rotation shape so the canonical "stitch + rotate to fit
+            #    native" workflow (e.g. .bin tiles stitched at (2048, 2560) with
+            #    rotate_k=1 to land at native (2560, 2048)) isn't rejected.
             # flip_axis is shape-invariant -- only rotate_k matters here.
             native_shape = metadata.get("native_shape")
             if native_shape is not None:
-                if (int(rotate_k) % 2) == 0:
+                if geom.registered or (int(rotate_k) % 2) == 0:
                     final_h, final_w = out_h, out_w
                 else:
                     final_h, final_w = out_w, out_h
                 if tuple(native_shape) != (final_h, final_w):
+                    if geom.registered:
+                        raise LayerSizeMismatchError(
+                            f"Registered decay canvas ({out_h}, {out_w}) from the "
+                            f"persisted tile offsets (rotate_k={rotate_k} applied "
+                            f"per tile) does not match dataset native_shape "
+                            f"{tuple(native_shape)}. The registered /intensity "
+                            "geometry disagrees with native_shape — re-import "
+                            "/intensity and /decay together so they share one "
+                            "canvas."
+                        )
                     raise LayerSizeMismatchError(
                         f"Source TCSPC stitched shape is ({out_h}, {out_w})"
                         + (
@@ -344,8 +367,11 @@ def add_decay_to_dataset(
                 channel_name=ch_name,
                 tile_bins=tile_to_path,
                 bin_dims=bin_dims,
-                tile_h=tile_h,
-                tile_w=tile_w,
+                # POST-rotation tile shape on the registered path (== tile_h/w
+                # for square tiles or rotate_k=0); the streamer rotates each
+                # tile to this shape before placement.
+                tile_h=placed_h,
+                tile_w=placed_w,
                 n_bins=n_bins,
                 out_h=out_h,
                 out_w=out_w,
@@ -357,6 +383,11 @@ def add_decay_to_dataset(
                 # tile the solve demoted is placed first (lowest priority) here
                 # too. ``()`` on the grid path (geom.disconnected is empty).
                 disconnected=geom.disconnected if geom.registered else (),
+                # Registered path corrects LASX orientation PER TILE (before
+                # placement); the grid path defers to the Phase-2 whole-image
+                # rotate/flip below, so it passes the no-op identity here.
+                tile_rotate_k=int(rotate_k) if geom.registered else 0,
+                tile_flip_axis=flip_axis if geom.registered else None,
             )
 
         except Exception as e:  # noqa: BLE001
@@ -373,7 +404,10 @@ def add_decay_to_dataset(
     # than on a partially-written or per-tile region. ONLY /decay is
     # rotated — never the user's existing /intensity channels (which may
     # be TIFF source data that must not be modified by an append flow).
-    if rotate_k:
+    # GRID PATH ONLY: the registered path already applied rotate_k PER TILE
+    # before placement (a whole-image rotate would transpose the registered
+    # mosaic off native_shape — the overlap shape-mismatch bug).
+    if rotate_k and not geom.registered:
         k = int(rotate_k) % 4
         for ch_name in list(written):
             progress(f"Rotating {ch_name} by {k * 90}° CCW")
@@ -388,8 +422,9 @@ def add_decay_to_dataset(
     # Mirror the (H, W) plane along the given axis (0 = vertical, 1 =
     # horizontal). T-axis preserved. Applied after rotation so users can
     # compose the two when their LASX export needs both. ONLY /decay
-    # — /intensity is never touched.
-    if flip_axis is not None:
+    # — /intensity is never touched. GRID PATH ONLY (the registered path
+    # flipped each tile before placement).
+    if flip_axis is not None and not geom.registered:
         for ch_name in list(written):
             progress(f"Flipping {ch_name} along axis {flip_axis}")
             try:

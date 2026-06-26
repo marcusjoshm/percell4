@@ -935,6 +935,90 @@ def test_add_decay_registered_reuses_persisted_offsets(tmp_path, monkeypatch):
     assert (decay[:, 6:8, 0] == 2).all()
 
 
+def _patterned_tile_reader():
+    """A .bin reader whose (H, W) plane is an asymmetric gradient so a per-tile
+    rotation is verifiable pixel-for-pixel (a constant tile would hide it).
+
+    Tile ``_s<idx>`` -> (8, 8, 2) with ``arr[y, x, :] = (idx+1)*100 + y*10 + x``
+    — distinct per tile AND not symmetric under a 90° rotation.
+    """
+    import re as _re
+
+    def _read(path, **kwargs):
+        m = _re.search(r"_s(\d+)", str(path))
+        idx = int(m.group(1)) if m else 0
+        y = np.arange(8)[:, None]
+        x = np.arange(8)[None, :]
+        plane = (idx + 1) * 100 + y * 10 + x                 # (8, 8)
+        arr = np.repeat(plane[:, :, None], 2, axis=2).astype(np.uint16)
+        return {"array": arr, "intensity": arr[..., 0].copy(),
+                "metadata": {"shape": (8, 8, 2)}}
+
+    return _read
+
+
+def test_add_decay_registered_rotate_k_rotates_per_tile(tmp_path, monkeypatch):
+    """Overlap shape-mismatch regression: a registered (overlap) dataset
+    appended with a non-zero ``rotate_k`` must rotate each .bin tile BEFORE
+    placement and reproduce ``native_shape`` EXACTLY — never whole-image-rotate
+    the registered mosaic off ``native_shape``.
+
+    Square 8x8 tiles, NON-SQUARE canvas (8, 14): a whole-image rotate_k=1 would
+    transpose it to (14, 8) and the size-check would reject the append (the
+    reported bug). The fix rotates per-tile, so the canvas stays (8, 14).
+    """
+    reader = _patterned_tile_reader()
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        reader,
+    )
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", reader)
+
+    offsets = [(0, 0), (0, 6)]
+    from percell4.domain.io.assembler import canvas_from_offsets
+
+    native = canvas_from_offsets(np.asarray(offsets), (8, 8))
+    assert native == (8, 14)  # non-square — a whole-image rotate would transpose
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=native)
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+        rotate_k=1,
+    )
+
+    assert report.written == ("ch00",), report.errors
+    assert report.errors == {}
+
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+    # Canvas stays at native_shape — NOT transposed to (14, 8).
+    assert decay.shape == (8, 14, 2)
+
+    # Content == each tile rot90(k=1) applied PER-TILE, placed at the persisted
+    # offsets with ascending-index overlap priority (tile 1 wins cols 6-7).
+    golden = np.zeros((8, 14, 2), dtype=decay.dtype)
+    for idx in (0, 1):
+        raw = reader(src / f"exp_s{idx}_ch00.bin")["array"]
+        rot = np.rot90(raw, k=1, axes=(0, 1))
+        y0, x0 = offsets[idx]
+        golden[y0:y0 + 8, x0:x0 + 8, :] = rot
+    assert np.array_equal(decay, golden), (
+        "registered decay + rotate_k must rotate per-tile and reproduce the "
+        "intensity canvas exactly (no whole-image rotation)"
+    )
+
+
 def test_add_decay_registered_offsets_absent_raises(tmp_path, mock_read_flim_bin,
                                                     monkeypatch):
     """AE4: a dataset flagged stitch_registered=True but with tile_offsets
@@ -997,10 +1081,15 @@ def test_add_decay_non_registered_uses_grid_path(tmp_path, mock_read_flim_bin):
         assert f["decay/ch00"].shape == (16, 16, 4)
 
 
-def test_add_decay_registered_rotate_k_odd_guard_transpose(tmp_path, monkeypatch):
-    """rotate_k odd on a registered dataset: the native_shape guard derives
-    out_h/out_w from canvas_from_offsets and still transposes for the odd
-    rotation, so a correctly-declared transposed native_shape matches."""
+def test_add_decay_registered_rotate_k_no_whole_image_transpose(tmp_path, monkeypatch):
+    """A registered dataset's native_shape ALWAYS equals canvas_from_offsets —
+    the import applies NO whole-image rotation to the registered /intensity. So
+    rotate_k is applied PER TILE, never to the assembled mosaic, and a dataset
+    whose declared native_shape is the TRANSPOSED canvas (an impossible state for
+    a real registered import) is correctly REJECTED — rather than being silently
+    whole-image-rotated to match (the overlap shape-mismatch bug). Cf. the
+    positive case in test_add_decay_registered_rotate_k_rotates_per_tile.
+    """
     monkeypatch.setattr(
         "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
         _tile_id_reader(),
@@ -1010,9 +1099,9 @@ def test_add_decay_registered_rotate_k_odd_guard_transpose(tmp_path, monkeypatch
         _tile_id_reader(),
     )
 
-    # 2-tile horizontal mosaic → registered canvas (8, 14). rotate_k=1
-    # (90° CCW) transposes to (14, 8): native_shape declares the POST-rotation
-    # orientation.
+    # 2-tile horizontal mosaic → registered canvas (8, 14). A real registered
+    # import sets native_shape to exactly this; declaring the transposed (14, 8)
+    # is inconsistent and must NOT be "fixed" by a whole-image rotate.
     offsets = [(0, 0), (0, 6)]
     store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(14, 8))
     _write_registered_geometry(store, offsets)
@@ -1031,11 +1120,13 @@ def test_add_decay_registered_rotate_k_odd_guard_transpose(tmp_path, monkeypatch
         rotate_k=1,
     )
 
-    assert report.written == ("ch00",), report.errors
-    assert report.errors == {}
+    # Registered canvas (8, 14) != declared native (14, 8): rejected, not
+    # transposed. The error names the registered-geometry mismatch.
+    assert report.written == ()
+    assert "ch00" in report.errors
+    assert "native_shape" in report.errors["ch00"]
     with h5py.File(store.path, "r") as f:
-        # Pre-rotation registered canvas (8, 14) → post-rotation (14, 8).
-        assert f["decay/ch00"].shape == (14, 8, 2)
+        assert "decay/ch00" not in f  # nothing written on rejection
 
 
 # ── FIX C: registered append completeness + disconnected winner ──────────

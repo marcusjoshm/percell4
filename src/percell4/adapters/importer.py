@@ -1209,6 +1209,8 @@ def write_decay_streaming(
     spatial_bin: int = 1,
     pixel_offsets: dict[int, tuple[int, int]] | None = None,
     disconnected: tuple[int, ...] = (),
+    tile_rotate_k: int = 0,
+    tile_flip_axis: int | None = None,
 ) -> None:
     """Stream-write a TCSPC decay channel to ``/decay/<channel_name>`` in an
     .h5 file, tile by tile.
@@ -1245,6 +1247,15 @@ def write_decay_streaming(
     ``assemble_tiles_with_offsets`` so intensity and decay resolve every
     overlap pixel to the same tile. ``disconnected`` is ignored on the grid
     path.
+
+    ``tile_rotate_k`` / ``tile_flip_axis`` apply the LASX orientation fix PER
+    TILE (rotate k·90° CCW then flip), before placement — used by the registered
+    append so each ``.bin`` tile matches its ``/intensity`` counterpart at the
+    persisted offset and the mosaic lands at ``native_shape`` (a whole-image
+    rotate would transpose a registered overlap mosaic off ``native_shape``).
+    ``tile_h``/``tile_w`` are the POST-rotation tile dimensions; the rotated tile
+    must match them. Defaults ``0``/``None`` (no-op) on the grid path, which
+    instead whole-image-rotates after stitching.
     """
     import h5py
 
@@ -1318,6 +1329,22 @@ def write_decay_streaming(
 
             if spatial_bin > 1:
                 tile_data = _spatial_bin_tile(tile_data, spatial_bin)
+
+            # Per-tile LASX orientation fix (registered overlap path): rotate the
+            # (H, W) plane k*90° CCW then flip, BEFORE placement, so each tile
+            # matches its /intensity counterpart's orientation at the persisted
+            # offset. Same op/order as the grid path's Phase-2 whole-image
+            # rotate+flip, but applied per tile so the registered mosaic lands at
+            # native_shape instead of being transposed off it. T-axis preserved.
+            if tile_rotate_k % 4:
+                tile_data = np.rot90(tile_data, k=tile_rotate_k % 4, axes=(0, 1))
+            if tile_flip_axis is not None:
+                tile_data = np.flip(tile_data, axis=int(tile_flip_axis))
+            if tile_data.shape[:2] != (tile_h, tile_w):
+                raise ValueError(
+                    f"tile {tile_idx} post-orientation shape "
+                    f"{tile_data.shape[:2]} != expected ({tile_h}, {tile_w})"
+                )
 
             if registered:
                 y0, x0 = pixel_offsets[tile_idx]
