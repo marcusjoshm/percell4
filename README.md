@@ -32,6 +32,7 @@
   - [macOS](#macos)
   - [Linux](#linux)
   - [Windows](#windows)
+- [Updating](#updating)
 - [Install from a wheel](#install-from-a-wheel)
 - [Optional extras](#optional-extras)
 - [Standalone bundle (PyInstaller)](#standalone-bundle-pyinstaller)
@@ -745,6 +746,36 @@ From a checkout without installing the package, you can also run:
 ```bash
 python main.py
 ```
+
+---
+
+## Updating
+
+PerCell4 requires **Cellpose 4.2 or newer** for the current segmentation models
+(`cpsam_v2`, `cpsam`, `cpdino`, `cpdino-vitb` — see [Changelog](#changelog)). To
+update an existing install, from your checkout with the virtual environment
+active:
+
+```bash
+git pull
+pip install -e .                    # resolves the new cellpose>=4.2 pin
+# or upgrade Cellpose on its own:
+pip install -U "cellpose>=4.2,<5"
+```
+
+- **The model downloads on first use.** Cellpose 4.x weights (`cpsam_v2` is a
+  large SAM-ViTL model, several hundred MB) are fetched from Hugging Face the
+  first time you segment with them — allow network access once, then they are
+  cached. Cellpose 4.x also pulls `segment_anything` and `opencv-python-headless`
+  automatically; `pip install` handles both.
+- **Windows / PyTorch is not affected.** Cellpose 4.2 only requires
+  `torch>=1.6`, so updating Cellpose does **not** change your existing PyTorch
+  install — the CPU-only torch and MSVC Redistributable setup from
+  [Windows](#windows) stays exactly as-is. (Only in the rare case that `pip`
+  upgrades torch on a machine **without** an NVIDIA GPU would you re-apply the
+  CPU wheel: `pip install --no-cache-dir --force-reinstall torch --index-url https://download.pytorch.org/whl/cpu`.)
+- A fresh install needs no extra steps — `pip install -e .` already pulls
+  Cellpose 4.2+; follow the [Installation](#installation) section for your OS.
 
 ---
 
