@@ -1211,6 +1211,8 @@ def write_decay_streaming(
     disconnected: tuple[int, ...] = (),
     tile_rotate_k: int = 0,
     tile_flip_axis: int | None = None,
+    n_acq: int = 1,
+    timepoint: int = 0,
 ) -> None:
     """Stream-write a TCSPC decay channel to ``/decay/<channel_name>`` in an
     .h5 file, tile by tile.
@@ -1256,6 +1258,15 @@ def write_decay_streaming(
     ``tile_h``/``tile_w`` are the POST-rotation tile dimensions; the rotated tile
     must match them. Defaults ``0``/``None`` (no-op) on the grid path, which
     instead whole-image-rotates after stitching.
+
+    ``n_acq`` / ``timepoint`` drive the time-lapse layout. With ``n_acq == 1``
+    (default) the output is a 3-D ``(out_h, out_w, n_bins)`` decay, byte-identical
+    to the legacy write. With ``n_acq > 1`` the decay is 4-D
+    ``(n_acq, out_h, out_w, n_bins)`` (``dims=["Tacq","H","W","T"]``, ``T_acq``
+    chunked to 1): the dataset is allocated once on ``timepoint == 0`` (and the
+    stale ``/phasor`` is invalidated then) and each frame is written in place at
+    the leading ``[timepoint]`` index. Call once per acquisition timepoint with
+    the SAME geometry every frame so ``/intensity[t]`` and ``/decay[t]`` align.
     """
     import h5py
 
@@ -1280,28 +1291,57 @@ def write_decay_streaming(
                 )
 
     decay_path = f"decay/{channel_name}"
-    with h5py.File(h5_path, "a") as f:
-        if decay_path in f:
-            del f[decay_path]
-        # Invalidate stale phasor for this channel — without this, the GUI
-        # phasor plot shows the OLD computed (g, s) maps even after the
-        # underlying /decay layer was overwritten, which looks like a
-        # broken import. compute_phasor must be re-run to refresh. This MUST
-        # fire on both the grid and the offset path.
-        phasor_path = f"phasor/{channel_name}"
-        if phasor_path in f:
-            del f[phasor_path]
-        dset = f.create_dataset(
-            decay_path,
-            shape=(out_h, out_w, n_bins),
-            dtype=np.float32,
-            chunks=(min(64, tile_h), min(64, tile_w), n_bins),
-            compression="lzf",
+    timelapse = n_acq > 1
+    if timelapse and not 0 <= timepoint < n_acq:
+        raise ValueError(
+            f"timepoint={timepoint} out of range [0, {n_acq})"
         )
-        dset.attrs["dims"] = ["H", "W", "T"]
-        dset.attrs["channel"] = channel_name
-        if spatial_bin > 1:
-            dset.attrs["spatial_bin"] = spatial_bin
+    with h5py.File(h5_path, "a") as f:
+        phasor_path = f"phasor/{channel_name}"
+        if timelapse:
+            # Time-lapse: a 4-D (T_acq, H, W, T_bins) dataset allocated ONCE on
+            # the first acquisition frame, then written in place per subsequent
+            # frame. The delete + /phasor invalidation are gated to timepoint==0
+            # so frame 1 does not delete frame 0's bytes.
+            if timepoint == 0:
+                if decay_path in f:
+                    del f[decay_path]
+                if phasor_path in f:
+                    del f[phasor_path]
+                dset = f.create_dataset(
+                    decay_path,
+                    shape=(n_acq, out_h, out_w, n_bins),
+                    dtype=np.float32,
+                    chunks=(1, min(64, tile_h), min(64, tile_w), n_bins),
+                    compression="lzf",
+                )
+                dset.attrs["dims"] = ["Tacq", "H", "W", "T"]
+                dset.attrs["channel"] = channel_name
+                if spatial_bin > 1:
+                    dset.attrs["spatial_bin"] = spatial_bin
+            else:
+                dset = f[decay_path]
+        else:
+            if decay_path in f:
+                del f[decay_path]
+            # Invalidate stale phasor for this channel — without this, the GUI
+            # phasor plot shows the OLD computed (g, s) maps even after the
+            # underlying /decay layer was overwritten, which looks like a
+            # broken import. compute_phasor must be re-run to refresh. This MUST
+            # fire on both the grid and the offset path.
+            if phasor_path in f:
+                del f[phasor_path]
+            dset = f.create_dataset(
+                decay_path,
+                shape=(out_h, out_w, n_bins),
+                dtype=np.float32,
+                chunks=(min(64, tile_h), min(64, tile_w), n_bins),
+                compression="lzf",
+            )
+            dset.attrs["dims"] = ["H", "W", "T"]
+            dset.attrs["channel"] = channel_name
+            if spatial_bin > 1:
+                dset.attrs["spatial_bin"] = spatial_bin
 
         if registered:
             # Disconnected tiles first (lowest priority), then ascending tile
@@ -1348,14 +1388,22 @@ def write_decay_streaming(
 
             if registered:
                 y0, x0 = pixel_offsets[tile_idx]
-                dset[y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
             elif use_tiling and tile_idx in positions:
                 row, col = positions[tile_idx]
                 y0 = row * tile_h
                 x0 = col * tile_w
-                dset[y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
             else:
-                dset[:, :, :] = tile_data
+                y0 = x0 = None  # whole-frame single-tile write
+
+            if y0 is None:
+                if timelapse:
+                    dset[timepoint, :, :, :] = tile_data
+                else:
+                    dset[:, :, :] = tile_data
+            elif timelapse:
+                dset[timepoint, y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
+            else:
+                dset[y0:y0 + tile_h, x0:x0 + tile_w, :] = tile_data
             del tile_data
 
 

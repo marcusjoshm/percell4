@@ -88,10 +88,20 @@ def sum_bin_decay(arr: NDArray, k: int) -> NDArray:
 
     Use for ``/decay/<ch>`` arrays specifically. The math matches the
     existing ``adapters/importer._spatial_bin_tile`` helper.
+
+    Requires a 3-D ``(H, W, T)`` array: a 4-D time-lapse decay
+    ``(T_acq, H, W, T_bins)`` must be sliced to one acquisition frame first
+    (``DatasetStore.read_decay(timepoint=)``), otherwise binning would fold the
+    acquisition axis into the spatial block.
     """
     _validate_k(k)
     if k == 1:
         return arr
+    if arr.ndim != 3:
+        raise ValueError(
+            f"sum_bin_decay requires a 3-D (H, W, T) decay frame; got "
+            f"{arr.ndim}-D. Slice a time-lapse decay to one timepoint first."
+        )
     h, w = arr.shape[:2]
     h_trunc = (h // k) * k
     w_trunc = (w // k) * k

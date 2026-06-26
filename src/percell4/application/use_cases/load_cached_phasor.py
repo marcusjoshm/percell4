@@ -130,6 +130,22 @@ class LoadCachedPhasor:
             g_filtered = None
             s_filtered = None
 
+        # Time-lapse: /phasor/<ch>/{g,s,...} are (T_acq, H, W). Slice the active
+        # acquisition frame (clamped) so consumers get a 2-D map matching the
+        # napari dims slider — never a combined-all-timepoints cloud. Legacy 2-D
+        # phasor passes through unchanged.
+        is_timelapse = g_map.ndim == 3
+        t_acq = 0
+        if is_timelapse:
+            nt = int(g_map.shape[0])
+            t_acq = max(0, min(int(self._session.active_timepoint), nt - 1))
+            g_map = g_map[t_acq]
+            s_map = s_map[t_acq]
+            if g_filtered is not None and g_filtered.ndim == 3:
+                g_filtered = g_filtered[t_acq]
+            if s_filtered is not None and s_filtered.ndim == 3:
+                s_filtered = s_filtered[t_acq]
+
         # Filter level stamped on g_filtered by ApplyWavelet — lets the
         # Apply-Wavelet handler detect a level change and recompute rather
         # than serving a stale cache. Read defensively: a repo without
@@ -156,10 +172,24 @@ class LoadCachedPhasor:
         # acceptable — the phasor window's set_phasor_data accepts None.
         intensity: NDArray[np.float32] | None = None
         try:
-            decay = self._repo.read_array(
-                handle, f"decay/{channel}", view_bin=view_bin
-            )
-            intensity = decay.sum(axis=-1).astype(np.float32)
+            if is_timelapse:
+                # Active decay frame (4-D /decay) — the SAME frame as the phasor
+                # sliced above (cross-layer alignment across the new axis).
+                reader = getattr(self._repo, "read_decay", None)
+                if reader is not None:
+                    decay_frame = reader(
+                        handle, channel, view_bin=view_bin, timepoint=t_acq
+                    )
+                else:
+                    decay_frame = self._repo.read_array(
+                        handle, f"decay/{channel}", view_bin=view_bin
+                    )[t_acq]
+                intensity = decay_frame.sum(axis=-1).astype(np.float32)
+            else:
+                decay = self._repo.read_array(
+                    handle, f"decay/{channel}", view_bin=view_bin
+                )
+                intensity = decay.sum(axis=-1).astype(np.float32)
         except KeyError:
             pass
 

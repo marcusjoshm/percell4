@@ -40,6 +40,13 @@ class FakeRepo:
             raise KeyError(f"Array not found: {path}")
         return self.arrays[path]
 
+    def read_decay(self, handle, channel, view_bin=1, timepoint=None):
+        path = f"decay/{channel}"
+        if path not in self.arrays:
+            raise KeyError(f"Array not found: {path}")
+        arr = self.arrays[path]
+        return arr if timepoint is None else arr[timepoint]
+
     def read_array_attrs(self, handle, path):
         return dict(self.attrs.get(path, {}))
 
@@ -303,3 +310,44 @@ def test_load_cached_phasor_default_view_bin_is_one(session):
 
     LoadCachedPhasor(repo, session).execute("ch0")
     assert all(vb == 1 for _, vb in repo.reads)
+
+
+# ── Time-lapse: slice the active acquisition frame (U7) ───────────────────
+
+
+def test_timelapse_phasor_slices_active_frame(session, repo):
+    """4-D /decay → (T_acq,H,W) phasor: LoadCachedPhasor returns the 2-D map at
+    session.active_timepoint, with intensity from THAT decay frame."""
+    nt, h, w, tb = 3, 8, 8, 16
+    rng = np.random.default_rng(7)
+    g = rng.uniform(0.1, 0.9, (nt, h, w)).astype(np.float32)
+    s = rng.uniform(0.05, 0.5, (nt, h, w)).astype(np.float32)
+    gf = rng.uniform(0.1, 0.9, (nt, h, w)).astype(np.float32)
+    sf = rng.uniform(0.05, 0.5, (nt, h, w)).astype(np.float32)
+    decay = rng.uniform(1.0, 100.0, (nt, h, w, tb)).astype(np.float32)
+    repo.arrays["phasor/ch0/g"] = g
+    repo.arrays["phasor/ch0/s"] = s
+    repo.arrays["phasor/ch0/g_filtered"] = gf
+    repo.arrays["phasor/ch0/s_filtered"] = sf
+    repo.arrays["decay/ch0"] = decay
+
+    session.set_dataset(DatasetHandle(
+        path=Path("/tmp/t.h5"),
+        metadata={"n_timepoints": nt, "native_shape": (h, w)},
+    ))
+    session.set_active_timepoint(2)
+
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+
+    assert result.g_map.shape == (h, w)
+    np.testing.assert_array_equal(result.g_map, g[2])
+    np.testing.assert_array_equal(result.s_map, s[2])
+    np.testing.assert_array_equal(result.g_filtered, gf[2])
+    np.testing.assert_array_equal(result.s_filtered, sf[2])
+    np.testing.assert_allclose(result.intensity, decay[2].sum(axis=-1), rtol=1e-6)
+
+    # Switching the active frame returns a different slice (tracks the slider).
+    session.set_active_timepoint(0)
+    result0 = LoadCachedPhasor(repo, session).execute("ch0")
+    np.testing.assert_array_equal(result0.g_map, g[0])
+    assert not np.array_equal(result0.g_map, result.g_map)

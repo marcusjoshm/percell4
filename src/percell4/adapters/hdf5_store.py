@@ -245,6 +245,17 @@ class Hdf5DatasetRepository:
     ) -> NDArray:
         return self._store(handle).read_array(path, view_bin=view_bin)
 
+    def read_decay(
+        self,
+        handle: DatasetHandle,
+        channel: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        return self._store(handle).read_decay(
+            channel, view_bin=view_bin, timepoint=timepoint
+        )
+
     def array_exists(self, handle: DatasetHandle, path: str) -> bool:
         """True if ``path`` is a dataset. Metadata only — no decompression."""
         return self._store(handle).array_exists(path)

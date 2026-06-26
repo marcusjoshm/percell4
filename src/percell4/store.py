@@ -101,7 +101,17 @@ def _infer_bin_metadata(f: h5py.File) -> dict[str, Any]:
         if children:
             first = decay_grp[children[0]]
             shape = first.shape
-            if len(shape) >= 2:
+            dims = first.attrs.get("dims")
+            is_4d_decay = len(shape) == 4 or (
+                dims is not None and len(dims) > 0 and str(dims[0]) == "Tacq"
+            )
+            if is_4d_decay and len(shape) >= 4:
+                # (T_acq, H, W, T_bins): spatial is dims [1:3]; the acquisition
+                # axis count comes from the decay when no /intensity exists.
+                native_shape = (int(shape[1]), int(shape[2]))
+                n_timepoints = int(shape[0])
+            elif len(shape) >= 2:
+                # Legacy 3-D (H, W, T_bins): spatial is dims [0:2], T_acq == 1.
                 native_shape = (int(shape[0]), int(shape[1]))
     creation_bin = 1
     if "metadata" in f and "creation_bin" in f["metadata"].attrs:
@@ -228,6 +238,11 @@ def _choose_chunks(shape: tuple[int, ...], is_decay: bool = False) -> tuple[int,
     ndim = len(shape)
     if ndim == 2:
         return (min(256, shape[0]), min(256, shape[1]))
+    if ndim == 4 and is_decay:
+        # Time-lapse TCSPC (T_acq, H, W, T_bins): one acquisition frame per
+        # chunk, 64x64 spatial tiles, full histogram axis. Chunking T_acq to 1
+        # keeps a per-frame slice cheap and avoids a whole-row-x-W-x-T_bins chunk.
+        return (1, min(64, shape[1]), min(64, shape[2]), shape[3])
     if ndim >= 3 and is_decay:
         # TCSPC: spatial chunks of 64x64, full time axis
         return (min(64, shape[0]), min(64, shape[1])) + shape[2:]
@@ -377,16 +392,61 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
-    def read_decay(self, channel: str, view_bin: int = 1) -> NDArray:
-        """Read ``/decay/<channel>`` with optional view-bin downsampling.
+    def read_decay(
+        self, channel: str, view_bin: int = 1, timepoint: int | None = None
+    ) -> NDArray:
+        """Read ``/decay/<channel>`` with optional per-timepoint slice + view-bin.
 
-        Sugar over :meth:`read_array` that exists so callers don't have
-        to build the ``f"decay/{channel}"`` path themselves -- and so a
-        single grep for ``read_decay`` enumerates every decay-read
-        callsite (closes the Single-Write-Boundary gap where decay reads
-        used to open ``h5py.File`` directly).
+        ``/decay`` is either legacy 3-D ``(H, W, T_bins)`` (single timepoint) or
+        time-lapse 4-D ``(T_acq, H, W, T_bins)`` (``dims[0] == "Tacq"``).
+
+        - ``timepoint is None``: return the whole array. ``view_bin > 1`` is
+          rejected on a 4-D decay (a whole-tensor sum-bin would fold the
+          acquisition axis into the spatial block) -- pass a ``timepoint`` to
+          view-bin a time-lapse decay.
+        - ``timepoint`` given: slice that acquisition frame **on disk** to a 3-D
+          ``(H, W, T_bins)`` array, then apply ``view_bin``. On a legacy 3-D
+          decay only ``timepoint == 0`` is valid.
+
+        Sugar/chokepoint over the raw read so a single grep for ``read_decay``
+        enumerates every decay-read callsite.
         """
-        return self.read_array(f"decay/{channel}", view_bin=view_bin)
+        if view_bin < 1:
+            raise ValueError(f"view_bin must be >= 1, got {view_bin}")
+        path = f"decay/{channel}"
+        f = self._open_read()
+        try:
+            if path not in f:
+                raise KeyError(f"Dataset not found: {path}")
+            obj = f[path]
+            if not isinstance(obj, h5py.Dataset):
+                raise KeyError(f"{path} is a group, not a dataset")
+            is_4d = obj.ndim == 4
+            if timepoint is None:
+                if is_4d and view_bin > 1:
+                    raise ValueError(
+                        "view_bin > 1 on a time-lapse (4-D) /decay requires a "
+                        "timepoint; pass read_decay(channel, view_bin, timepoint=)."
+                    )
+                arr = obj[()]
+                return arr if view_bin == 1 else _apply_view_bin(path, arr, view_bin)
+            if is_4d:
+                nt = obj.shape[0]
+                if not 0 <= timepoint < nt:
+                    raise IndexError(
+                        f"timepoint={timepoint} out of range [0, {nt}) for {path}"
+                    )
+                frame = obj[timepoint]  # on-disk slice -> (H, W, T_bins)
+            else:
+                if timepoint != 0:
+                    raise IndexError(
+                        f"timepoint={timepoint} invalid for legacy single-timepoint "
+                        f"{path} (only 0 is valid)."
+                    )
+                frame = obj[()]
+            return frame if view_bin == 1 else _apply_view_bin(path, frame, view_bin)
+        finally:
+            self._close_if_not_session(f)
 
     # ── Stitch geometry (registered overlap mosaics) ──────────
 
@@ -1013,6 +1073,103 @@ class DatasetStore:
         # Case 3: existing (T,H,W) -- in-place single-frame write, no recreate.
         with h5py.File(self.path, "a") as f:
             f[path][timepoint] = frame
+        return int(frame.size)
+
+    def _validate_decay_shape(self, array: NDArray) -> list[str]:
+        """Validate a /decay array shape and return its ``dims`` attr.
+
+        Accepts legacy 3-D ``(H, W, T_bins)`` (single timepoint, T_acq == 1)
+        always, or time-lapse 4-D ``(T_acq, H, W, T_bins)`` only on a time-lapse
+        dataset (``n_timepoints > 1``) whose leading axis equals ``n_timepoints``
+        and whose spatial dims ``[1:3]`` equal ``native_shape``.
+        """
+        if array.ndim == 3:
+            return ["H", "W", "T"]
+        if array.ndim != 4:
+            raise ValueError(
+                f"Decay must be 3-D (H,W,T) or 4-D (T_acq,H,W,T_bins); got "
+                f"{array.ndim}-D."
+            )
+        ns, nt = self._native_shape_and_timepoints()
+        if nt <= 1:
+            raise ValueError(
+                "A 4-D (T_acq,H,W,T_bins) decay is only accepted on a time-lapse "
+                "dataset (n_timepoints > 1)."
+            )
+        th, tw = int(array.shape[1]), int(array.shape[2])
+        if ns is not None and (th, tw) != ns:
+            raise LayerSizeMismatchError(
+                f"Decay spatial dims {(th, tw)} disagree with dataset "
+                f"native_shape {ns}."
+            )
+        if int(array.shape[0]) != nt:
+            raise LayerSizeMismatchError(
+                f"Decay has {int(array.shape[0])} acquisition frame(s) but the "
+                f"dataset has {nt} timepoints; the time axis would mis-stack."
+            )
+        return ["Tacq", "H", "W", "T"]
+
+    def write_decay_frame(
+        self, channel: str, frame: NDArray, timepoint: int
+    ) -> int:
+        """Splice one acquisition timepoint's 3-D decay ``frame`` into
+        ``/decay/<channel>``.
+
+        The per-frame counterpart to :meth:`read_decay` with a ``timepoint``.
+        ``frame`` is ``(H, W, T_bins)``. On a single-timepoint dataset
+        (``n_timepoints == 1``) this is a plain 3-D decay write at
+        ``timepoint == 0``. On a time-lapse dataset it allocates a
+        ``(T_acq, H, W, T_bins)`` dataset on first write (lzf, per-frame chunks)
+        and writes frame ``timepoint`` in place thereafter. Invalidates any
+        cached ``/phasor/<channel>`` (derived-layer staleness rule).
+        """
+        if frame.ndim != 3:
+            raise ValueError(
+                f"decay frame must be 3-D (H,W,T_bins); got {frame.ndim}-D"
+            )
+        ns, nt = self._native_shape_and_timepoints()
+        if not 0 <= timepoint < nt:
+            raise IndexError(f"timepoint={timepoint} out of range [0, {nt})")
+        if ns is not None and (int(frame.shape[0]), int(frame.shape[1])) != ns:
+            raise LayerSizeMismatchError(
+                f"decay frame spatial shape "
+                f"{(int(frame.shape[0]), int(frame.shape[1]))} disagrees with "
+                f"dataset native_shape {ns}."
+            )
+        frame = np.ascontiguousarray(frame, dtype=np.float32)
+        path = f"decay/{channel}"
+        phasor_path = f"phasor/{channel}"
+
+        # Single-timepoint dataset: a plain 3-D decay write (T_acq == 1).
+        if nt <= 1:
+            return self.write_array(
+                path, frame, is_decay=True,
+                attrs={"dims": ["H", "W", "T"], "channel": channel},
+            )
+
+        h, w, t_bins = (
+            int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2])
+        )
+        shape4 = (nt, h, w, t_bins)
+        with h5py.File(self.path, "a") as f:
+            existing = f.get(path)
+            if existing is not None and tuple(existing.shape) != shape4:
+                del f[path]
+                existing = None
+            # Invalidate stale phasor whenever the decay is (re)written.
+            if phasor_path in f:
+                del f[phasor_path]
+            if existing is None:
+                ds = f.create_dataset(
+                    path, shape=shape4, dtype=np.float32,
+                    chunks=_choose_chunks(shape4, is_decay=True),
+                    **_compression_kwargs(is_decay=True),
+                )
+                ds.attrs["dims"] = ["Tacq", "H", "W", "T"]
+                ds.attrs["channel"] = channel
+            else:
+                ds = existing
+            ds[timepoint] = frame
         return int(frame.size)
 
     def write_labels(

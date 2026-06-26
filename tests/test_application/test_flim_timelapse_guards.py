@@ -6,13 +6,14 @@ import numpy as np
 
 from percell4.store import DatasetStore
 
-
 # ── Decay-import guard ────────────────────────────────────────
 
 
-def test_add_decay_rejects_timelapse(tmp_path):
-    """Appending TCSPC .bin decay to a time-lapse dataset is rejected
-    discoverably (/decay has no acquisition-time axis)."""
+def test_add_decay_timelapse_no_longer_rejected_outright(tmp_path):
+    """The blanket U20 "Time-lapse FLIM is not yet supported" rejection is gone:
+    time-lapse decay append now proceeds per-timepoint. Full per-frame success +
+    completeness coverage lives in
+    tests/test_add_decay_to_dataset.py::test_add_decay_timelapse_*."""
     from percell4.application.use_cases.add_decay_to_dataset import (
         add_decay_to_dataset,
     )
@@ -33,8 +34,11 @@ def test_add_decay_rejects_timelapse(tmp_path):
     report = add_decay_to_dataset(
         h5, src, TokenConfig(), TileConfig(), FlimConfig(), ZeroPadOffsetRule(0, 0)
     )
-    assert "decay" in report.errors
-    assert "time-lapse" in report.errors["decay"].lower()
+    # No blanket time-lapse rejection any more (this .bin is simply unmatched).
+    assert "decay" not in report.errors
+    assert not any(
+        "not yet supported" in m.lower() for m in report.errors.values()
+    )
 
 
 # ── FLIM-FRET discovery: dims-attr time-lapse detection ───────

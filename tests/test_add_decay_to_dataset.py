@@ -21,7 +21,7 @@ from percell4.domain.io.models import (
     TokenConfig,
     ZeroPadOffsetRule,
 )
-from percell4.store import DatasetStore, LayerSizeMismatchError
+from percell4.store import DatasetStore
 
 
 def _h5_with_intensity(tmp_path, channel_names=("ch00", "ch01"), shape=(8, 8)):
@@ -1252,3 +1252,100 @@ def test_add_decay_offsets_present_flag_absent_raises(tmp_path, mock_read_flim_b
     with h5py.File(store.path, "r") as f:
         assert "decay" not in f
 
+
+
+# ── Multi-timepoint (time-lapse) decay append (U3/U4/U5) ─────────────────
+
+
+def _timepoint_tile_reader():
+    """A patterned .bin reader keyed on the ``_t<N>`` and ``_s<idx>`` tokens so
+    per-timepoint placement is verifiable: tile value = ``t * 100 + (idx + 1)``.
+    """
+    import re as _re
+
+    def _read(path, **kwargs):
+        s = Path(path).name  # basename only — tmp dirs can contain _tN/_sN
+        t = int(_re.search(r"_t(\d+)", s).group(1))
+        idx = int(_re.search(r"_s(\d+)", s).group(1))
+        val = t * 100 + (idx + 1)
+        arr = np.full((8, 8, 2), val, dtype=np.uint16)
+        return {"array": arr, "intensity": arr[..., 0].copy(),
+                "metadata": {"shape": (8, 8, 2)}}
+
+    return _read
+
+
+def test_add_decay_timelapse_per_timepoint_success(tmp_path, monkeypatch):
+    """A registered 3-timepoint dataset with one .bin set per timepoint appends a
+    4-D (T_acq, H, W, T_bins) /decay; each frame places that timepoint's tiles at
+    the persisted offsets (overlap winner = higher tile index). _t1 -> frame 0."""
+    reader = _timepoint_tile_reader()
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin", reader)
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", reader)
+
+    offsets = [(0, 0), (0, 6)]
+    from percell4.domain.io.assembler import canvas_from_offsets
+    native = canvas_from_offsets(np.asarray(offsets), (8, 8))
+    assert native == (8, 14)
+
+    store = DatasetStore(tmp_path / "movie.h5")
+    store.create(metadata={"channel_names": ["ch00"],
+                           "native_shape": native, "n_timepoints": 3})
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    # Single-padded, 1-based timepoint + tile tokens: _t1.._t3, _s0/_s1.
+    names = [f"exp_t{t}_s{s}_ch00.bin" for t in (1, 2, 3) for s in (0, 1)]
+    _make_bin_files(src, names)
+
+    report = add_decay_to_dataset(
+        h5_path=store.path, source_dir=src, token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+    assert report.written == ("ch00",), report.errors
+
+    with h5py.File(store.path, "r") as f:
+        ds = f["decay/ch00"]
+        assert ds.shape == (3, 8, 14, 2)
+        assert list(ds.attrs["dims"]) == ["Tacq", "H", "W", "T"]
+        for t_acq, t in enumerate((1, 2, 3)):
+            # tile0 (t*100+1) non-overlap cols 0-5; tile1 (t*100+2) cols 6-13;
+            # overlap cols 6-7 -> tile1 (higher index) wins.
+            assert (ds[t_acq, :, 0:6, 0] == t * 100 + 1).all()
+            assert (ds[t_acq, :, 6:14, 0] == t * 100 + 2).all()
+
+
+def test_add_decay_timelapse_incomplete_rejected(tmp_path, monkeypatch):
+    """A 3-timepoint dataset given only 2 timepoints' .bin sets is rejected per
+    channel (no partial time-lapse decay); nothing is written."""
+    reader = _timepoint_tile_reader()
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin", reader)
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", reader)
+
+    offsets = [(0, 0), (0, 6)]
+    store = DatasetStore(tmp_path / "movie.h5")
+    store.create(metadata={"channel_names": ["ch00"],
+                           "native_shape": (8, 14), "n_timepoints": 3})
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    names = [f"exp_t{t}_s{s}_ch00.bin" for t in (1, 2) for s in (0, 1)]  # missing t3
+    _make_bin_files(src, names)
+
+    report = add_decay_to_dataset(
+        h5_path=store.path, source_dir=src, token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+    assert report.written == ()
+    assert "ch00" in report.errors
+    assert "timepoint" in report.errors["ch00"].lower()
+    with h5py.File(store.path, "r") as f:
+        assert "decay/ch00" not in f

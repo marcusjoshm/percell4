@@ -287,6 +287,46 @@ class FlimPanel(QWidget):
 
     # ── Helpers ──────────────────────────────────────────────
 
+    def _active_tp_or_none(self) -> int | None:
+        """Active acquisition-frame index on a time-lapse dataset, else None."""
+        session = self.data_model.session
+        return int(session.active_timepoint) if session.n_timepoints > 1 else None
+
+    def _frame_map(self, arr):
+        """Slice a time-lapse (T_acq, H, W) phasor map to the active frame.
+
+        2-D maps (single-timepoint, or already a frame) pass through, so the
+        phasor window always receives a 2-D map matching the napari slider —
+        never a combined-all-timepoints (T_acq, H, W) cloud.
+        """
+        tp = self._active_tp_or_none()
+        if arr is not None and getattr(arr, "ndim", 0) == 3 and tp is not None:
+            return arr[max(0, min(tp, arr.shape[0] - 1))]
+        return arr
+
+    def _decay_intensity(self, handle, channel, view_bin: int = 1):
+        """Active-frame ``decay.sum(axis=-1)`` (2-D) for the intensity histogram.
+
+        Reads the active 4-D /decay frame on disk (read_decay) on a time-lapse
+        dataset so the weights match the displayed phasor frame; legacy 3-D
+        decay is read whole. Returns None when no /decay layer exists.
+        """
+        repo = self._get_repo()
+        tp = self._active_tp_or_none()
+        try:
+            reader = getattr(repo, "read_decay", None)
+            if tp is not None and reader is not None:
+                decay = reader(handle, channel, view_bin=view_bin, timepoint=tp)
+            else:
+                decay = repo.read_array(
+                    handle, f"decay/{channel}", view_bin=view_bin
+                )
+                if getattr(decay, "ndim", 0) == 4 and tp is not None:
+                    decay = decay[max(0, min(tp, decay.shape[0] - 1))]
+            return decay.sum(axis=-1).astype(np.float32)
+        except KeyError:
+            return None
+
     def _shift_held(self) -> bool:
         """Read Shift modifier at handler entry to detect force-recompute intent.
 
@@ -377,30 +417,22 @@ class FlimPanel(QWidget):
         handle = self.data_model.session.dataset
         phasor_intensity = None
         if handle is not None:
-            # Intensity for the phasor plot's intensity-weighted histogram
-            # MUST be spatially aligned with g_map / s_map. Both g_map and
-            # s_map are computed from /decay/<channel>, so derive the
-            # intensity weights from /decay/<channel>.sum(axis=-1) too —
-            # NOT from the /intensity stack, which can drift out of
-            # alignment with /decay (different stitching, rotation,
-            # different acquisition source). Misaligned weights produce
-            # wildly wrong histograms even though the per-pixel (g, s)
-            # values are correct.
-            try:
-                repo = self._get_repo()
-                decay = repo.read_array(
-                    handle, f"decay/{active_channel}", view_bin=active_bin,
-                )
-                phasor_intensity = decay.sum(axis=-1).astype(np.float32)
-            except KeyError:
-                phasor_intensity = None
+            # Intensity weights MUST come from /decay/<ch>.sum(axis=-1) (NOT the
+            # /intensity stack, which can drift out of alignment with /decay) so
+            # they match g/s per pixel — and from the SAME acquisition frame on
+            # a time-lapse dataset.
+            phasor_intensity = self._decay_intensity(
+                handle, active_channel, view_bin=active_bin
+            )
 
         seg_labels = self._get_active_seg_labels()
         self._show_window("phasor_plot")
         phasor_win = self._get_phasor_window()
         if phasor_win is not None:
+                # _frame_map slices the active acquisition frame on a time-lapse
+                # dataset (ComputePhasor returns (T_acq, H, W) g/s); 2-D passes.
                 phasor_win.set_phasor_data(
-                    result.g_map, result.s_map,
+                    self._frame_map(result.g_map), self._frame_map(result.s_map),
                     intensity=phasor_intensity, labels=seg_labels,
                 )
 
@@ -524,17 +556,19 @@ class FlimPanel(QWidget):
         repo = self._get_repo()
         intensity = None
         if handle is not None and repo is not None:
-            try:
-                decay = repo.read_array(handle, f"decay/{active_channel}")
-                intensity = decay.sum(axis=-1).astype(np.float32)
-            except KeyError:
-                pass
+            intensity = self._decay_intensity(handle, active_channel)
 
         g_unfiltered = s_unfiltered = None
         if handle is not None and repo is not None:
             try:
-                g_unfiltered = repo.read_array(handle, f"phasor/{active_channel}/g")
-                s_unfiltered = repo.read_array(handle, f"phasor/{active_channel}/s")
+                # _frame_map slices the active acquisition frame (time-lapse
+                # phasor is (T_acq, H, W)); 2-D single-timepoint passes through.
+                g_unfiltered = self._frame_map(
+                    repo.read_array(handle, f"phasor/{active_channel}/g")
+                )
+                s_unfiltered = self._frame_map(
+                    repo.read_array(handle, f"phasor/{active_channel}/s")
+                )
             except KeyError:
                 pass
 
@@ -543,7 +577,8 @@ class FlimPanel(QWidget):
         # after a successful wavelet run (wavelet reads them), but fall back
         # to the filtered maps as the base if the read somehow failed.
         if g_unfiltered is None or s_unfiltered is None:
-            base_g, base_s = result.g_filtered, result.s_filtered
+            base_g = self._frame_map(result.g_filtered)
+            base_s = self._frame_map(result.s_filtered)
         else:
             base_g, base_s = g_unfiltered, s_unfiltered
 
@@ -553,7 +588,8 @@ class FlimPanel(QWidget):
                 phasor_win.set_phasor_data(
                     base_g, base_s,
                     intensity=intensity.astype(np.float32) if intensity is not None else None,
-                    g_wavelet=result.g_filtered, s_wavelet=result.s_filtered,
+                    g_wavelet=self._frame_map(result.g_filtered),
+                    s_wavelet=self._frame_map(result.s_filtered),
                     labels=seg_labels,
                 )
 
