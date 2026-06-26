@@ -106,6 +106,16 @@ class FakeRepo:
             raise KeyError(f"Array not found: {path}")
         return self.written_arrays[path]
 
+    def read_array_attrs(self, handle, path):
+        return dict(getattr(self, "array_attrs", {}).get(path, {}))
+
+    def read_decay(self, handle, channel, view_bin=1, timepoint=None):
+        path = f"decay/{channel}"
+        if path not in self.written_arrays:
+            raise KeyError(f"Array not found: {path}")
+        arr = self.written_arrays[path]
+        return arr if timepoint is None else arr[timepoint]
+
     def read_group_columns(self, handle):
         return self.group_columns
 
@@ -452,6 +462,48 @@ class TestComputePhasorFreshMetadata:
         # Should not raise; falls back to handle.metadata.
         result = uc.execute(channel="ch0", harmonic=1)
         assert result.g_map.shape == (4, 4)
+
+
+class TestComputePhasorTimelapse:
+    """ComputePhasor on a 4-D (T_acq,H,W,T_bins) decay writes a (T_acq,H,W)
+    phasor, computing each frame from ITS OWN decay (cross-layer alignment
+    across the acquisition axis)."""
+
+    def test_timelapse_decay_writes_4d_phasor_per_frame(self):
+        from percell4.application.use_cases.compute_phasor import ComputePhasor
+        from percell4.domain.flim.phasor import compute_phasor
+
+        nt, h, w, tb = 3, 4, 4, 16
+        rates = [0.1, 0.25, 0.4]  # distinct decay rate per frame -> distinct phasor
+        tvec = np.arange(tb, dtype=np.float32)
+        decay = np.empty((nt, h, w, tb), dtype=np.float32)
+        for t in range(nt):
+            decay[t] = np.broadcast_to(
+                np.exp(-rates[t] * tvec) * 1000.0, (h, w, tb)
+            ).astype(np.float32)
+
+        session = Session()
+        session.set_dataset(DatasetHandle(path=Path("/tmp/x.h5"), metadata={}))
+        repo = FakeRepo()
+        repo.disk_metadata = {"native_shape": (h, w), "n_timepoints": nt}
+        repo.written_arrays["decay/ch0"] = decay
+        repo.array_attrs = {"decay/ch0": {"dims": ["Tacq", "H", "W", "T"]}}
+
+        ComputePhasor(repo, session).execute(channel="ch0", harmonic=1)
+
+        g = repo.written_arrays["phasor/ch0/g"]
+        s = repo.written_arrays["phasor/ch0/s"]
+        assert g.shape == (nt, h, w)
+        assert s.shape == (nt, h, w)
+        assert repo.array_attrs["phasor/ch0/g"]["dims"] == ["Tacq", "H", "W"]
+        # Each frame equals compute_phasor of that frame's decay.
+        for t in range(nt):
+            gt, st = compute_phasor(decay[t], harmonic=1)
+            np.testing.assert_allclose(g[t], gt, atol=1e-6)
+            np.testing.assert_allclose(s[t], st, atol=1e-6)
+        # Frames are genuinely distinct (different decay rates).
+        assert not np.allclose(g[0], g[1])
+        assert not np.allclose(g[1], g[2])
 
 
 # ── ComputePhasor: invalidate stale wavelet output ───────────
