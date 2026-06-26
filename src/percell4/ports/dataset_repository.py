@@ -217,6 +217,24 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def read_decay(
+        self,
+        handle: DatasetHandle,
+        channel: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        """Read ``/decay/<channel>`` with optional per-timepoint slice + view-bin.
+
+        ``timepoint`` slices one acquisition frame of a time-lapse 4-D decay
+        ``(T_acq, H, W, T_bins)`` **on disk** (returning ``(H, W, T_bins)``);
+        ``None`` returns the whole array (``view_bin > 1`` is then rejected on a
+        4-D decay). The frame-slicing chokepoint for every FLIM consumer — never
+        full-decode a 4-D decay to read one frame. See
+        :meth:`DatasetStore.read_decay`.
+        """
+        ...
+
     def read_array_attrs(
         self, handle: DatasetHandle, path: str
     ) -> dict[str, Any]:

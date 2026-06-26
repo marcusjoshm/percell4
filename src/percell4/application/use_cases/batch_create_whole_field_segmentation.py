@@ -87,12 +87,21 @@ def _infer_native_shape(
         if len(ns_tuple) == 2:
             return ns_tuple  # type: ignore[return-value]
 
-    # Fall back to decay-layer inference.
+    # Fall back to decay-layer inference. A 4-D time-lapse decay
+    # (T_acq, H, W, T_bins) carries spatial dims at [1:3]; legacy 3-D
+    # (H, W, T_bins) at [0:2].
     with h5py.File(h5_path, "r") as f:
         if "decay" in f:
             decay_grp = f["decay"]
             for channel in decay_grp:
-                shape = decay_grp[channel].shape
+                ds = decay_grp[channel]
+                shape = ds.shape
+                dims = ds.attrs.get("dims")
+                is_4d = len(shape) == 4 or (
+                    dims is not None and len(dims) > 0 and str(dims[0]) == "Tacq"
+                )
+                if is_4d and len(shape) >= 4:
+                    return int(shape[1]), int(shape[2])
                 if len(shape) >= 2:
                     return int(shape[0]), int(shape[1])
 
