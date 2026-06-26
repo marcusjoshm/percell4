@@ -54,19 +54,19 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # OCR + PARSING
 # ---------------------------------------------------------------------------
 
-# A row looks like:  <name>  HyD X 3  ✓  34.84 °  0.9997
-# Strict pattern: phase has a decimal point.
-ROW_RE = re.compile(
-    r"(.+?)\s+(HyD\s*[XS]\s*\d)\s+.*?(\d{1,3}\.\d{2})\s*°?\s+(0\.\d{4})"
-)
-# Fallback: same as above but tolerates OCR dropping the decimal in the phase
-# (e.g. "3849°" instead of "38.49°"). Used only when the strict regex misses.
-ROW_RE_NODOT = re.compile(
-    r"(.+?)\s+(HyD\s*[XS]\s*\d)\s+.*?(\d{4})\s*°?\s+(0\.\d{4})"
-)
-# A weaker pattern used only to detect "this line probably WAS a data row
-# but failed to parse" so we can warn the user.
-SUSPECT_RE = re.compile(r"HyD\s*[XS]\s*\d.*0\.\d{3,4}")
+# A data row looks like:  <name>  HyD X 3  ✓  34.84 °  0.9997
+# We anchor on the two most reliable tokens — the CHANNEL and the MODULATION
+# (always 0.dddd) — and pull the phase NUMBER from between them. The degree
+# symbol is ignored entirely: OCR renders it as °, *, ', ` … which used to
+# break a strict `\s*°?\s+` separator and silently drop ~3/4 of the rows.
+# Numbers (phase + modulation) are what matter; names are best-effort and easy
+# to fix by hand, and a row is never dropped just because its name is messy.
+CHAN_RE = re.compile(r"HyD\s*([XS])\s*(\d)")
+MOD_RE = re.compile(r"0\.\d{3,4}")
+PHASE_DOT_RE = re.compile(r"-?\d{1,3}\.\d{1,2}")     # e.g. 38.92
+PHASE_NODOT_RE = re.compile(r"-?\d{3,4}")            # e.g. 3892 -> 38.92
+# Any line carrying a channel followed by a modulation is treated as a data row.
+DATA_ROW_RE = re.compile(r"HyD\s*[XS]\s*\d.*?0\.\d{3,4}")
 
 JUNK_CHARS = set("SVYvLsylWw=.¥√✓/\\|_~-&\"'`*°")
 
@@ -98,7 +98,14 @@ def clean_name(raw: str) -> str:
 
 
 def extract_rows(image_path: Path):
-    """Run OCR on one image, return list of (name, channel, phase, modulation)."""
+    """Run OCR on one image, return list of (name, channel, phase, modulation).
+
+    Best-effort: every line that carries a channel + a modulation is emitted as
+    a row. The phase/modulation NUMBERS are extracted regardless of the (often
+    mis-OCR'd) degree symbol; if the phase or name can't be read cleanly the row
+    is still written — phase blank, name blank/partial — and a warning is logged
+    so the user can fill those cells in by hand. Rows are never silently dropped.
+    """
     img = Image.open(image_path).convert("L")
     img = ImageOps.invert(img)                                # dark UI -> dark-on-light
     img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
@@ -107,34 +114,46 @@ def extract_rows(image_path: Path):
     rows = []
     warnings = []
     for line in text.splitlines():
-        m = ROW_RE.search(line)
-        phase_was_reconstructed = False
-        if not m:
-            m = ROW_RE_NODOT.search(line)
-            if m:
-                phase_was_reconstructed = True
-            elif SUSPECT_RE.search(line):
-                # Looks like a data row but neither regex caught it -- warn
-                warnings.append(line.strip())
-                continue
-            else:
-                continue
-        name = clean_name(m.group(1))
-        channel = re.sub(r"HyD\s*([XS])\s*(\d)", r"HyD \1 \2", m.group(2))
-        if phase_was_reconstructed:
-            raw = m.group(3)                                  # e.g. "3849"
-            phase = float(f"{raw[:-2]}.{raw[-2:]}")            # -> 38.49
-            warnings.append(
-                f"reconstructed phase {phase} from '{raw}' in: {line.strip()}"
-            )
+        if not DATA_ROW_RE.search(line):
+            continue
+        chan_m = CHAN_RE.search(line)
+        mod_m = MOD_RE.search(line, chan_m.end())             # modulation after channel
+        if mod_m is None:                                     # shouldn't happen (gated)
+            warnings.append(f"no modulation read: {line.strip()}")
+            continue
+
+        channel = f"HyD {chan_m.group(1)} {chan_m.group(2)}"
+        modulation = float(mod_m.group())
+
+        # Phase = the number between channel and modulation; the degree glyph
+        # (°, *, ', …) is just skipped over.
+        between = line[chan_m.end():mod_m.start()]
+        phase, note = None, ""
+        pm = PHASE_DOT_RE.search(between)
+        if pm:
+            phase = float(pm.group())
         else:
-            phase = float(m.group(3))
-        modulation = float(m.group(4))
+            pm = PHASE_NODOT_RE.search(between)               # OCR dropped the dot
+            if pm:
+                raw = pm.group()
+                sign = -1.0 if raw.startswith("-") else 1.0
+                digits = raw.lstrip("-")
+                phase = sign * float(f"{digits[:-2]}.{digits[-2:]}")
+                note = f"phase reconstructed as {phase} from {raw!r}"
+            else:
+                note = "phase unreadable (left blank)"
+
+        name = clean_name(line[:chan_m.start()])
+        if not name:
+            note = (note + "; " if note else "") + "name unreadable (left blank)"
+
         rows.append((name, channel, phase, modulation))
+        if note:
+            warnings.append(f"{note}: {line.strip()}")
 
     if warnings:
-        print(f"  ⚠ {image_path.name}: {len(warnings)} line(s) needed attention:",
-              file=sys.stderr)
+        print(f"  ⚠ {image_path.name}: {len(warnings)} row(s) need a manual check "
+              f"(numbers were still extracted where possible):", file=sys.stderr)
         for w in warnings:
             print(f"      {w}", file=sys.stderr)
     return rows
@@ -270,13 +289,11 @@ def main():
         all_rows.extend(rows)
 
     all_rows = dedupe(all_rows)
-    all_rows, name_changes = normalize_group_names(all_rows)
+    # NB: name normalization is intentionally NOT applied — with best-effort OCR
+    # names, forcing a canonical name across a sample pair could overwrite a
+    # clean name with a garbled neighbour. Names are left as-read for the user
+    # to correct; the numbers are the load-bearing output.
     print(f"Total after dedupe: {len(all_rows)} rows", file=sys.stderr)
-    if name_changes:
-        print(f"  Name-normalized {len(name_changes)} row(s) to match neighbors:",
-              file=sys.stderr)
-        for before, after in name_changes:
-            print(f"      {before!r}  ->  {after!r}", file=sys.stderr)
 
     if args.print_only:
         for r in all_rows:
