@@ -160,34 +160,47 @@ class RunPhasorGMM:
                     f"Phasor data not found for channel '{channel}'. Compute Phasor first."
                 )
 
-        # ── Derive intensity from decay (NEVER /intensity[ch_idx]) ─
-        # The cross-layer alignment learning forbids reading /intensity
-        # because /decay and /intensity can drift out of alignment after
-        # a later add-layer or rotation pass. ``dtype=np.float64`` on the
-        # sum prevents precision loss for high-photon-count pixels (sums
-        # > 2^24 ≈ 1.7e7 lose precision in float32).
-        try:
-            decay = self._repo.read_array(
-                handle, f"decay/{channel}", view_bin=view_bin
+        # Time-lapse: /phasor/<ch>/{g,s} are (T_acq, H, W). Slice the active
+        # acquisition frame so g/s are 2-D and align with the (active-frame)
+        # labels/mask read below. Single-timepoint phasor is already 2-D.
+        if g.ndim == 3:
+            t_idx = max(
+                0, min(int(self._session.active_timepoint), g.shape[0] - 1)
             )
-        except KeyError:
-            raise ValueError(
-                f"No /decay/{channel} layer — cannot derive intensity weights."
-            )
-        intensity = decay.sum(axis=-1, dtype=np.float64).astype(np.float32)
+            g = g[t_idx]
+            s = s[t_idx]
 
-        # The phasor (g, s) and decay-derived intensity are 2D (/decay has no
-        # acquisition-T axis). On a time-lapse dataset the labels/mask resources
-        # may be (T,H,W); read them at the active timepoint so the raveled
-        # labels/mask align with the 2D g/s/intensity instead of mismatching
-        # T*H*W vs H*W (the boolean-index crash). Single-timepoint passes
-        # timepoint=None -> today's behavior. (Full time-lapse FLIM is deferred:
-        # /decay would need an acquisition-T axis.)
+        # The active acquisition frame (time-lapse) or None (single-timepoint),
+        # used for the decay-derived intensity AND the labels/mask reads so all
+        # ravel to the SAME H*W and never mismatch T*H*W vs H*W.
         tp = (
             self._session.active_timepoint
             if self._session.n_timepoints > 1
             else None
         )
+
+        # ── Derive intensity from decay (NEVER /intensity[ch_idx]) ─
+        # The cross-layer alignment learning forbids reading /intensity
+        # because /decay and /intensity can drift out of alignment after
+        # a later add-layer or rotation pass. ``dtype=np.float64`` on the
+        # sum prevents precision loss for high-photon-count pixels (sums
+        # > 2^24 ≈ 1.7e7 lose precision in float32). On a time-lapse dataset
+        # read the active 4-D decay frame (the same frame as g/s above).
+        try:
+            reader = getattr(self._repo, "read_decay", None)
+            if tp is not None and reader is not None:
+                decay = reader(handle, channel, view_bin=view_bin, timepoint=tp)
+            else:
+                decay = self._repo.read_array(
+                    handle, f"decay/{channel}", view_bin=view_bin
+                )
+                if decay.ndim == 4 and tp is not None:
+                    decay = decay[tp]
+        except KeyError:
+            raise ValueError(
+                f"No /decay/{channel} layer — cannot derive intensity weights."
+            )
+        intensity = decay.sum(axis=-1, dtype=np.float64).astype(np.float32)
 
         # ── Read mask (optional, only when filter is engaged) ────
         mask_array: NDArray[np.uint8] | None = None

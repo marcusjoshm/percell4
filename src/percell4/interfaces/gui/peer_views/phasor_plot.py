@@ -376,6 +376,10 @@ class PhasorPlotWindow(QMainWindow):
             self._session.subscribe(
                 Event.ACTIVE_BIN_CHANGED, self._on_active_bin_changed,
             ),
+            self._session.subscribe(
+                Event.ACTIVE_TIMEPOINT_CHANGED,
+                self._on_active_timepoint_changed,
+            ),
         ]
 
     def _build_ui(self) -> None:
@@ -2201,6 +2205,19 @@ class PhasorPlotWindow(QMainWindow):
         channel clears the histogram (consistent with per-channel
         caching — the user expects to see the new channel's data, not
         the previous one).
+        """
+        if not self.isVisible():
+            return
+        self._try_auto_load_cached()
+
+    def _on_active_timepoint_changed(self) -> None:
+        """Re-hydrate the phasor window for the new acquisition frame when the
+        napari dims slider moves.
+
+        Time-lapse FLIM: /phasor/<ch> and /decay/<ch> are per-acquisition-frame,
+        so LoadCachedPhasor (via _try_auto_load_cached) returns the frame at
+        ``session.active_timepoint``. The displayed phasor therefore tracks the
+        slider rather than showing a combined-all-timepoints cloud.
         """
         if not self.isVisible():
             return
