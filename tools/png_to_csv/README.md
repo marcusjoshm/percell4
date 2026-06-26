@@ -14,14 +14,18 @@ Helper tools for turning a Leica **Phasor Calibration** table into the
 
 ## One-time setup
 
-The script needs the Tesseract OCR engine plus three Python packages:
+The script needs the Tesseract OCR engine plus three Python packages
+(`pytesseract`, `Pillow`, `openpyxl`). Install the Python packages via the
+PerCell4 `ocr` extra (or by hand), then the Tesseract engine separately:
 
 ```bash
-# Tesseract OCR engine:
+pip install -e ".[ocr]"           # from the repo root — installs the python deps
+# (or by hand: pip install pytesseract Pillow openpyxl)
+
+# Tesseract OCR engine (system binary, not a pip package):
 #   macOS:   brew install tesseract
 #   Linux:   sudo apt install tesseract-ocr
 #   Windows: https://github.com/UB-Mannheim/tesseract/wiki  (add it to PATH)
-pip install pytesseract Pillow openpyxl
 ```
 
 ## Creating a calibration

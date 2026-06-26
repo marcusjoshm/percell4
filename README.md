@@ -806,12 +806,24 @@ Wheels appear under `dist/`.
 | `gpu`   | GPU-accelerated Cellpose (`cellpose[gpu]`) — pulls CUDA-tagged torch; requires a matching NVIDIA driver. Unsupported on Windows lab machines without a GPU. On Windows, if `nvidia-smi` reports a driver older than R527 (max CUDA < 12.1), install torch from the CUDA 11.8 index explicitly: `pip install --no-cache-dir --force-reinstall "torch<2.9" "torchvision<0.24" --index-url https://download.pytorch.org/whl/cu118`. Current drivers (R560+) work with default `cu126` wheels. |
 | `flim`  | Additional FLIM-related dependency (`dtcwt`) |
 | `imagej`| ROI I/O via `roifile`                        |
-| `all`   | `gpu`, `flim`, and `imagej`                  |
+| `ocr`   | Phasor-calibration OCR helper [`tools/png_to_csv/`](tools/png_to_csv/README.md): `pytesseract`, `Pillow`, `openpyxl`. **Also needs the Tesseract OCR engine** — a system binary pip cannot install (see below). |
+| `all`   | `gpu`, `flim`, `imagej`, and `ocr`           |
 
 Example:
 
 ```bash
 pip install -e ".[gpu]"
+```
+
+The `ocr` extra additionally requires the **Tesseract** OCR engine (not a Python
+package), installed once per machine:
+
+```bash
+pip install -e ".[ocr]"          # python deps for tools/png_to_csv/
+# Tesseract OCR engine:
+#   macOS:   brew install tesseract
+#   Linux:   sudo apt install tesseract-ocr
+#   Windows: https://github.com/UB-Mannheim/tesseract/wiki  (add it to PATH)
 ```
 
 ---

@@ -71,8 +71,15 @@ flim = [
 imagej = [
     "roifile>=2024.1",
 ]
+# Phasor-calibration OCR helper (tools/png_to_csv/). Also needs the Tesseract
+# OCR engine, a system binary pip cannot install (brew / apt / Windows installer).
+ocr = [
+    "pytesseract>=0.3",
+    "Pillow>=10",
+    "openpyxl>=3.1",
+]
 all = [
-    "percell4[gpu,flim,imagej]",
+    "percell4[gpu,flim,imagej,ocr]",
 ]
 dev = [
     "pytest>=7.4",
