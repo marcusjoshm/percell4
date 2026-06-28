@@ -875,12 +875,14 @@ def _apply_auto_extract_cells(
     # with no QC step, so the passes/window/largest-Ø are the only visible trace).
     logger.info(
         "round %s: auto extraction — passes=%s, fine_window=%s, largest=%.3gpx, "
-        "second_pass=%s, %d positive px",
+        "second_pass=%s, coarse_k(mean per-cell)=%s over %d cells, %d positive px",
         round_name,
         report.passes,
         report.fine_window,
         report.largest_particle_px or 0.0,
         report.second_pass_used,
+        f"{report.coarse_k_mean:.2f}" if report.coarse_k_mean is not None else "n/a",
+        report.coarse_k_n,
         n_pos,
     )
     if n_pos == 0:

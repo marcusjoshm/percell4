@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -238,7 +239,7 @@ def detect_adaptive_per_cell(
     *,
     window_px: int,
     min_spot_px: int,
-    k: float = 1.0,
+    k: float | Mapping[int, float] = 1.0,
     presmooth_sigma_px: float = 1.0,
     fill_holes: bool = False,
 ) -> np.ndarray:
@@ -251,17 +252,24 @@ def detect_adaptive_per_cell(
     at ``sigma=(window_px-1)/6`` (computed once — a per-cell-crop background would
     distort the cell-edge granules), then thresholds every Cellpose cell against
     *its own* robust ``1.4826*MAD`` σ at ``k``. The per-cell σ is what lets one
-    ``k`` hold across cells whose intensity scale varies many-fold. When
-    ``fill_holes`` is True, enclosed interior holes are filled per pass (a large
-    particle under-windowed into a ring is closed solid) **before** the size
-    filter; default False leaves the mask as detected. Components smaller than
-    ``min_spot_px`` are dropped (a no-op when ``min_spot_px <= 1``). Returns a
-    whole-frame ``{0, 1}`` ``uint8`` mask.
+    ``k`` hold across cells whose intensity scale varies many-fold.
+
+    ``k`` is either a scalar (one k for every cell) or a ``{cell_id -> k}`` mapping
+    for a genuinely per-cell threshold (e.g. the two-pass auto-extraction coarse
+    pass, where the noise-symmetry floor is estimated per cell). With a mapping, a
+    cell absent from it is **not** thresholded this pass (it has no defined k) —
+    callers build the mapping over the same finite-σ cells this function thresholds,
+    so in practice every thresholded cell is present. When ``fill_holes`` is True,
+    enclosed interior holes are filled per pass (a large particle under-windowed
+    into a ring is closed solid) **before** the size filter; default False leaves
+    the mask as detected. Components smaller than ``min_spot_px`` are dropped (a
+    no-op when ``min_spot_px <= 1``). Returns a whole-frame ``{0, 1}`` ``uint8`` mask.
     """
     from scipy.ndimage import binary_fill_holes, find_objects, gaussian_filter
 
     img = np.asarray(image, dtype=np.float32)
     lab = np.asarray(labels)
+    k_is_map = isinstance(k, Mapping)
 
     work = apply_gaussian_smoothing(img, presmooth_sigma_px)
     # Local background = Gaussian mean at the threshold_local('gaussian') sigma.
@@ -278,8 +286,15 @@ def detect_adaptive_per_cell(
         s = sigmas.get(cid)
         if s is None:  # zero/non-finite MAD: cell omitted (cannot threshold)
             continue
+        if k_is_map:
+            kc = k.get(cid)
+            if kc is None:  # no per-cell k for this cell -> not thresholded this pass
+                continue
+            kc = float(kc)
+        else:
+            kc = float(k)
         cell = lab[sl] == cid
-        out[sl] |= (diff[sl] > float(k) * s) & cell
+        out[sl] |= (diff[sl] > kc * s) & cell
 
     if fill_holes:
         out = binary_fill_holes(out)

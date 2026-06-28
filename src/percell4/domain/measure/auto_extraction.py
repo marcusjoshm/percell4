@@ -60,6 +60,7 @@ __all__ = [
     "measure_largest_particle_diameter",
     "measure_smallest_particle_diameter",
     "noise_symmetry_floor_k",
+    "noise_symmetry_floor_k_per_cell",
     "AutoExtractReport",
     "NoParticlesFound",
 ]
@@ -107,6 +108,13 @@ class AutoExtractReport:
     area_px: int
     smallest_diameter_px: float = 0.0  # effective smallest Ø (supplied or auto)
     smallest_source: str = ""          # "supplied …" | "auto LoG …"
+    # Coarse-pass per-cell k stats (None / 0 when no coarse pass ran). The coarse
+    # k is the noise-symmetry floor estimated PER CELL; these summarise the spread
+    # and ``passes`` records the mean.
+    coarse_k_mean: float | None = None
+    coarse_k_min: float | None = None
+    coarse_k_max: float | None = None
+    coarse_k_n: int = 0                 # cells contributing a per-cell coarse k
     extra: dict = field(default_factory=dict)
 
 
@@ -209,6 +217,44 @@ def measure_smallest_particle_diameter(
     return float(np.percentile(d, percentile)) if d.size else 0.0
 
 
+def _symmetry_floor_for_z(
+    z: np.ndarray,
+    *,
+    fdr: float,
+    k_floor: float,
+    k_ceiling: float,
+    step: float,
+) -> float:
+    """The noise-symmetry-floor scan over one z-score array (the shared kernel).
+
+    The smallest k (stepping up from ``k_floor``) whose estimated false rate
+    (negative tail count / positive tail count) is ≤ ``fdr``, requiring ≥20
+    positives so a tiny tail does not latch a spuriously low k. Returns
+    ``k_ceiling`` when the criterion is never met. Both the pooled
+    (:func:`noise_symmetry_floor_k`) and per-cell
+    (:func:`noise_symmetry_floor_k_per_cell`) estimators call this, so the two
+    use the *same* method — they differ only in whether the z-scores are pooled
+    across cells or evaluated one cell at a time.
+    """
+    k = float(k_floor)
+    while k <= k_ceiling:
+        pos = int((z > k).sum())
+        neg = int((z < -k).sum())
+        if pos >= 20 and neg <= fdr * pos:
+            return float(k)
+        k += step
+    return float(k_ceiling)
+
+
+def _band_pass_diff(work: np.ndarray, window: int) -> np.ndarray:
+    """The band-pass residual ``work - gaussian_mean(work, (window-1)/6)``.
+
+    The whole-frame local-background subtraction the detector thresholds; shared
+    by both noise-floor estimators so their z-scores match detection exactly.
+    """
+    return np.asarray(work) - gaussian_filter(np.asarray(work), (int(window) - 1) / 6.0)
+
+
 def noise_symmetry_floor_k(
     work: np.ndarray,
     cell_labels: np.ndarray,
@@ -220,7 +266,7 @@ def noise_symmetry_floor_k(
     k_ceiling: float = 15.0,
     step: float = 0.25,
 ) -> float:
-    """Smallest k where the band-passed background is rejected at rate ≤ ``fdr``.
+    """Smallest k where the *pooled* band-passed background is rejected at ≤ ``fdr``.
 
     Operates on precomputed ``work`` (the presmoothed image) and ``sigma`` (the
     per-cell σ from :func:`per_cell_sigma`) so the z-scores match the detection
@@ -230,10 +276,14 @@ def noise_symmetry_floor_k(
     (negative tail / positive tail) is ≤ ``fdr`` (with ≥20 positives, so a tiny
     tail does not latch a spuriously low k). Returns ``k_floor`` when no cell
     contributes z-scores, ``k_ceiling`` when the criterion is never met.
+
+    This pools every cell's z-scores into one frame-wide estimate. Prefer
+    :func:`noise_symmetry_floor_k_per_cell` for the per-cell floor — pooling
+    averages away the tail asymmetry of high-background/low-contrast cells, which
+    then over-detect at the pooled (too-low) k.
     """
-    work = np.asarray(work)
     lab = np.asarray(cell_labels)
-    diff = work - gaussian_filter(work, (window - 1) / 6.0)
+    diff = _band_pass_diff(work, window)
 
     zs = []
     for idx, sl in enumerate(find_objects(lab)):
@@ -247,15 +297,52 @@ def noise_symmetry_floor_k(
     if not zs:
         return float(k_floor)
     z = np.concatenate(zs)
+    return _symmetry_floor_for_z(z, fdr=fdr, k_floor=k_floor, k_ceiling=k_ceiling, step=step)
 
-    k = float(k_floor)
-    while k <= k_ceiling:
-        pos = int((z > k).sum())
-        neg = int((z < -k).sum())
-        if pos >= 20 and neg <= fdr * pos:
-            return float(k)
-        k += step
-    return float(k_ceiling)
+
+def noise_symmetry_floor_k_per_cell(
+    work: np.ndarray,
+    cell_labels: np.ndarray,
+    sigma: dict[int, float],
+    window: int,
+    *,
+    fdr: float = FDR,
+    k_floor: float = 1.0,
+    k_ceiling: float = 15.0,
+    step: float = 0.25,
+) -> dict[int, float]:
+    """Per-cell noise-symmetry floor: ``{cell_id -> k}`` via the same scan, unpooled.
+
+    Identical method to :func:`noise_symmetry_floor_k` but the floor is found from
+    *each cell's own* z-scores instead of the frame-pooled array. The per-cell σ
+    already normalises intensity scale; evaluating the symmetry per cell also lets
+    each cell's tail *shape* set its own k — so a high-background, low-contrast
+    cell (near-symmetric residual → high floor) is no longer dragged down by the
+    clean, positive-skewed cells it would be pooled with.
+
+    Keys are exactly the cells with a finite σ in ``sigma`` (a cell with no σ
+    cannot define a threshold and is omitted — matching
+    :func:`detect_adaptive_per_cell`, which skips the same cells). A cell whose
+    criterion is never met maps to ``k_ceiling``. ``work`` is the presmoothed
+    image and the band-pass is computed once over the whole frame, so the
+    z-scores match what the detector thresholds.
+    """
+    lab = np.asarray(cell_labels)
+    diff = _band_pass_diff(work, window)
+
+    out: dict[int, float] = {}
+    for idx, sl in enumerate(find_objects(lab)):
+        if sl is None:
+            continue
+        cid = idx + 1
+        s = sigma.get(cid)
+        if s is None:
+            continue
+        z = diff[sl][lab[sl] == cid] / s
+        out[cid] = _symmetry_floor_for_z(
+            z, fdr=fdr, k_floor=k_floor, k_ceiling=k_ceiling, step=step
+        )
+    return out
 
 
 def auto_extract(
@@ -342,15 +429,31 @@ def auto_extract(
 
     # ---- pass 2: only if the largest particle exceeds what the fine window fills ----
     second = coarse_window > fine_window
+    coarse_k_mean = coarse_k_min = coarse_k_max = None
+    coarse_k_n = 0
     if second:
-        k_coarse = noise_symmetry_floor_k(
+        # Estimate the noise-symmetry floor PER CELL (not pooled): each cell's k is
+        # set by its own tail asymmetry, so a high-background/low-contrast cell gets
+        # the higher k it needs instead of the frame-pooled (too-low) one.
+        k_by_cell = noise_symmetry_floor_k_per_cell(
             work, lab, sigma, coarse_window, fdr=fdr, k_floor=1.0,
         )
-        mask |= detect_adaptive_per_cell(
-            img, lab, window_px=coarse_window, min_spot_px=1, k=k_coarse,
-            presmooth_sigma_px=presmooth_sigma_px, fill_holes=fill_holes,
-        ).astype(bool)
-        passes.append((int(coarse_window), round(float(k_coarse), 2)))
+        if k_by_cell:
+            kvals = np.fromiter(k_by_cell.values(), dtype=float)
+            coarse_k_mean = float(kvals.mean())
+            coarse_k_min = float(kvals.min())
+            coarse_k_max = float(kvals.max())
+            coarse_k_n = int(kvals.size)
+            mask |= detect_adaptive_per_cell(
+                img, lab, window_px=coarse_window, min_spot_px=1, k=k_by_cell,
+                presmooth_sigma_px=presmooth_sigma_px, fill_holes=fill_holes,
+            ).astype(bool)
+            # `passes` records the MEAN per-cell k (the spread is in the report).
+            passes.append((int(coarse_window), round(coarse_k_mean, 2)))
+        else:
+            # No cell yielded a per-cell floor (every cell flat/σ-less) — the coarse
+            # pass would add nothing, so treat the frame as a single pass.
+            second = False
 
     mask = _filter_by_area(mask, int(min_spot_px))
     out = mask.astype(np.uint8)
@@ -367,6 +470,10 @@ def auto_extract(
         area_px=int(mask.sum()),
         smallest_diameter_px=float(smallest_diameter_px),
         smallest_source=smallest_source,
+        coarse_k_mean=coarse_k_mean,
+        coarse_k_min=coarse_k_min,
+        coarse_k_max=coarse_k_max,
+        coarse_k_n=coarse_k_n,
         extra={"fdr": float(fdr)},
     )
     return out, report

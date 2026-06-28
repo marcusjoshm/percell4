@@ -13,6 +13,7 @@ from percell4.domain.measure.auto_extraction import (
     measure_largest_particle_diameter,
     measure_smallest_particle_diameter,
     noise_symmetry_floor_k,
+    noise_symmetry_floor_k_per_cell,
 )
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 
@@ -91,6 +92,56 @@ def test_noise_floor_in_range_and_rises_with_window():
 
 
 # --------------------------------------------------------------------------- #
+# noise_symmetry_floor_k_per_cell
+# --------------------------------------------------------------------------- #
+def _two_cell_contrast_image(shape=(160, 320), seed=3):
+    """Two well-separated cells with the same noise scale but opposite tail shape.
+
+    * Cell 1 (left disc): several bright, high-contrast spots → a positive-skewed
+      band-pass residual that meets the noise-symmetry criterion at a *low* k.
+    * Cell 2 (right disc): featureless noise → a ~symmetric residual that only
+      meets it at the *ceiling*.
+
+    Per-cell MAD normalises intensity scale, so the two cells differ only in tail
+    asymmetry — the property the pooled single-k estimate averages away. This is
+    the "very high background, low contrast" cell the pooled estimate over-detects.
+    """
+    rng = np.random.RandomState(seed)
+    img = rng.normal(100.0, 5.0, shape).astype(np.float32)
+    labels = np.zeros(shape, dtype=np.int32)
+    rr, cc = disk((80, 70), 45, shape=shape)
+    labels[rr, cc] = 1
+    for cy, cx in [(60, 55), (95, 60), (80, 85), (70, 90), (100, 75), (55, 75)]:
+        srr, scc = disk((cy, cx), 2, shape=shape)
+        img[srr, scc] += 300.0
+    rr, cc = disk((80, 250), 45, shape=shape)
+    labels[rr, cc] = 2
+    return img, labels
+
+
+def test_noise_floor_per_cell_differs_by_cell():
+    img, labels = _two_cell_contrast_image()
+    work = apply_gaussian_smoothing(img, 1.0)
+    sigma = per_cell_sigma(work, labels)
+    k_by_cell = noise_symmetry_floor_k_per_cell(work, labels, sigma, 31, fdr=0.1, k_floor=1.0)
+    assert set(k_by_cell) == {1, 2}
+    assert all(1.0 <= v <= 15.0 for v in k_by_cell.values())
+    # the featureless high-background cell needs a strictly higher k than the
+    # spot-bearing cell — the whole point of estimating k per cell.
+    assert k_by_cell[2] > k_by_cell[1]
+
+
+def test_noise_floor_per_cell_skips_cells_without_sigma():
+    """A cell absent from the per-cell σ map gets no k entry (cannot threshold)."""
+    img, labels = _two_cell_contrast_image()
+    work = apply_gaussian_smoothing(img, 1.0)
+    sigma = per_cell_sigma(work, labels)
+    del sigma[2]  # drop one cell's σ
+    k_by_cell = noise_symmetry_floor_k_per_cell(work, labels, sigma, 31, k_floor=1.0)
+    assert set(k_by_cell) == {1}
+
+
+# --------------------------------------------------------------------------- #
 # auto_extract
 # --------------------------------------------------------------------------- #
 def test_auto_extract_two_pass_fills_large_and_small():
@@ -106,6 +157,19 @@ def test_auto_extract_two_pass_fills_large_and_small():
     assert mask[180, 180] == 1
     # small spots detected too
     assert mask[40, 40] == 1
+
+
+def test_auto_extract_reports_per_cell_coarse_k_mean():
+    """The coarse pass records the MEAN per-cell k (one cell here → mean == that k)."""
+    img, labels = _wide_range_image()
+    _, report = auto_extract(img, labels, smallest_particle_px=3.0)
+    assert report.second_pass_used is True
+    assert report.coarse_k_n == 1  # one whole-frame cell
+    assert report.coarse_k_mean is not None
+    assert report.coarse_k_min == report.coarse_k_max == report.coarse_k_mean
+    # the k recorded in `passes` for the coarse pass is the mean of the per-cell floors
+    assert report.passes[1][1] == round(report.coarse_k_mean, 2)
+    assert report.coarse_k_mean > 1.0
 
 
 def test_auto_extract_single_pass_when_no_large_particle():

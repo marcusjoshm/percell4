@@ -953,12 +953,21 @@ class AdaptiveClipPanel(QWidget):
 
     def _print_auto_extract_report(self, report) -> None:
         """Print the two-pass auto-extraction passes/sizes to the terminal (debug)."""
+        if report.coarse_k_mean is not None:
+            coarse_k = (
+                f"coarse k (per-cell): mean {report.coarse_k_mean:.2f} "
+                f"[{report.coarse_k_min:.2f}–{report.coarse_k_max:.2f}] "
+                f"over {report.coarse_k_n} cells"
+            )
+        else:
+            coarse_k = "coarse k (per-cell): n/a (single pass)"
         print(
             f"  [auto-extract] smallest: {report.smallest_source}\n"
             f"    passes {report.passes} "
             f"(fine window {report.fine_window}; "
             f"largest Ø {report.largest_particle_px} px; "
             f"second pass {report.second_pass_used})\n"
+            f"    {coarse_k}\n"
             f"    presmooth σ {report.presmooth_sigma_px}; n_cells {report.n_cells}; "
             f"components {report.n_components}; area {report.area_px} px",
             flush=True,
