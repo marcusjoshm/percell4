@@ -398,6 +398,21 @@ def _process_one_dataset(
     # surfaced as /metadata n_timepoints): branch on this, never array.ndim.
     n_timepoints = session.n_timepoints
 
+    # Shared-ROI × time-lapse is deferred in BOTH directions: a time-lapse
+    # *source* self-fits per frame and never populates the scalar roi_cache, so
+    # a target consuming it would otherwise cache-miss with a misleading "fit
+    # failed" message. Detect a time-lapse source once (cheap metadata read) so
+    # the guard below can skip discoverably whether the source OR the target is
+    # time-lapse.
+    source_is_timelapse = False
+    if roi_source is not None:
+        try:
+            source_is_timelapse = (
+                int(DatasetStore(roi_source).metadata.get("n_timepoints", 1) or 1) > 1
+            )
+        except Exception:  # noqa: BLE001 — a bad source is handled by the cache-miss path
+            source_is_timelapse = False
+
     try:
         channel_names = list(store.metadata.get("channel_names", []) or [])
     except Exception as exc:  # noqa: BLE001
@@ -445,8 +460,11 @@ def _process_one_dataset(
             # shared-ROI sub-mode is NOT extended to time-lapse in this plan;
             # applying one cached scalar fit to every frame would be silently
             # wrong. Skip the channel discoverably (the deferred former-U3)
-            # instead. The time-lapse self-fit path below IS supported. ──
-            if roi_source is not None and n_timepoints > 1:
+            # instead — whether the TARGET or the SOURCE is time-lapse (a
+            # time-lapse source never caches a fit, so a target consuming it
+            # would otherwise misreport "ROI source fit failed"). The
+            # time-lapse *self*-fit path below (roi_source is None) IS supported. ──
+            if roi_source is not None and (n_timepoints > 1 or source_is_timelapse):
                 skipped[channel] = "shared-ROI time-lapse not yet supported"
                 continue
 
@@ -569,19 +587,26 @@ def _process_one_dataset(
                 # n_timepoints and compute_phasor loops range(n_timepoints), so
                 # production datasets converge). Check loud here so a malformed
                 # dataset yields a clear shape-mismatch error rather than a bare
-                # mid-loop IndexError on ``g_all[t]``.
-                if g_all.ndim != 3 or g_all.shape[0] != n_timepoints:
+                # mid-loop IndexError on ``g_all[t]`` / ``s_all[t]``. g and s are
+                # co-produced by compute_phasor, so a divergence is corruption —
+                # validate BOTH so it isolates to the channel, never the dataset.
+                if (
+                    g_all.ndim != 3
+                    or g_all.shape[0] != n_timepoints
+                    or s_all.shape != g_all.shape
+                ):
                     leading = g_all.shape[0] if g_all.ndim >= 1 else None
                     errors[channel] = (
-                        f"phasor leading axis {leading} disagrees with "
-                        f"n_timepoints {n_timepoints}; the time axis would "
-                        "mis-stack"
+                        f"phasor g/s shape {g_all.shape}/{s_all.shape} "
+                        f"(leading axis {leading}) disagrees with n_timepoints "
+                        f"{n_timepoints}; the time axis would mis-stack"
                     )
                     continue
 
                 mask_a_planes: list[np.ndarray] = []
                 mask_b_planes: list[np.ndarray] = []
                 any_fit_succeeded = False
+                n_fit_failed = 0
                 read_failed = False
                 for t in range(n_timepoints):
                     # D4 CRITICAL GATE: per-frame intensity is decay-derived
@@ -614,9 +639,11 @@ def _process_one_dataset(
                         # plane for BOTH masks (never a dropped frame — the
                         # exact-T store contract). The channel errors only
                         # when EVERY frame fails (checked after the loop).
-                        zeros = np.zeros(g_t.shape, dtype=np.uint8)
-                        mask_a_planes.append(zeros)
-                        mask_b_planes.append(zeros)
+                        # Separate arrays (not one aliased object) so a future
+                        # in-place edit of one mask can't corrupt the other.
+                        mask_a_planes.append(np.zeros(g_t.shape, dtype=np.uint8))
+                        mask_b_planes.append(np.zeros(g_t.shape, dtype=np.uint8))
+                        n_fit_failed += 1
                         continue
                     mask_a_planes.append(
                         (applied_t.mask_a > 0).astype(np.uint8)
@@ -633,6 +660,17 @@ def _process_one_dataset(
                 if not any_fit_succeeded:
                     errors[channel] = "fit failed on every timepoint"
                     continue
+                if n_fit_failed:
+                    # Some (not all) frames had no phasor fit → all-zero planes.
+                    # Surface it (D2 caveat): a researcher must be able to tell a
+                    # partially-blank stack from clean biology (photobleaching /
+                    # dissolution looks the same as a degenerate fit downstream).
+                    logger.warning(
+                        "batch_fit_phasor_masks: %s channel %s — %d/%d "
+                        "timepoint(s) had no phasor fit (all-zero mask plane); "
+                        "check for photobleaching or granule dissolution",
+                        h5_path.name, channel, n_fit_failed, n_timepoints,
+                    )
 
                 # ── Write both (T, H, W) masks via the (T,H,W)-validating
                 # write_mask (exact-T store contract). A write failure is

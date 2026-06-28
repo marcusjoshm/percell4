@@ -1664,6 +1664,74 @@ def test_timelapse_all_frames_fail_errors_every_timepoint(tmp_path: Path) -> Non
     assert not _mask_exists(h5, "ch0_phasor_2")
 
 
+def test_timelapse_phasor_s_axis_mismatch_isolates_to_channel(
+    tmp_path: Path,
+) -> None:
+    """The pre-loop guard validates BOTH g and s leading axes: a correct g but
+    a short s isolates to a clear per-channel error (review hardening) rather
+    than a dataset-fatal ``IndexError`` on ``s_all[t]``; a sibling channel with
+    a consistent g/s still processes."""
+    nt, shape = 3, (8, 8)
+    g_ok = _blob_phasor_planes(nt, shape, seed=7)[0]            # 3 g frames
+    s_short = np.full((nt - 1, *shape), 0.3, dtype=np.float32)  # only 2 s frames
+    g_ok2, s_ok2 = _blob_phasor_planes(nt, shape, seed=8)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0", "ch1"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g_ok, s_short), "ch1": (g_ok2, s_ok2)},
+    )
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0", "ch1"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "partial"
+    assert "ch0" in item.errors
+    msg = item.errors["ch0"]
+    assert "mis-stack" in msg and "IndexError" not in msg
+    assert not _mask_exists(h5, "ch0_phasor_1")
+    assert "ch1" in item.processed
+
+
+def test_timelapse_partial_degradation_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Some-but-not-all frames failing to fit still ``succeeded`` but surfaces a
+    per-channel WARNING naming the count (D2 caveat: a partially-blank stack
+    must be QC-able, not silently indistinguishable from clean biology)."""
+    import logging
+
+    nt, shape = 4, (8, 8)
+    g, s = _blob_phasor_planes(nt, shape, degenerate=(2, 3))  # 2 of 4 frames fail
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g, s)},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        report = batch_fit_phasor_masks(
+            [h5],
+            channels=["ch0"],
+            t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+            suffix_a="_phasor_1", suffix_b="_phasor_2",
+        )
+
+    item = report.items[0]
+    assert item.status == "succeeded"  # the 2 good frames fit
+    assert item.processed == ("ch0",)
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("2/4" in m and "no phasor fit" in m for m in msgs)
+
+
 def test_timelapse_intensity_is_decay_derived_not_intensity_layer(
     tmp_path: Path,
 ) -> None:
@@ -1791,8 +1859,10 @@ def test_shared_roi_timelapse_source_does_not_pollute_scalar_cache(
     tmp_path: Path,
 ) -> None:
     """A time-lapse SOURCE self-fits (writing (T,H,W) masks) but NEVER writes
-    the scalar ``roi_cache``; a single-t target naming it falls to a safe
-    cache-miss error, not a crash — the scalar cache type stays scalar (D5)."""
+    the scalar ``roi_cache``; a single-t target naming a time-lapse source is
+    guarded in BOTH directions — skipped with a clear "shared-ROI time-lapse
+    not yet supported" reason (not a misleading "fit failed"), no crash, and
+    the scalar cache type stays scalar (D5)."""
     source = _make_timelapse_h5(
         tmp_path / "src.h5",
         channels=["ch0"],
@@ -1818,9 +1888,11 @@ def test_shared_roi_timelapse_source_does_not_pollute_scalar_cache(
     assert src_item.status == "succeeded"
     assert _read_mask(source, "ch0_phasor_1").shape == (3, 8, 8)
 
-    # Single-t target sees a cache miss (source never cached) → channel error,
-    # no crash.
-    assert tgt_item.status == "failed"
-    assert "ch0" in tgt_item.errors
-    assert "fit failed" in tgt_item.errors["ch0"]
+    # Single-t target naming a time-lapse source → the shared-ROI×time-lapse
+    # guard fires on the SOURCE direction too: skipped with a clear reason
+    # (not the old misleading "fit failed" cache-miss), no mask, no crash.
+    assert tgt_item.status == "skipped_no_changes"
+    assert "ch0" in tgt_item.skipped
+    assert "shared-roi time-lapse not yet supported" in tgt_item.skipped["ch0"].lower()
+    assert "ch0" not in tgt_item.errors
     assert not _mask_exists(target, "ch0_phasor_1")
