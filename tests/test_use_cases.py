@@ -1280,3 +1280,60 @@ class TestComputeLifetimeSource:
 
         with pytest.raises(ValueError, match="time-lapse"):
             ComputeLifetime(repo, session).execute(channel="ch0", source="unfiltered")
+
+
+class TestApplyWaveletTimelapse:
+    """ApplyWavelet on a time-lapse dataset filters each acquisition frame
+    independently (U9). Before the fix, the 3-D (T_acq,H,W) phasor was passed
+    straight to the 2-D wavelet kernel and crashed with
+    'too many values to unpack (expected 2)'."""
+
+    def test_apply_wavelet_filters_per_frame(self, monkeypatch):
+        import percell4.domain.flim.wavelet_filter as wf
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
+
+        nt, h, w, tb = 3, 4, 4, 8
+        calls = []
+
+        def fake_denoise(g, s, intensity, filter_level=1, omega=None):
+            # Mirror _filter_channel's `h, w = data.shape` so a 3-D pass
+            # reproduces the reported crash; per-frame 2-D input is required.
+            hh, ww = g.shape
+            assert intensity.shape == (hh, ww)
+            calls.append((hh, ww))
+            return {"G": g.copy() + 10.0, "S": s.copy() + 20.0, "T": g.copy() + 1.0}
+
+        monkeypatch.setattr(wf, "denoise_phasor", fake_denoise)
+
+        session = Session()
+        session.set_dataset(DatasetHandle(
+            path=Path("/tmp/x.h5"),
+            metadata={"n_timepoints": nt, "native_shape": (h, w),
+                      "flim_frequency_mhz": 80.0},
+        ))
+        repo = FakeRepo()
+        repo.disk_metadata = {"native_shape": (h, w), "n_timepoints": nt,
+                              "flim_frequency_mhz": 80.0}
+        rng = np.random.default_rng(3)
+        g = rng.uniform(0.1, 0.9, (nt, h, w)).astype(np.float32)
+        s = rng.uniform(0.05, 0.5, (nt, h, w)).astype(np.float32)
+        decay = rng.uniform(1.0, 50.0, (nt, h, w, tb)).astype(np.float32)
+        repo.written_arrays["phasor/ch0/g"] = g
+        repo.written_arrays["phasor/ch0/s"] = s
+        repo.written_arrays["decay/ch0"] = decay
+        repo.array_attrs = {"phasor/ch0/g": {"dims": ["Tacq", "H", "W"]}}
+
+        ApplyWavelet(repo, session).execute(channel="ch0", filter_level=2)
+
+        gf = repo.written_arrays["phasor/ch0/g_filtered"]
+        sf = repo.written_arrays["phasor/ch0/s_filtered"]
+        lf = repo.written_arrays["phasor/ch0/lifetime_filtered"]
+        assert gf.shape == (nt, h, w)
+        assert sf.shape == (nt, h, w)
+        assert lf.shape == (nt, h, w)
+        assert repo.array_attrs["phasor/ch0/g_filtered"]["dims"] == ["Tacq", "H", "W"]
+        assert len(calls) == nt  # filtered once per frame, each 2-D
+        # Each frame is the wavelet of THAT frame's input (per-frame, ordered).
+        for t in range(nt):
+            np.testing.assert_allclose(gf[t], g[t] + 10.0)
+            np.testing.assert_allclose(sf[t], s[t] + 20.0)

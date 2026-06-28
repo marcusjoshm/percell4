@@ -75,90 +75,106 @@ class ApplyWavelet:
                 f"No phasor data for '{channel}'. Compute Phasor first."
             )
 
-        # Compute the per-pixel intensity from the decay layer itself —
-        # NOT from the /intensity stack. The wavelet filter does
-        # ``f_real = g * intensity`` (pointwise) and the same for s, so
-        # ``intensity`` MUST be spatially aligned with g and s. The /intensity
-        # stack can drift out of alignment when /decay is rewritten by a
-        # later add-layer pass (different stitching, rotation, or a
-        # different acquisition mode); using ``decay.sum(axis=-1)`` here
-        # makes the alignment guaranteed by construction. compute_phasor
-        # already follows the same pattern (compute_phasor.py:60).
-        try:
-            decay = self._repo.read_array(
-                handle, f"decay/{channel}", view_bin=view_bin
-            )
-        except KeyError:
-            raise ValueError(
-                f"No /decay/{channel} layer for wavelet filter intensity weighting."
-            )
-        intensity = decay.sum(axis=-1).astype(np.float64)
+        # Per-pixel intensity comes from /decay (NEVER the /intensity stack) so
+        # it stays spatially aligned with g/s — denoise does f_real = g*intensity
+        # pointwise. On a time-lapse dataset /decay is 4-D and the phasor is
+        # (T_acq, H, W); each frame is filtered independently because the 2-D
+        # DTCWT kernel can't take a 3-D stack (it does ``h, w = data.shape``).
+        def _intensity_frame(tp):
+            """(H, W) decay-derived intensity for acquisition frame ``tp`` (or
+            the whole 3-D decay sum when ``tp`` is None)."""
+            try:
+                if tp is not None:
+                    reader = getattr(self._repo, "read_decay", None)
+                    if reader is not None:
+                        dk = reader(
+                            handle, channel, view_bin=view_bin, timepoint=tp
+                        )
+                    else:
+                        dk = self._repo.read_array(
+                            handle, f"decay/{channel}", view_bin=view_bin
+                        )[tp]
+                else:
+                    dk = self._repo.read_array(
+                        handle, f"decay/{channel}", view_bin=view_bin
+                    )
+            except KeyError:
+                raise ValueError(
+                    f"No /decay/{channel} layer for wavelet filter "
+                    "intensity weighting."
+                )
+            return dk.sum(axis=-1).astype(np.float64)
 
-        # Get frequency for lifetime calculation. Read /metadata fresh
-        # from disk — handle.metadata is a snapshot from set_dataset
-        # time and may not reflect flim_frequency_mhz if TCSPC data was
-        # imported in this session. See compute_phasor for the full
-        # explanation of this snapshot-staleness hazard.
+        # Frequency for the lifetime map. Read /metadata fresh from disk —
+        # handle.metadata is a snapshot from set_dataset time (see compute_phasor
+        # for the snapshot-staleness rationale).
         meta = self._read_fresh_metadata(handle)
         freq = meta.get("flim_frequency_mhz", None)
-        omega = None
-        if freq and freq > 0:
-            omega = 2.0 * np.pi * freq
+        omega = 2.0 * np.pi * freq if (freq and freq > 0) else None
 
-        # Run wavelet denoising
         from percell4.domain.flim.wavelet_filter import denoise_phasor
 
-        result = denoise_phasor(
-            g_map, s_map, intensity.astype(np.float64),
-            filter_level=filter_level,
-            omega=omega,
-        )
+        native = meta.get("native_shape")
 
-        g_filtered = result["G"]
-        s_filtered = result["S"]
-        lifetime = result.get("T")
-
-        # Bin-aware write: derived datasets stay at native_shape so the
-        # canonical /phasor/<ch>/{g_filtered,s_filtered,lifetime_filtered}
-        # paths follow the same storage-at-native invariant as g/s.
-        write_attrs: dict = {
-            "dims": ["H", "W"], "channel": channel, "filter_level": filter_level,
-        }
-        if view_bin > 1:
+        def _upsample(arr):
+            # Bin-aware: derived maps are stored at native_shape. No-op at k=1.
+            if view_bin <= 1 or arr is None:
+                return arr
             from percell4.domain.io.view_bin import nn_upsample_2d
-            native = meta.get("native_shape")
             if native is None:
                 raise ValueError(
                     "Cannot write a binned wavelet result: "
                     "/metadata.native_shape is missing."
                 )
             target = (int(native[0]), int(native[1]))
-            g_filtered = nn_upsample_2d(
-                g_filtered, view_bin, target_hw=target
-            ).astype(g_filtered.dtype, copy=False)
-            s_filtered = nn_upsample_2d(
-                s_filtered, view_bin, target_hw=target
-            ).astype(s_filtered.dtype, copy=False)
-            if lifetime is not None:
-                lifetime = nn_upsample_2d(
-                    lifetime, view_bin, target_hw=target
-                ).astype(lifetime.dtype, copy=False)
-            write_attrs["created_at_bin"] = int(view_bin)
+            return nn_upsample_2d(arr, view_bin, target_hw=target).astype(
+                arr.dtype, copy=False
+            )
 
-        # Write filtered results
+        def _filter_frame(g2d, s2d, tp):
+            """Denoise one 2-D (H, W) phasor frame, returning native-shape maps."""
+            res = denoise_phasor(
+                g2d.astype(np.float64), s2d.astype(np.float64),
+                _intensity_frame(tp), filter_level=filter_level, omega=omega,
+            )
+            return _upsample(res["G"]), _upsample(res["S"]), _upsample(res.get("T"))
+
+        # Time-lapse: (T_acq, H, W) phasor -> filter each frame, stack to
+        # (T_acq, H, W). Single-timepoint: a plain 2-D filter (unchanged).
+        if g_map.ndim == 3:
+            nt = int(g_map.shape[0])
+            g_frames, s_frames, lt_frames = [], [], []
+            for t in range(nt):
+                gf_t, sf_t, lt_t = _filter_frame(g_map[t], s_map[t], t)
+                g_frames.append(gf_t)
+                s_frames.append(sf_t)
+                lt_frames.append(lt_t)
+            g_filtered = np.stack(g_frames, axis=0)
+            s_filtered = np.stack(s_frames, axis=0)
+            lifetime = (
+                np.stack(lt_frames, axis=0)
+                if all(f is not None for f in lt_frames) else None
+            )
+            dims = ["Tacq", "H", "W"]
+        else:
+            g_filtered, s_filtered, lifetime = _filter_frame(g_map, s_map, None)
+            dims = ["H", "W"]
+
+        # Write filtered results (dims tracks the time-lapse layout).
+        write_attrs: dict = {
+            "dims": dims, "channel": channel, "filter_level": filter_level,
+        }
+        if view_bin > 1:
+            write_attrs["created_at_bin"] = int(view_bin)
         self._repo.write_array(
-            handle, f"phasor/{channel}/g_filtered", g_filtered,
-            attrs=write_attrs,
+            handle, f"phasor/{channel}/g_filtered", g_filtered, attrs=write_attrs,
         )
         self._repo.write_array(
-            handle, f"phasor/{channel}/s_filtered", s_filtered,
-            attrs=write_attrs,
+            handle, f"phasor/{channel}/s_filtered", s_filtered, attrs=write_attrs,
         )
 
         if lifetime is not None:
-            lifetime_attrs: dict = {
-                "dims": ["H", "W"], "channel": channel,
-            }
+            lifetime_attrs: dict = {"dims": dims, "channel": channel}
             if view_bin > 1:
                 lifetime_attrs["created_at_bin"] = int(view_bin)
             self._repo.write_array(
