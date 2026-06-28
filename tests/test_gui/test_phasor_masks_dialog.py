@@ -54,17 +54,21 @@ def _make_h5(
     decay_channels: list[str] | None = None,
     mask_names: list[str] = (),
     bytes_channel_names: bool = False,
+    n_timepoints: int = 1,
 ) -> Path:
     """Create a minimal .h5 fixture for the dialog's pre-flight reads.
 
     ``decay_channels`` defaults to ``channel_names``; pass an explicit
-    subset to simulate "channel listed but no /decay group".
+    subset to simulate "channel listed but no /decay group". ``n_timepoints``
+    > 1 marks the dataset as time-lapse (the U2 self-fit path is supported).
     """
     if decay_channels is None:
         decay_channels = list(channel_names)
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as f:
         meta = f.create_group("metadata")
+        if n_timepoints != 1:
+            meta.attrs["n_timepoints"] = n_timepoints
         if bytes_channel_names:
             meta.attrs["channel_names"] = [
                 np.bytes_(c) for c in channel_names
@@ -1223,3 +1227,46 @@ def test_row_path_label_tooltip_is_full_path(qtbot, tmp_path):
     label = dlg._row_path_label(0)
     assert label is not None
     assert label.toolTip() == str(p1.resolve())
+
+
+# ── Time-lapse (U2): self-fit datasets are no longer skipped ────────────
+
+
+def test_timelapse_self_fit_dataset_is_queued_not_skipped(
+    qtbot, tmp_path, monkeypatch
+):
+    """U2: a multi-timepoint dataset enters the queue for the self-fit path;
+    the old 'Time-lapse FLIM not supported' QMessageBox no longer appears."""
+    info_calls: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda *a, **k: (info_calls.append(a), QMessageBox.Ok)[1],
+    )
+
+    p = _make_h5(tmp_path / "timelapse.h5", channel_names=["mNG"], n_timepoints=3)
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([p])
+
+    # Dataset queued (not silently dropped).
+    assert len(dlg._pending_datasets) == 1
+    assert dlg._pending_datasets[0].h5_path == p.resolve()
+    # Channel picker populated → the dataset is a real candidate.
+    assert "mNG" in dlg._eligible_channels
+    # No "not supported" information dialog was shown.
+    assert info_calls == []
+
+
+def test_timelapse_and_single_t_datasets_coexist_in_queue(qtbot, tmp_path):
+    """A mixed queue (single-t + time-lapse) keeps both — the self-fit path
+    handles each per its own ``n_timepoints``."""
+    single = _make_h5(tmp_path / "single.h5", channel_names=["mNG"])
+    multi = _make_h5(tmp_path / "multi.h5", channel_names=["mNG"], n_timepoints=4)
+    dlg = PhasorMasksDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([single, multi])
+
+    queued = {pd.h5_path for pd in dlg._pending_datasets}
+    assert queued == {single.resolve(), multi.resolve()}
+    assert "mNG" in dlg._eligible_channels

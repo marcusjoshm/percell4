@@ -1228,3 +1228,599 @@ def test_shared_roi_channels_frozen_at_call_time(
     # If the use case "re-read" channels mid-run and added Halo, this
     # would be 2.
     assert len(fit_calls) == 1
+
+
+# ── Time-lapse self-fit (U2): per-frame fit → (T, H, W) masks ───────────
+#
+# These build real 4-D ``(T_acq, H, W, T_bins)`` /decay datasets with
+# ``n_timepoints > 1`` in /metadata (the canonical discriminator) and assert
+# the workflow fits each frame independently, writes ``(T, H, W)`` masks, and
+# degrades per the D3 error taxonomy. The end-to-end ensure_phasor test is the
+# anti-dead-kwarg gate (the chain must run on a 4-D decay, not just accept a
+# kwarg).
+
+
+def _make_timelapse_h5(
+    path: Path,
+    *,
+    channels: list[str],
+    n_timepoints: int,
+    shape: tuple[int, int] = (8, 8),
+    n_bins: int = 8,
+    decay_intensity: float = 100.0,
+    decay_arrays: dict[str, np.ndarray] | None = None,
+    phasor: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    intensity_layer: np.ndarray | None = None,
+    with_calibration: bool = True,
+) -> Path:
+    """Create a 4-D-``/decay`` time-lapse FLIM ``.h5`` fixture.
+
+    ``/metadata`` carries ``native_shape``, ``n_timepoints``, and
+    ``channel_names`` so both ``write_mask`` validation and
+    ``session.n_timepoints`` resolve. ``/decay/<ch>`` is 4-D
+    ``(T_acq, H, W, T_bins)`` with ``dims=["Tacq","H","W","T"]``; by default
+    every pixel/frame sums to ``decay_intensity`` (a predictable decay-derived
+    intensity gate). ``decay_arrays`` overrides a channel's full decay.
+
+    ``phasor`` (optional) pre-populates ``/phasor/<ch>/{g,s}`` as ``(T, H, W)``;
+    omit it to exercise the ensure_phasor path. ``intensity_layer`` plants a
+    deliberately misaligned ``/intensity`` to prove the use case never reads it.
+    """
+    h, w = shape
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as f:
+        meta = f.create_group("metadata")
+        meta.attrs["channel_names"] = channels
+        meta.attrs["native_shape"] = (h, w)
+        meta.attrs["n_timepoints"] = n_timepoints
+        if with_calibration:
+            meta.attrs["flim_frequency_mhz"] = 80.0
+            for ch in channels:
+                meta.attrs[f"flim_cal_phase_{ch}"] = 0.0
+                meta.attrs[f"flim_cal_mod_{ch}"] = 1.0
+
+        decay_grp = f.create_group("decay")
+        for ch in channels:
+            if decay_arrays is not None and ch in decay_arrays:
+                decay = decay_arrays[ch].astype(np.float32)
+            else:
+                decay = np.full(
+                    (n_timepoints, h, w, n_bins),
+                    decay_intensity / n_bins,
+                    dtype=np.float32,
+                )
+            ds = decay_grp.create_dataset(ch, data=decay)
+            ds.attrs["dims"] = ["Tacq", "H", "W", "T"]
+
+        if phasor:
+            phasor_grp = f.create_group("phasor")
+            for ch, (g_all, s_all) in phasor.items():
+                ch_grp = phasor_grp.create_group(ch)
+                gds = ch_grp.create_dataset("g", data=g_all.astype(np.float32))
+                sds = ch_grp.create_dataset("s", data=s_all.astype(np.float32))
+                gds.attrs["dims"] = ["Tacq", "H", "W"]
+                sds.attrs["dims"] = ["Tacq", "H", "W"]
+
+        if intensity_layer is not None:
+            ids = f.create_dataset("intensity", data=intensity_layer)
+            ids.attrs["dims"] = ["T", "H", "W"]
+    return path
+
+
+def _blob_phasor_planes(
+    n_timepoints: int,
+    shape: tuple[int, int],
+    *,
+    degenerate: tuple[int, ...] = (),
+    g_center: float = 0.5,
+    s_center: float = 0.3,
+    sigma: float = 0.01,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(T, H, W)`` g/s where every frame is a Gaussian phasor blob, except
+    frames listed in ``degenerate`` which are all-NaN (empty fit subset →
+    ``fit_phasor_ellipse`` raises ``ValueError``)."""
+    rng = np.random.default_rng(seed)
+    g = rng.normal(g_center, sigma, size=(n_timepoints, *shape)).astype(np.float32)
+    s = rng.normal(s_center, sigma, size=(n_timepoints, *shape)).astype(np.float32)
+    for t in degenerate:
+        g[t] = np.nan
+        s[t] = np.nan
+    return g, s
+
+
+def test_timelapse_ensure_phasor_e2e_thw_masks_differ_per_frame(
+    tmp_path: Path,
+) -> None:
+    """END-TO-END gate (run → reload → assert): a 4-D-/decay time-lapse with
+    NO phasor on disk + ``ensure_phasor=True`` computes a ``(T_acq, H, W)``
+    phasor, fits each frame independently, and writes ``(T, H, W)`` masks that
+    DIFFER per frame where the per-frame phasor/intensity differs.
+
+    Construction: per-pixel mono-exponential decays with a spatial lifetime
+    gradient across columns (→ a non-degenerate phasor cloud each frame) and a
+    bright horizontal band that moves down one frame at a time (→ the fit
+    subset and the intensity-gated mask both move per frame). This is the
+    anti-dead-kwarg test: a receiver kwarg that is wired but never exercised
+    end-to-end would pass a unit test yet fail here.
+    """
+    h, w, n_bins, nt = 9, 10, 16, 3
+    tbins = np.arange(n_bins, dtype=np.float64)
+    tau = 1.0 + 0.5 * np.arange(w)  # lifetime varies across columns
+    decay = np.zeros((nt, h, w, n_bins), dtype=np.float32)
+    for t in range(nt):
+        band = slice(3 * t, 3 * t + 3)  # bright rows move with t
+        for x in range(w):
+            curve = np.exp(-tbins / tau[x])
+            curve = curve / curve.sum()
+            decay[t, :, x, :] = (curve * 3.0).astype(np.float32)  # dim base
+            decay[t, band, x, :] = (curve * 100.0).astype(np.float32)  # bright
+
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=(h, w),
+        n_bins=n_bins,
+        decay_arrays={"ch0": decay},
+        phasor=None,  # force the ensure_phasor compute path
+    )
+    with h5py.File(h5, "r") as f:
+        assert "phasor" not in f  # truly absent before the run
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        ensure_phasor=True,
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded", f"errors={item.errors}"
+    assert item.processed == ("ch0",)
+
+    # ensure_phasor computed a (T_acq, H, W) phasor on the fly.
+    with h5py.File(h5, "r") as f:
+        assert f["phasor/ch0/g"].shape == (nt, h, w)
+        assert list(f["phasor/ch0/g"].attrs["dims"]) == ["Tacq", "H", "W"]
+
+    mask_a = _read_mask(h5, "ch0_phasor_1")
+    mask_b = _read_mask(h5, "ch0_phasor_2")
+    assert mask_a.shape == (nt, h, w)
+    assert mask_b.shape == (nt, h, w)
+    with h5py.File(h5, "r") as f:
+        assert list(f["masks/ch0_phasor_1"].attrs["dims"]) == ["T", "H", "W"]
+    # Population mask is non-trivial and DIFFERS frame-to-frame.
+    assert mask_b[0].sum() > 0
+    assert not np.array_equal(mask_b[0], mask_b[1])
+    assert not np.array_equal(mask_b[1], mask_b[2])
+
+
+def test_timelapse_self_fit_writes_thw_masks(tmp_path: Path) -> None:
+    """Happy path with pre-populated phasor: each requested channel writes
+    both masks as ``(T, H, W)`` with the ``["T","H","W"]`` dims attr."""
+    nt, shape = 3, (8, 8)
+    g, s = _blob_phasor_planes(nt, shape)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g, s)},
+    )
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert item.processed == ("ch0",)
+    mask_a = _read_mask(h5, "ch0_phasor_1")
+    mask_b = _read_mask(h5, "ch0_phasor_2")
+    assert mask_a.shape == (nt, *shape)
+    assert mask_b.shape == (nt, *shape)
+    with h5py.File(h5, "r") as f:
+        assert list(f["masks/ch0_phasor_1"].attrs["dims"]) == ["T", "H", "W"]
+        assert list(f["masks/ch0_phasor_2"].attrs["dims"]) == ["T", "H", "W"]
+
+
+def test_timelapse_last_frame_degenerate_yields_zero_plane(tmp_path: Path) -> None:
+    """A degenerate (empty) LAST frame contributes an all-zero plane for both
+    masks; earlier frames are populated; the channel still ``processed`` — the
+    exact-T + recoverable-degradation regression (D3)."""
+    nt, shape = 3, (8, 8)
+    g, s = _blob_phasor_planes(nt, shape, degenerate=(2,))
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g, s)},
+    )
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert item.processed == ("ch0",)
+    mask_a = _read_mask(h5, "ch0_phasor_1")
+    mask_b = _read_mask(h5, "ch0_phasor_2")
+    assert mask_a.shape == (nt, *shape)  # exact-T: never a dropped frame
+    assert mask_b[2].sum() == 0  # degenerate frame → all-zero plane
+    assert mask_a[2].sum() == 0
+    assert mask_b[0].sum() > 0  # earlier frames populated
+
+
+def test_timelapse_per_frame_apply_failure_yields_zero_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame whose fit succeeds but ``apply_ellipse_masks`` raises
+    ``ValueError`` is the SAME recoverable class as a fit failure (D3): that
+    frame is an all-zero plane, the channel is still ``processed`` — NOT a
+    whole-dataset failure."""
+    nt, shape = 3, (8, 8)
+    g, s = _blob_phasor_planes(nt, shape)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g, s)},
+    )
+
+    real_apply = bfpm.apply_ellipse_masks
+    calls = {"n": 0}
+
+    def patched_apply(g_map, s_map, intensity_map, fit, *, t_mask_a, t_mask_b):
+        calls["n"] += 1
+        if calls["n"] == nt:  # raise on the LAST frame only
+            raise ValueError("synthetic per-frame apply failure")
+        return real_apply(
+            g_map, s_map, intensity_map, fit,
+            t_mask_a=t_mask_a, t_mask_b=t_mask_b,
+        )
+
+    monkeypatch.setattr(bfpm, "apply_ellipse_masks", patched_apply)
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert item.processed == ("ch0",)
+    mask_b = _read_mask(h5, "ch0_phasor_2")
+    assert mask_b.shape == (nt, *shape)
+    assert mask_b[2].sum() == 0  # apply-failed frame → all-zero plane
+    assert mask_b[0].sum() > 0
+
+
+def test_timelapse_read_decay_failure_is_channel_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-frame ``read_decay`` failure abandons the whole channel (no
+    partial mask), routes it to ``errors``, and leaves sibling channels
+    untouched — per-operation isolation, channel-fatal class (D3)."""
+    nt, shape = 3, (8, 8)
+    g0, s0 = _blob_phasor_planes(nt, shape, seed=1)
+    g1, s1 = _blob_phasor_planes(nt, shape, seed=2)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0", "ch1"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g0, s0), "ch1": (g1, s1)},
+    )
+
+    from percell4.store import DatasetStore
+
+    real_read_decay = DatasetStore.read_decay
+
+    def patched_read_decay(self, channel, view_bin=1, timepoint=None):
+        if channel == "ch0" and timepoint == 1:
+            raise RuntimeError("synthetic decay read error")
+        return real_read_decay(
+            self, channel, view_bin=view_bin, timepoint=timepoint
+        )
+
+    monkeypatch.setattr(DatasetStore, "read_decay", patched_read_decay)
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0", "ch1"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "partial"
+    assert "ch0" in item.errors
+    assert "read failed" in item.errors["ch0"]
+    assert "ch1" in item.processed
+    # Channel-fatal: NO partial mask for ch0; ch1 unaffected.
+    assert not _mask_exists(h5, "ch0_phasor_1")
+    assert not _mask_exists(h5, "ch0_phasor_2")
+    assert _mask_exists(h5, "ch1_phasor_1")
+    assert _mask_exists(h5, "ch1_phasor_2")
+
+
+def test_timelapse_write_mask_failure_is_channel_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``write_mask`` failure on the stacked output is channel-fatal: the
+    channel joins ``errors`` with no completed mask pair; siblings unaffected."""
+    nt, shape = 3, (8, 8)
+    g0, s0 = _blob_phasor_planes(nt, shape, seed=1)
+    g1, s1 = _blob_phasor_planes(nt, shape, seed=2)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0", "ch1"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g0, s0), "ch1": (g1, s1)},
+    )
+
+    from percell4.store import DatasetStore
+
+    real_write_mask = DatasetStore.write_mask
+
+    def patched_write_mask(self, name, array, attrs=None):
+        if name == "ch0_phasor_1":
+            raise RuntimeError("synthetic disk-full")
+        return real_write_mask(self, name, array, attrs=attrs)
+
+    monkeypatch.setattr(DatasetStore, "write_mask", patched_write_mask)
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0", "ch1"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "partial"
+    assert "ch0" in item.errors
+    assert "write failed" in item.errors["ch0"]
+    assert "ch0" not in item.processed
+    assert "ch1" in item.processed
+    assert not _mask_exists(h5, "ch0_phasor_1")
+    assert _mask_exists(h5, "ch1_phasor_1")
+
+
+def test_timelapse_phasor_axis_mismatch_clear_error_not_indexerror(
+    tmp_path: Path,
+) -> None:
+    """A phasor whose leading axis ≠ ``n_timepoints`` hits the pre-loop check
+    → a clear shape-mismatch error routed to ``errors`` (NOT a bare mid-loop
+    ``IndexError``); a sibling channel with a correct axis still processes."""
+    nt, shape = 3, (8, 8)
+    g_bad = np.full((2, *shape), 0.5, dtype=np.float32)  # only 2 phasor frames
+    s_bad = np.full((2, *shape), 0.3, dtype=np.float32)
+    g_ok, s_ok = _blob_phasor_planes(nt, shape, seed=5)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0", "ch1"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g_bad, s_bad), "ch1": (g_ok, s_ok)},
+    )
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0", "ch1"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "partial"
+    assert "ch0" in item.errors
+    msg = item.errors["ch0"]
+    assert "n_timepoints" in msg and "mis-stack" in msg
+    assert "IndexError" not in msg
+    assert not _mask_exists(h5, "ch0_phasor_1")
+    assert "ch1" in item.processed
+
+
+def test_timelapse_all_frames_fail_errors_every_timepoint(tmp_path: Path) -> None:
+    """When EVERY frame is degenerate the channel joins ``errors`` with a
+    clear 'fit failed on every timepoint' message; no mask is written."""
+    nt, shape = 3, (8, 8)
+    g, s = _blob_phasor_planes(nt, shape, degenerate=(0, 1, 2))
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor={"ch0": (g, s)},
+    )
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "failed"
+    assert "ch0" in item.errors
+    assert "every timepoint" in item.errors["ch0"]
+    assert not _mask_exists(h5, "ch0_phasor_1")
+    assert not _mask_exists(h5, "ch0_phasor_2")
+
+
+def test_timelapse_intensity_is_decay_derived_not_intensity_layer(
+    tmp_path: Path,
+) -> None:
+    """D4 CRITICAL GATE: per-frame intensity is derived from the decay tensor,
+    never ``/intensity``. With a deliberately misaligned (all-zero)
+    ``/intensity`` planted, the masks are UNAFFECTED — they reflect the
+    decay-derived intensity (100 ≥ t_mask_b), so the population mask is
+    non-empty. If ``/intensity`` had been read, every mask would be all-zero."""
+    nt, shape = 3, (8, 8)
+    g, s = _blob_phasor_planes(nt, shape)
+    misaligned = np.zeros((nt, *shape), dtype=np.float32)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=shape,
+        decay_intensity=100.0,
+        phasor={"ch0": (g, s)},
+        intensity_layer=misaligned,
+    )
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    mask_b = _read_mask(h5, "ch0_phasor_2")
+    # Decay-derived intensity (100) clears t_mask_b (5) everywhere → non-empty.
+    assert mask_b.sum() > 0
+
+
+def test_timelapse_ensure_phasor_false_skips(tmp_path: Path) -> None:
+    """``ensure_phasor=False`` on a time-lapse dataset lacking ``/phasor``
+    skips the channel with the canonical reason (the per-frame loop is never
+    reached)."""
+    nt, shape = 3, (8, 8)
+    h5 = _make_timelapse_h5(
+        tmp_path / "tl.h5",
+        channels=["ch0"],
+        n_timepoints=nt,
+        shape=shape,
+        phasor=None,
+    )
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        ensure_phasor=False,
+    )
+
+    item = report.items[0]
+    assert item.status == "skipped_no_changes"
+    assert "ch0" in item.skipped
+    assert "phasor not computed" in item.skipped["ch0"]
+
+
+def test_single_t_flim_writes_2d_masks_byte_identical(tmp_path: Path) -> None:
+    """Backward compat: a single-timepoint FLIM dataset writes 2D ``(H, W)``
+    masks exactly as before — NOT a ``(1, H, W)`` stack."""
+    h5 = _make_h5(tmp_path / "single.h5", channels=["ch0"], shape=(10, 10))
+
+    report = batch_fit_phasor_masks(
+        [h5],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+    )
+
+    item = report.items[0]
+    assert item.status == "succeeded"
+    mask_a = _read_mask(h5, "ch0_phasor_1")
+    assert mask_a.ndim == 2
+    assert mask_a.shape == (10, 10)
+    with h5py.File(h5, "r") as f:
+        assert list(f["masks/ch0_phasor_1"].attrs["dims"]) == ["H", "W"]
+
+
+def test_shared_roi_timelapse_target_skipped_scalar_cache_preserved(
+    tmp_path: Path,
+) -> None:
+    """Shared-ROI guard (D5): a single-t source self-fits (scalar cache),
+    then a time-lapse TARGET pointing at it is skipped with a clear reason —
+    no crash, no per-frame mis-application of the cached scalar fit."""
+    source = _make_h5(tmp_path / "src.h5", channels=["ch0"])  # single-t self-fit
+    target = _make_timelapse_h5(
+        tmp_path / "tgt.h5",
+        channels=["ch0"],
+        n_timepoints=3,
+        shape=(8, 8),
+        phasor={"ch0": _blob_phasor_planes(3, (8, 8))},
+    )
+
+    report = batch_fit_phasor_masks(
+        [source, target],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={target: source},
+    )
+
+    by_path = {it.h5_path: it for it in report.items}
+    src_item = by_path[source.resolve()]
+    tgt_item = by_path[target.resolve()]
+
+    # Source self-fits → 2D masks.
+    assert src_item.status == "succeeded"
+    src_mask = _read_mask(source, "ch0_phasor_1")
+    assert src_mask.ndim == 2
+
+    # Time-lapse target is guarded out (skipped), no masks written.
+    assert tgt_item.status == "skipped_no_changes"
+    assert "ch0" in tgt_item.skipped
+    assert "shared-ROI time-lapse not yet supported" in tgt_item.skipped["ch0"]
+    assert not _mask_exists(target, "ch0_phasor_1")
+    assert not _mask_exists(target, "ch0_phasor_2")
+
+
+def test_shared_roi_timelapse_source_does_not_pollute_scalar_cache(
+    tmp_path: Path,
+) -> None:
+    """A time-lapse SOURCE self-fits (writing (T,H,W) masks) but NEVER writes
+    the scalar ``roi_cache``; a single-t target naming it falls to a safe
+    cache-miss error, not a crash — the scalar cache type stays scalar (D5)."""
+    source = _make_timelapse_h5(
+        tmp_path / "src.h5",
+        channels=["ch0"],
+        n_timepoints=3,
+        shape=(8, 8),
+        phasor={"ch0": _blob_phasor_planes(3, (8, 8))},
+    )
+    target = _make_h5(tmp_path / "tgt.h5", channels=["ch0"])  # single-t target
+
+    report = batch_fit_phasor_masks(
+        [source, target],
+        channels=["ch0"],
+        t_fit=10.0, t_mask_a=0.0, t_mask_b=5.0,
+        suffix_a="_phasor_1", suffix_b="_phasor_2",
+        roi_sources={target: source},
+    )
+
+    by_path = {it.h5_path: it for it in report.items}
+    src_item = by_path[source.resolve()]
+    tgt_item = by_path[target.resolve()]
+
+    # Time-lapse source self-fits → (T, H, W) masks; no cache write.
+    assert src_item.status == "succeeded"
+    assert _read_mask(source, "ch0_phasor_1").shape == (3, 8, 8)
+
+    # Single-t target sees a cache miss (source never cached) → channel error,
+    # no crash.
+    assert tgt_item.status == "failed"
+    assert "ch0" in tgt_item.errors
+    assert "fit failed" in tgt_item.errors["ch0"]
+    assert not _mask_exists(target, "ch0_phasor_1")

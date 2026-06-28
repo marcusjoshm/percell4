@@ -362,6 +362,19 @@ def _process_one_dataset(
     message. On a hit, applies the cached fit against the *target's*
     own phasor map.
 
+    On a **time-lapse** dataset (``session.n_timepoints > 1``) the
+    self-fit path fits each acquisition frame's ellipse independently
+    and writes ``(T, H, W)`` population masks; per-frame intensity is
+    derived from ``read_decay(channel, timepoint=t).sum(-1)`` (never
+    ``/intensity``). A frame whose fit/apply raises ``ValueError``
+    contributes an all-zero plane (recoverable) and the channel errors
+    only when *every* frame fails; a per-frame ``read_decay`` or the
+    final ``write_mask`` failure is channel-fatal. The scalar
+    ``roi_cache`` is intentionally *not* written on this path. The
+    cross-dataset shared-ROI sub-mode is **guarded** on time-lapse (the
+    channel is skipped with a clear reason) — full shared-ROI ×
+    time-lapse is deferred.
+
     Catches dataset-level exceptions (missing file, bad HDF5) and
     per-channel exceptions independently. Returns a classified
     :class:`BatchPhasorItemResult`.
@@ -381,6 +394,9 @@ def _process_one_dataset(
 
     session = Session()
     session.set_dataset(handle)
+    # Canonical time-handling discriminator (from /intensity dims[0]=='T',
+    # surfaced as /metadata n_timepoints): branch on this, never array.ndim.
+    n_timepoints = session.n_timepoints
 
     try:
         channel_names = list(store.metadata.get("channel_names", []) or [])
@@ -425,6 +441,15 @@ def _process_one_dataset(
                 skipped[channel] = "channel not present"
                 continue
 
+            # ── Shared-ROI × time-lapse guard (D5). The cross-dataset
+            # shared-ROI sub-mode is NOT extended to time-lapse in this plan;
+            # applying one cached scalar fit to every frame would be silently
+            # wrong. Skip the channel discoverably (the deferred former-U3)
+            # instead. The time-lapse self-fit path below IS supported. ──
+            if roi_source is not None and n_timepoints > 1:
+                skipped[channel] = "shared-ROI time-lapse not yet supported"
+                continue
+
             # ── Resolve phasor source: unfiltered g/s only. ──
             # The manual recipe in the workflow's brainstorm is explicit
             # about using the unfiltered phasor for both the GMM fit and
@@ -447,79 +472,185 @@ def _process_one_dataset(
                     errors[channel] = f"compute_phasor: {exc}"
                     continue
 
-            # ── Read phasor + decay. ──
-            try:
-                g_map = store.read_array(f"phasor/{channel}/g")
-                s_map = store.read_array(f"phasor/{channel}/s")
-                decay = store.read_decay(channel)
-            except Exception as exc:  # noqa: BLE001
-                errors[channel] = f"read failed: {exc}"
-                continue
-
-            intensity_map = decay.sum(axis=-1)
-
-            # ── Fit (self) or look up cached fit (target). ──
-            if roi_source is None:
-                # Self-fitting: try the fit, cache geometry on success.
+            # ── Read + fit + apply + write. Single-timepoint datasets keep
+            # the historical block byte-for-byte; a time-lapse self-fit runs
+            # a per-frame loop writing a (T, H, W) population mask (D1/D2).
+            # The shared-ROI × time-lapse sub-mode was guarded out above. ──
+            if n_timepoints <= 1:
+                # ── Read phasor + decay. ──
                 try:
-                    # Module-level lookup so monkeypatches on
-                    # ``batch_fit_phasor_masks.fit_phasor_ellipse`` take
-                    # effect (per the U2 test surface).
-                    fit = fit_phasor_ellipse(
-                        g_map, s_map, intensity_map, t_fit=t_fit,
+                    g_map = store.read_array(f"phasor/{channel}/g")
+                    s_map = store.read_array(f"phasor/{channel}/s")
+                    decay = store.read_decay(channel)
+                except Exception as exc:  # noqa: BLE001
+                    errors[channel] = f"read failed: {exc}"
+                    continue
+
+                intensity_map = decay.sum(axis=-1)
+
+                # ── Fit (self) or look up cached fit (target). ──
+                if roi_source is None:
+                    # Self-fitting: try the fit, cache geometry on success.
+                    try:
+                        # Module-level lookup so monkeypatches on
+                        # ``batch_fit_phasor_masks.fit_phasor_ellipse`` take
+                        # effect (per the U2 test surface).
+                        fit = fit_phasor_ellipse(
+                            g_map, s_map, intensity_map, t_fit=t_fit,
+                        )
+                    except ValueError as exc:
+                        # Routes both empty-subset and degenerate-fit cases
+                        # to errors with the actual message. Cache entry for
+                        # (h5_path, channel) is NOT populated → dependents
+                        # will hit the cache-miss branch.
+                        errors[channel] = str(exc)
+                        continue
+                    roi_cache[(h5_path, channel)] = fit
+                else:
+                    # Target: consult cache. Miss → source's fit for this
+                    # channel failed; route to errors with a source-failed
+                    # message naming the source path.
+                    fit = roi_cache.get((roi_source, channel))
+                    if fit is None:
+                        errors[channel] = (
+                            f"ROI source {roi_source.name} fit failed: "
+                            f"see source's item for details"
+                        )
+                        continue
+
+                # ── Apply the (fitted or cached) ellipse to this dataset's
+                # own phasor maps + intensity. ValueError → channel-level
+                # error (shape mismatch only — apply does not re-validate
+                # degeneracy). ──
+                try:
+                    applied = apply_ellipse_masks(
+                        g_map, s_map, intensity_map, fit,
+                        t_mask_a=t_mask_a,
+                        t_mask_b=t_mask_b,
                     )
                 except ValueError as exc:
-                    # Routes both empty-subset and degenerate-fit cases
-                    # to errors with the actual message. Cache entry for
-                    # (h5_path, channel) is NOT populated → dependents
-                    # will hit the cache-miss branch.
                     errors[channel] = str(exc)
                     continue
-                roi_cache[(h5_path, channel)] = fit
+
+                # ── Write masks. Defensive binarize (U1 already does it). ──
+                # First write: a failure here means no mask landed for this
+                # channel. Second write: a failure leaves the first mask on
+                # disk; the channel still does NOT join `processed`.
+                mask_a = (applied.mask_a > 0).astype(np.uint8)
+                mask_b = (applied.mask_b > 0).astype(np.uint8)
+                try:
+                    store.write_mask(mask_a_name, mask_a)
+                except Exception as exc:  # noqa: BLE001
+                    errors[channel] = f"write failed: {exc}"
+                    continue
+                try:
+                    store.write_mask(mask_b_name, mask_b)
+                except Exception as exc:  # noqa: BLE001
+                    errors[channel] = f"write failed: {exc}"
+                    continue
+
+                processed.append(channel)
             else:
-                # Target: consult cache. Miss → source's fit for this
-                # channel failed; route to errors with a source-failed
-                # message naming the source path.
-                fit = roi_cache.get((roi_source, channel))
-                if fit is None:
+                # ── Time-lapse self-fit: fit each acquisition frame's
+                # ellipse independently and write (T, H, W) masks (D2).
+                # roi_source is None here (shared-ROI × time-lapse was guarded
+                # out above), and the scalar roi_cache is intentionally NOT
+                # written — its dict[(path, ch) -> PhasorEllipseFit] type is
+                # preserved (D5). ──
+                try:
+                    g_all = store.read_array(f"phasor/{channel}/g")
+                    s_all = store.read_array(f"phasor/{channel}/s")
+                except Exception as exc:  # noqa: BLE001 — read = channel-fatal
+                    errors[channel] = f"read failed: {exc}"
+                    continue
+
+                # Invariant (Context U2): the computed-phasor leading axis must
+                # equal n_timepoints (write_decay_frame enforces decay ==
+                # n_timepoints and compute_phasor loops range(n_timepoints), so
+                # production datasets converge). Check loud here so a malformed
+                # dataset yields a clear shape-mismatch error rather than a bare
+                # mid-loop IndexError on ``g_all[t]``.
+                if g_all.ndim != 3 or g_all.shape[0] != n_timepoints:
+                    leading = g_all.shape[0] if g_all.ndim >= 1 else None
                     errors[channel] = (
-                        f"ROI source {roi_source.name} fit failed: "
-                        f"see source's item for details"
+                        f"phasor leading axis {leading} disagrees with "
+                        f"n_timepoints {n_timepoints}; the time axis would "
+                        "mis-stack"
                     )
                     continue
 
-            # ── Apply the (fitted or cached) ellipse to this dataset's
-            # own phasor maps + intensity. ValueError → channel-level
-            # error (shape mismatch only — apply does not re-validate
-            # degeneracy). ──
-            try:
-                applied = apply_ellipse_masks(
-                    g_map, s_map, intensity_map, fit,
-                    t_mask_a=t_mask_a,
-                    t_mask_b=t_mask_b,
-                )
-            except ValueError as exc:
-                errors[channel] = str(exc)
-                continue
+                mask_a_planes: list[np.ndarray] = []
+                mask_b_planes: list[np.ndarray] = []
+                any_fit_succeeded = False
+                read_failed = False
+                for t in range(n_timepoints):
+                    # D4 CRITICAL GATE: per-frame intensity is decay-derived
+                    # (read_decay(timepoint=t).sum(-1)), NEVER /intensity — the
+                    # FLIM cross-layer-alignment rule across the new T axis.
+                    try:
+                        decay_t = store.read_decay(channel, timepoint=t)
+                    except Exception as exc:  # noqa: BLE001 — read = fatal
+                        errors[channel] = f"read failed @t={t}: {exc}"
+                        read_failed = True
+                        break
+                    intensity_t = decay_t.sum(axis=-1)
+                    g_t = g_all[t]
+                    s_t = s_all[t]
+                    try:
+                        # Module-level lookup so monkeypatches on
+                        # ``batch_fit_phasor_masks.{fit_phasor_ellipse,
+                        # apply_ellipse_masks}`` take effect.
+                        fit_t = fit_phasor_ellipse(
+                            g_t, s_t, intensity_t, t_fit=t_fit,
+                        )
+                        applied_t = apply_ellipse_masks(
+                            g_t, s_t, intensity_t, fit_t,
+                            t_mask_a=t_mask_a,
+                            t_mask_b=t_mask_b,
+                        )
+                    except ValueError:
+                        # Recoverable (D3): an empty/degenerate phasor OR a
+                        # per-frame shape mismatch contributes an all-zero
+                        # plane for BOTH masks (never a dropped frame — the
+                        # exact-T store contract). The channel errors only
+                        # when EVERY frame fails (checked after the loop).
+                        zeros = np.zeros(g_t.shape, dtype=np.uint8)
+                        mask_a_planes.append(zeros)
+                        mask_b_planes.append(zeros)
+                        continue
+                    mask_a_planes.append(
+                        (applied_t.mask_a > 0).astype(np.uint8)
+                    )
+                    mask_b_planes.append(
+                        (applied_t.mask_b > 0).astype(np.uint8)
+                    )
+                    any_fit_succeeded = True
 
-            # ── Write masks. Defensive binarize (U1 already does it). ──
-            # First write: a failure here means no mask landed for this
-            # channel. Second write: a failure leaves the first mask on
-            # disk; the channel still does NOT join `processed`.
-            mask_a = (applied.mask_a > 0).astype(np.uint8)
-            mask_b = (applied.mask_b > 0).astype(np.uint8)
-            try:
-                store.write_mask(mask_a_name, mask_a)
-            except Exception as exc:  # noqa: BLE001
-                errors[channel] = f"write failed: {exc}"
-                continue
-            try:
-                store.write_mask(mask_b_name, mask_b)
-            except Exception as exc:  # noqa: BLE001
-                errors[channel] = f"write failed: {exc}"
-                continue
+                if read_failed:
+                    # Channel-fatal read error already recorded; abandon the
+                    # channel with no partial mask (matches single-t isolation).
+                    continue
+                if not any_fit_succeeded:
+                    errors[channel] = "fit failed on every timepoint"
+                    continue
 
-            processed.append(channel)
+                # ── Write both (T, H, W) masks via the (T,H,W)-validating
+                # write_mask (exact-T store contract). A write failure is
+                # channel-fatal (matches single-t). ──
+                mask_a_stack = np.stack(mask_a_planes, axis=0)
+                mask_b_stack = np.stack(mask_b_planes, axis=0)
+                try:
+                    store.write_mask(mask_a_name, mask_a_stack)
+                except Exception as exc:  # noqa: BLE001
+                    errors[channel] = f"write failed: {exc}"
+                    continue
+                try:
+                    store.write_mask(mask_b_name, mask_b_stack)
+                except Exception as exc:  # noqa: BLE001
+                    errors[channel] = f"write failed: {exc}"
+                    continue
+
+                processed.append(channel)
     except Exception as exc:  # noqa: BLE001
         # Unexpected dataset-level failure mid-loop. Preserve whatever
         # per-channel state we accumulated; classify the item as failed.
