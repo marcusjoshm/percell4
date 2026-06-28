@@ -1,7 +1,7 @@
 ---
 title: "feat: Multi-timepoint support for per-particle multichannel, phasor-masks, and Export Images"
 type: feat
-status: active
+status: completed
 date: 2026-06-28
 ---
 
