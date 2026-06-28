@@ -263,8 +263,21 @@ def _aggregate_timepoints(
                 pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             )
         elif isinstance(decl, ImageOutput):
-            arrs = [out[name] for _t, out in per_t if name in out]
-            aggregated[name] = np.stack(arrs, axis=0)
+            # Exact-T contract: one plane per frame, never fewer. A frame that
+            # omitted this ImageOutput contributes an all-zero plane (shaped
+            # like the frames that did emit it) so the stacked result keeps
+            # exactly n_timepoints planes — a short stack would later raise
+            # LayerSizeMismatchError at write. (Tables, above, intentionally
+            # tolerate absent frames; images must stay an exact-T stack.) In
+            # practice the per-particle donut producer already emits an all-zero
+            # plane on a no-particle frame, so the key is present every frame;
+            # this guards against a producer ever omitting it.
+            template = next(out[name] for _t, out in per_t if name in out)
+            planes = [
+                out[name] if name in out else np.zeros_like(template)
+                for _t, out in per_t
+            ]
+            aggregated[name] = np.stack(planes, axis=0)
     return aggregated
 
 

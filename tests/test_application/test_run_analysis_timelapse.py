@@ -86,3 +86,44 @@ def test_aggregate_tolerates_output_absent_on_some_frames():
     per_t = [(0, {}), (1, {"counts": df1})]  # frame 0 produced nothing
     out = _aggregate_timepoints(per_t, cls)
     assert list(out["counts"]["timepoint"]) == [1]
+
+
+# ── ImageOutput is exact-T: never silently shortened (U1) ─────────
+
+
+def test_aggregate_imageoutput_all_frames_present_is_exact_T():
+    """An ImageOutput present on every frame (the realistic per-particle
+    donut path, which emits an all-zero plane on an empty frame) stacks to
+    exactly T planes on a leading T axis."""
+    cls = types.SimpleNamespace(outputs={"donut": ImageOutput(dtype="binary")})
+    img0 = np.ones((4, 4), dtype=np.uint8)
+    img1 = np.zeros((4, 4), dtype=np.uint8)  # an empty frame's all-zero plane
+    img2 = np.ones((4, 4), dtype=np.uint8)
+    per_t = [(0, {"donut": img0}), (1, {"donut": img1}), (2, {"donut": img2})]
+    out = _aggregate_timepoints(per_t, cls)
+    assert out["donut"].shape == (3, 4, 4)
+    assert out["donut"][1].sum() == 0
+    assert out["donut"][0].sum() == 16 and out["donut"][2].sum() == 16
+
+
+def test_aggregate_imageoutput_missing_frame_not_silently_shortened():
+    """Exact-T contract: an ImageOutput absent on one frame must NOT shorten
+    the stack to < T planes — a short stack would later raise
+    LayerSizeMismatchError at write. The missing frame becomes an all-zero
+    plane shaped like the frames that did emit it, so the stack stays exactly
+    T. (Contrast the TableOutput tolerance above, which is intentional: tables
+    concatenate variable rows, images must stay an exact-T stack.)
+
+    Belt-and-suspenders for the producer guarantee: the per-particle donut
+    producer already emits an all-zero plane on a no-particle frame, so in
+    practice the key is present on every frame — but the aggregator must not
+    silently drop a frame even if a producer ever omits it.
+    """
+    cls = types.SimpleNamespace(outputs={"donut": ImageOutput(dtype="binary")})
+    img0 = np.ones((4, 4), dtype=np.uint8)
+    img2 = np.ones((4, 4), dtype=np.uint8)
+    per_t = [(0, {"donut": img0}), (1, {}), (2, {"donut": img2})]  # f1 omitted
+    out = _aggregate_timepoints(per_t, cls)
+    assert out["donut"].shape == (3, 4, 4)  # exact-T, not (2, 4, 4)
+    assert out["donut"][1].sum() == 0       # the omitted frame: all-zero plane
+    assert out["donut"][0].sum() == 16 and out["donut"][2].sum() == 16

@@ -352,3 +352,164 @@ def test_per_particle_cell_mean_matches_single_cell_table(tmp_path: Path):
             assert row["cell_mNG_mean"] == pytest.approx(
                 cell_means[row["cell_id"]]
             )
+
+
+# ── Multi-timepoint (T,C,H,W) framework path (U1) ─────────────────
+
+
+def _build_synthetic_timelapse_h5(
+    path: Path,
+    *,
+    channels: list[str],
+    n_t: int = 3,
+    with_cp: bool = False,
+    particle_frames: set[int] | None = None,
+    blob_px: int = 8,
+) -> None:
+    """Minimal ``(T,C,H,W)`` h5 for the framework per-frame loop.
+
+    A ``blob_px``-square particle (> the default ``min_size`` of 4) is
+    placed in every frame listed in ``particle_frames`` (default: all
+    ``n_t`` frames). The mask is written as ``(T,H,W)`` so each timepoint
+    slices to a distinct 2D plane; ``/intensity`` carries a leading-``T``
+    ``dims`` so the store reports ``n_timepoints == n_t`` and ``run_analysis``
+    takes its per-frame loop. Mirrors :func:`_build_synthetic_h5` but with a
+    leading acquisition-time axis.
+    """
+    h = w = 32
+    if particle_frames is None:
+        particle_frames = set(range(n_t))
+    intensity = np.zeros((n_t, len(channels), h, w), dtype=np.float32)
+    for t in range(n_t):
+        for i in range(len(channels)):
+            # Distinct per channel; small per-frame offset so frames differ.
+            intensity[t, i] = 100.0 * (i + 1) + t
+    mask = np.zeros((n_t, h, w), dtype=np.uint8)
+    for t in particle_frames:
+        mask[t, 4:4 + blob_px, 4:4 + blob_px] = 1
+    store = DatasetStore(path)
+    store.create(metadata={"source": "test", "channel_names": channels})
+    store.write_array(
+        "intensity", intensity, attrs={"dims": ["T", "C", "H", "W"]}
+    )
+    store.write_mask("particles", mask)  # (T,H,W): validated exact-T
+    if with_cp:
+        cp = np.zeros((n_t, h, w), dtype=np.int32)
+        cp[:, :16, :] = 1
+        cp[:, 16:, :] = 2
+        store.write_labels("cells", cp)
+
+
+def test_timelapse_particle_table_spans_all_timepoints(tmp_path: Path):
+    """R1: a (3,C,H,W) dataset with a particle in every frame yields a
+    particle_table whose rows span timepoint ∈ {0,1,2} with a trailing
+    ``timepoint`` column; the measurement column order is otherwise the
+    single-t order (layer-named, unchanged)."""
+    h5 = tmp_path / "tl.h5"
+    _build_synthetic_timelapse_h5(h5, channels=["mNG", "CA-SiR"], n_t=3)
+    out = run_analysis(
+        "per_particle_multichannel", h5,
+        {"mask": "particles", "channel_1": "mNG", "channel_2": "CA-SiR"},
+        params={},
+    )
+    assert "particle_table" in out
+    assert "cell_table" not in out
+    df = out["particle_table"]
+    assert set(df["timepoint"]) == {0, 1, 2}
+    assert len(df) == 3  # one particle per frame
+    # timepoint is appended last; the rest is the byte-identical single-t order
+    # (sorted(["mNG","CA-SiR"]) == ["CA-SiR","mNG"]).
+    assert list(df.columns) == [
+        "particle_id", "particle_area_px", "donut_area_px",
+        "condensed_CA-SiR_mean", "dilute_CA-SiR_mean",
+        "CA-SiR_condensed_over_dilute",
+        "condensed_mNG_mean", "dilute_mNG_mean", "mNG_condensed_over_dilute",
+        "timepoint",
+    ]
+    assert not any(c.endswith("_integ") for c in df.columns)
+
+
+def test_timelapse_single_cell_table_spans_all_timepoints(tmp_path: Path):
+    """R1: single_cell mode over a (3,C,H,W) dataset yields a cell_table
+    with a ``timepoint`` column spanning every frame (2 cells × 3 frames)."""
+    h5 = tmp_path / "tlsc.h5"
+    _build_synthetic_timelapse_h5(
+        h5, channels=["mNG", "mTQ2"], n_t=3, with_cp=True
+    )
+    out = run_analysis(
+        "per_particle_multichannel", h5,
+        {"mask": "particles", "channel_1": "mNG", "channel_2": "mTQ2",
+         "cp_mask": "cells"},
+        params={"single_cell": True},
+    )
+    assert "cell_table" in out
+    assert "particle_table" not in out
+    ct = out["cell_table"]
+    assert "timepoint" in ct.columns
+    assert set(ct["timepoint"]) == {0, 1, 2}
+    assert "cell_mNG_mean" in ct.columns
+    # 2 cells per frame across 3 frames.
+    assert len(ct) == 6
+    assert set(ct["cell_id"]) == {1, 2}
+
+
+def test_timelapse_donut_mask_is_T_stack_and_writable(tmp_path: Path):
+    """R1: with export_donuts, the aggregated donut is a (3,H,W) stack that
+    the exact-T store contract accepts (leading axis == n_timepoints) and
+    round-trips per frame."""
+    h5 = tmp_path / "tldonut.h5"
+    _build_synthetic_timelapse_h5(h5, channels=["mNG"], n_t=3)
+    out = run_analysis(
+        "per_particle_multichannel", h5,
+        {"mask": "particles", "channel_1": "mNG"},
+        params={"export_donuts": True},
+    )
+    donut = out["multichannel_donut_mask"]
+    assert donut.shape == (3, 32, 32)
+    assert all(donut[t].sum() > 0 for t in range(3))  # a donut in every frame
+    store = DatasetStore(h5)
+    assert store.write_mask("tl_donut", donut) == donut.size  # accepted
+    assert store.read_mask("tl_donut", timepoint=1).shape == (32, 32)
+
+
+def test_timelapse_no_particle_middle_frame_keeps_exact_T_donut(
+    tmp_path: Path,
+):
+    """R1 exact-T regression: a dataset whose middle frame has zero particles
+    still yields a (3,H,W) donut whose empty frame is an all-zero plane (never
+    dropped → no short stack), and a particle_table with no rows for that
+    timepoint. The (T,H,W) donut is acceptable to write_mask."""
+    h5 = tmp_path / "tlgap.h5"
+    _build_synthetic_timelapse_h5(
+        h5, channels=["mNG"], n_t=3, particle_frames={0, 2}
+    )
+    out = run_analysis(
+        "per_particle_multichannel", h5,
+        {"mask": "particles", "channel_1": "mNG"},
+        params={"export_donuts": True},
+    )
+    donut = out["multichannel_donut_mask"]
+    assert donut.shape == (3, 32, 32)          # exact-T: not (2,32,32)
+    assert donut[1].sum() == 0                 # the empty frame: all-zero plane
+    assert donut[0].sum() > 0 and donut[2].sum() > 0
+    df = out["particle_table"]
+    assert set(df["timepoint"]) == {0, 2}      # no rows for the empty frame
+    # The all-zero-plane stack is acceptable to the exact-T store contract.
+    assert DatasetStore(h5).write_mask("gap_donut", donut) == donut.size
+
+
+def test_single_t_output_has_no_timepoint_and_2d_donut(tmp_path: Path):
+    """R6 backward compat: a (C,H,W) single-t dataset is byte-identical to
+    today — no ``timepoint`` column and a 2D donut mask."""
+    h5 = tmp_path / "single.h5"
+    _build_synthetic_h5(h5, channels=["mNG", "CA-SiR"], with_cp=False)
+    out = run_analysis(
+        "per_particle_multichannel", h5,
+        {"mask": "particles", "channel_1": "mNG", "channel_2": "CA-SiR"},
+        params={"export_donuts": True},
+    )
+    df = out["particle_table"]
+    assert "timepoint" not in df.columns
+    donut = out["multichannel_donut_mask"]
+    assert donut.ndim == 2
+    assert donut.shape == (32, 32)
