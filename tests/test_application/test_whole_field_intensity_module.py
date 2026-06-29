@@ -159,3 +159,124 @@ def test_intermediate_requires_filters(tmp_path: Path):
         run_analysis("whole_field_intensity", h5, _LAYER_MAP,
                      params={"intermediate_assemblies": True,
                              "FLIM_filter": "zero"})
+
+
+# ── Multi-timepoint (T,…) framework auto-loop (U1) ─────────────────
+
+
+def _build_timelapse_h5(
+    path: Path,
+    *,
+    n_t: int = 3,
+    drop_cell_2_last_frame: bool = True,
+) -> None:
+    """Build a ``(T, C, H, W)`` whole-field h5 from the fixture field.
+
+    The Halo / mNG fixture planes are stacked across ``n_t`` acquisition
+    frames (a small per-frame ``+t`` offset so the frames carry distinct
+    data — proving the framework genuinely re-runs the 2D core per frame
+    rather than reusing one result). ``/intensity`` is written with a
+    leading-``T`` ``dims`` so the store reports ``n_timepoints == n_t`` and
+    ``run_analysis`` takes its per-frame loop.
+
+    The seven masks are written as 2D ``(H, W)`` planes — *time-invariant*
+    gates the store broadcasts to every frame on a per-timepoint read.
+    ``labels/cells`` is a ``(T, H, W)`` stack so the segmentation can vary
+    per frame: when ``drop_cell_2_last_frame`` is set, cell ``2`` is zeroed
+    on the final frame, exercising the "a cell present in one frame but not
+    another is simply absent that frame" contract.
+    """
+    halo = _img("Halo").astype(np.float32)
+    mng = _img("mNG").astype(np.float32)
+    h, w = halo.shape
+    intensity = np.zeros((n_t, 2, h, w), dtype=np.float32)
+    for t in range(n_t):
+        intensity[t, 0] = halo + t  # Halo
+        intensity[t, 1] = mng + t   # mNG
+    store = DatasetStore(path)
+    store.create(metadata={"source": "test", "channel_names": ["Halo", "mNG"]})
+    store.write_array(
+        "intensity", intensity, attrs={"dims": ["T", "C", "H", "W"]}
+    )
+    for role, fname in [
+        ("pbody", "P-body_mask"), ("dilute", "dilute_mask"),
+        ("dcp2", "Dcp2_mask"), ("dcp2_2", "Dcp2_mask_2"),
+        ("interaction", "interaction_mask"),
+        ("interaction_2", "interaction_mask_2"), ("sir", "SiR_mask"),
+    ]:
+        store.write_mask(role, (_img(fname) > 0).astype(np.uint8))
+    cp_plane = _img("cp_mask").astype(np.int32)  # ids {0, 1, 2}
+    cp = np.stack([cp_plane.copy() for _ in range(n_t)], axis=0)
+    if drop_cell_2_last_frame:
+        cp[n_t - 1][cp[n_t - 1] == 2] = 0
+    store.write_labels("cells", cp)
+
+
+def test_timelapse_two_region_spans_all_timepoints(tmp_path: Path):
+    """R1 (two-region): a (3,C,H,W) v2-style run yields one whole-field row
+    per frame, tagged with a ``timepoint`` column spanning {0,1,2}."""
+    h5 = tmp_path / "tl.h5"
+    _build_timelapse_h5(h5, n_t=3)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP, params=_V2)
+    df = out["whole_field_table"]
+    assert "timepoint" in df.columns
+    assert set(df["timepoint"]) == {0, 1, 2}
+    assert len(df) == 3  # one whole-field row per frame
+    assert "pbody_area_px" in df.columns
+
+
+def test_timelapse_three_region_spans_all_timepoints(tmp_path: Path):
+    """R1 (three-region): a (3,C,H,W) v4-style run yields one three-region
+    whole-field row per frame with a ``timepoint`` column."""
+    h5 = tmp_path / "tl.h5"
+    _build_timelapse_h5(h5, n_t=3)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP, params=_V4)
+    df = out["whole_field_table"]
+    assert "mNG_intermediate_mean" in df.columns  # three-region schema
+    assert "timepoint" in df.columns
+    assert set(df["timepoint"]) == {0, 1, 2}
+    assert len(df) == 3  # one whole-field row per frame
+
+
+def test_timelapse_single_cell_spans_all_timepoints(tmp_path: Path):
+    """R1 (single-cell): single_cell + cp_mask over a (3,C,H,W) dataset
+    yields per-cell rows per frame, each tagged with ``timepoint``. Cell 2 is
+    absent from the final frame's segmentation, so it is simply missing that
+    frame (no error, no placeholder row)."""
+    h5 = tmp_path / "tlsc.h5"
+    _build_timelapse_h5(h5, n_t=3, drop_cell_2_last_frame=True)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       params={**_V4, "single_cell": True})
+    ct = out["whole_field_table"]
+    assert "timepoint" in ct.columns
+    assert "cell_id" in ct.columns
+    assert "mNG_cell_mean" in ct.columns
+    assert set(ct["timepoint"]) == {0, 1, 2}
+    assert set(ct["cell_id"]) == {1, 2}
+    # Frames 0 and 1 carry both cells; frame 2 dropped cell 2.
+    assert set(ct.loc[ct["timepoint"] == 0, "cell_id"]) == {1, 2}
+    assert set(ct.loc[ct["timepoint"] == 1, "cell_id"]) == {1, 2}
+    assert set(ct.loc[ct["timepoint"] == 2, "cell_id"]) == {1}
+    assert len(ct) == 5  # 2 + 2 + 1 cells across the three frames
+
+
+def test_single_t_two_region_has_no_timepoint_column(tmp_path: Path):
+    """R6 backward compat: a single-timepoint (C,H,W) dataset is byte-identical
+    to today — no ``timepoint`` column is added (the per-frame aggregation path
+    is never taken). The v2/v4/v4_sc parity tests pin the values; this pins the
+    column's absence explicitly across both modes."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    two_region = run_analysis(
+        "whole_field_intensity", h5, _LAYER_MAP, params=_V2
+    )["whole_field_table"]
+    assert "timepoint" not in two_region.columns
+    three_region = run_analysis(
+        "whole_field_intensity", h5, _LAYER_MAP, params=_V4
+    )["whole_field_table"]
+    assert "timepoint" not in three_region.columns
+    single_cell = run_analysis(
+        "whole_field_intensity", h5, _LAYER_MAP,
+        params={**_V4, "single_cell": True},
+    )["whole_field_table"]
+    assert "timepoint" not in single_cell.columns
