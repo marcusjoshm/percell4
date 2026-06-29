@@ -136,6 +136,19 @@ def validate_schema(cls: type[Analysis]) -> None:
                         f"[{preset_name!r}] references {role!r} which is not "
                         f"a known role (declared roles: {sorted(role_names)})"
                     )
+    # A role declared both required and hidden by the same preset is a
+    # contradiction: the dialog would hide its row (no way to assign it) yet
+    # block Start on its absence, and headless ``run_analysis`` would always
+    # raise. Fail loud at registration rather than ship a soft-locked preset.
+    required_map = getattr(cls, "preset_required_inputs", {})
+    hidden_map = getattr(cls, "preset_hidden_inputs", {})
+    for preset_name in set(required_map) & set(hidden_map):
+        clash = set(required_map[preset_name]) & set(hidden_map[preset_name])
+        if clash:
+            raise ValueError(
+                f"Analysis {cls.__name__!r}: preset {preset_name!r} declares "
+                f"role(s) {sorted(clash)} as both required and hidden"
+            )
 
     # ── output-name uniqueness ──────────────────────────────────
     output_names = list(cls.outputs)

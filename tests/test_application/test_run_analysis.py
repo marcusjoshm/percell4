@@ -1173,6 +1173,8 @@ def test_add_area_um2_columns_noop_without_pixel_size():
     pd.testing.assert_frame_equal(_add_area_um2_columns(df, None), df)
     pd.testing.assert_frame_equal(_add_area_um2_columns(df, 0.0), df)
     pd.testing.assert_frame_equal(_add_area_um2_columns(df, -1.0), df)
+    # Non-numeric external metadata is treated as absent (no raise).
+    pd.testing.assert_frame_equal(_add_area_um2_columns(df, "bad"), df)  # type: ignore[arg-type]
     no_area = pd.DataFrame({"mean": [1.0]})
     pd.testing.assert_frame_equal(_add_area_um2_columns(no_area, 0.5), no_area)
 

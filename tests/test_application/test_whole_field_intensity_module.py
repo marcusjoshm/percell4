@@ -222,6 +222,7 @@ def _build_timelapse_h5(
     *,
     n_t: int = 3,
     drop_cell_2_last_frame: bool = True,
+    pixel_size_um: float | None = None,
 ) -> None:
     """Build a ``(T, C, H, W)`` whole-field h5 from the fixture field.
 
@@ -247,7 +248,10 @@ def _build_timelapse_h5(
         intensity[t, 0] = halo + t  # Halo
         intensity[t, 1] = mng + t   # mNG
     store = DatasetStore(path)
-    store.create(metadata={"source": "test", "channel_names": ["Halo", "mNG"]})
+    meta: dict = {"source": "test", "channel_names": ["Halo", "mNG"]}
+    if pixel_size_um is not None:
+        meta["pixel_size_um"] = pixel_size_um
+    store.create(metadata=meta)
     store.write_array(
         "intensity", intensity, attrs={"dims": ["T", "C", "H", "W"]}
     )
@@ -333,6 +337,24 @@ def test_single_t_two_region_has_no_timepoint_column(tmp_path: Path):
         params={**_V4, "single_cell": True},
     )["whole_field_table"]
     assert "timepoint" not in single_cell.columns
+
+
+def test_timelapse_with_pixel_size_adds_area_um2_once(tmp_path: Path):
+    """Multi-timepoint × pixel-size interaction: a calibrated (T,C,H,W) dataset
+    yields an aggregated table carrying BOTH the ``timepoint`` column and a
+    single ``*_area_um2`` sibling per ``*_area_px`` (added once on the final
+    aggregated table, scaled by pixel_size_um**2 — not per frame)."""
+    px = 0.25
+    h5 = tmp_path / "tl.h5"
+    _build_timelapse_h5(h5, n_t=3, pixel_size_um=px)
+    df = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                      params=_V2)["whole_field_table"]
+    assert "timepoint" in df.columns and set(df["timepoint"]) == {0, 1, 2}
+    # exactly one um2 sibling per px column (added once, not per-frame duplicated)
+    assert sum(c == "pbody_area_um2" for c in df.columns) == 1
+    np.testing.assert_allclose(
+        df["pbody_area_um2"], df["pbody_area_px"].astype(float) * px * px
+    )
 
 
 # ── U5: opt-in Halo_cell_mean per-cell expression measurement ──────

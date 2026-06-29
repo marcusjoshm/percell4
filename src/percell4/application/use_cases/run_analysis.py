@@ -267,17 +267,26 @@ def _add_area_um2_columns(
     """Return ``df`` with a ``<base>_area_um2`` sibling immediately after each
     ``<base>_area_px`` column, scaled by ``pixel_size_um ** 2``.
 
-    A no-op (returns ``df`` unchanged) when ``pixel_size_um`` is missing or
-    non-positive, or when there are no ``*_area_px`` columns — so output for
-    uncalibrated datasets is byte-identical. Idempotent: a ``_area_um2`` column
-    that already exists is left as-is.
+    A no-op (returns ``df`` unchanged) when ``pixel_size_um`` is missing,
+    non-numeric, or non-positive, or when there are no ``*_area_px`` columns —
+    so a single uncalibrated dataset's output is byte-identical. Idempotent: a
+    ``_area_um2`` column that already exists is left as-is.
+
+    Note: in a *combined* CSV spanning a batch where some datasets are
+    calibrated and some are not, pandas unions columns by name, so the
+    ``_area_um2`` column appears with ``NaN`` for the uncalibrated rows — the
+    correct "µm² unknown" semantic, not a defect.
     """
-    if pixel_size_um is None or not (float(pixel_size_um) > 0):
+    try:
+        px = float(pixel_size_um)  # pixel_size_um comes from external metadata
+    except (TypeError, ValueError):
+        return df
+    if not (px > 0):
         return df
     area_cols = [c for c in df.columns if c.endswith("_area_px")]
     if not area_cols:
         return df
-    factor = float(pixel_size_um) * float(pixel_size_um)
+    factor = px * px
     out = df.copy()
     for col in area_cols:
         sibling = f"{col[: -len('_area_px')]}_area_um2"

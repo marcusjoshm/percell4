@@ -365,6 +365,28 @@ def test_error_preset_hidden_inputs_unknown_role() -> None:
                 return {}
 
 
+def test_error_preset_role_both_required_and_hidden() -> None:
+    """A role declared both required and hidden by the same preset is a
+    contradiction (soft-locks the dialog / hard-fails headless) and must be
+    rejected at registration."""
+    with pytest.raises(ValueError, match="both required and hidden"):
+
+        @register_analysis("bad_preset_required_and_hidden")
+        class Bad(Analysis):
+            name = "bad_preset_required_and_hidden"
+            display_name = "Bad"
+            required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+            optional_inputs = {"a_mask": ImageRole(kind="mask", dtype="binary")}
+            parameters = {"k": IntParam(default=1)}
+            presets = {"p1": {"k": 2}}
+            preset_required_inputs = {"p1": ("a_mask",)}
+            preset_hidden_inputs = {"p1": ("a_mask",)}
+            outputs = {"table": TableOutput()}
+
+            def run(self, inputs, params):
+                return {}
+
+
 def test_error_get_unknown_raises_key_error() -> None:
     with pytest.raises(KeyError):
         get("does_not_exist")
