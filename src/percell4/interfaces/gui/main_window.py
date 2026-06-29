@@ -424,6 +424,19 @@ class LauncherWindow(QMainWindow):
         )
         layout.addWidget(self._btn_dilute_phase_workflow)
 
+        self._btn_dilute_from_mask_workflow = QPushButton(
+            "Dilute phase mask from mask"
+        )
+        self._btn_dilute_from_mask_workflow.setToolTip(
+            "Batch workflow: from an existing condensed-phase mask, grow it by "
+            "an expansion radius and invert within cell boundaries to make a "
+            "dilute-phase mask — across N .h5 datasets."
+        )
+        self._btn_dilute_from_mask_workflow.clicked.connect(
+            self._on_open_dilute_from_mask_workflow
+        )
+        layout.addWidget(self._btn_dilute_from_mask_workflow)
+
         self._btn_flim_fret_workflow = QPushButton(
             "FLIM-FRET analysis"
         )
@@ -509,6 +522,38 @@ class LauncherWindow(QMainWindow):
                 n = len(report.items)
                 self.statusBar().showMessage(
                     f"Phasor-masks workflow complete — {n} dataset(s) "
+                    f"processed."
+                )
+        finally:
+            dialog.deleteLater()
+
+    def _on_open_dilute_from_mask_workflow(self) -> None:
+        """Open the "Dilute phase mask from mask" batch dialog.
+
+        Reentrance-guarded against ``is_workflow_locked``. The dialog drives
+        its own ``QProgressDialog`` per-dataset loop on the main thread, emits
+        one conditional ``session.refresh_resource_lists`` at end of run, and
+        accepts on completion. The button is an **Action** (no session mutation
+        except the one end-of-run refresh push) — mirroring the phasor-masks
+        dialog's modal lifecycle, not the interactive dilute panel's locked
+        long-lived panel.
+        """
+        if self.is_workflow_locked:
+            self.statusBar().showMessage(
+                "A workflow is already running — click Cancel to stop it first."
+            )
+            return
+
+        from percell4.gui.dilute_from_mask_dialog import DiluteFromMaskDialog
+
+        dialog = DiluteFromMaskDialog(parent=self)
+        try:
+            dialog.exec_()
+            report = dialog.last_report
+            if report is not None:
+                n = len(report.items)
+                self.statusBar().showMessage(
+                    f"Dilute-from-mask workflow complete — {n} dataset(s) "
                     f"processed."
                 )
         finally:
