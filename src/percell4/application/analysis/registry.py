@@ -115,6 +115,28 @@ def validate_schema(cls: type[Analysis]) -> None:
                     f"references unknown parameter {key!r}"
                 )
 
+    # ── preset_required_inputs / preset_hidden_inputs ───────────
+    # A preset may declare optional roles it requires / hides. Each
+    # mapping is {preset_name: (role, ...)}; the preset must exist in
+    # ``presets`` and every role must be a declared input. Enforced in
+    # both the dialog (UX) and ``run_analysis`` (headless safety net).
+    for field_name in ("preset_required_inputs", "preset_hidden_inputs"):
+        mapping = getattr(cls, field_name, {})
+        for preset_name, roles in mapping.items():
+            if preset_name not in cls.presets:
+                raise ValueError(
+                    f"Analysis {cls.__name__!r}: {field_name} references "
+                    f"unknown preset {preset_name!r} (declared presets: "
+                    f"{sorted(cls.presets)})"
+                )
+            for role in roles:
+                if role not in role_names:
+                    raise ValueError(
+                        f"Analysis {cls.__name__!r}: {field_name}"
+                        f"[{preset_name!r}] references {role!r} which is not "
+                        f"a known role (declared roles: {sorted(role_names)})"
+                    )
+
     # ── output-name uniqueness ──────────────────────────────────
     output_names = list(cls.outputs)
     if len(set(output_names)) != len(output_names):

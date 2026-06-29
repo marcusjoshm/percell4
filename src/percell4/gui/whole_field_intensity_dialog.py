@@ -102,6 +102,8 @@ class WholeFieldIntensityDialog(QDialog):
         self._dataset_list: QListWidget | None = None
         # role -> combo (required + optional).
         self._role_combos: dict[str, QComboBox] = {}
+        # role -> its row label, so preset-hidden rows can be hidden whole.
+        self._role_labels: dict[str, QLabel] = {}
         self._param_widgets: dict[str, QWidget] = {}
         self._param_getters: dict[str, Callable[[], Any]] = {}
         self._param_setters: dict[str, Callable[[Any], None]] = {}
@@ -200,18 +202,20 @@ class WholeFieldIntensityDialog(QDialog):
 
         for role in ("condensate_mask", "dilute_mask", "halo", "mng"):
             decl = WholeFieldIntensity.required_inputs[role]
-            row, _, combo = build_layer_combo(role, decl.desc, self)
+            row, label, combo = build_layer_combo(role, decl.desc, self)
             combo.activated.connect(lambda _i: self._refresh_state())
             self._role_combos[role] = combo
+            self._role_labels[role] = label
             layout.addLayout(row)
 
         opt_box = QGroupBox("Optional masks", self)
         opt_layout = QVBoxLayout(opt_box)
         for role in _OPTIONAL_ROLES:
             decl = WholeFieldIntensity.optional_inputs[role]
-            row, _, combo = build_layer_combo(role, decl.desc, self)
+            row, label, combo = build_layer_combo(role, decl.desc, self)
             combo.activated.connect(lambda _i: self._refresh_state())
             self._role_combos[role] = combo
+            self._role_labels[role] = label
             opt_layout.addLayout(row)
         layout.addWidget(opt_box)
         return box
@@ -319,6 +323,7 @@ class WholeFieldIntensityDialog(QDialog):
         inventory = self._gather_layer_inventory()
         self._refresh_combos(inventory)
         self._refresh_preset_lock()
+        self._refresh_hidden_roles()
         self._refresh_requires_gating()
         self._refresh_bg_value_enabled()
         self._refresh_outputs_panel()
@@ -373,6 +378,24 @@ class WholeFieldIntensityDialog(QDialog):
         self._preset_lock_label.setText(
             "🔒 Preset locked" if preset_chosen else ""
         )
+
+    def _refresh_hidden_roles(self) -> None:
+        """Hide the rows of roles the active preset declares hidden.
+
+        Hides the whole row (label + combo) — both widgets ``setVisible``
+        ``False`` so the row collapses while ``wrap_in_scroll`` keeps the
+        section scroll-safe. The combo VALUE is **not** cleared; hidden
+        roles are excluded at :meth:`_resolve_layer_map`, so switching to a
+        non-hiding preset shows the row again with the prior selection
+        intact (restore-not-clear).
+        """
+        hidden = set(self._preset_hidden_roles())
+        for role, combo in self._role_combos.items():
+            visible = role not in hidden
+            combo.setVisible(visible)
+            label = self._role_labels.get(role)
+            if label is not None:
+                label.setVisible(visible)
 
     def _refresh_requires_gating(self) -> None:
         assert self._preset_combo is not None
@@ -443,6 +466,10 @@ class WholeFieldIntensityDialog(QDialog):
         for role in ("condensate_mask", "dilute_mask", "halo", "mng"):
             if role not in layer_map:
                 return f"Assign the required role {role!r}."
+        preset = self._active_preset()
+        for role in self._preset_required_roles():
+            if role not in layer_map:
+                return f"Preset {preset!r} requires {role!r}."
         if not self._resolve_output_parent():
             return "Choose an output folder."
         return None
@@ -450,12 +477,40 @@ class WholeFieldIntensityDialog(QDialog):
     # ── Selection helpers ───────────────────────────────────────
 
     def _resolve_layer_map(self) -> dict[str, str]:
+        # Exclude preset-hidden roles WITHOUT clearing their combo, so a
+        # switch to a non-hiding preset restores the prior selection.
+        hidden = set(self._preset_hidden_roles())
         out: dict[str, str] = {}
         for role, combo in self._role_combos.items():
+            if role in hidden:
+                continue
             text = combo.currentText()
             if text and text != LAYER_SENTINEL:
                 out[role] = text
         return out
+
+    def _active_preset(self) -> str | None:
+        """The active preset name, or ``None`` when 'No preset' is chosen."""
+        if self._preset_combo is None:
+            return None
+        text = self._preset_combo.currentText()
+        return None if text == _NO_PRESET else text
+
+    def _preset_required_roles(self) -> tuple[str, ...]:
+        """Roles the active preset requires (empty when no preset)."""
+        preset = self._active_preset()
+        if preset is None:
+            return ()
+        mapping = getattr(WholeFieldIntensity, "preset_required_inputs", {})
+        return tuple(mapping.get(preset, ()))
+
+    def _preset_hidden_roles(self) -> tuple[str, ...]:
+        """Roles the active preset hides (empty when no preset)."""
+        preset = self._active_preset()
+        if preset is None:
+            return ()
+        mapping = getattr(WholeFieldIntensity, "preset_hidden_inputs", {})
+        return tuple(mapping.get(preset, ()))
 
     def _collect_params(self) -> dict[str, Any]:
         return {name: getter() for name, getter in self._param_getters.items()}

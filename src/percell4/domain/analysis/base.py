@@ -59,6 +59,21 @@ class Analysis:
     # validated against ``parameters`` at registration time.
     presets: ClassVar[dict[str, dict[str, Any]]] = {}
 
+    # ── Preset-aware optional roles ────────────────────────────────
+    # A preset may declare optional roles it *requires* and optional
+    # roles it *hides*. Keyed by preset name; each value is a tuple of
+    # declared role names (in ``required_inputs`` / ``optional_inputs`` /
+    # any ``input_groups`` group). Validated at registration time (the
+    # preset must exist; each role must be declared). Both surfaces read
+    # these: the dialog blocks Start with a reason on a missing required
+    # role and hides hidden-role rows; the use-case (``run_analysis``)
+    # raises a hard ``ValueError`` when an active preset's required role
+    # is absent from the layer map — so headless runs cannot silently
+    # produce wrong numbers. Default empty, so existing analyses that
+    # declare neither are unaffected.
+    preset_required_inputs: ClassVar[dict[str, tuple[str, ...]]] = {}
+    preset_hidden_inputs: ClassVar[dict[str, tuple[str, ...]]] = {}
+
     # ── Outputs ───────────────────────────────────────────────────
     outputs: ClassVar[dict[str, OutputLike]] = {}
 

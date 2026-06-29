@@ -312,6 +312,74 @@ def test_bool_requires_false_does_not_check(tmp_path: Path) -> None:
     assert out["table"]["sc"].iloc[0] is np.False_ or out["table"]["sc"].iloc[0] is False
 
 
+# ── preset_required_inputs (headless safety net) ──────────────────────
+
+
+def _register_preset_required_stub() -> None:
+    @register_analysis("stub")
+    class Stub(Analysis):
+        name = "stub"
+        display_name = "Stub"
+        required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+        optional_inputs = {
+            "extra_mask": ImageRole(kind="mask", dtype="binary"),
+        }
+        parameters = {"k": IntParam(default=1)}
+        presets = {"p1": {"k": 2}}
+        preset_required_inputs = {"p1": ("extra_mask",)}
+        outputs = {"table": TableOutput()}
+
+        def run(self, inputs, params):
+            return {"table": pd.DataFrame({"k": [params["k"]]})}
+
+
+def test_error_preset_required_role_absent_raises(tmp_path: Path) -> None:
+    """A preset's required role missing from layer_map raises a clear error."""
+    _register_preset_required_stub()
+    h5 = tmp_path / "x.h5"
+    _make_h5(
+        h5,
+        channel_names=["Cap"],
+        intensity=np.ones((1, 4, 4), np.float32),
+        masks={"em": np.ones((4, 4), np.uint8)},
+    )
+    with pytest.raises(ValueError, match="extra_mask"):
+        run_analysis("stub", h5, {"x": "Cap"}, preset="p1")
+
+
+def test_happy_path_preset_required_role_present_runs(tmp_path: Path) -> None:
+    """With the preset's required role supplied, the run proceeds."""
+    _register_preset_required_stub()
+    h5 = tmp_path / "x.h5"
+    _make_h5(
+        h5,
+        channel_names=["Cap"],
+        intensity=np.ones((1, 4, 4), np.float32),
+        masks={"em": np.ones((4, 4), np.uint8)},
+    )
+    out = run_analysis(
+        "stub", h5, {"x": "Cap", "extra_mask": "em"}, preset="p1"
+    )
+    assert out["table"]["k"].iloc[0] == 2
+
+
+def test_preset_required_not_enforced_without_active_preset(
+    tmp_path: Path,
+) -> None:
+    """preset_required_inputs only fires when its preset is active."""
+    _register_preset_required_stub()
+    h5 = tmp_path / "x.h5"
+    _make_h5(
+        h5,
+        channel_names=["Cap"],
+        intensity=np.ones((1, 4, 4), np.float32),
+        masks={"em": np.ones((4, 4), np.uint8)},
+    )
+    # No preset selected (explicit params path) -> extra_mask not enforced.
+    out = run_analysis("stub", h5, {"x": "Cap"}, params={"k": 5})
+    assert out["table"]["k"].iloc[0] == 5
+
+
 # ── preset + params strict policy ─────────────────────────────────────
 
 

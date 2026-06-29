@@ -20,6 +20,7 @@ from percell4.application.analysis.modules.whole_field_intensity import (  # noq
     WholeFieldIntensity,
 )
 from percell4.gui.whole_field_intensity_dialog import (
+    _NO_PRESET,
     _QSETTINGS_OUTPUT_KEY,
     WholeFieldIntensityDialog,
 )
@@ -180,3 +181,104 @@ def test_start_dispatches_with_preset(qtbot, tmp_path):
     assert args[0] == "whole_field_intensity"
     assert kwargs["preset"] == "decapping-sensor-v2"
     assert kwargs["params"] is None
+
+
+# ── U3: preset-aware required / hidden roles (dormant capability) ──────
+#
+# Whole-field declares NO preset_required/hidden_inputs yet (that's U4),
+# so these exercise the generic capability by monkeypatching the schema
+# fields for an existing preset.
+
+
+def _assign_base_roles(dlg: WholeFieldIntensityDialog) -> None:
+    for role, layer in [
+        ("condensate_mask", "pbody"),
+        ("dilute_mask", "dilute"),
+        ("halo", "Halo"),
+        ("mng", "mNG"),
+    ]:
+        dlg._role_combos[role].setCurrentText(layer)
+
+
+def _select_preset(dlg: WholeFieldIntensityDialog, name: str) -> None:
+    idx = dlg._preset_combo.findText(name)
+    dlg._preset_combo.setCurrentIndex(idx)
+    dlg._on_preset_changed(idx)
+
+
+def test_preset_required_role_blocks_start(qtbot, tmp_path, monkeypatch):
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    monkeypatch.setattr(
+        WholeFieldIntensity,
+        "preset_required_inputs",
+        {"decapping-sensor-v2": ("mng_mask",)},
+        raising=False,
+    )
+    dlg = WholeFieldIntensityDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    _assign_base_roles(dlg)
+    dlg._output_parent_line.setText(str(out_dir))
+    _select_preset(dlg, "decapping-sensor-v2")
+
+    # mng_mask unassigned -> Start disabled, reason names the role.
+    assert dlg._start_btn.isEnabled() is False
+    reason = dlg._start_disabled_reason()
+    assert reason is not None and "mng_mask" in reason
+
+    # Assigning the required role enables Start.
+    dlg._role_combos["mng_mask"].setCurrentText("dcp2")
+    dlg._refresh_state()
+    assert dlg._start_btn.isEnabled() is True
+
+
+def test_preset_hidden_role_hides_and_restores(qtbot, tmp_path, monkeypatch):
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    monkeypatch.setattr(
+        WholeFieldIntensity,
+        "preset_hidden_inputs",
+        {"decapping-sensor-v2": ("sir_mask",)},
+        raising=False,
+    )
+    dlg = WholeFieldIntensityDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+
+    # Assign sir_mask BEFORE selecting the hiding preset.
+    dlg._role_combos["sir_mask"].setCurrentText("sir")
+    dlg._refresh_state()
+    assert dlg._role_combos["sir_mask"].isHidden() is False
+    assert dlg._resolve_layer_map().get("sir_mask") == "sir"
+
+    # Selecting the hiding preset hides the row + excludes it from the map.
+    _select_preset(dlg, "decapping-sensor-v2")
+    assert dlg._role_combos["sir_mask"].isHidden() is True
+    assert dlg._role_labels["sir_mask"].isHidden() is True
+    assert "sir_mask" not in dlg._resolve_layer_map()
+    # The combo VALUE is preserved (no destructive clear).
+    assert dlg._role_combos["sir_mask"].currentText() == "sir"
+
+    # Switching back to No preset restores the row + the prior selection.
+    _select_preset(dlg, _NO_PRESET)
+    assert dlg._role_combos["sir_mask"].isHidden() is False
+    assert dlg._role_combos["sir_mask"].currentText() == "sir"
+    assert dlg._resolve_layer_map().get("sir_mask") == "sir"
+
+
+def test_no_preset_no_required_or_hidden_roles(qtbot, tmp_path):
+    """With no preset, nothing is required/hidden beyond the base schema."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    dlg = WholeFieldIntensityDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._role_combos["sir_mask"].setCurrentText("sir")
+    dlg._refresh_state()
+    assert dlg._preset_required_roles() == ()
+    assert dlg._preset_hidden_roles() == ()
+    assert dlg._role_combos["sir_mask"].isHidden() is False
+    assert dlg._resolve_layer_map().get("sir_mask") == "sir"

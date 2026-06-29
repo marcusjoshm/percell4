@@ -136,6 +136,23 @@ def run_analysis(
             f"layer_map: {sorted(missing_required)}"
         )
 
+    # 3b. Enforce preset-required roles (the headless safety net). When a
+    # preset is active, every role it declares in ``preset_required_inputs``
+    # must be present in the layer_map — otherwise a filter that depends on
+    # that role (e.g. v6's ``mNG_filter`` / ``FLIM_filter``) would silently
+    # no-op and produce scientifically-wrong numbers with no error. The
+    # dialog blocks Start on the same condition; this guards the headless
+    # path (notebook / batch_run_analysis / a future CLI), which otherwise
+    # validates only required_inputs / groups / BoolParam.requires.
+    if preset is not None:
+        for role in getattr(cls, "preset_required_inputs", {}).get(preset, ()):
+            if role not in layer_map:
+                raise ValueError(
+                    f"analysis {analysis_name!r}: preset {preset!r} requires "
+                    f"role {role!r} to be supplied (layer_map keys="
+                    f"{sorted(layer_map)})"
+                )
+
     # 4. Build GroupState.
     role_flags = {f"{r}_supplied": (r in layer_map) for r in all_role_names}
     group_satisfaction = {
