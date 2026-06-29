@@ -142,9 +142,9 @@ def test_single_cell_two_region_rows():
         assert "mNG_cell_mean" in r
 
 
-def test_single_cell_default_has_no_halo_cell_mean():
-    """Default (halo_cell_mean=False): rows keep mNG_cell_mean, no Halo column
-    (the existing always-on mNG measurement is untouched)."""
+def test_single_cell_default_has_both_cell_means():
+    """Default (channel_cell_mean=True): rows carry BOTH mNG_cell_mean AND
+    Halo_cell_mean per cell."""
     f = _field()
     res = run_one_image_set(
         pbody_mask=f["pbody"], dilute_mask=f["dilute"],
@@ -153,54 +153,59 @@ def test_single_cell_default_has_no_halo_cell_mean():
     )
     for r in res["rows"]:
         assert "mNG_cell_mean" in r
-        assert "Halo_cell_mean" not in r
+        assert "Halo_cell_mean" in r
 
 
-def test_single_cell_halo_cell_mean_opt_in():
-    """halo_cell_mean=True adds Halo_cell_mean immediately after mNG_cell_mean,
-    equal to np.nanmean of the bg-subtracted Halo over each cell's region."""
+def test_single_cell_channel_cell_mean_both():
+    """The default (channel_cell_mean=True, no param passed) emits both cell
+    means, with Halo_cell_mean immediately after mNG_cell_mean, each equal to
+    np.nanmean of the bg-subtracted channel over each cell's region."""
     f = _field()
     res = run_one_image_set(
         pbody_mask=f["pbody"], dilute_mask=f["dilute"],
         halo=f["halo"], mng=f["mng"], cp_mask=f["cp"],
         mng_bg_mode=0, halo_bg_mode=0, min_size=2, single_cell=True,
-        halo_cell_mean=True,
     )
     # With bg=0 and no FLIM/SiR filters, halo_sub == halo (all >= 0).
     halo_sub = np.maximum(f["halo"].astype(np.float64), 0)
+    mng_sub = f["mng"].astype(np.float64)
+    mng_sub[mng_sub <= 0] = np.nan
     for r in res["rows"]:
         keys = list(r.keys())
         # Position: Halo_cell_mean directly after mNG_cell_mean.
         assert keys[keys.index("mNG_cell_mean") + 1] == "Halo_cell_mean"
         cell_region = f["cp"] == r["cell_id"]
-        expected = np.nanmean(halo_sub[cell_region])
-        assert np.isclose(r["Halo_cell_mean"], expected)
+        assert np.isclose(r["mNG_cell_mean"], np.nanmean(mng_sub[cell_region]))
+        assert np.isclose(r["Halo_cell_mean"],
+                          np.nanmean(halo_sub[cell_region]))
 
 
-def test_halo_cell_mean_no_op_without_single_cell():
-    """halo_cell_mean=True is a no-op (no column, no raise) without single_cell
-    or without a cp_mask."""
+def test_channel_cell_mean_no_op_without_single_cell():
+    """channel_cell_mean=True (the default) is a no-op (no cell-mean columns,
+    no raise) without single_cell or without a cp_mask."""
     f = _field()
     # No single_cell.
     res = run_one_image_set(
         pbody_mask=f["pbody"], dilute_mask=f["dilute"],
         halo=f["halo"], mng=f["mng"],
-        mng_bg_mode=0, halo_bg_mode=0, min_size=2, halo_cell_mean=True,
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2, channel_cell_mean=True,
     )
+    assert "mNG_cell_mean" not in res["rows"][0]
     assert "Halo_cell_mean" not in res["rows"][0]
     # single_cell=True but no cp_mask -> whole-field fall-through, still no col.
     res2 = run_one_image_set(
         pbody_mask=f["pbody"], dilute_mask=f["dilute"],
         halo=f["halo"], mng=f["mng"], cp_mask=None,
         mng_bg_mode=0, halo_bg_mode=0, min_size=2, single_cell=True,
-        halo_cell_mean=True,
+        channel_cell_mean=True,
     )
+    assert "mNG_cell_mean" not in res2["rows"][0]
     assert "Halo_cell_mean" not in res2["rows"][0]
 
 
-def test_single_cell_halo_cell_mean_nan_for_all_nan_cell():
+def test_single_cell_channel_cell_mean_nan_for_all_nan_cell():
     """A cell whose Halo pixels are all NaN (FLIM-NaN'd) -> Halo_cell_mean is
-    NaN, no error."""
+    NaN, no error. (Default channel_cell_mean=True surfaces Halo_cell_mean.)"""
     f = _field()
     # interaction covers only cell 1 (cp rows 4:24); cell 2 (rows 24:44) is
     # entirely outside, so FLIM-NaN makes its Halo all-NaN.
@@ -211,16 +216,16 @@ def test_single_cell_halo_cell_mean_nan_for_all_nan_cell():
         halo=f["halo"], mng=f["mng"], cp_mask=f["cp"],
         interaction_mask=interaction,
         mng_bg_mode=0, halo_bg_mode=0, min_size=2, single_cell=True,
-        flim_filter_mode="NaN", halo_cell_mean=True,
+        flim_filter_mode="NaN",
     )
     by_cell = {r["cell_id"]: r for r in res["rows"]}
     assert np.isnan(by_cell[2]["Halo_cell_mean"])
     assert not np.isnan(by_cell[1]["Halo_cell_mean"])
 
 
-def test_v4_single_cell_halo_cell_mean_opt_in():
-    """The three-region (v4) single-cell path also gains Halo_cell_mean right
-    after mNG_cell_mean when opted in."""
+def test_v4_single_cell_channel_cell_mean_both():
+    """The three-region (v4) single-cell path also carries Halo_cell_mean right
+    after mNG_cell_mean by default (channel_cell_mean=True)."""
     f = _field()
     res = run_one_image_set(
         pbody_mask=f["pbody"], dilute_mask=f["dilute"],
@@ -229,11 +234,27 @@ def test_v4_single_cell_halo_cell_mean_opt_in():
         dcp2_mask_2=f["dcp2_2"], interaction_mask_2=f["interaction_2"],
         mng_bg_mode=0, halo_bg_mode=0, min_size=2,
         mng_filter_mode="NaN", flim_filter_mode="zero",
-        intermediate_assemblies=True, single_cell=True, halo_cell_mean=True,
+        intermediate_assemblies=True, single_cell=True,
     )
     for r in res["rows"]:
         keys = list(r.keys())
+        assert "mNG_cell_mean" in r and "Halo_cell_mean" in r
         assert keys[keys.index("mNG_cell_mean") + 1] == "Halo_cell_mean"
+
+
+def test_single_cell_channel_cell_mean_false_emits_neither():
+    """channel_cell_mean=False in single-cell mode emits NEITHER mNG_cell_mean
+    nor Halo_cell_mean."""
+    f = _field()
+    res = run_one_image_set(
+        pbody_mask=f["pbody"], dilute_mask=f["dilute"],
+        halo=f["halo"], mng=f["mng"], cp_mask=f["cp"],
+        mng_bg_mode=0, halo_bg_mode=0, min_size=2, single_cell=True,
+        channel_cell_mean=False,
+    )
+    for r in res["rows"]:
+        assert "mNG_cell_mean" not in r
+        assert "Halo_cell_mean" not in r
 
 
 def test_single_cell_without_cp_mask_falls_through_to_whole_field():

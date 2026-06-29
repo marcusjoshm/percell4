@@ -326,7 +326,7 @@ class WholeFieldIntensityDialog(QDialog):
         self._refresh_hidden_roles()
         self._refresh_requires_gating()
         self._refresh_bg_value_enabled()
-        self._refresh_halo_cell_mean_enabled()
+        self._refresh_channel_cell_mean_enabled()
         self._refresh_outputs_panel()
         self._refresh_start_button()
 
@@ -437,27 +437,27 @@ class WholeFieldIntensityDialog(QDialog):
             is_manual = self._param_getters[mode_param]() == "manual"
             self._param_widgets[value_param].setEnabled(is_manual)
 
-    def _refresh_halo_cell_mean_enabled(self) -> None:
-        """Grey the Halo_cell_mean checkbox unless single_cell is on.
+    def _refresh_channel_cell_mean_enabled(self) -> None:
+        """Grey the channel_cell_mean checkbox unless single_cell is on.
 
         UX-only gating (the core no-ops it outside single-cell mode and it
         carries NO ``requires=cp_mask`` so a stray True never raises). When
         single_cell is off, the checkbox is unchecked so a disabled-but-checked
-        state can't leak into the run. ``halo_cell_mean`` is a preset-editable
+        state can't leak into the run. ``channel_cell_mean`` is a preset-editable
         mode param, so this gating applies under a preset too (single_cell may
         be toggled there).
         """
         assert self._preset_combo is not None
         single_cell = bool(self._param_getters["single_cell"]())
-        widget = self._param_widgets["halo_cell_mean"]
+        widget = self._param_widgets["channel_cell_mean"]
         widget.setEnabled(single_cell)
         if not single_cell:
-            self._param_setters["halo_cell_mean"](False)
+            self._param_setters["channel_cell_mean"](False)
         widget.setToolTip(
-            WholeFieldIntensity.parameters["halo_cell_mean"].desc or ""
+            WholeFieldIntensity.parameters["channel_cell_mean"].desc or ""
             if single_cell
-            else "Enable single_cell (needs cp_mask) to add a whole-cell "
-            "Halo mean."
+            else "Enable single_cell (needs cp_mask) to add the whole-cell "
+            "channel means (mNG + Halo)."
         )
 
     def _refresh_outputs_panel(self) -> None:
@@ -607,7 +607,7 @@ class WholeFieldIntensityDialog(QDialog):
             return bool(progress.wasCanceled())
 
         # Under a preset, pass only the editable "mode" params (single_cell,
-        # halo_cell_mean) as an overlay — resolve_params merges them onto the
+        # channel_cell_mean) as an overlay — resolve_params merges them onto the
         # preset, keeping the preset's science values authoritative and the
         # preset name in the run's provenance.
         if preset is not None:

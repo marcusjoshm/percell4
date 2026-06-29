@@ -127,8 +127,14 @@ def test_v4_single_cell_parity_with_cli(tmp_path: Path):
     _build_h5(h5)
     out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
                        params={**_V4, "single_cell": True})
-    _parity(out["whole_field_table"],
-            FIXTURE_ROOT / "expected" / "v4_sc.csv", sort_key="cell_id")
+    df = out["whole_field_table"]
+    # channel_cell_mean defaults True, so the module now emits Halo_cell_mean —
+    # a PerCell4-only extension that the original-CLI fixture v4_sc.csv does not
+    # carry. Drop it before parity; the science (mNG_cell_mean + every
+    # compartment column) still matches v4_sc.csv exactly.
+    assert "Halo_cell_mean" in df.columns
+    df = df.drop(columns=["Halo_cell_mean"])
+    _parity(df, FIXTURE_ROOT / "expected" / "v4_sc.csv", sort_key="cell_id")
 
 
 def test_preset_v3_runs(tmp_path: Path):
@@ -357,17 +363,18 @@ def test_timelapse_with_pixel_size_adds_area_um2_once(tmp_path: Path):
     )
 
 
-# ── U5: opt-in Halo_cell_mean per-cell expression measurement ──────
+# ── U5: channel_cell_mean per-cell expression measurement (default on) ──
 
 
-def test_single_cell_halo_cell_mean_column_present(tmp_path: Path):
-    """R5: a single-cell run with halo_cell_mean=True surfaces a Halo_cell_mean
-    column (right after mNG_cell_mean), one value per cell."""
+def test_single_cell_channel_cell_mean_both_columns(tmp_path: Path):
+    """R5: the default single-cell run (channel_cell_mean on) surfaces BOTH
+    mNG_cell_mean and Halo_cell_mean (Halo right after mNG), one value per
+    cell — no need to pass the param explicitly."""
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
     out = run_analysis(
         "whole_field_intensity", h5, _LAYER_MAP,
-        params={**_V4, "single_cell": True, "halo_cell_mean": True},
+        params={**_V4, "single_cell": True},
     )
     df = out["whole_field_table"]
     assert "mNG_cell_mean" in df.columns
@@ -377,29 +384,29 @@ def test_single_cell_halo_cell_mean_column_present(tmp_path: Path):
     assert df["Halo_cell_mean"].notna().any()
 
 
-def test_halo_cell_mean_default_v4_sc_parity_unchanged(tmp_path: Path):
-    """R6: the default single-cell run (halo_cell_mean off) is byte-identical to
-    the v4_sc parity fixture — no Halo_cell_mean column, mNG_cell_mean
-    untouched."""
+def test_channel_cell_mean_false_emits_neither_column(tmp_path: Path):
+    """R6: channel_cell_mean=False in single-cell mode emits NEITHER cell-mean
+    column (no mNG_cell_mean, no Halo_cell_mean)."""
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
     out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
-                       params={**_V4, "single_cell": True})
+                       params={**_V4, "single_cell": True,
+                               "channel_cell_mean": False})
     df = out["whole_field_table"]
+    assert "mNG_cell_mean" not in df.columns
     assert "Halo_cell_mean" not in df.columns
-    _parity(df, FIXTURE_ROOT / "expected" / "v4_sc.csv", sort_key="cell_id")
 
 
-def test_halo_cell_mean_no_cp_mask_does_not_raise(tmp_path: Path):
-    """R5 no-requires guard: a halo_cell_mean=True run WITHOUT cp_mask /
-    single_cell does NOT raise (proves the BoolParam carries no
+def test_channel_cell_mean_no_cp_mask_does_not_raise(tmp_path: Path):
+    """R5 no-requires guard: channel_cell_mean=True (the default) WITHOUT
+    cp_mask / single_cell does NOT raise (proves the BoolParam carries no
     ``requires=('cp_mask',)``) — it is simply a no-op."""
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
     layer_map = {k: v for k, v in _LAYER_MAP.items() if k != "cp_mask"}
     out = run_analysis(
         "whole_field_intensity", h5, layer_map,
-        params={**_V2, "halo_cell_mean": True},
+        params={**_V2, "channel_cell_mean": True},
     )
     assert "Halo_cell_mean" not in out["whole_field_table"].columns
 
@@ -469,7 +476,7 @@ def test_preset_v6_missing_interaction_mask_raises(tmp_path: Path):
                      preset="decapping-sensor-v6")
 
 
-# ── preset-editable mode params (single_cell / halo_cell_mean overlay) ──
+# ── preset-editable mode params (single_cell / channel_cell_mean overlay) ──
 
 
 def test_v6_with_single_cell_overlay_produces_per_cell_rows(tmp_path: Path):
@@ -487,15 +494,15 @@ def test_v6_with_single_cell_overlay_produces_per_cell_rows(tmp_path: Path):
     assert "mNG_cell_mean" in out.columns  # single-cell mode confirmed
 
 
-def test_v6_with_single_cell_and_halo_cell_mean_overlay(tmp_path: Path):
-    """Both editable mode params overlay onto v6: single-cell rows gain the
-    opt-in ``Halo_cell_mean`` expression column."""
+def test_v6_with_single_cell_and_channel_cell_mean_overlay(tmp_path: Path):
+    """channel_cell_mean is a preset-editable mode param defaulting True, so
+    overlaying ``single_cell=True`` onto v6 alone yields single-cell rows that
+    carry the ``Halo_cell_mean`` expression column."""
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
     out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
                        preset="decapping-sensor-v6",
-                       params={"single_cell": True,
-                               "halo_cell_mean": True})["whole_field_table"]
+                       params={"single_cell": True})["whole_field_table"]
     assert "cell_id" in out.columns
     assert "Halo_cell_mean" in out.columns
 

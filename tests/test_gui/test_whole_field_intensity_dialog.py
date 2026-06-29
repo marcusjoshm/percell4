@@ -142,25 +142,25 @@ def test_single_cell_gated_on_cp_mask(qtbot, tmp_path):
     assert sc.isEnabled() is True
 
 
-def test_halo_cell_mean_greyed_unless_single_cell(qtbot, tmp_path):
-    """U5: the Halo_cell_mean checkbox appears and is greyed unless single_cell
-    is on (which itself needs a cp_mask)."""
+def test_channel_cell_mean_greyed_unless_single_cell(qtbot, tmp_path):
+    """U5: the channel_cell_mean checkbox appears and is greyed unless
+    single_cell is on (which itself needs a cp_mask)."""
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
     dlg = WholeFieldIntensityDialog()
     qtbot.addWidget(dlg)
     dlg._add_paths([h5])
     dlg._refresh_state()
-    halo_chk = dlg._param_widgets["halo_cell_mean"]
+    channel_chk = dlg._param_widgets["channel_cell_mean"]
     # single_cell off (no cp_mask) -> the checkbox is disabled.
-    assert halo_chk.isEnabled() is False
+    assert channel_chk.isEnabled() is False
     # Assign cp_mask, then turn single_cell on -> the checkbox enables.
     dlg._role_combos["cp_mask"].setCurrentText("cells")
     dlg._refresh_state()
     dlg._param_setters["single_cell"](True)
     dlg._refresh_state()
     assert dlg._param_widgets["single_cell"].isEnabled() is True
-    assert halo_chk.isEnabled() is True
+    assert channel_chk.isEnabled() is True
 
 
 def test_start_dispatches_with_preset(qtbot, tmp_path):
@@ -202,17 +202,18 @@ def test_start_dispatches_with_preset(qtbot, tmp_path):
     assert args[0] == "whole_field_intensity"
     assert kwargs["preset"] == "decapping-sensor-v2"
     # Under a preset the dialog now passes ONLY the editable "mode" params as
-    # an overlay (here at their defaults — cp_mask unassigned, so single_cell
-    # is gated off); resolve_params merges them onto the preset.
-    assert kwargs["params"] == {"single_cell": False, "halo_cell_mean": False}
+    # an overlay (here at their gated values — cp_mask unassigned, so
+    # single_cell is gated off, which in turn unchecks channel_cell_mean);
+    # resolve_params merges them onto the preset.
+    assert kwargs["params"] == {"single_cell": False, "channel_cell_mean": False}
 
 
 def test_v6_single_cell_clickable_and_dispatched(qtbot, tmp_path):
     """A preset locks its science params but leaves the editable "mode" params
-    (single_cell, halo_cell_mean) clickable: under v6 with cp_mask assigned,
+    (single_cell, channel_cell_mean) clickable: under v6 with cp_mask assigned,
     single_cell is enabled (a science param like min_size stays locked),
-    toggling it enables halo_cell_mean, and Start dispatches preset=v6 with the
-    editable overlay (single_cell=True)."""
+    toggling it enables channel_cell_mean, and Start dispatches preset=v6 with
+    the editable overlay (single_cell=True)."""
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
     out_dir = tmp_path / "out"
@@ -238,10 +239,10 @@ def test_v6_single_cell_clickable_and_dispatched(qtbot, tmp_path):
     # Science param locked; single_cell editable (cp_mask is assigned).
     assert dlg._param_widgets["min_size"].isEnabled() is False
     assert dlg._param_widgets["single_cell"].isEnabled() is True
-    # Toggle single_cell on → halo_cell_mean becomes clickable.
+    # Toggle single_cell on → channel_cell_mean becomes clickable.
     dlg._param_setters["single_cell"](True)
     dlg._refresh_state()
-    assert dlg._param_widgets["halo_cell_mean"].isEnabled() is True
+    assert dlg._param_widgets["channel_cell_mean"].isEnabled() is True
 
     dlg._output_parent_line.setText(str(out_dir))
     dlg._refresh_state()

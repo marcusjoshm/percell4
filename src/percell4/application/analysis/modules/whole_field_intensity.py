@@ -168,18 +168,19 @@ class WholeFieldIntensity(Analysis):
         "single_cell": BoolParam(
             default=False, requires=("cp_mask",),
             desc="Aggregate per cell using cp_mask; one row per cell."),
-        # Opt-in whole-cell Halo mean per cell (for expression grouping).
+        # Whole-cell mean of BOTH channels per cell (for expression grouping).
         # Deliberately NO requires=("cp_mask",): a True flag without a cp_mask
         # would make run_analysis._check_bool_requires raise and fail the whole
         # dataset (the per-particle cell_mean precedent omits requires too).
         # It is a no-op outside single-cell mode (gated inside the single-cell
         # core branch, reached only with cp_mask); the dialog greys it unless
         # single_cell is on for UX only.
-        "halo_cell_mean": BoolParam(
-            default=False,
-            desc="In single-cell mode, add a whole-cell Halo mean column "
-            "(Halo_cell_mean) per cell. Needs single_cell + cp_mask; "
-            "ignored otherwise."),
+        "channel_cell_mean": BoolParam(
+            default=True,
+            desc="Add a whole-cell mean of BOTH the mNG and Halo channels per "
+            "cell (mNG_cell_mean + Halo_cell_mean), for grouping cells by "
+            "expression level. Single-cell mode only (needs single_cell + "
+            "cp_mask); on by default."),
     }
 
     presets: dict[str, dict[str, Any]] = {
@@ -245,12 +246,13 @@ class WholeFieldIntensity(Analysis):
         "decapping-sensor-v6": ("dcp2_mask_2", "interaction_mask_2",
                                 "sir_mask"),
     }
-    # ``single_cell`` (and its dependent ``halo_cell_mean`` expression toggle)
-    # are run-mode/output choices orthogonal to the science a preset fixes, so
-    # they stay user-editable under any preset (e.g. run v6 in single-cell mode
-    # and group cells by expression). The dialog leaves them clickable and the
-    # toggled value is overlaid onto the preset by ``resolve_params``.
-    preset_editable_params = ("single_cell", "halo_cell_mean")
+    # ``single_cell`` (and its dependent ``channel_cell_mean`` expression
+    # toggle) are run-mode/output choices orthogonal to the science a preset
+    # fixes, so they stay user-editable under any preset (e.g. run v6 in
+    # single-cell mode and group cells by expression). The dialog leaves them
+    # clickable and the toggled value is overlaid onto the preset by
+    # ``resolve_params``.
+    preset_editable_params = ("single_cell", "channel_cell_mean")
 
     # ── Outputs ───────────────────────────────────────────────────
     # One table whose columns vary by mode (two-region / three-region /
@@ -340,7 +342,7 @@ class WholeFieldIntensity(Analysis):
             sir_filter=sir_filter,
             intermediate_assemblies=intermediate,
             intermediate_zero_fill=zero_fill,
-            halo_cell_mean=bool(params["halo_cell_mean"]),
+            channel_cell_mean=bool(params["channel_cell_mean"]),
             set_label=set_label,
             log=log,
         )
