@@ -78,7 +78,7 @@ class WholeFieldIntensity(Analysis):
     version = "1.0.0"
     description = (
         "Whole-field (aggregate) mNG/Halo compartment quantification with "
-        "per-field background subtraction. Presets decapping-sensor-v2..v5; "
+        "per-field background subtraction. Presets decapping-sensor-v2..v6; "
         "optional three-region (intermediate) and single-cell modes."
     )
 
@@ -203,6 +203,35 @@ class WholeFieldIntensity(Analysis):
             "SiR_filter": False, "FLIM_filter": "zero", "mNG_in_FLIM": False,
             "intermediate_assemblies": True, "intermediate_zero_fill": True,
         },
+        # Stress-granule two-region variant. Same param set as v3 (two-region,
+        # mNG_filter='NaN', FLIM_filter='zero', percent, NO intermediate
+        # assemblies); the SG/mNG region substitution is the user assigning
+        # their SG_mask / mNG_mask layers to the condensate_mask / mng_mask
+        # roles — no preset-side role mapping. Keeps the generic pbody/dilute
+        # output column names. See preset_required_inputs / preset_hidden_inputs
+        # below for the v6-specific role gating.
+        "decapping-sensor-v6": {
+            "min_size": 2, "mng_bg_mode": "manual", "mng_bg_value": 0,
+            "halo_bg_mode": "manual", "halo_bg_value": 0, "mNG_filter": "NaN",
+            "percent": True, "exclude_halo_zero": True,
+            "exclude_halo_one": False, "SiR_subtract": "none",
+            "SiR_filter": False, "FLIM_filter": "zero", "mNG_in_FLIM": False,
+            "intermediate_assemblies": False, "intermediate_zero_fill": False,
+        },
+    }
+
+    # ── Preset-aware role gating (U3 capability) ──────────────────
+    # v6's mNG_filter='NaN' silently no-ops without mng_mask, and its
+    # FLIM_filter='zero' only applies when interaction_mask is supplied
+    # (else the Halo filtering never runs and the means are wrong) — so
+    # both are required. The v4/v5 intermediate masks and the SiR mask are
+    # irrelevant to v6's two-region path, so they are hidden.
+    preset_required_inputs = {
+        "decapping-sensor-v6": ("mng_mask", "interaction_mask"),
+    }
+    preset_hidden_inputs = {
+        "decapping-sensor-v6": ("dcp2_mask_2", "interaction_mask_2",
+                                "sir_mask"),
     }
 
     # ── Outputs ───────────────────────────────────────────────────

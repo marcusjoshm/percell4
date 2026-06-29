@@ -280,3 +280,68 @@ def test_single_t_two_region_has_no_timepoint_column(tmp_path: Path):
         params={**_V4, "single_cell": True},
     )["whole_field_table"]
     assert "timepoint" not in single_cell.columns
+
+
+# ── decapping-sensor-v6 stress-granule preset (U4) ────────────────
+
+
+def test_preset_v6_runs(tmp_path: Path):
+    """R3 happy path: the v6 stress-granule preset is a two-region run with
+    ``mNG_filter='NaN'`` + ``FLIM_filter='zero'`` semantics. Its param set is
+    identical to v3's (two-region, no intermediate assemblies), so a v6 run
+    reproduces the v3 parity fixture byte-for-byte — pinning the exact
+    FLIM/mNG-filter numeric semantics the source preset prescribes."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       preset="decapping-sensor-v6")
+    df = out["whole_field_table"]
+    # Two-region path (NOT three-region) — no intermediate compartment column.
+    assert "mNG_intermediate_mean" not in df.columns
+    # percent=True surfaces the pct_halo_in_mNG_* columns.
+    assert "pct_halo_in_mNG_pbody" in df.columns
+    # v6 == v3 params → identical output (generic pbody/dilute column names).
+    _parity(df, FIXTURE_ROOT / "expected" / "v3.csv", sort_key="pbody_area_px")
+
+
+def test_preset_v6_mng_filter_restricts_to_mng_mask(tmp_path: Path):
+    """R3: v6's ``mNG_filter='NaN'`` genuinely restricts mNG to ``mng_mask``
+    (not a silent no-op). The v6 mNG dilute mean differs from an otherwise
+    identical run with ``mNG_filter='none'``."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    v6 = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                      preset="decapping-sensor-v6")["whole_field_table"]
+    no_filter = run_analysis(
+        "whole_field_intensity", h5, _LAYER_MAP,
+        params=dict(min_size=2, mng_bg_mode="manual", mng_bg_value=0,
+                    halo_bg_mode="manual", halo_bg_value=0, mNG_filter="none",
+                    FLIM_filter="zero", percent=True),
+    )["whole_field_table"]
+    assert v6["mNG_dilute_mean"].iloc[0] != no_filter["mNG_dilute_mean"].iloc[0]
+
+
+def test_preset_v6_missing_mng_mask_raises(tmp_path: Path):
+    """R4 headless safety net: a v6 run with ``mng_mask`` absent from the
+    layer_map raises a clear ValueError naming the role (via U3's use-case
+    enforcement) — it does NOT silently no-op ``mNG_filter`` and emit
+    scientifically-wrong numbers."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    layer_map = {k: v for k, v in _LAYER_MAP.items() if k != "mng_mask"}
+    with pytest.raises(ValueError, match="mng_mask"):
+        run_analysis("whole_field_intensity", h5, layer_map,
+                     preset="decapping-sensor-v6")
+
+
+def test_preset_v6_missing_interaction_mask_raises(tmp_path: Path):
+    """R4 headless safety net: a v6 run with ``interaction_mask`` absent raises
+    a clear ValueError naming the role — its ``FLIM_filter='zero'`` only
+    applies when interaction_mask is supplied, so the core would otherwise
+    silently skip the Halo filtering."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    layer_map = {k: v for k, v in _LAYER_MAP.items() if k != "interaction_mask"}
+    with pytest.raises(ValueError, match="interaction_mask"):
+        run_analysis("whole_field_intensity", h5, layer_map,
+                     preset="decapping-sensor-v6")
