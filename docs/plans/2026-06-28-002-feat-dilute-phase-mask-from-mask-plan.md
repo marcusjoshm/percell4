@@ -1,7 +1,7 @@
 ---
 title: "feat: Dilute phase mask from mask (batch dilate + invert-within-cells)"
 type: feat
-status: active
+status: completed
 date: 2026-06-28
 ---
 
