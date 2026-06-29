@@ -467,3 +467,44 @@ def test_preset_v6_missing_interaction_mask_raises(tmp_path: Path):
     with pytest.raises(ValueError, match="interaction_mask"):
         run_analysis("whole_field_intensity", h5, layer_map,
                      preset="decapping-sensor-v6")
+
+
+# ── preset-editable mode params (single_cell / halo_cell_mean overlay) ──
+
+
+def test_v6_with_single_cell_overlay_produces_per_cell_rows(tmp_path: Path):
+    """``single_cell`` is a preset-editable mode param: running v6 with
+    ``params={'single_cell': True}`` keeps the v6 preset authoritative for the
+    science while switching to per-cell output (a ``cell_id`` column) — the
+    overlay is merged onto the preset by resolve_params, not rejected as
+    illegal mixing."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       preset="decapping-sensor-v6",
+                       params={"single_cell": True})["whole_field_table"]
+    assert "cell_id" in out.columns
+    assert "mNG_cell_mean" in out.columns  # single-cell mode confirmed
+
+
+def test_v6_with_single_cell_and_halo_cell_mean_overlay(tmp_path: Path):
+    """Both editable mode params overlay onto v6: single-cell rows gain the
+    opt-in ``Halo_cell_mean`` expression column."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       preset="decapping-sensor-v6",
+                       params={"single_cell": True,
+                               "halo_cell_mean": True})["whole_field_table"]
+    assert "cell_id" in out.columns
+    assert "Halo_cell_mean" in out.columns
+
+
+def test_v6_with_non_editable_param_still_raises(tmp_path: Path):
+    """Mixing a preset with a NON-editable (science) param is still rejected —
+    only declared mode params may overlay a preset."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    with pytest.raises(ValueError, match="min_size"):
+        run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                     preset="decapping-sensor-v6", params={"min_size": 99})

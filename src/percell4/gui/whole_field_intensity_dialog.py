@@ -368,16 +368,21 @@ class WholeFieldIntensityDialog(QDialog):
         assert self._preset_combo is not None
         assert self._preset_lock_label is not None
         preset_chosen = self._preset_combo.currentText() != _NO_PRESET
+        editable = set(WholeFieldIntensity.preset_editable_params)
         for name, widget in self._param_widgets.items():
             decl = WholeFieldIntensity.parameters[name]
-            if preset_chosen:
+            # A preset locks its science params, but "mode" params it declares
+            # editable (e.g. single_cell) stay clickable — their final
+            # enabled state is then refined by the requires/halo gating below.
+            if preset_chosen and name not in editable:
                 widget.setEnabled(False)
                 widget.setToolTip("Preset locked")
             else:
                 widget.setEnabled(True)
                 widget.setToolTip(decl.desc or "")
         self._preset_lock_label.setText(
-            "🔒 Preset locked" if preset_chosen else ""
+            "🔒 Preset locked (mode params stay editable)"
+            if preset_chosen else ""
         )
 
     def _refresh_hidden_roles(self) -> None:
@@ -400,11 +405,15 @@ class WholeFieldIntensityDialog(QDialog):
 
     def _refresh_requires_gating(self) -> None:
         assert self._preset_combo is not None
-        if self._preset_combo.currentText() != _NO_PRESET:
-            return
+        preset_chosen = self._preset_combo.currentText() != _NO_PRESET
+        editable = set(WholeFieldIntensity.preset_editable_params)
         layer_map = self._resolve_layer_map()
         for pname, decl in WholeFieldIntensity.parameters.items():
             if not isinstance(decl, BoolParam) or not decl.requires:
+                continue
+            # Under a preset, only the editable "mode" params are gated here;
+            # everything else is already locked by _refresh_preset_lock.
+            if preset_chosen and pname not in editable:
                 continue
             widget = self._param_widgets[pname]
             missing = [req for req in decl.requires if req not in layer_map]
@@ -432,14 +441,13 @@ class WholeFieldIntensityDialog(QDialog):
         """Grey the Halo_cell_mean checkbox unless single_cell is on.
 
         UX-only gating (the core no-ops it outside single-cell mode and it
-        carries NO ``requires=cp_mask`` so a stray True never raises). Skipped
-        under a preset lock (everything is already disabled). When single_cell
-        is off, the checkbox is unchecked so a disabled-but-checked state can't
-        leak into the run.
+        carries NO ``requires=cp_mask`` so a stray True never raises). When
+        single_cell is off, the checkbox is unchecked so a disabled-but-checked
+        state can't leak into the run. ``halo_cell_mean`` is a preset-editable
+        mode param, so this gating applies under a preset too (single_cell may
+        be toggled there).
         """
         assert self._preset_combo is not None
-        if self._preset_combo.currentText() != _NO_PRESET:
-            return
         single_cell = bool(self._param_getters["single_cell"]())
         widget = self._param_widgets["halo_cell_mean"]
         widget.setEnabled(single_cell)
@@ -598,7 +606,15 @@ class WholeFieldIntensityDialog(QDialog):
         def cancel_check() -> bool:
             return bool(progress.wasCanceled())
 
-        runner_params = None if preset is not None else params
+        # Under a preset, pass only the editable "mode" params (single_cell,
+        # halo_cell_mean) as an overlay — resolve_params merges them onto the
+        # preset, keeping the preset's science values authoritative and the
+        # preset name in the run's provenance.
+        if preset is not None:
+            editable = set(WholeFieldIntensity.preset_editable_params)
+            runner_params = {k: v for k, v in params.items() if k in editable}
+        else:
+            runner_params = params
 
         try:
             report = self._orchestrator(

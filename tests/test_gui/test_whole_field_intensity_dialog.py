@@ -201,7 +201,62 @@ def test_start_dispatches_with_preset(qtbot, tmp_path):
     args, kwargs = stub.call_args
     assert args[0] == "whole_field_intensity"
     assert kwargs["preset"] == "decapping-sensor-v2"
-    assert kwargs["params"] is None
+    # Under a preset the dialog now passes ONLY the editable "mode" params as
+    # an overlay (here at their defaults — cp_mask unassigned, so single_cell
+    # is gated off); resolve_params merges them onto the preset.
+    assert kwargs["params"] == {"single_cell": False, "halo_cell_mean": False}
+
+
+def test_v6_single_cell_clickable_and_dispatched(qtbot, tmp_path):
+    """A preset locks its science params but leaves the editable "mode" params
+    (single_cell, halo_cell_mean) clickable: under v6 with cp_mask assigned,
+    single_cell is enabled (a science param like min_size stays locked),
+    toggling it enables halo_cell_mean, and Start dispatches preset=v6 with the
+    editable overlay (single_cell=True)."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stub = MagicMock(
+        return_value=BatchAnalysisReport(
+            items=(BatchAnalysisItemResult(
+                h5_path=h5, status="succeeded",
+                produced_outputs=("whole_field_table",)),),
+            run_folder=out_dir, cancelled=False,
+        )
+    )
+    dlg = WholeFieldIntensityDialog(orchestrator=stub)
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    for role, layer in [("condensate_mask", "pbody"), ("dilute_mask", "dilute"),
+                        ("halo", "Halo"), ("mng", "mNG"), ("mng_mask", "dcp2"),
+                        ("interaction_mask", "interaction"), ("cp_mask", "cells")]:
+        dlg._role_combos[role].setCurrentText(layer)
+    _select_preset(dlg, "decapping-sensor-v6")
+    dlg._refresh_state()
+
+    # Science param locked; single_cell editable (cp_mask is assigned).
+    assert dlg._param_widgets["min_size"].isEnabled() is False
+    assert dlg._param_widgets["single_cell"].isEnabled() is True
+    # Toggle single_cell on → halo_cell_mean becomes clickable.
+    dlg._param_setters["single_cell"](True)
+    dlg._refresh_state()
+    assert dlg._param_widgets["halo_cell_mean"].isEnabled() is True
+
+    dlg._output_parent_line.setText(str(out_dir))
+    dlg._refresh_state()
+    from qtpy.QtWidgets import QMessageBox
+    orig = QMessageBox.information
+    QMessageBox.information = staticmethod(lambda *a, **k: 0)
+    try:
+        dlg._on_start_clicked()
+    finally:
+        QMessageBox.information = orig
+
+    assert stub.call_count == 1
+    _, kwargs = stub.call_args
+    assert kwargs["preset"] == "decapping-sensor-v6"
+    assert kwargs["params"]["single_cell"] is True
 
 
 # ── U3: preset-aware required / hidden roles (dormant capability) ──────

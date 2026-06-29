@@ -387,6 +387,24 @@ def test_error_preset_role_both_required_and_hidden() -> None:
                 return {}
 
 
+def test_error_preset_editable_params_unknown_param() -> None:
+    """A preset_editable_params entry must be a declared parameter."""
+    with pytest.raises(ValueError, match="ghost_param"):
+
+        @register_analysis("bad_preset_editable")
+        class Bad(Analysis):
+            name = "bad_preset_editable"
+            display_name = "Bad"
+            required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+            parameters = {"k": IntParam(default=1)}
+            presets = {"p1": {"k": 2}}
+            preset_editable_params = ("ghost_param",)
+            outputs = {"table": TableOutput()}
+
+            def run(self, inputs, params):
+                return {}
+
+
 def test_error_get_unknown_raises_key_error() -> None:
     with pytest.raises(KeyError):
         get("does_not_exist")

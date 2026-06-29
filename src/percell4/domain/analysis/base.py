@@ -74,6 +74,16 @@ class Analysis:
     preset_required_inputs: ClassVar[dict[str, tuple[str, ...]]] = {}
     preset_hidden_inputs: ClassVar[dict[str, tuple[str, ...]]] = {}
 
+    # Params that stay user-editable even when a preset is selected — "mode"
+    # or output toggles (e.g. ``single_cell``) that are orthogonal to the
+    # science the preset fixes. The dialog leaves these enabled under a preset
+    # (still subject to their own ``requires`` gating); ``resolve_params``
+    # overlays a caller-supplied value for one of these on top of the preset
+    # (the preset's other values stay authoritative). Each entry must be a
+    # declared parameter. Default empty: existing presets fully lock their
+    # params as before.
+    preset_editable_params: ClassVar[tuple[str, ...]] = ()
+
     # ── Outputs ───────────────────────────────────────────────────
     outputs: ClassVar[dict[str, OutputLike]] = {}
 

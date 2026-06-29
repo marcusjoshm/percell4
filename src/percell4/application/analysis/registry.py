@@ -150,6 +150,16 @@ def validate_schema(cls: type[Analysis]) -> None:
                 f"role(s) {sorted(clash)} as both required and hidden"
             )
 
+    # ── preset_editable_params ──────────────────────────────────
+    # "Mode" params that stay user-editable under a preset; each must be a
+    # declared parameter.
+    for pname in getattr(cls, "preset_editable_params", ()):
+        if pname not in declared_params:
+            raise ValueError(
+                f"Analysis {cls.__name__!r}: preset_editable_params references "
+                f"unknown parameter {pname!r} (declared: {sorted(declared_params)})"
+            )
+
     # ── output-name uniqueness ──────────────────────────────────
     output_names = list(cls.outputs)
     if len(set(output_names)) != len(output_names):

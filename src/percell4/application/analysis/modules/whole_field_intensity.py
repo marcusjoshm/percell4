@@ -245,6 +245,12 @@ class WholeFieldIntensity(Analysis):
         "decapping-sensor-v6": ("dcp2_mask_2", "interaction_mask_2",
                                 "sir_mask"),
     }
+    # ``single_cell`` (and its dependent ``halo_cell_mean`` expression toggle)
+    # are run-mode/output choices orthogonal to the science a preset fixes, so
+    # they stay user-editable under any preset (e.g. run v6 in single-cell mode
+    # and group cells by expression). The dialog leaves them clickable and the
+    # toggled value is overlaid onto the preset by ``resolve_params``.
+    preset_editable_params = ("single_cell", "halo_cell_mean")
 
     # ── Outputs ───────────────────────────────────────────────────
     # One table whose columns vary by mode (two-region / three-region /

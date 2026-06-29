@@ -447,15 +447,22 @@ def resolve_params(
 ) -> dict[str, Any]:
     """Resolve the runtime parameter dict.
 
-    Strict policy: ``preset`` and a non-empty ``params`` cannot be
-    combined. Empty ``params`` is treated as absent (caller passing
-    ``{}`` with a preset is fine).
+    Strict policy: ``preset`` and a non-empty ``params`` cannot be combined —
+    *except* for params the analysis declares in ``preset_editable_params``
+    ("mode" toggles like ``single_cell`` that are orthogonal to the science a
+    preset fixes). Such a param is overlaid on top of the preset (the preset's
+    other values stay authoritative). Empty ``params`` is treated as absent
+    (caller passing ``{}`` with a preset is fine).
     """
+    editable = set(getattr(cls, "preset_editable_params", ()))
     if preset is not None and params:
-        raise ValueError(
-            f"analysis {analysis_name!r}: cannot mix preset and explicit "
-            f"params (preset={preset!r}, params keys={sorted(params)})"
-        )
+        illegal = set(params) - editable
+        if illegal:
+            raise ValueError(
+                f"analysis {analysis_name!r}: cannot mix preset and explicit "
+                f"params (preset={preset!r}, non-editable keys="
+                f"{sorted(illegal)})"
+            )
 
     if preset is not None:
         if preset not in cls.presets:
@@ -464,6 +471,8 @@ def resolve_params(
                 f"(declared: {sorted(cls.presets)})"
             )
         resolved = dict(cls.presets[preset])
+        # Overlay declared editable "mode" params on top of the preset.
+        resolved.update(params or {})
     else:
         resolved = dict(params or {})
 
