@@ -290,6 +290,41 @@ def test_timelapse_thw_mask_2d_seg_broadcasts(tmp_path: Path) -> None:
         )
 
 
+def test_timelapse_2d_mask_thw_seg_broadcasts(tmp_path: Path) -> None:
+    """Reverse broadcast: a 2D (time-invariant) mask + a (T,H,W) segmentation →
+    the 2D mask broadcasts per frame, the seg varies per frame, output is
+    exact-T (T,H,W) and genuinely differs across frames (per-frame compute)."""
+    nt, shape = 3, (8, 8)
+    cond2d = _square(shape, 2, 5, 2, 5)  # 2D condensed mask, time-invariant
+    seg = np.zeros((nt, *shape), dtype=np.int32)
+    for t in range(nt):
+        seg[t, 1 : 6 + t, 1 : 6 + t] = 1  # one cell that grows per frame
+    h5 = _make_h5(
+        tmp_path / "tl.h5",
+        n_timepoints=nt,
+        native_shape=shape,
+        masks={"condensed": cond2d},  # 2D, time-invariant
+        labels={"cells": seg},  # (T,H,W), varies per frame
+    )
+
+    report = batch_dilute_from_mask(
+        [h5],
+        mask_name="condensed",
+        segmentation_name="cells",
+        radius_px=1,
+        output_name="dilute",
+    )
+
+    assert report.items[0].status == "processed"
+    on_disk = _read_mask(h5, "dilute")
+    assert on_disk.shape == (nt, *shape)
+    for t in range(nt):
+        np.testing.assert_array_equal(
+            on_disk[t], _expected_dilute(cond2d, seg[t], 1).astype(np.uint8)
+        )
+    assert not np.array_equal(on_disk[0], on_disk[2])  # per-frame, not broadcast
+
+
 def test_multi_t_but_both_inputs_2d_writes_2d(tmp_path: Path) -> None:
     nt, shape = 3, (8, 8)
     cond = _square(shape, 2, 4, 2, 4)

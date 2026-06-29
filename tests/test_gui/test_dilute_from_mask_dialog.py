@@ -330,6 +330,54 @@ def test_output_collides_with_label_disables_start(qtbot, tmp_path):
     assert "label" in dlg._output_status.text().lower()
 
 
+def test_partial_collision_warns_but_keeps_start_enabled(qtbot, tmp_path):
+    """A collision in SOME (not all) datasets warns but keeps Start enabled —
+    the use case skips the colliding datasets and runs the rest (a normal
+    incremental re-run). Mirrors the phasor dialog's graceful degradation."""
+    a = _make_h5(
+        tmp_path / "a.h5",
+        mask_names=["condensed", "dilute"],  # already has the output mask
+        label_names=["cells"],
+    )
+    b = _make_h5(
+        tmp_path / "b.h5",
+        mask_names=["condensed"],  # fresh — no 'dilute'
+        label_names=["cells"],
+    )
+    dlg = DiluteFromMaskDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([a, b])
+    dlg._mask_combo.setCurrentText("condensed")
+    dlg._seg_combo.setCurrentText("cells")
+
+    dlg._output_edit.clear()
+    qtbot.keyClicks(dlg._output_edit, "dilute")
+
+    assert dlg._start_btn.isEnabled() is True  # 1 of 2 collides → not blocked
+    txt = dlg._output_status.text().lower()
+    assert "1 of 2" in txt and "skipped" in txt
+
+
+def test_all_datasets_collide_blocks_start(qtbot, tmp_path):
+    """When EVERY queued dataset already has the output name, Start is disabled."""
+    a = _make_h5(
+        tmp_path / "a.h5", mask_names=["condensed", "dilute"], label_names=["cells"]
+    )
+    b = _make_h5(
+        tmp_path / "b.h5", mask_names=["condensed", "dilute"], label_names=["cells"]
+    )
+    dlg = DiluteFromMaskDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_h5_paths([a, b])
+    dlg._mask_combo.setCurrentText("condensed")
+    dlg._seg_combo.setCurrentText("cells")
+
+    dlg._output_edit.clear()
+    qtbot.keyClicks(dlg._output_edit, "dilute")
+
+    assert dlg._start_btn.isEnabled() is False
+
+
 def test_clearing_collision_re_enables_start(qtbot, tmp_path):
     p = _make_h5(
         tmp_path / "a.h5",

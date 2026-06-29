@@ -516,32 +516,52 @@ class DiluteFromMaskDialog(QDialog):
 
     # ── Output-name collision validation ─────────────────
 
-    def _output_collision_reason(self) -> str | None:
-        """Return the collision reason if the output name already exists as a
-        channel / mask / label in any queued dataset, else None.
+    def _collision_info(self) -> tuple[int, int, str]:
+        """``(n_colliding, n_total, status_text)`` for the current output name.
 
-        Keeps the three namespaces distinct so the reason names the exact
-        conflicting resource kind (add-mask collision learning).
+        A dataset "collides" when the output name already exists in it as a
+        channel / mask / label (the three namespaces kept distinct, per the
+        add-mask collision learning). The use case **skips colliding datasets
+        per-dataset**, so a *partial* collision is a non-blocking warning (those
+        are skipped, the rest run); only an *all-datasets* collision blocks the
+        run (nothing to do). This mirrors the phasor dialog's graceful
+        degradation rather than blocking the whole batch on one stale file —
+        which would defeat a normal incremental re-run.
         """
         assert self._output_edit is not None
         name = self._output_edit.text().strip()
-        if not name:
-            return None
+        total = len(self._pending_datasets)
+        if not name or total == 0:
+            return 0, total, ""
+        n = 0
+        first_kind: str | None = None
         for pd in self._pending_datasets:
             if name in pd.channel_names:
-                return (
-                    f"'{name}' already exists as a channel in "
-                    f"{pd.h5_path.name}."
-                )
-            if name in pd.mask_names:
-                return (
-                    f"'{name}' already exists as a mask in {pd.h5_path.name}."
-                )
-            if name in pd.label_names:
-                return (
-                    f"'{name}' already exists as a label in {pd.h5_path.name}."
-                )
-        return None
+                kind = "channel"
+            elif name in pd.mask_names:
+                kind = "mask"
+            elif name in pd.label_names:
+                kind = "label"
+            else:
+                continue
+            n += 1
+            if first_kind is None:
+                first_kind = kind
+        if n == 0:
+            return 0, total, ""
+        if n == total:
+            # Every queued dataset collides → nothing to write; block the run
+            # and name the conflicting resource kind.
+            return n, total, (
+                f"'{name}' already exists as a {first_kind} — choose another "
+                "output name."
+            )
+        # Partial collision → the use case skips those datasets and runs the
+        # rest; warn but do not block (a normal incremental re-run).
+        return n, total, (
+            f"'{name}' already exists in {n} of {total} dataset(s); those will "
+            "be skipped (the rest run)."
+        )
 
     # ── Signal slots ────────────────────────────────────
 
@@ -565,17 +585,19 @@ class DiluteFromMaskDialog(QDialog):
         mask_name = self._mask_combo.currentText()
         seg_name = self._seg_combo.currentText()
         output_name = self._output_edit.text().strip()
-        collision = self._output_collision_reason()
+        n_colliding, n_total, status_text = self._collision_info()
 
-        # Surface the collision reason inline.
-        self._output_status.setText(collision or "")
+        # Surface the collision status inline (a partial collision is a
+        # non-blocking warning; an all-datasets collision blocks the run).
+        self._output_status.setText(status_text)
+        all_collide = n_total > 0 and n_colliding == n_total
 
         enabled = (
             has_files
             and bool(mask_name)
             and bool(seg_name)
             and bool(output_name)
-            and collision is None
+            and not all_collide
         )
         self._start_btn.setEnabled(enabled)
 
@@ -667,8 +689,14 @@ class DiluteFromMaskDialog(QDialog):
         self._cancelled = cancelled
         self._save_qsettings()
 
-        # Conditional, one-shot session refresh (Action discipline, R6/D5).
-        self._maybe_refresh_session(dataset_paths)
+        # Conditional, one-shot session refresh (Action discipline, R6/D5):
+        # only datasets that actually had a mask written can change the loaded
+        # dataset's resource list — skipped/failed/unreached datasets are
+        # excluded so the refresh matches its "among the processed paths" gate.
+        processed_paths = [
+            it.h5_path for it in report.items if it.status == "processed"
+        ]
+        self._maybe_refresh_session(processed_paths)
 
         # Per-dataset summary.
         self._show_summary(report, cancelled)

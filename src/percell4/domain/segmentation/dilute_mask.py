@@ -25,10 +25,10 @@ Public functions:
   point. **Returns a ``bool`` array** — the use-case passes this straight to
   ``write_dilute_mask``, which requires bool and casts to ``uint8`` itself
   (never pre-binarize to ``uint8``).
-- :func:`dilute_from_mask_stack` — thin ``(T, H, W)`` convenience that loops
-  :func:`dilute_from_mask` per frame and ``np.stack``\\ s the result. The
-  core stays rank-2; the per-frame loop in the use-case may use this or
-  read+loop itself.
+
+The core is rank-2; the batch use-case applies it per timepoint, reading each
+frame lazily from the store (so a 2D input broadcasts), rather than loading a
+whole ``(T, H, W)`` stack into memory.
 
 **Dilation is global, then clipped within cells (D8).** The mask is dilated
 over the whole frame and *then* AND-ed within ``labels > 0`` — identical to
@@ -145,50 +145,3 @@ def dilute_from_mask(
         )
 
     return invert_within_cells(dilate_mask(condensed, radius_px), seg_labels)
-
-
-def dilute_from_mask_stack(
-    condensed_thw: NDArray,
-    seg_thw: NDArray,
-    radius_px: int,
-) -> NDArray[np.bool_]:
-    """Per-frame :func:`dilute_from_mask` over a ``(T, H, W)`` stack.
-
-    Thin convenience that loops the rank-2 core per frame and stacks the
-    result along a new leading axis — exactly ``T`` planes out for ``T``
-    planes in (an empty label plane at frame ``t`` simply yields an
-    all-zero plane, never dropped). The core stays rank-2; the use-case
-    may use this or read each frame and loop itself.
-
-    Parameters
-    ----------
-    condensed_thw : (T, H, W) condensed-phase mask stack.
-    seg_thw : (T, H, W) cell-label image stack.
-    radius_px : disk **radius** in pixels (``0`` → no dilation, D2).
-
-    Returns
-    -------
-    NDArray[np.bool_]
-        ``(T, H, W)`` boolean dilute-phase stack.
-
-    Raises
-    ------
-    ValueError
-        When the two stacks disagree on the number of frames ``T``, or any
-        frame's ``(H, W)`` shapes disagree (propagated from
-        :func:`dilute_from_mask`).
-    """
-    condensed_thw = np.asarray(condensed_thw)
-    seg_thw = np.asarray(seg_thw)
-
-    if condensed_thw.shape[0] != seg_thw.shape[0]:
-        raise ValueError(
-            "condensed_thw and seg_thw must have the same number of frames, "
-            f"got {condensed_thw.shape[0]} and {seg_thw.shape[0]}"
-        )
-
-    planes = [
-        dilute_from_mask(condensed_thw[t], seg_thw[t], radius_px)
-        for t in range(condensed_thw.shape[0])
-    ]
-    return np.stack(planes, axis=0)

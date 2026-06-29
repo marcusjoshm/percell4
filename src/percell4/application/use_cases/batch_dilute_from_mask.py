@@ -39,6 +39,7 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -50,7 +51,7 @@ from percell4.store import DatasetStore
 
 logger = logging.getLogger(__name__)
 
-ItemStatus = str  # one of "processed", "skipped", "failed"
+ItemStatus = Literal["processed", "skipped", "failed"]
 
 
 # ── Result types (D6) ───────────────────────────────────────────────────
@@ -250,7 +251,11 @@ def _process_one_dataset(
     # ── Compute (D4): 2D op or exact-T per-frame loop. ──
     try:
         out = _compute_dilute(
-            store, mask_name, segmentation_name, radius_px, n_timepoints
+            store,
+            mask_name=mask_name,
+            segmentation_name=segmentation_name,
+            radius_px=radius_px,
+            n_timepoints=n_timepoints,
         )
     except ValueError as exc:
         # Mask/seg shape mismatch (domain op) or a mis-stacked time axis —
@@ -274,6 +279,7 @@ def _process_one_dataset(
 
 def _compute_dilute(
     store: DatasetStore,
+    *,
     mask_name: str,
     segmentation_name: str,
     radius_px: int,

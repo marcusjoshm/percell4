@@ -73,14 +73,16 @@ def test_button_respects_workflow_lock(qtbot):
 
 
 def test_handler_updates_status_bar_on_run(qtbot):
-    """A completed run reports the dataset count in the status bar."""
+    """A completed run reports the processed/skipped/failed breakdown."""
     win = LauncherWindow(CellDataModel())
     qtbot.addWidget(win)
     btn = _find_button(win, "Dilute phase mask from mask")
 
     fake_dialog = MagicMock()
     fake_report = MagicMock()
-    fake_report.items = (MagicMock(), MagicMock())  # 2 datasets
+    fake_report.total_processed = 2
+    fake_report.total_skipped = 1
+    fake_report.total_failed = 0
     fake_dialog.last_report = fake_report
 
     with patch(_DIALOG_PATH, return_value=fake_dialog):
@@ -88,4 +90,5 @@ def test_handler_updates_status_bar_on_run(qtbot):
 
     msg = win.statusBar().currentMessage()
     assert "Dilute-from-mask workflow complete" in msg
-    assert "2 dataset(s)" in msg
+    assert "2 processed" in msg
+    assert "1 skipped" in msg

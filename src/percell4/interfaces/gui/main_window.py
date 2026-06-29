@@ -551,10 +551,11 @@ class LauncherWindow(QMainWindow):
             dialog.exec_()
             report = dialog.last_report
             if report is not None:
-                n = len(report.items)
                 self.statusBar().showMessage(
-                    f"Dilute-from-mask workflow complete — {n} dataset(s) "
-                    f"processed."
+                    "Dilute-from-mask workflow complete — "
+                    f"{report.total_processed} processed, "
+                    f"{report.total_skipped} skipped, "
+                    f"{report.total_failed} failed."
                 )
         finally:
             dialog.deleteLater()

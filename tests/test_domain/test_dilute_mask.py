@@ -32,7 +32,6 @@ from skimage.morphology import dilation, disk
 from percell4.domain.segmentation.dilute_mask import (
     dilate_mask,
     dilute_from_mask,
-    dilute_from_mask_stack,
     invert_within_cells,
 )
 
@@ -258,43 +257,6 @@ def test_dilate_mask_returns_bool_and_no_growth_at_zero():
     assert grown.dtype == np.bool_
     assert grown.sum() > mask.sum()  # the disk grew the single pixel
     np.testing.assert_array_equal(grown, dilation(mask.astype(bool), footprint=disk(2)))
-
-
-# ── stack convenience ──────────────────────────────────────────────────
-
-
-def test_dilute_from_mask_stack_per_frame_and_empty_plane():
-    """(T, H, W) inputs → (T, H, W) bool output, per-frame correct; a
-    frame whose label plane is empty yields an all-zero plane (exact-T)."""
-    labels2d = _two_cell_labels()
-    h, w = labels2d.shape
-    t = 3
-
-    seg = np.stack([labels2d, labels2d, np.zeros_like(labels2d)], axis=0)
-    condensed = np.zeros((t, h, w), dtype=bool)
-    condensed[0, 7:10, 4:7] = True  # blob only in frame 0
-
-    out = dilute_from_mask_stack(condensed, seg, radius_px=2)
-
-    assert out.shape == (t, h, w)
-    assert out.dtype == np.bool_
-
-    # Frame 0 matches the 2D op on frame 0's inputs.
-    np.testing.assert_array_equal(
-        out[0], dilute_from_mask(condensed[0], seg[0], radius_px=2)
-    )
-    # Frame 1 (no condensed) → whole cell interiors are dilute.
-    np.testing.assert_array_equal(out[1], labels2d > 0)
-    # Frame 2 (empty label plane) → all-zero plane, never dropped.
-    assert not out[2].any()
-
-
-def test_dilute_from_mask_stack_frame_count_mismatch_raises():
-    """A mismatched frame count between the two stacks raises ValueError."""
-    condensed = np.zeros((3, 8, 8), dtype=bool)
-    seg = np.zeros((2, 8, 8), dtype=np.int32)
-    with pytest.raises(ValueError, match="number of frames"):
-        dilute_from_mask_stack(condensed, seg, radius_px=1)
 
 
 # ── domain isolation ───────────────────────────────────────────────────
