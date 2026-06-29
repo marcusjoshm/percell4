@@ -1,7 +1,7 @@
 ---
 title: "Adding a registered analysis: pure core + module + CLI + dialog"
 date: 2026-05-28
-last_updated: 2026-05-28
+last_updated: 2026-06-29
 category: architecture-patterns
 module: percell4.application.analysis
 problem_type: architecture_pattern
@@ -57,6 +57,11 @@ Worked examples: `per_particle_donut` (the reference), `per_particle_multichanne
    `np.unique`+`argmax`+skip-0 particle assignment verbatim because its
    tie-break/background-majority handling differs from the shared bincount
    version; forcing the shared helper would silently change its numbers.
+   Registered analyses are **multi-timepoint by contract**: the pure core sees
+   one 2D frame and stays rank-agnostic, while `run_analysis` loops the
+   timepoints and aggregates (`timepoint`-columned tables, `(T, ...)` image
+   stacks) — so a 2D core is time-lapse-ready for free. See
+   `[[registered-analysis-multitimepoint-contract-2026-06-29]]`.
 
 2. **Numeric parity is pinned by a characterization fixture, built BEFORE the
    refactor.** Generate expected CSVs from the *unmodified* original CLI,
@@ -87,7 +92,11 @@ Worked examples: `per_particle_donut` (the reference), `per_particle_multichanne
 5. **Presets are immutable, pinned by a snapshot test.** Declare `presets` as
    an in-code dict; mirror it to `tests/fixtures/preset_snapshots/<name>.json`;
    `tests/test_application/test_presets_immutable.py` fails on drift. Never edit
-   a preset value in place — add a new version. No import-time hashing.
+   a preset value in place — add a new version. No import-time hashing. A preset
+   may additionally declare `preset_required_inputs` / `preset_hidden_inputs` /
+   `preset_editable_params` — extending the `BoolParam(requires=...)` precedent
+   (rule 3) so a preset can require/hide specific masks and keep mode toggles
+   user-editable; see `[[preset-aware-and-editable-roles-2026-06-29]]`.
 
 6. **Dual-typed / optional params.** The framework has IntParam / FloatParam /
    ChoiceParam / BoolParam only. A keyword-or-integer field (e.g. a background
@@ -129,6 +138,11 @@ run-folder, and Scripts tab are generic — they need no per-analysis change.
 ## See also
 
 - `docs/writing_an_analysis.md` — the full step-by-step.
+- `[[registered-analysis-multitimepoint-contract-2026-06-29]]` — how the
+  framework runs an analysis over a time-lapse (per-timepoint auto-loop +
+  `_aggregate_timepoints`, byte-identical single-t contract).
+- `[[preset-aware-and-editable-roles-2026-06-29]]` — preset-required/hidden
+  inputs + preset-editable mode params (extends rule 5 and `BoolParam.requires`).
 - `[[sibling-dialog-extract-shared-widget-2026-05-12]]` — consume the shared
   widget factories; don't rebuild from a dataclass.
 - `[[dialog-scroll-when-tall]]` — `wrap_in_scroll` + `cap_to_screen` (CI-enforced).
