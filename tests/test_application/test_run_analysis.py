@@ -1145,3 +1145,43 @@ def test_plain_run_signature_not_passed_layer_map(tmp_path: Path) -> None:
 
     out = run_analysis("stub", h5, {"x": "Cap"})
     assert "table" in out
+
+
+# ── _add_area_um2_columns helper (µm² area siblings) ───────────────
+
+
+def test_add_area_um2_columns_scales_and_places_sibling():
+    """Each ``*_area_px`` column gains an adjacent ``*_area_um2`` sibling
+    scaled by pixel_size_um**2; non-area columns are untouched."""
+    from percell4.application.use_cases.run_analysis import _add_area_um2_columns
+
+    df = pd.DataFrame({"cell_id": [1, 2], "cell_area_px": [100, 400],
+                       "pbody_area_px": [10, 40], "mNG_pbody_mean": [5.0, 6.0]})
+    out = _add_area_um2_columns(df, pixel_size_um=0.5)  # factor 0.25
+    cols = list(out.columns)
+    assert cols == ["cell_id", "cell_area_px", "cell_area_um2",
+                    "pbody_area_px", "pbody_area_um2", "mNG_pbody_mean"]
+    np.testing.assert_allclose(out["cell_area_um2"], [25.0, 100.0])
+    np.testing.assert_allclose(out["pbody_area_um2"], [2.5, 10.0])
+
+
+def test_add_area_um2_columns_noop_without_pixel_size():
+    """None / non-positive pixel size, or no ``*_area_px`` columns, → no-op."""
+    from percell4.application.use_cases.run_analysis import _add_area_um2_columns
+
+    df = pd.DataFrame({"cell_area_px": [100]})
+    pd.testing.assert_frame_equal(_add_area_um2_columns(df, None), df)
+    pd.testing.assert_frame_equal(_add_area_um2_columns(df, 0.0), df)
+    pd.testing.assert_frame_equal(_add_area_um2_columns(df, -1.0), df)
+    no_area = pd.DataFrame({"mean": [1.0]})
+    pd.testing.assert_frame_equal(_add_area_um2_columns(no_area, 0.5), no_area)
+
+
+def test_add_area_um2_columns_idempotent():
+    """A second pass does not duplicate an existing ``*_area_um2`` column."""
+    from percell4.application.use_cases.run_analysis import _add_area_um2_columns
+
+    df = pd.DataFrame({"cell_area_px": [100]})
+    once = _add_area_um2_columns(df, 0.5)
+    twice = _add_area_um2_columns(once, 0.5)
+    pd.testing.assert_frame_equal(once, twice)

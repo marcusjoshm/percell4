@@ -140,6 +140,59 @@ def test_preset_v3_runs(tmp_path: Path):
             FIXTURE_ROOT / "expected" / "v3.csv", sort_key="pbody_area_px")
 
 
+# ── µm² area siblings (pixel-size-aware) ───────────────────────────
+
+
+def _build_h5_calibrated(path: Path, pixel_size_um: float) -> None:
+    """Like ``_build_h5`` but records a ``pixel_size_um`` in /metadata."""
+    halo = _img("Halo").astype(np.float32)
+    mng = _img("mNG").astype(np.float32)
+    intensity = np.stack([halo, mng], axis=0)
+    store = DatasetStore(path)
+    store.create(metadata={"source": "test", "channel_names": ["Halo", "mNG"],
+                           "pixel_size_um": pixel_size_um})
+    store.write_array("intensity", intensity, attrs={"dims": ["C", "H", "W"]})
+    for role, fname in [
+        ("pbody", "P-body_mask"), ("dilute", "dilute_mask"),
+        ("dcp2", "Dcp2_mask"), ("dcp2_2", "Dcp2_mask_2"),
+        ("interaction", "interaction_mask"),
+        ("interaction_2", "interaction_mask_2"), ("sir", "SiR_mask"),
+    ]:
+        store.write_array(f"masks/{role}", (_img(fname) > 0).astype(np.uint8))
+    store.write_array("labels/cells", _img("cp_mask").astype(np.int32))
+
+
+def test_area_um2_columns_added_when_pixel_size_present(tmp_path: Path):
+    """A dataset with pixel_size_um gains a ``*_area_um2`` sibling for each
+    ``*_area_px`` column (cell + pbody + intermediate + dilute), each equal to
+    the px count times pixel_size_um**2, placed right after the px column."""
+    px = 0.5
+    h5 = tmp_path / "f.h5"
+    _build_h5_calibrated(h5, pixel_size_um=px)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       params={**_V4, "single_cell": True})
+    df = out["whole_field_table"]
+    cols = list(df.columns)
+    factor = px * px
+    for base in ("cell", "pbody", "intermediate", "dilute"):
+        px_col, um_col = f"{base}_area_px", f"{base}_area_um2"
+        assert px_col in cols and um_col in cols
+        assert cols.index(um_col) == cols.index(px_col) + 1  # sibling adjacency
+        np.testing.assert_allclose(df[um_col], df[px_col].astype(float) * factor)
+
+
+def test_area_um2_absent_without_pixel_size(tmp_path: Path):
+    """An uncalibrated dataset (no pixel_size_um) gets no ``*_area_um2``
+    columns; the px columns are unchanged (no-op)."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)  # no pixel_size_um in metadata
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       params={**_V4, "single_cell": True})
+    df = out["whole_field_table"]
+    assert not any(c.endswith("_area_um2") for c in df.columns)
+    assert "cell_area_px" in df.columns
+
+
 # ── Cross-cutting constraint guards (error path) ───────────────────
 
 

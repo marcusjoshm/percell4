@@ -194,7 +194,9 @@ def run_analysis(
         layer_map=layer_map,
     )
 
-    n_timepoints = int(DatasetStore(h5_path).metadata.get("n_timepoints", 1) or 1)
+    _meta = DatasetStore(h5_path).metadata
+    n_timepoints = int(_meta.get("n_timepoints", 1) or 1)
+    pixel_size_um = _meta.get("pixel_size_um")
     if n_timepoints <= 1:
         arrays = load_layers(h5_path, layer_map, roles_dict)
         outputs = run_callable(arrays, resolved, **run_kwargs)
@@ -244,10 +246,47 @@ def run_analysis(
                 f"declaration type {type(decl).__name__}"
             )
 
+    # 13. Add a µm² area sibling next to every ``*_area_px`` column, scaled by
+    # the dataset's pixel size. A no-op when the dataset carries no
+    # ``pixel_size_um`` (e.g. an import without resolution tags) — the px
+    # columns are left untouched, so output is byte-identical for uncalibrated
+    # datasets.
+    for name, value in outputs.items():
+        if isinstance(cls.outputs[name], TableOutput):
+            outputs[name] = _add_area_um2_columns(value, pixel_size_um)
+
     return outputs
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+
+def _add_area_um2_columns(
+    df: pd.DataFrame, pixel_size_um: float | None
+) -> pd.DataFrame:
+    """Return ``df`` with a ``<base>_area_um2`` sibling immediately after each
+    ``<base>_area_px`` column, scaled by ``pixel_size_um ** 2``.
+
+    A no-op (returns ``df`` unchanged) when ``pixel_size_um`` is missing or
+    non-positive, or when there are no ``*_area_px`` columns — so output for
+    uncalibrated datasets is byte-identical. Idempotent: a ``_area_um2`` column
+    that already exists is left as-is.
+    """
+    if pixel_size_um is None or not (float(pixel_size_um) > 0):
+        return df
+    area_cols = [c for c in df.columns if c.endswith("_area_px")]
+    if not area_cols:
+        return df
+    factor = float(pixel_size_um) * float(pixel_size_um)
+    out = df.copy()
+    for col in area_cols:
+        sibling = f"{col[: -len('_area_px')]}_area_um2"
+        if sibling in out.columns:
+            continue
+        # Re-fetch the position each iteration — prior inserts shift columns.
+        insert_at = out.columns.get_loc(col) + 1
+        out.insert(insert_at, sibling, out[col].astype(float) * factor)
+    return out
 
 
 def _aggregate_timepoints(
