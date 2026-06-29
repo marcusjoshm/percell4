@@ -163,6 +163,43 @@ def test_channel_cell_mean_greyed_unless_single_cell(qtbot, tmp_path):
     assert channel_chk.isEnabled() is True
 
 
+def test_export_particles_checkbox_and_output_panel(qtbot, tmp_path):
+    """The export_particles checkbox auto-renders (plain, no requires gating),
+    and toggling it on marks condensate_particle_table produced (✔) in the
+    outputs panel; off, the output is greyed."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    dlg = WholeFieldIntensityDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._refresh_state()
+
+    assert "export_particles" in dlg._param_widgets
+    chk = dlg._param_widgets["export_particles"]
+    assert chk.isEnabled() is True  # no requires → plain, enabled checkbox
+
+    label = dlg._output_labels["condensate_particle_table"]
+    assert "✔" not in label.text()  # off → greyed / struck through
+
+    dlg._param_setters["export_particles"](True)
+    dlg._refresh_state()
+    assert label.text() == "✔ condensate_particle_table"
+
+
+def test_export_particles_stays_editable_under_preset(qtbot, tmp_path):
+    """export_particles is a preset-editable mode toggle, so it stays clickable
+    even when a preset locks the science params (e.g. min_size)."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    dlg = WholeFieldIntensityDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    _select_preset(dlg, "decapping-sensor-v2")
+    dlg._refresh_state()
+    assert dlg._param_widgets["min_size"].isEnabled() is False  # locked
+    assert dlg._param_widgets["export_particles"].isEnabled() is True
+
+
 def test_start_dispatches_with_preset(qtbot, tmp_path):
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
@@ -203,9 +240,14 @@ def test_start_dispatches_with_preset(qtbot, tmp_path):
     assert kwargs["preset"] == "decapping-sensor-v2"
     # Under a preset the dialog now passes ONLY the editable "mode" params as
     # an overlay (here at their gated values — cp_mask unassigned, so
-    # single_cell is gated off, which in turn unchecks channel_cell_mean);
+    # single_cell is gated off, which in turn unchecks channel_cell_mean;
+    # export_particles is an independent mode toggle, default off);
     # resolve_params merges them onto the preset.
-    assert kwargs["params"] == {"single_cell": False, "channel_cell_mean": False}
+    assert kwargs["params"] == {
+        "single_cell": False,
+        "channel_cell_mean": False,
+        "export_particles": False,
+    }
 
 
 def test_v6_single_cell_clickable_and_dispatched(qtbot, tmp_path):

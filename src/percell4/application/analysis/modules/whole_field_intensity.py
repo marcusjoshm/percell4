@@ -59,6 +59,11 @@ _HALO_BG_CHOICES = (
 _FILTER_CHOICES = ("none", "zero", "NaN")
 
 
+def _condensate_particle_table_produced(g, params: dict[str, Any]) -> bool:
+    """The per-particle condensate table is produced only when opted in."""
+    return bool(params["export_particles"])
+
+
 @register_analysis("whole_field_intensity")
 class WholeFieldIntensity(Analysis):
     """Whole-field decapping-sensor intensity analysis.
@@ -181,6 +186,15 @@ class WholeFieldIntensity(Analysis):
             "cell (mNG_cell_mean + Halo_cell_mean), for grouping cells by "
             "expression level. Single-cell mode only (needs single_cell + "
             "cp_mask); on by default."),
+        # Opt-in second table: one row per individual condensate particle.
+        # Deliberately NO requires (independent of single_cell / cp_mask — a
+        # cell_id is added only when a cp_mask is mapped). Off by default so the
+        # main table and all prior behavior stay byte-identical.
+        "export_particles": BoolParam(
+            default=False,
+            desc="Also export one row per individual condensate particle "
+            "(mNG/Halo mean+integ, area, halo/mNG ratio) to a separate table — "
+            "condensate only, not dilute. Off by default."),
     }
 
     presets: dict[str, dict[str, Any]] = {
@@ -247,12 +261,15 @@ class WholeFieldIntensity(Analysis):
                                 "sir_mask"),
     }
     # ``single_cell`` (and its dependent ``channel_cell_mean`` expression
-    # toggle) are run-mode/output choices orthogonal to the science a preset
-    # fixes, so they stay user-editable under any preset (e.g. run v6 in
-    # single-cell mode and group cells by expression). The dialog leaves them
-    # clickable and the toggled value is overlaid onto the preset by
+    # toggle) plus ``export_particles`` are run-mode/output choices orthogonal
+    # to the science a preset fixes, so they stay user-editable under any preset
+    # (e.g. run v6 in single-cell mode and group cells by expression, or run v6
+    # and additionally export the per-particle condensate table). The dialog
+    # leaves them clickable and the toggled value is overlaid onto the preset by
     # ``resolve_params``.
-    preset_editable_params = ("single_cell", "channel_cell_mean")
+    preset_editable_params = (
+        "single_cell", "channel_cell_mean", "export_particles"
+    )
 
     # ── Outputs ───────────────────────────────────────────────────
     # One table whose columns vary by mode (two-region / three-region /
@@ -261,6 +278,11 @@ class WholeFieldIntensity(Analysis):
     outputs = {
         "whole_field_table": TableOutput(
             desc="Whole-field (or per-cell) compartment measurements.",
+        ),
+        "condensate_particle_table": TableOutput(
+            produced_when=_condensate_particle_table_produced,
+            desc="Per-condensate-particle measurements (mNG/Halo mean+integ, "
+            "area, halo/mNG ratio; cell_id when a cp_mask is mapped).",
         ),
     }
 
@@ -343,10 +365,20 @@ class WholeFieldIntensity(Analysis):
             intermediate_assemblies=intermediate,
             intermediate_zero_fill=zero_fill,
             channel_cell_mean=bool(params["channel_cell_mean"]),
+            export_particles=bool(params["export_particles"]),
             set_label=set_label,
             log=log,
         )
-        return {"whole_field_table": pd.DataFrame(result["rows"])}
+        out: dict[str, Any] = {
+            "whole_field_table": pd.DataFrame(result["rows"])
+        }
+        # Second table produced only when opted in. An empty DataFrame (zero
+        # particles) is still returned so produced ⊇ returned holds.
+        if params["export_particles"]:
+            out["condensate_particle_table"] = pd.DataFrame(
+                result["particle_rows"]
+            )
+        return out
 
 
 def _none_to_py(choice: str) -> str | None:

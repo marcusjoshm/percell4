@@ -515,3 +515,73 @@ def test_v6_with_non_editable_param_still_raises(tmp_path: Path):
     with pytest.raises(ValueError, match="min_size"):
         run_analysis("whole_field_intensity", h5, _LAYER_MAP,
                      preset="decapping-sensor-v6", params={"min_size": 99})
+
+
+# ── export_particles: per-condensate-particle second table ─────────
+
+
+_PARTICLE_COLS = {
+    "particle_id", "particle_area_px", "mNG_particle_mean",
+    "mNG_particle_integ", "halo_particle_mean", "halo_particle_integ",
+    "halo_over_mNG_particle",
+}
+
+
+def test_export_particles_produces_second_table(tmp_path: Path):
+    """export_particles=True yields BOTH whole_field_table AND
+    condensate_particle_table; the particle table carries the per-particle
+    columns plus cell_id (cp_mask is in _LAYER_MAP). The fixture has 3
+    condensate particles (2 in cell 1, 1 in cell 2)."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       params={**_V4, "export_particles": True})
+    assert "whole_field_table" in out
+    assert "condensate_particle_table" in out
+    pt = out["condensate_particle_table"]
+    assert _PARTICLE_COLS <= set(pt.columns)
+    assert "cell_id" in pt.columns  # cp_mask mapped → cell_id present
+    assert len(pt) == 3
+    assert set(pt["cell_id"]) == {1, 2}
+
+
+def test_default_no_condensate_particle_table(tmp_path: Path):
+    """Default (no export_particles) → only whole_field_table; the second table
+    is absent (produced_when False), keeping the default path unchanged."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP, params=_V4)
+    assert "whole_field_table" in out
+    assert "condensate_particle_table" not in out
+
+
+def test_v6_export_particles_overlay(tmp_path: Path):
+    """export_particles is a preset-editable mode toggle, so overlaying it onto
+    the v6 preset (params={'export_particles': True}) is accepted and produces
+    the condensate_particle_table alongside the v6 whole_field_table."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       preset="decapping-sensor-v6",
+                       params={"export_particles": True})
+    assert "whole_field_table" in out
+    assert "condensate_particle_table" in out
+    assert len(out["condensate_particle_table"]) == 3
+
+
+def test_export_particles_area_um2_on_particle_table(tmp_path: Path):
+    """A calibrated dataset (pixel_size_um set) auto-gains a particle_area_um2
+    sibling on the particle table (via run_analysis's _add_area_um2_columns),
+    equal to particle_area_px * pixel_size_um**2."""
+    px = 0.5
+    h5 = tmp_path / "f.h5"
+    _build_h5_calibrated(h5, pixel_size_um=px)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       params={**_V4, "export_particles": True})
+    pt = out["condensate_particle_table"]
+    assert "particle_area_um2" in pt.columns
+    cols = list(pt.columns)
+    assert cols.index("particle_area_um2") == cols.index("particle_area_px") + 1
+    np.testing.assert_allclose(
+        pt["particle_area_um2"], pt["particle_area_px"].astype(float) * px * px
+    )
