@@ -80,7 +80,7 @@ def test_start_disabled_until_required_roles_and_output(qtbot, tmp_path):
     qtbot.addWidget(dlg)
     assert dlg._start_btn.isEnabled() is False
     dlg._add_paths([h5])
-    for role, layer in [("pbody_mask", "pbody"), ("dilute_mask", "dilute"),
+    for role, layer in [("condensate_mask", "pbody"), ("dilute_mask", "dilute"),
                         ("halo", "Halo"), ("mng", "mNG")]:
         dlg._role_combos[role].setCurrentText(layer)
     dlg._output_parent_line.setText(str(out_dir))
@@ -118,7 +118,7 @@ def test_intermediate_assemblies_gated_on_four_masks(qtbot, tmp_path):
     dlg._refresh_state()
     inter = dlg._param_widgets["intermediate_assemblies"]
     assert inter.isEnabled() is False  # masks not mapped
-    for role, layer in [("dcp2_mask", "dcp2"),
+    for role, layer in [("mng_mask", "dcp2"),
                         ("interaction_mask", "interaction"),
                         ("dcp2_mask_2", "dcp2_2"),
                         ("interaction_mask_2", "interaction_2")]:
@@ -157,8 +157,8 @@ def test_start_dispatches_with_preset(qtbot, tmp_path):
     dlg = WholeFieldIntensityDialog(orchestrator=stub)
     qtbot.addWidget(dlg)
     dlg._add_paths([h5])
-    for role, layer in [("pbody_mask", "pbody"), ("dilute_mask", "dilute"),
-                        ("halo", "Halo"), ("mng", "mNG"), ("dcp2_mask", "dcp2"),
+    for role, layer in [("condensate_mask", "pbody"), ("dilute_mask", "dilute"),
+                        ("halo", "Halo"), ("mng", "mNG"), ("mng_mask", "dcp2"),
                         ("sir_mask", "sir")]:
         dlg._role_combos[role].setCurrentText(layer)
     idx = dlg._preset_combo.findText("decapping-sensor-v2")

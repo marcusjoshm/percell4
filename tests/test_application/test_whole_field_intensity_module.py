@@ -63,9 +63,9 @@ def _build_h5(path: Path) -> None:
 
 
 _LAYER_MAP = {
-    "pbody_mask": "pbody", "dilute_mask": "dilute",
+    "condensate_mask": "pbody", "dilute_mask": "dilute",
     "halo": "Halo", "mng": "mNG",
-    "dcp2_mask": "dcp2", "interaction_mask": "interaction",
+    "mng_mask": "dcp2", "interaction_mask": "interaction",
     "sir_mask": "sir", "dcp2_mask_2": "dcp2_2",
     "interaction_mask_2": "interaction_2", "cp_mask": "cells",
 }

@@ -84,8 +84,9 @@ class WholeFieldIntensity(Analysis):
 
     # ── Inputs ────────────────────────────────────────────────────
     required_inputs = {
-        "pbody_mask": ImageRole(kind="mask", dtype="binary",
-                                desc="P-body binary mask"),
+        "condensate_mask": ImageRole(kind="mask", dtype="binary",
+                                     desc="Condensate binary mask "
+                                     "(P-body / stress granule)"),
         "dilute_mask": ImageRole(kind="mask", dtype="binary",
                                  desc="Dilute-cytoplasm mask (bg region)"),
         "halo": ImageRole(kind="intensity", dtype="float",
@@ -98,8 +99,8 @@ class WholeFieldIntensity(Analysis):
     optional_inputs = {
         "cp_mask": ImageRole(kind="label", dtype="labels",
                              desc="Cell-segmentation labels (single_cell)"),
-        "dcp2_mask": ImageRole(kind="mask", dtype="binary",
-                               desc="Dcp2/mNG mask (mNG_filter, percent, v4/v5)"),
+        "mng_mask": ImageRole(kind="mask", dtype="binary",
+                              desc="mNG-filter mask (mNG_filter, percent, v4/v5)"),
         "interaction_mask": ImageRole(kind="mask", dtype="binary",
                                       desc="FLIM interaction mask (FLIM_filter, v4/v5)"),
         "sir_mask": ImageRole(kind="mask", dtype="binary",
@@ -137,7 +138,8 @@ class WholeFieldIntensity(Analysis):
             "(supersedes exclude_halo_zero)."),
         "mNG_filter": ChoiceParam(
             choices=_FILTER_CHOICES, default="none",
-            desc="Set mNG outside Dcp2_mask to zero/NaN (needs dcp2_mask)."),
+            desc="Set mNG outside the mNG-filter mask to zero/NaN "
+            "(needs mng_mask)."),
         "FLIM_filter": ChoiceParam(
             choices=_FILTER_CHOICES, default="none",
             desc="Set Halo outside interaction_mask to zero/NaN "
@@ -149,14 +151,14 @@ class WholeFieldIntensity(Analysis):
             default=False, requires=("sir_mask",),
             desc="Restrict Halo measurements to within SiR_mask."),
         "mNG_in_FLIM": BoolParam(
-            default=False, requires=("interaction_mask", "dcp2_mask"),
-            desc="NaN both channels outside (interaction_mask & Dcp2_mask)."),
+            default=False, requires=("interaction_mask", "mng_mask"),
+            desc="NaN both channels outside (interaction_mask & mng_mask)."),
         "percent": BoolParam(
             default=False,
             desc="Add pct_halo_in_mNG_* columns per compartment."),
         "intermediate_assemblies": BoolParam(
             default=False,
-            requires=("dcp2_mask", "interaction_mask", "dcp2_mask_2",
+            requires=("mng_mask", "interaction_mask", "dcp2_mask_2",
                       "interaction_mask_2"),
             desc="Three-region (P-body/intermediate/dilute) measurement."),
         "intermediate_zero_fill": BoolParam(
@@ -267,12 +269,12 @@ class WholeFieldIntensity(Analysis):
         )
 
         result = run_one_image_set(
-            pbody_mask=inputs["pbody_mask"],
+            pbody_mask=inputs["condensate_mask"],
             dilute_mask=inputs["dilute_mask"],
             halo=inputs["halo"],
             mng=inputs["mng"],
             cp_mask=inputs.get("cp_mask"),
-            dcp2_mask=inputs.get("dcp2_mask"),
+            dcp2_mask=inputs.get("mng_mask"),
             interaction_mask=inputs.get("interaction_mask"),
             sir_mask=inputs.get("sir_mask"),
             dcp2_mask_2=inputs.get("dcp2_mask_2"),

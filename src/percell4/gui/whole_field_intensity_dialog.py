@@ -69,7 +69,7 @@ _NO_PRESET = "No preset"
 
 # Optional mask/label roles shown as always-enabled combos.
 _OPTIONAL_ROLES = (
-    "cp_mask", "dcp2_mask", "interaction_mask", "sir_mask",
+    "cp_mask", "mng_mask", "interaction_mask", "sir_mask",
     "dcp2_mask_2", "interaction_mask_2",
 )
 # bg-mode choice param -> the manual-value IntParam it gates.
@@ -198,7 +198,7 @@ class WholeFieldIntensityDialog(QDialog):
         box = QGroupBox("2. Layer map")
         layout = QVBoxLayout(box)
 
-        for role in ("pbody_mask", "dilute_mask", "halo", "mng"):
+        for role in ("condensate_mask", "dilute_mask", "halo", "mng"):
             decl = WholeFieldIntensity.required_inputs[role]
             row, _, combo = build_layer_combo(role, decl.desc, self)
             combo.activated.connect(lambda _i: self._refresh_state())
@@ -440,7 +440,7 @@ class WholeFieldIntensityDialog(QDialog):
         if not self._h5_paths:
             return "Add at least one dataset to begin."
         layer_map = self._resolve_layer_map()
-        for role in ("pbody_mask", "dilute_mask", "halo", "mng"):
+        for role in ("condensate_mask", "dilute_mask", "halo", "mng"):
             if role not in layer_map:
                 return f"Assign the required role {role!r}."
         if not self._resolve_output_parent():
