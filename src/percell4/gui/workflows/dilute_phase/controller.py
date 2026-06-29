@@ -48,6 +48,7 @@ from percell4.domain.measure.grouper import (
     group_cells_kmeans,
 )
 from percell4.domain.measure.measurer import measure_cells
+from percell4.domain.segmentation.dilute_mask import dilate_mask, invert_within_cells
 from percell4.gui._grouped_threshold_settings import GroupedThresholdConfig
 from percell4.gui.threshold_qc import ThresholdQCController
 from percell4.gui.workers import Worker
@@ -235,8 +236,9 @@ class DilutePhaseMaskController(QObject):
 
     def finish(self) -> None:
         """Persist the final dilute mask and tear down transient state."""
-        in_cell = self._seg_labels > 0
-        dilute_mask = in_cell & ~self._cumulative_condensed
+        # Single source of truth (R7): the same invert-within-cells the batch
+        # "Dilute phase mask from mask" tool uses (domain/segmentation/dilute_mask).
+        dilute_mask = invert_within_cells(self._cumulative_condensed, self._seg_labels)
 
         repo = Hdf5DatasetRepository()
         use_case = AcceptDiluteMask(repo=repo, session=self._session)
@@ -358,18 +360,10 @@ class DilutePhaseMaskController(QObject):
             self.round_complete.emit(self._round_n)
             return
 
-        # ``skimage.morphology.dilation`` is the recommended replacement
-        # for ``binary_dilation`` (scheduled for removal in 0.28); for a
-        # symmetric ``disk`` footprint they are equivalent.
-        from skimage.morphology import dilation, disk
-
-        accepted = mask_or_none.astype(bool, copy=False)
-        if self._dilation_radius_px > 0:
-            dilated = dilation(
-                accepted, footprint=disk(self._dilation_radius_px),
-            ).astype(bool, copy=False)
-        else:
-            dilated = accepted
+        # Single source of truth (R7): the same disk-radius dilation the batch
+        # "Dilute phase mask from mask" tool uses (domain/segmentation/dilute_mask;
+        # radius <= 0 → no dilation).
+        dilated = dilate_mask(mask_or_none, self._dilation_radius_px)
 
         # NaN-stamp the working buffer at every dilated pixel. Downstream
         # consumers (next round's measure_cells + apply_gaussian_smoothing
