@@ -289,6 +289,122 @@ def test_error_bool_param_requires_unknown_role() -> None:
                 return {}
 
 
+def test_happy_path_preset_required_hidden_inputs_valid() -> None:
+    """A preset declaring required + hidden roles (all declared) registers."""
+
+    @register_analysis("preset_roles_ok")
+    class Ok(Analysis):
+        name = "preset_roles_ok"
+        display_name = "Preset Roles OK"
+        required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+        optional_inputs = {
+            "a_mask": ImageRole(kind="mask", dtype="binary"),
+            "b_mask": ImageRole(kind="mask", dtype="binary"),
+        }
+        parameters = {"k": IntParam(default=1)}
+        presets = {"p1": {"k": 2}}
+        preset_required_inputs = {"p1": ("a_mask",)}
+        preset_hidden_inputs = {"p1": ("b_mask",)}
+        outputs = {"table": TableOutput()}
+
+        def run(self, inputs, params):
+            return {}
+
+    assert get("preset_roles_ok") is Ok
+
+
+def test_error_preset_required_inputs_unknown_role() -> None:
+    with pytest.raises(ValueError, match="ghost_role"):
+
+        @register_analysis("bad_preset_required_role")
+        class Bad(Analysis):
+            name = "bad_preset_required_role"
+            display_name = "Bad"
+            required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+            parameters = {"k": IntParam(default=1)}
+            presets = {"p1": {"k": 2}}
+            preset_required_inputs = {"p1": ("ghost_role",)}
+            outputs = {"table": TableOutput()}
+
+            def run(self, inputs, params):
+                return {}
+
+
+def test_error_preset_required_inputs_unknown_preset() -> None:
+    with pytest.raises(ValueError, match="ghost_preset"):
+
+        @register_analysis("bad_preset_required_preset")
+        class Bad(Analysis):
+            name = "bad_preset_required_preset"
+            display_name = "Bad"
+            required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+            optional_inputs = {"a_mask": ImageRole(kind="mask", dtype="binary")}
+            parameters = {"k": IntParam(default=1)}
+            presets = {"p1": {"k": 2}}
+            preset_required_inputs = {"ghost_preset": ("a_mask",)}
+            outputs = {"table": TableOutput()}
+
+            def run(self, inputs, params):
+                return {}
+
+
+def test_error_preset_hidden_inputs_unknown_role() -> None:
+    with pytest.raises(ValueError, match="ghost_hidden"):
+
+        @register_analysis("bad_preset_hidden_role")
+        class Bad(Analysis):
+            name = "bad_preset_hidden_role"
+            display_name = "Bad"
+            required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+            parameters = {"k": IntParam(default=1)}
+            presets = {"p1": {"k": 2}}
+            preset_hidden_inputs = {"p1": ("ghost_hidden",)}
+            outputs = {"table": TableOutput()}
+
+            def run(self, inputs, params):
+                return {}
+
+
+def test_error_preset_role_both_required_and_hidden() -> None:
+    """A role declared both required and hidden by the same preset is a
+    contradiction (soft-locks the dialog / hard-fails headless) and must be
+    rejected at registration."""
+    with pytest.raises(ValueError, match="both required and hidden"):
+
+        @register_analysis("bad_preset_required_and_hidden")
+        class Bad(Analysis):
+            name = "bad_preset_required_and_hidden"
+            display_name = "Bad"
+            required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+            optional_inputs = {"a_mask": ImageRole(kind="mask", dtype="binary")}
+            parameters = {"k": IntParam(default=1)}
+            presets = {"p1": {"k": 2}}
+            preset_required_inputs = {"p1": ("a_mask",)}
+            preset_hidden_inputs = {"p1": ("a_mask",)}
+            outputs = {"table": TableOutput()}
+
+            def run(self, inputs, params):
+                return {}
+
+
+def test_error_preset_editable_params_unknown_param() -> None:
+    """A preset_editable_params entry must be a declared parameter."""
+    with pytest.raises(ValueError, match="ghost_param"):
+
+        @register_analysis("bad_preset_editable")
+        class Bad(Analysis):
+            name = "bad_preset_editable"
+            display_name = "Bad"
+            required_inputs = {"x": ImageRole(kind="intensity", dtype="float")}
+            parameters = {"k": IntParam(default=1)}
+            presets = {"p1": {"k": 2}}
+            preset_editable_params = ("ghost_param",)
+            outputs = {"table": TableOutput()}
+
+            def run(self, inputs, params):
+                return {}
+
+
 def test_error_get_unknown_raises_key_error() -> None:
     with pytest.raises(KeyError):
         get("does_not_exist")

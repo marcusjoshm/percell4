@@ -363,6 +363,8 @@ def run_one_image_set(
     sir_filter: bool = False,
     intermediate_assemblies: bool = False,
     intermediate_zero_fill: bool = False,
+    channel_cell_mean: bool = True,
+    export_particles: bool = False,
     halo_bg_override: int | None = None,
     set_label: str = "",
     log: Callable[[str], None] | None = None,
@@ -380,6 +382,16 @@ def run_one_image_set(
     caller (CLI ``_check_channels`` / framework ``run()`` guards) is
     responsible for that. Returns one row for the whole field, or one row
     per non-zero cell id when ``single_cell``.
+
+    When ``export_particles`` is True the return additionally carries a
+    ``"particle_rows"`` key — one dict per individual condensate particle
+    (connected component of the size-filtered condensate mask), measured the
+    same way :func:`_measure_region` measures the pooled P-body region. This
+    is independent of ``single_cell`` (works in both whole-field and
+    single-cell modes, and across both the two-region and v4/v5 three-region
+    paths); a ``cell_id`` is added per particle whenever a ``cp_mask`` is
+    supplied. Dilute phase is never per-particle. The key is omitted entirely
+    when ``export_particles`` is False, so the default path is byte-identical.
     """
     halo_img = halo.astype(np.float64, copy=True)
     mng_img = mng.astype(np.float64, copy=True)
@@ -489,6 +501,25 @@ def run_one_image_set(
             f"area: {dilute_mask_b.sum()} px")
         log(f"  mNG bg: {mng_bg} | Halo bg: {halo_bg}")
 
+    # --- Optional per-condensate-particle export (opt-in) ---
+    # Measured once on the shared bg-subtracted channels; the condensate mask
+    # is ``pbody_mask_f`` for both the two-region and v4/v5 paths, so a single
+    # computation serves every branch below. Independent of single_cell.
+    particle_rows = (
+        _measure_condensate_particles(
+            pbody_mask_f, mng_sub, halo_sub, mng_valid, cp_mask,
+            sir_filter_region, log
+        )
+        if export_particles
+        else None
+    )
+
+    def _pack(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {"rows": rows}
+        if export_particles:
+            out["particle_rows"] = particle_rows
+        return out
+
     # --- v4/v5: three-region mode ---
     if intermediate_assemblies:
         dcp2_full = dcp2_mask > 0
@@ -497,12 +528,12 @@ def run_one_image_set(
         interaction_inner = interaction_mask_2 > 0
 
         if single_cell and cp_mask is not None:
-            return {"rows": _v4_single_cell(
+            return _pack(_v4_single_cell(
                 mng_sub, halo_sub, mng_valid, pbody_mask_f, dilute_mask_b,
                 dcp2_full, dcp2_inner, interaction_full, interaction_inner,
                 cp_mask, compute_percent, intermediate_zero_fill,
-                mng_bg, halo_bg, log,
-            )}
+                mng_bg, halo_bg, log, channel_cell_mean,
+            ))
 
         result = _measure_v4_regions(
             mng_sub, halo_sub, mng_valid, pbody_mask_f, dilute_mask_b,
@@ -512,15 +543,15 @@ def run_one_image_set(
         )
         result['mng_bg_value'] = mng_bg
         result['halo_bg_value'] = halo_bg
-        return {"rows": [result]}
+        return _pack([result])
 
     # --- Single-cell two-region mode ---
     if single_cell and cp_mask is not None:
-        return {"rows": _two_region_single_cell(
+        return _pack(_two_region_single_cell(
             mng_sub, halo_sub, mng_valid, pbody_mask_f, dilute_mask_b,
             cp_mask, compute_percent, interaction_mask, dcp2_mask,
-            sir_filter_region, mng_bg, halo_bg, log,
-        )}
+            sir_filter_region, mng_bg, halo_bg, log, channel_cell_mean,
+        ))
 
     # --- Whole-field two-region ---
     result = _measure_region(
@@ -530,7 +561,7 @@ def run_one_image_set(
     )
     result['mng_bg_value'] = mng_bg
     result['halo_bg_value'] = halo_bg
-    return {"rows": [result]}
+    return _pack([result])
 
 
 def _particle_counts_per_cell(pbody_mask: np.ndarray,
@@ -553,10 +584,103 @@ def _particle_counts_per_cell(pbody_mask: np.ndarray,
     return counts
 
 
+def _measure_condensate_particles(
+    pbody_mask: np.ndarray,
+    mng_sub: np.ndarray,
+    halo_sub: np.ndarray,
+    mng_valid: np.ndarray,
+    cp_mask_img: np.ndarray | None,
+    sir_filter_region: np.ndarray | None = None,
+    log: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """One row per individual condensate particle (CONDENSATE only).
+
+    Mirrors :func:`_measure_region`'s P-body mNG/Halo logic applied to each
+    connected component instead of the pooled mask: mNG is measured over the
+    particle on ``mng_sub``; Halo is measured over ``particle & mng_valid`` on
+    ``halo_sub`` (the same ``mng_valid`` masking ``_measure_region`` uses for
+    the Halo P-body region). The nan-safe mean/sum helpers are identical.
+
+    ``pbody_mask`` is the already-size-filtered condensate mask
+    (``pbody_mask_f``); labeling it directly with :func:`skimage.measure.label`
+    (8-connectivity) reproduces the EXACT labeling :func:`_particle_counts_per_cell`
+    uses, so the particles correspond 1:1 with the per-cell ``particle_count``.
+    When ``cp_mask_img`` is supplied, each particle is assigned to a ``cell_id``
+    by the same majority-pixel rule (``np.unique`` + ``argmax``); a particle
+    whose majority owner is background (cell 0) is skipped, exactly as the count
+    path skips it. No dilute columns. Halo is SiR-restricted
+    (``& sir_filter_region``) when SiR filtering is active — exactly as the
+    pooled ``_measure_region`` — so per-particle Halo matches the pooled P-body
+    Halo for every preset (a no-op for SiR-off presets like v6).
+
+    Column order per row: ``particle_id``, [``cell_id``], ``particle_area_px``,
+    ``mNG_particle_mean``, ``mNG_particle_integ``, ``halo_particle_mean``,
+    ``halo_particle_integ``, ``halo_over_mNG_particle``.
+    """
+    labels = measure.label(pbody_mask)
+
+    def _mean(p):
+        return (np.nanmean(p) if p.size > 0 and np.any(~np.isnan(p))
+                else np.nan)
+
+    def _sum(p):
+        return (np.nansum(p) if p.size > 0 and np.any(~np.isnan(p))
+                else np.nan)
+
+    rows: list[dict[str, Any]] = []
+    for prop in measure.regionprops(labels):
+        cell_id: int | None = None
+        if cp_mask_img is not None:
+            ys, xs = prop.coords[:, 0], prop.coords[:, 1]
+            cell_values = cp_mask_img[ys, xs]
+            values, value_counts = np.unique(cell_values, return_counts=True)
+            majority_cell = int(values[np.argmax(value_counts)])
+            if majority_cell == 0:
+                continue  # background-majority: not in any cell's count
+            cell_id = majority_cell
+
+        particle_mask = labels == prop.label
+        mng_pixels = mng_sub[particle_mask]
+        halo_valid = particle_mask & mng_valid
+        if sir_filter_region is not None:
+            halo_valid = halo_valid & sir_filter_region
+        halo_pixels = halo_sub[halo_valid]
+        mng_mean = _mean(mng_pixels)
+        halo_mean = _mean(halo_pixels)
+
+        row: dict[str, Any] = {"particle_id": int(prop.label)}
+        if cp_mask_img is not None:
+            row["cell_id"] = int(cell_id)
+        row["particle_area_px"] = int(prop.area)
+        row["mNG_particle_mean"] = mng_mean
+        row["mNG_particle_integ"] = _sum(mng_pixels)
+        row["halo_particle_mean"] = halo_mean
+        row["halo_particle_integ"] = _sum(halo_pixels)
+        row["halo_over_mNG_particle"] = nan_safe_ratio(halo_mean, mng_mean)
+        rows.append(row)
+
+    if log is not None:
+        log(f"  Condensate particles exported: {len(rows)}")
+    return rows
+
+
+def _cell_nanmean(channel_sub: np.ndarray, cell_region: np.ndarray) -> float:
+    """Float-safe whole-cell mean of a bg-subtracted channel over a cell.
+
+    Returns ``np.nan`` for an empty cell or an all-NaN region (e.g. Halo
+    NaN'd by a FLIM/SiR filter) rather than emitting a RuntimeWarning. Used
+    for both the ``mNG_cell_mean`` and ``Halo_cell_mean`` per-cell columns.
+    """
+    pixels = channel_sub[cell_region]
+    if pixels.size > 0 and np.any(~np.isnan(pixels)):
+        return float(np.nanmean(pixels))
+    return np.nan
+
+
 def _two_region_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask,
                             dilute_mask, cp_mask_img, compute_percent,
                             interaction_mask, dcp2_mask, sir_filter_region,
-                            mng_bg, halo_bg, log):
+                            mng_bg, halo_bg, log, channel_cell_mean=True):
     cell_ids = np.unique(cp_mask_img)
     cell_ids = cell_ids[cell_ids != 0]
     counts = _particle_counts_per_cell(pbody_mask, cp_mask_img)
@@ -571,16 +695,12 @@ def _two_region_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask,
             compute_percent, interaction_mask, dcp2_mask,
             sir_filter=sir_filter_region,
         )
-        mng_cell_pixels = mng_sub[cell_region]
-        mng_cell_mean = (
-            np.nanmean(mng_cell_pixels)
-            if mng_cell_pixels.size > 0 and np.any(~np.isnan(mng_cell_pixels))
-            else np.nan
-        )
         metrics['cell_id'] = int(cell_id)
         metrics['cell_area_px'] = int(cell_region.sum())
         metrics['particle_count'] = counts.get(int(cell_id), 0)
-        metrics['mNG_cell_mean'] = mng_cell_mean
+        if channel_cell_mean:
+            metrics['mNG_cell_mean'] = _cell_nanmean(mng_sub, cell_region)
+            metrics['Halo_cell_mean'] = _cell_nanmean(halo_sub, cell_region)
         metrics['mng_bg_value'] = mng_bg
         metrics['halo_bg_value'] = halo_bg
         results.append(metrics)
@@ -592,7 +712,8 @@ def _two_region_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask,
 def _v4_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask, dilute_mask,
                     dcp2_full, dcp2_inner, interaction_full,
                     interaction_inner, cp_mask_img, compute_percent,
-                    zero_fill_mode, mng_bg, halo_bg, log):
+                    zero_fill_mode, mng_bg, halo_bg, log,
+                    channel_cell_mean=True):
     cell_ids = np.unique(cp_mask_img)
     cell_ids = cell_ids[cell_ids != 0]
     counts = _particle_counts_per_cell(pbody_mask, cp_mask_img)
@@ -606,16 +727,12 @@ def _v4_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask, dilute_mask,
             compute_percent=compute_percent, cell_region=cell_region,
             zero_fill_mode=zero_fill_mode,
         )
-        mng_cell_pixels = mng_sub[cell_region]
-        mng_cell_mean = (
-            np.nanmean(mng_cell_pixels)
-            if mng_cell_pixels.size > 0 and np.any(~np.isnan(mng_cell_pixels))
-            else np.nan
-        )
         metrics['cell_id'] = int(cell_id)
         metrics['cell_area_px'] = int(cell_region.sum())
         metrics['particle_count'] = counts.get(int(cell_id), 0)
-        metrics['mNG_cell_mean'] = mng_cell_mean
+        if channel_cell_mean:
+            metrics['mNG_cell_mean'] = _cell_nanmean(mng_sub, cell_region)
+            metrics['Halo_cell_mean'] = _cell_nanmean(halo_sub, cell_region)
         metrics['mng_bg_value'] = mng_bg
         metrics['halo_bg_value'] = halo_bg
         results.append(metrics)

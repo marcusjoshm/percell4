@@ -69,7 +69,7 @@ _NO_PRESET = "No preset"
 
 # Optional mask/label roles shown as always-enabled combos.
 _OPTIONAL_ROLES = (
-    "cp_mask", "dcp2_mask", "interaction_mask", "sir_mask",
+    "cp_mask", "mng_mask", "interaction_mask", "sir_mask",
     "dcp2_mask_2", "interaction_mask_2",
 )
 # bg-mode choice param -> the manual-value IntParam it gates.
@@ -102,6 +102,8 @@ class WholeFieldIntensityDialog(QDialog):
         self._dataset_list: QListWidget | None = None
         # role -> combo (required + optional).
         self._role_combos: dict[str, QComboBox] = {}
+        # role -> its row label, so preset-hidden rows can be hidden whole.
+        self._role_labels: dict[str, QLabel] = {}
         self._param_widgets: dict[str, QWidget] = {}
         self._param_getters: dict[str, Callable[[], Any]] = {}
         self._param_setters: dict[str, Callable[[Any], None]] = {}
@@ -198,20 +200,22 @@ class WholeFieldIntensityDialog(QDialog):
         box = QGroupBox("2. Layer map")
         layout = QVBoxLayout(box)
 
-        for role in ("pbody_mask", "dilute_mask", "halo", "mng"):
+        for role in ("condensate_mask", "dilute_mask", "halo", "mng"):
             decl = WholeFieldIntensity.required_inputs[role]
-            row, _, combo = build_layer_combo(role, decl.desc, self)
+            row, label, combo = build_layer_combo(role, decl.desc, self)
             combo.activated.connect(lambda _i: self._refresh_state())
             self._role_combos[role] = combo
+            self._role_labels[role] = label
             layout.addLayout(row)
 
         opt_box = QGroupBox("Optional masks", self)
         opt_layout = QVBoxLayout(opt_box)
         for role in _OPTIONAL_ROLES:
             decl = WholeFieldIntensity.optional_inputs[role]
-            row, _, combo = build_layer_combo(role, decl.desc, self)
+            row, label, combo = build_layer_combo(role, decl.desc, self)
             combo.activated.connect(lambda _i: self._refresh_state())
             self._role_combos[role] = combo
+            self._role_labels[role] = label
             opt_layout.addLayout(row)
         layout.addWidget(opt_box)
         return box
@@ -319,8 +323,10 @@ class WholeFieldIntensityDialog(QDialog):
         inventory = self._gather_layer_inventory()
         self._refresh_combos(inventory)
         self._refresh_preset_lock()
+        self._refresh_hidden_roles()
         self._refresh_requires_gating()
         self._refresh_bg_value_enabled()
+        self._refresh_channel_cell_mean_enabled()
         self._refresh_outputs_panel()
         self._refresh_start_button()
 
@@ -362,25 +368,52 @@ class WholeFieldIntensityDialog(QDialog):
         assert self._preset_combo is not None
         assert self._preset_lock_label is not None
         preset_chosen = self._preset_combo.currentText() != _NO_PRESET
+        editable = set(WholeFieldIntensity.preset_editable_params)
         for name, widget in self._param_widgets.items():
             decl = WholeFieldIntensity.parameters[name]
-            if preset_chosen:
+            # A preset locks its science params, but "mode" params it declares
+            # editable (e.g. single_cell) stay clickable — their final
+            # enabled state is then refined by the requires/halo gating below.
+            if preset_chosen and name not in editable:
                 widget.setEnabled(False)
                 widget.setToolTip("Preset locked")
             else:
                 widget.setEnabled(True)
                 widget.setToolTip(decl.desc or "")
         self._preset_lock_label.setText(
-            "🔒 Preset locked" if preset_chosen else ""
+            "🔒 Preset locked (mode params stay editable)"
+            if preset_chosen else ""
         )
+
+    def _refresh_hidden_roles(self) -> None:
+        """Hide the rows of roles the active preset declares hidden.
+
+        Hides the whole row (label + combo) — both widgets ``setVisible``
+        ``False`` so the row collapses while ``wrap_in_scroll`` keeps the
+        section scroll-safe. The combo VALUE is **not** cleared; hidden
+        roles are excluded at :meth:`_resolve_layer_map`, so switching to a
+        non-hiding preset shows the row again with the prior selection
+        intact (restore-not-clear).
+        """
+        hidden = set(self._preset_hidden_roles())
+        for role, combo in self._role_combos.items():
+            visible = role not in hidden
+            combo.setVisible(visible)
+            label = self._role_labels.get(role)
+            if label is not None:
+                label.setVisible(visible)
 
     def _refresh_requires_gating(self) -> None:
         assert self._preset_combo is not None
-        if self._preset_combo.currentText() != _NO_PRESET:
-            return
+        preset_chosen = self._preset_combo.currentText() != _NO_PRESET
+        editable = set(WholeFieldIntensity.preset_editable_params)
         layer_map = self._resolve_layer_map()
         for pname, decl in WholeFieldIntensity.parameters.items():
             if not isinstance(decl, BoolParam) or not decl.requires:
+                continue
+            # Under a preset, only the editable "mode" params are gated here;
+            # everything else is already locked by _refresh_preset_lock.
+            if preset_chosen and pname not in editable:
                 continue
             widget = self._param_widgets[pname]
             missing = [req for req in decl.requires if req not in layer_map]
@@ -403,6 +436,29 @@ class WholeFieldIntensityDialog(QDialog):
         for mode_param, value_param in _BG_VALUE_PARAMS.items():
             is_manual = self._param_getters[mode_param]() == "manual"
             self._param_widgets[value_param].setEnabled(is_manual)
+
+    def _refresh_channel_cell_mean_enabled(self) -> None:
+        """Grey the channel_cell_mean checkbox unless single_cell is on.
+
+        UX-only gating (the core no-ops it outside single-cell mode and it
+        carries NO ``requires=cp_mask`` so a stray True never raises). When
+        single_cell is off, the checkbox is unchecked so a disabled-but-checked
+        state can't leak into the run. ``channel_cell_mean`` is a preset-editable
+        mode param, so this gating applies under a preset too (single_cell may
+        be toggled there).
+        """
+        assert self._preset_combo is not None
+        single_cell = bool(self._param_getters["single_cell"]())
+        widget = self._param_widgets["channel_cell_mean"]
+        widget.setEnabled(single_cell)
+        if not single_cell:
+            self._param_setters["channel_cell_mean"](False)
+        widget.setToolTip(
+            WholeFieldIntensity.parameters["channel_cell_mean"].desc or ""
+            if single_cell
+            else "Enable single_cell (needs cp_mask) to add the whole-cell "
+            "channel means (mNG + Halo)."
+        )
 
     def _refresh_outputs_panel(self) -> None:
         from percell4.domain.analysis import GroupState
@@ -440,9 +496,13 @@ class WholeFieldIntensityDialog(QDialog):
         if not self._h5_paths:
             return "Add at least one dataset to begin."
         layer_map = self._resolve_layer_map()
-        for role in ("pbody_mask", "dilute_mask", "halo", "mng"):
+        for role in ("condensate_mask", "dilute_mask", "halo", "mng"):
             if role not in layer_map:
                 return f"Assign the required role {role!r}."
+        preset = self._active_preset()
+        for role in self._preset_required_roles():
+            if role not in layer_map:
+                return f"Preset {preset!r} requires {role!r}."
         if not self._resolve_output_parent():
             return "Choose an output folder."
         return None
@@ -450,12 +510,40 @@ class WholeFieldIntensityDialog(QDialog):
     # ── Selection helpers ───────────────────────────────────────
 
     def _resolve_layer_map(self) -> dict[str, str]:
+        # Exclude preset-hidden roles WITHOUT clearing their combo, so a
+        # switch to a non-hiding preset restores the prior selection.
+        hidden = set(self._preset_hidden_roles())
         out: dict[str, str] = {}
         for role, combo in self._role_combos.items():
+            if role in hidden:
+                continue
             text = combo.currentText()
             if text and text != LAYER_SENTINEL:
                 out[role] = text
         return out
+
+    def _active_preset(self) -> str | None:
+        """The active preset name, or ``None`` when 'No preset' is chosen."""
+        if self._preset_combo is None:
+            return None
+        text = self._preset_combo.currentText()
+        return None if text == _NO_PRESET else text
+
+    def _preset_required_roles(self) -> tuple[str, ...]:
+        """Roles the active preset requires (empty when no preset)."""
+        preset = self._active_preset()
+        if preset is None:
+            return ()
+        mapping = getattr(WholeFieldIntensity, "preset_required_inputs", {})
+        return tuple(mapping.get(preset, ()))
+
+    def _preset_hidden_roles(self) -> tuple[str, ...]:
+        """Roles the active preset hides (empty when no preset)."""
+        preset = self._active_preset()
+        if preset is None:
+            return ()
+        mapping = getattr(WholeFieldIntensity, "preset_hidden_inputs", {})
+        return tuple(mapping.get(preset, ()))
 
     def _collect_params(self) -> dict[str, Any]:
         return {name: getter() for name, getter in self._param_getters.items()}
@@ -518,7 +606,15 @@ class WholeFieldIntensityDialog(QDialog):
         def cancel_check() -> bool:
             return bool(progress.wasCanceled())
 
-        runner_params = None if preset is not None else params
+        # Under a preset, pass only the editable "mode" params (single_cell,
+        # channel_cell_mean) as an overlay — resolve_params merges them onto the
+        # preset, keeping the preset's science values authoritative and the
+        # preset name in the run's provenance.
+        if preset is not None:
+            editable = set(WholeFieldIntensity.preset_editable_params)
+            runner_params = {k: v for k, v in params.items() if k in editable}
+        else:
+            runner_params = params
 
         try:
             report = self._orchestrator(

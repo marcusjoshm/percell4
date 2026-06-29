@@ -66,5 +66,22 @@
     "mng_bg_mode": "manual",
     "mng_bg_value": 0,
     "percent": true
+  },
+  "decapping-sensor-v6": {
+    "FLIM_filter": "zero",
+    "SiR_filter": false,
+    "SiR_subtract": "none",
+    "exclude_halo_one": false,
+    "exclude_halo_zero": true,
+    "halo_bg_mode": "manual",
+    "halo_bg_value": 0,
+    "intermediate_assemblies": false,
+    "intermediate_zero_fill": false,
+    "mNG_filter": "NaN",
+    "mNG_in_FLIM": false,
+    "min_size": 2,
+    "mng_bg_mode": "manual",
+    "mng_bg_value": 0,
+    "percent": true
   }
 }

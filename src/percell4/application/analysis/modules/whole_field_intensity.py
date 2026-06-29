@@ -59,6 +59,11 @@ _HALO_BG_CHOICES = (
 _FILTER_CHOICES = ("none", "zero", "NaN")
 
 
+def _condensate_particle_table_produced(g, params: dict[str, Any]) -> bool:
+    """The per-particle condensate table is produced only when opted in."""
+    return bool(params["export_particles"])
+
+
 @register_analysis("whole_field_intensity")
 class WholeFieldIntensity(Analysis):
     """Whole-field decapping-sensor intensity analysis.
@@ -78,14 +83,15 @@ class WholeFieldIntensity(Analysis):
     version = "1.0.0"
     description = (
         "Whole-field (aggregate) mNG/Halo compartment quantification with "
-        "per-field background subtraction. Presets decapping-sensor-v2..v5; "
+        "per-field background subtraction. Presets decapping-sensor-v2..v6; "
         "optional three-region (intermediate) and single-cell modes."
     )
 
     # ── Inputs ────────────────────────────────────────────────────
     required_inputs = {
-        "pbody_mask": ImageRole(kind="mask", dtype="binary",
-                                desc="P-body binary mask"),
+        "condensate_mask": ImageRole(kind="mask", dtype="binary",
+                                     desc="Condensate binary mask "
+                                     "(P-body / stress granule)"),
         "dilute_mask": ImageRole(kind="mask", dtype="binary",
                                  desc="Dilute-cytoplasm mask (bg region)"),
         "halo": ImageRole(kind="intensity", dtype="float",
@@ -98,8 +104,8 @@ class WholeFieldIntensity(Analysis):
     optional_inputs = {
         "cp_mask": ImageRole(kind="label", dtype="labels",
                              desc="Cell-segmentation labels (single_cell)"),
-        "dcp2_mask": ImageRole(kind="mask", dtype="binary",
-                               desc="Dcp2/mNG mask (mNG_filter, percent, v4/v5)"),
+        "mng_mask": ImageRole(kind="mask", dtype="binary",
+                              desc="mNG-filter mask (mNG_filter, percent, v4/v5)"),
         "interaction_mask": ImageRole(kind="mask", dtype="binary",
                                       desc="FLIM interaction mask (FLIM_filter, v4/v5)"),
         "sir_mask": ImageRole(kind="mask", dtype="binary",
@@ -137,7 +143,8 @@ class WholeFieldIntensity(Analysis):
             "(supersedes exclude_halo_zero)."),
         "mNG_filter": ChoiceParam(
             choices=_FILTER_CHOICES, default="none",
-            desc="Set mNG outside Dcp2_mask to zero/NaN (needs dcp2_mask)."),
+            desc="Set mNG outside the mNG-filter mask to zero/NaN "
+            "(needs mng_mask)."),
         "FLIM_filter": ChoiceParam(
             choices=_FILTER_CHOICES, default="none",
             desc="Set Halo outside interaction_mask to zero/NaN "
@@ -149,14 +156,14 @@ class WholeFieldIntensity(Analysis):
             default=False, requires=("sir_mask",),
             desc="Restrict Halo measurements to within SiR_mask."),
         "mNG_in_FLIM": BoolParam(
-            default=False, requires=("interaction_mask", "dcp2_mask"),
-            desc="NaN both channels outside (interaction_mask & Dcp2_mask)."),
+            default=False, requires=("interaction_mask", "mng_mask"),
+            desc="NaN both channels outside (interaction_mask & mng_mask)."),
         "percent": BoolParam(
             default=False,
             desc="Add pct_halo_in_mNG_* columns per compartment."),
         "intermediate_assemblies": BoolParam(
             default=False,
-            requires=("dcp2_mask", "interaction_mask", "dcp2_mask_2",
+            requires=("mng_mask", "interaction_mask", "dcp2_mask_2",
                       "interaction_mask_2"),
             desc="Three-region (P-body/intermediate/dilute) measurement."),
         "intermediate_zero_fill": BoolParam(
@@ -166,6 +173,28 @@ class WholeFieldIntensity(Analysis):
         "single_cell": BoolParam(
             default=False, requires=("cp_mask",),
             desc="Aggregate per cell using cp_mask; one row per cell."),
+        # Whole-cell mean of BOTH channels per cell (for expression grouping).
+        # Deliberately NO requires=("cp_mask",): a True flag without a cp_mask
+        # would make run_analysis._check_bool_requires raise and fail the whole
+        # dataset (the per-particle cell_mean precedent omits requires too).
+        # It is a no-op outside single-cell mode (gated inside the single-cell
+        # core branch, reached only with cp_mask); the dialog greys it unless
+        # single_cell is on for UX only.
+        "channel_cell_mean": BoolParam(
+            default=True,
+            desc="Add a whole-cell mean of BOTH the mNG and Halo channels per "
+            "cell (mNG_cell_mean + Halo_cell_mean), for grouping cells by "
+            "expression level. Single-cell mode only (needs single_cell + "
+            "cp_mask); on by default."),
+        # Opt-in second table: one row per individual condensate particle.
+        # Deliberately NO requires (independent of single_cell / cp_mask — a
+        # cell_id is added only when a cp_mask is mapped). Off by default so the
+        # main table and all prior behavior stay byte-identical.
+        "export_particles": BoolParam(
+            default=False,
+            desc="Also export one row per individual condensate particle "
+            "(mNG/Halo mean+integ, area, halo/mNG ratio) to a separate table — "
+            "condensate only, not dilute. Off by default."),
     }
 
     presets: dict[str, dict[str, Any]] = {
@@ -201,7 +230,46 @@ class WholeFieldIntensity(Analysis):
             "SiR_filter": False, "FLIM_filter": "zero", "mNG_in_FLIM": False,
             "intermediate_assemblies": True, "intermediate_zero_fill": True,
         },
+        # Stress-granule two-region variant. Same param set as v3 (two-region,
+        # mNG_filter='NaN', FLIM_filter='zero', percent, NO intermediate
+        # assemblies); the SG/mNG region substitution is the user assigning
+        # their SG_mask / mNG_mask layers to the condensate_mask / mng_mask
+        # roles — no preset-side role mapping. Keeps the generic pbody/dilute
+        # output column names. See preset_required_inputs / preset_hidden_inputs
+        # below for the v6-specific role gating.
+        "decapping-sensor-v6": {
+            "min_size": 2, "mng_bg_mode": "manual", "mng_bg_value": 0,
+            "halo_bg_mode": "manual", "halo_bg_value": 0, "mNG_filter": "NaN",
+            "percent": True, "exclude_halo_zero": True,
+            "exclude_halo_one": False, "SiR_subtract": "none",
+            "SiR_filter": False, "FLIM_filter": "zero", "mNG_in_FLIM": False,
+            "intermediate_assemblies": False, "intermediate_zero_fill": False,
+        },
     }
+
+    # ── Preset-aware role gating (U3 capability) ──────────────────
+    # v6's mNG_filter='NaN' silently no-ops without mng_mask, and its
+    # FLIM_filter='zero' only applies when interaction_mask is supplied
+    # (else the Halo filtering never runs and the means are wrong) — so
+    # both are required. The v4/v5 intermediate masks and the SiR mask are
+    # irrelevant to v6's two-region path, so they are hidden.
+    preset_required_inputs = {
+        "decapping-sensor-v6": ("mng_mask", "interaction_mask"),
+    }
+    preset_hidden_inputs = {
+        "decapping-sensor-v6": ("dcp2_mask_2", "interaction_mask_2",
+                                "sir_mask"),
+    }
+    # ``single_cell`` (and its dependent ``channel_cell_mean`` expression
+    # toggle) plus ``export_particles`` are run-mode/output choices orthogonal
+    # to the science a preset fixes, so they stay user-editable under any preset
+    # (e.g. run v6 in single-cell mode and group cells by expression, or run v6
+    # and additionally export the per-particle condensate table). The dialog
+    # leaves them clickable and the toggled value is overlaid onto the preset by
+    # ``resolve_params``.
+    preset_editable_params = (
+        "single_cell", "channel_cell_mean", "export_particles"
+    )
 
     # ── Outputs ───────────────────────────────────────────────────
     # One table whose columns vary by mode (two-region / three-region /
@@ -210,6 +278,11 @@ class WholeFieldIntensity(Analysis):
     outputs = {
         "whole_field_table": TableOutput(
             desc="Whole-field (or per-cell) compartment measurements.",
+        ),
+        "condensate_particle_table": TableOutput(
+            produced_when=_condensate_particle_table_produced,
+            desc="Per-condensate-particle measurements (mNG/Halo mean+integ, "
+            "area, halo/mNG ratio; cell_id when a cp_mask is mapped).",
         ),
     }
 
@@ -267,12 +340,12 @@ class WholeFieldIntensity(Analysis):
         )
 
         result = run_one_image_set(
-            pbody_mask=inputs["pbody_mask"],
+            pbody_mask=inputs["condensate_mask"],
             dilute_mask=inputs["dilute_mask"],
             halo=inputs["halo"],
             mng=inputs["mng"],
             cp_mask=inputs.get("cp_mask"),
-            dcp2_mask=inputs.get("dcp2_mask"),
+            dcp2_mask=inputs.get("mng_mask"),
             interaction_mask=inputs.get("interaction_mask"),
             sir_mask=inputs.get("sir_mask"),
             dcp2_mask_2=inputs.get("dcp2_mask_2"),
@@ -291,10 +364,21 @@ class WholeFieldIntensity(Analysis):
             sir_filter=sir_filter,
             intermediate_assemblies=intermediate,
             intermediate_zero_fill=zero_fill,
+            channel_cell_mean=bool(params["channel_cell_mean"]),
+            export_particles=bool(params["export_particles"]),
             set_label=set_label,
             log=log,
         )
-        return {"whole_field_table": pd.DataFrame(result["rows"])}
+        out: dict[str, Any] = {
+            "whole_field_table": pd.DataFrame(result["rows"])
+        }
+        # Second table produced only when opted in. An empty DataFrame (zero
+        # particles) is still returned so produced ⊇ returned holds.
+        if params["export_particles"]:
+            out["condensate_particle_table"] = pd.DataFrame(
+                result["particle_rows"]
+            )
+        return out
 
 
 def _none_to_py(choice: str) -> str | None:

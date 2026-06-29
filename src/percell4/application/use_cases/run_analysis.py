@@ -136,6 +136,23 @@ def run_analysis(
             f"layer_map: {sorted(missing_required)}"
         )
 
+    # 3b. Enforce preset-required roles (the headless safety net). When a
+    # preset is active, every role it declares in ``preset_required_inputs``
+    # must be present in the layer_map — otherwise a filter that depends on
+    # that role (e.g. v6's ``mNG_filter`` / ``FLIM_filter``) would silently
+    # no-op and produce scientifically-wrong numbers with no error. The
+    # dialog blocks Start on the same condition; this guards the headless
+    # path (notebook / batch_run_analysis / a future CLI), which otherwise
+    # validates only required_inputs / groups / BoolParam.requires.
+    if preset is not None:
+        for role in getattr(cls, "preset_required_inputs", {}).get(preset, ()):
+            if role not in layer_map:
+                raise ValueError(
+                    f"analysis {analysis_name!r}: preset {preset!r} requires "
+                    f"role {role!r} to be supplied (layer_map keys="
+                    f"{sorted(layer_map)})"
+                )
+
     # 4. Build GroupState.
     role_flags = {f"{r}_supplied": (r in layer_map) for r in all_role_names}
     group_satisfaction = {
@@ -177,7 +194,9 @@ def run_analysis(
         layer_map=layer_map,
     )
 
-    n_timepoints = int(DatasetStore(h5_path).metadata.get("n_timepoints", 1) or 1)
+    _meta = DatasetStore(h5_path).metadata
+    n_timepoints = int(_meta.get("n_timepoints", 1) or 1)
+    pixel_size_um = _meta.get("pixel_size_um")
     if n_timepoints <= 1:
         arrays = load_layers(h5_path, layer_map, roles_dict)
         outputs = run_callable(arrays, resolved, **run_kwargs)
@@ -227,10 +246,56 @@ def run_analysis(
                 f"declaration type {type(decl).__name__}"
             )
 
+    # 13. Add a µm² area sibling next to every ``*_area_px`` column, scaled by
+    # the dataset's pixel size. A no-op when the dataset carries no
+    # ``pixel_size_um`` (e.g. an import without resolution tags) — the px
+    # columns are left untouched, so output is byte-identical for uncalibrated
+    # datasets.
+    for name, value in outputs.items():
+        if isinstance(cls.outputs[name], TableOutput):
+            outputs[name] = _add_area_um2_columns(value, pixel_size_um)
+
     return outputs
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+
+def _add_area_um2_columns(
+    df: pd.DataFrame, pixel_size_um: float | None
+) -> pd.DataFrame:
+    """Return ``df`` with a ``<base>_area_um2`` sibling immediately after each
+    ``<base>_area_px`` column, scaled by ``pixel_size_um ** 2``.
+
+    A no-op (returns ``df`` unchanged) when ``pixel_size_um`` is missing,
+    non-numeric, or non-positive, or when there are no ``*_area_px`` columns —
+    so a single uncalibrated dataset's output is byte-identical. Idempotent: a
+    ``_area_um2`` column that already exists is left as-is.
+
+    Note: in a *combined* CSV spanning a batch where some datasets are
+    calibrated and some are not, pandas unions columns by name, so the
+    ``_area_um2`` column appears with ``NaN`` for the uncalibrated rows — the
+    correct "µm² unknown" semantic, not a defect.
+    """
+    try:
+        px = float(pixel_size_um)  # pixel_size_um comes from external metadata
+    except (TypeError, ValueError):
+        return df
+    if not (px > 0):
+        return df
+    area_cols = [c for c in df.columns if c.endswith("_area_px")]
+    if not area_cols:
+        return df
+    factor = px * px
+    out = df.copy()
+    for col in area_cols:
+        sibling = f"{col[: -len('_area_px')]}_area_um2"
+        if sibling in out.columns:
+            continue
+        # Re-fetch the position each iteration — prior inserts shift columns.
+        insert_at = out.columns.get_loc(col) + 1
+        out.insert(insert_at, sibling, out[col].astype(float) * factor)
+    return out
 
 
 def _aggregate_timepoints(
@@ -382,15 +447,22 @@ def resolve_params(
 ) -> dict[str, Any]:
     """Resolve the runtime parameter dict.
 
-    Strict policy: ``preset`` and a non-empty ``params`` cannot be
-    combined. Empty ``params`` is treated as absent (caller passing
-    ``{}`` with a preset is fine).
+    Strict policy: ``preset`` and a non-empty ``params`` cannot be combined —
+    *except* for params the analysis declares in ``preset_editable_params``
+    ("mode" toggles like ``single_cell`` that are orthogonal to the science a
+    preset fixes). Such a param is overlaid on top of the preset (the preset's
+    other values stay authoritative). Empty ``params`` is treated as absent
+    (caller passing ``{}`` with a preset is fine).
     """
+    editable = set(getattr(cls, "preset_editable_params", ()))
     if preset is not None and params:
-        raise ValueError(
-            f"analysis {analysis_name!r}: cannot mix preset and explicit "
-            f"params (preset={preset!r}, params keys={sorted(params)})"
-        )
+        illegal = set(params) - editable
+        if illegal:
+            raise ValueError(
+                f"analysis {analysis_name!r}: cannot mix preset and explicit "
+                f"params (preset={preset!r}, non-editable keys="
+                f"{sorted(illegal)})"
+            )
 
     if preset is not None:
         if preset not in cls.presets:
@@ -399,6 +471,8 @@ def resolve_params(
                 f"(declared: {sorted(cls.presets)})"
             )
         resolved = dict(cls.presets[preset])
+        # Overlay declared editable "mode" params on top of the preset.
+        resolved.update(params or {})
     else:
         resolved = dict(params or {})
 

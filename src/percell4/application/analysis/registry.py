@@ -115,6 +115,51 @@ def validate_schema(cls: type[Analysis]) -> None:
                     f"references unknown parameter {key!r}"
                 )
 
+    # ── preset_required_inputs / preset_hidden_inputs ───────────
+    # A preset may declare optional roles it requires / hides. Each
+    # mapping is {preset_name: (role, ...)}; the preset must exist in
+    # ``presets`` and every role must be a declared input. Enforced in
+    # both the dialog (UX) and ``run_analysis`` (headless safety net).
+    for field_name in ("preset_required_inputs", "preset_hidden_inputs"):
+        mapping = getattr(cls, field_name, {})
+        for preset_name, roles in mapping.items():
+            if preset_name not in cls.presets:
+                raise ValueError(
+                    f"Analysis {cls.__name__!r}: {field_name} references "
+                    f"unknown preset {preset_name!r} (declared presets: "
+                    f"{sorted(cls.presets)})"
+                )
+            for role in roles:
+                if role not in role_names:
+                    raise ValueError(
+                        f"Analysis {cls.__name__!r}: {field_name}"
+                        f"[{preset_name!r}] references {role!r} which is not "
+                        f"a known role (declared roles: {sorted(role_names)})"
+                    )
+    # A role declared both required and hidden by the same preset is a
+    # contradiction: the dialog would hide its row (no way to assign it) yet
+    # block Start on its absence, and headless ``run_analysis`` would always
+    # raise. Fail loud at registration rather than ship a soft-locked preset.
+    required_map = getattr(cls, "preset_required_inputs", {})
+    hidden_map = getattr(cls, "preset_hidden_inputs", {})
+    for preset_name in set(required_map) & set(hidden_map):
+        clash = set(required_map[preset_name]) & set(hidden_map[preset_name])
+        if clash:
+            raise ValueError(
+                f"Analysis {cls.__name__!r}: preset {preset_name!r} declares "
+                f"role(s) {sorted(clash)} as both required and hidden"
+            )
+
+    # ── preset_editable_params ──────────────────────────────────
+    # "Mode" params that stay user-editable under a preset; each must be a
+    # declared parameter.
+    for pname in getattr(cls, "preset_editable_params", ()):
+        if pname not in declared_params:
+            raise ValueError(
+                f"Analysis {cls.__name__!r}: preset_editable_params references "
+                f"unknown parameter {pname!r} (declared: {sorted(declared_params)})"
+            )
+
     # ── output-name uniqueness ──────────────────────────────────
     output_names = list(cls.outputs)
     if len(set(output_names)) != len(output_names):
