@@ -1,7 +1,7 @@
 ---
 title: "feat: Whole-field decapping-sensor — multi-timepoint, neutral role labels, v6 preset, preset-aware dialog, per-cell expression measurement"
 type: feat
-status: active
+status: completed
 date: 2026-06-29
 ---
 
