@@ -326,6 +326,7 @@ class WholeFieldIntensityDialog(QDialog):
         self._refresh_hidden_roles()
         self._refresh_requires_gating()
         self._refresh_bg_value_enabled()
+        self._refresh_halo_cell_mean_enabled()
         self._refresh_outputs_panel()
         self._refresh_start_button()
 
@@ -426,6 +427,30 @@ class WholeFieldIntensityDialog(QDialog):
         for mode_param, value_param in _BG_VALUE_PARAMS.items():
             is_manual = self._param_getters[mode_param]() == "manual"
             self._param_widgets[value_param].setEnabled(is_manual)
+
+    def _refresh_halo_cell_mean_enabled(self) -> None:
+        """Grey the Halo_cell_mean checkbox unless single_cell is on.
+
+        UX-only gating (the core no-ops it outside single-cell mode and it
+        carries NO ``requires=cp_mask`` so a stray True never raises). Skipped
+        under a preset lock (everything is already disabled). When single_cell
+        is off, the checkbox is unchecked so a disabled-but-checked state can't
+        leak into the run.
+        """
+        assert self._preset_combo is not None
+        if self._preset_combo.currentText() != _NO_PRESET:
+            return
+        single_cell = bool(self._param_getters["single_cell"]())
+        widget = self._param_widgets["halo_cell_mean"]
+        widget.setEnabled(single_cell)
+        if not single_cell:
+            self._param_setters["halo_cell_mean"](False)
+        widget.setToolTip(
+            WholeFieldIntensity.parameters["halo_cell_mean"].desc or ""
+            if single_cell
+            else "Enable single_cell (needs cp_mask) to add a whole-cell "
+            "Halo mean."
+        )
 
     def _refresh_outputs_panel(self) -> None:
         from percell4.domain.analysis import GroupState

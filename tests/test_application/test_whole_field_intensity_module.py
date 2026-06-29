@@ -282,6 +282,53 @@ def test_single_t_two_region_has_no_timepoint_column(tmp_path: Path):
     assert "timepoint" not in single_cell.columns
 
 
+# ── U5: opt-in Halo_cell_mean per-cell expression measurement ──────
+
+
+def test_single_cell_halo_cell_mean_column_present(tmp_path: Path):
+    """R5: a single-cell run with halo_cell_mean=True surfaces a Halo_cell_mean
+    column (right after mNG_cell_mean), one value per cell."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis(
+        "whole_field_intensity", h5, _LAYER_MAP,
+        params={**_V4, "single_cell": True, "halo_cell_mean": True},
+    )
+    df = out["whole_field_table"]
+    assert "mNG_cell_mean" in df.columns
+    assert "Halo_cell_mean" in df.columns
+    cols = list(df.columns)
+    assert cols[cols.index("mNG_cell_mean") + 1] == "Halo_cell_mean"
+    assert df["Halo_cell_mean"].notna().any()
+
+
+def test_halo_cell_mean_default_v4_sc_parity_unchanged(tmp_path: Path):
+    """R6: the default single-cell run (halo_cell_mean off) is byte-identical to
+    the v4_sc parity fixture — no Halo_cell_mean column, mNG_cell_mean
+    untouched."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    out = run_analysis("whole_field_intensity", h5, _LAYER_MAP,
+                       params={**_V4, "single_cell": True})
+    df = out["whole_field_table"]
+    assert "Halo_cell_mean" not in df.columns
+    _parity(df, FIXTURE_ROOT / "expected" / "v4_sc.csv", sort_key="cell_id")
+
+
+def test_halo_cell_mean_no_cp_mask_does_not_raise(tmp_path: Path):
+    """R5 no-requires guard: a halo_cell_mean=True run WITHOUT cp_mask /
+    single_cell does NOT raise (proves the BoolParam carries no
+    ``requires=('cp_mask',)``) — it is simply a no-op."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    layer_map = {k: v for k, v in _LAYER_MAP.items() if k != "cp_mask"}
+    out = run_analysis(
+        "whole_field_intensity", h5, layer_map,
+        params={**_V2, "halo_cell_mean": True},
+    )
+    assert "Halo_cell_mean" not in out["whole_field_table"].columns
+
+
 # ── decapping-sensor-v6 stress-granule preset (U4) ────────────────
 
 

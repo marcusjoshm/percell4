@@ -363,6 +363,7 @@ def run_one_image_set(
     sir_filter: bool = False,
     intermediate_assemblies: bool = False,
     intermediate_zero_fill: bool = False,
+    halo_cell_mean: bool = False,
     halo_bg_override: int | None = None,
     set_label: str = "",
     log: Callable[[str], None] | None = None,
@@ -501,7 +502,7 @@ def run_one_image_set(
                 mng_sub, halo_sub, mng_valid, pbody_mask_f, dilute_mask_b,
                 dcp2_full, dcp2_inner, interaction_full, interaction_inner,
                 cp_mask, compute_percent, intermediate_zero_fill,
-                mng_bg, halo_bg, log,
+                mng_bg, halo_bg, log, halo_cell_mean,
             )}
 
         result = _measure_v4_regions(
@@ -519,7 +520,7 @@ def run_one_image_set(
         return {"rows": _two_region_single_cell(
             mng_sub, halo_sub, mng_valid, pbody_mask_f, dilute_mask_b,
             cp_mask, compute_percent, interaction_mask, dcp2_mask,
-            sir_filter_region, mng_bg, halo_bg, log,
+            sir_filter_region, mng_bg, halo_bg, log, halo_cell_mean,
         )}
 
     # --- Whole-field two-region ---
@@ -553,10 +554,23 @@ def _particle_counts_per_cell(pbody_mask: np.ndarray,
     return counts
 
 
+def _cell_nanmean(channel_sub: np.ndarray, cell_region: np.ndarray) -> float:
+    """Float-safe whole-cell mean of a bg-subtracted channel over a cell.
+
+    Mirrors the always-on ``mNG_cell_mean`` guard: returns ``np.nan`` for an
+    empty cell or an all-NaN region (e.g. Halo NaN'd by a FLIM/SiR filter)
+    rather than emitting a RuntimeWarning.
+    """
+    pixels = channel_sub[cell_region]
+    if pixels.size > 0 and np.any(~np.isnan(pixels)):
+        return float(np.nanmean(pixels))
+    return np.nan
+
+
 def _two_region_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask,
                             dilute_mask, cp_mask_img, compute_percent,
                             interaction_mask, dcp2_mask, sir_filter_region,
-                            mng_bg, halo_bg, log):
+                            mng_bg, halo_bg, log, halo_cell_mean=False):
     cell_ids = np.unique(cp_mask_img)
     cell_ids = cell_ids[cell_ids != 0]
     counts = _particle_counts_per_cell(pbody_mask, cp_mask_img)
@@ -581,6 +595,8 @@ def _two_region_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask,
         metrics['cell_area_px'] = int(cell_region.sum())
         metrics['particle_count'] = counts.get(int(cell_id), 0)
         metrics['mNG_cell_mean'] = mng_cell_mean
+        if halo_cell_mean:
+            metrics['Halo_cell_mean'] = _cell_nanmean(halo_sub, cell_region)
         metrics['mng_bg_value'] = mng_bg
         metrics['halo_bg_value'] = halo_bg
         results.append(metrics)
@@ -592,7 +608,8 @@ def _two_region_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask,
 def _v4_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask, dilute_mask,
                     dcp2_full, dcp2_inner, interaction_full,
                     interaction_inner, cp_mask_img, compute_percent,
-                    zero_fill_mode, mng_bg, halo_bg, log):
+                    zero_fill_mode, mng_bg, halo_bg, log,
+                    halo_cell_mean=False):
     cell_ids = np.unique(cp_mask_img)
     cell_ids = cell_ids[cell_ids != 0]
     counts = _particle_counts_per_cell(pbody_mask, cp_mask_img)
@@ -616,6 +633,8 @@ def _v4_single_cell(mng_sub, halo_sub, mng_valid, pbody_mask, dilute_mask,
         metrics['cell_area_px'] = int(cell_region.sum())
         metrics['particle_count'] = counts.get(int(cell_id), 0)
         metrics['mNG_cell_mean'] = mng_cell_mean
+        if halo_cell_mean:
+            metrics['Halo_cell_mean'] = _cell_nanmean(halo_sub, cell_region)
         metrics['mng_bg_value'] = mng_bg
         metrics['halo_bg_value'] = halo_bg
         results.append(metrics)

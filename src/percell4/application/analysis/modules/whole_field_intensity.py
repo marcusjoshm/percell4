@@ -168,6 +168,18 @@ class WholeFieldIntensity(Analysis):
         "single_cell": BoolParam(
             default=False, requires=("cp_mask",),
             desc="Aggregate per cell using cp_mask; one row per cell."),
+        # Opt-in whole-cell Halo mean per cell (for expression grouping).
+        # Deliberately NO requires=("cp_mask",): a True flag without a cp_mask
+        # would make run_analysis._check_bool_requires raise and fail the whole
+        # dataset (the per-particle cell_mean precedent omits requires too).
+        # It is a no-op outside single-cell mode (gated inside the single-cell
+        # core branch, reached only with cp_mask); the dialog greys it unless
+        # single_cell is on for UX only.
+        "halo_cell_mean": BoolParam(
+            default=False,
+            desc="In single-cell mode, add a whole-cell Halo mean column "
+            "(Halo_cell_mean) per cell. Needs single_cell + cp_mask; "
+            "ignored otherwise."),
     }
 
     presets: dict[str, dict[str, Any]] = {
@@ -322,6 +334,7 @@ class WholeFieldIntensity(Analysis):
             sir_filter=sir_filter,
             intermediate_assemblies=intermediate,
             intermediate_zero_fill=zero_fill,
+            halo_cell_mean=bool(params["halo_cell_mean"]),
             set_label=set_label,
             log=log,
         )

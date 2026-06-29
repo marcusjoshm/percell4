@@ -142,6 +142,27 @@ def test_single_cell_gated_on_cp_mask(qtbot, tmp_path):
     assert sc.isEnabled() is True
 
 
+def test_halo_cell_mean_greyed_unless_single_cell(qtbot, tmp_path):
+    """U5: the Halo_cell_mean checkbox appears and is greyed unless single_cell
+    is on (which itself needs a cp_mask)."""
+    h5 = tmp_path / "f.h5"
+    _build_h5(h5)
+    dlg = WholeFieldIntensityDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_paths([h5])
+    dlg._refresh_state()
+    halo_chk = dlg._param_widgets["halo_cell_mean"]
+    # single_cell off (no cp_mask) -> the checkbox is disabled.
+    assert halo_chk.isEnabled() is False
+    # Assign cp_mask, then turn single_cell on -> the checkbox enables.
+    dlg._role_combos["cp_mask"].setCurrentText("cells")
+    dlg._refresh_state()
+    dlg._param_setters["single_cell"](True)
+    dlg._refresh_state()
+    assert dlg._param_widgets["single_cell"].isEnabled() is True
+    assert halo_chk.isEnabled() is True
+
+
 def test_start_dispatches_with_preset(qtbot, tmp_path):
     h5 = tmp_path / "f.h5"
     _build_h5(h5)
