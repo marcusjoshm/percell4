@@ -19,6 +19,7 @@ from qtpy.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -206,8 +207,7 @@ class LauncherWindow(QMainWindow):
             ("Segment", self._create_segment_panel),
             ("Analysis", self._create_analysis_panel),
             ("FLIM", self._create_flim_panel),
-            ("Scripts", self._create_scripts_panel),
-            ("Workflows", self._create_workflows_panel),
+            ("Analyses & Workflows", self._create_scripts_workflows_panel),
             ("Data", self._create_data_panel),
         ]
 
@@ -301,15 +301,16 @@ class LauncherWindow(QMainWindow):
         )
         return self._flim_panel
 
-    def _create_scripts_panel(self) -> QWidget:
+    def _create_scripts_workflows_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setAlignment(Qt.AlignTop)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(theme.section_label("Scripts"))
+        layout.addWidget(theme.section_label("Analyses & Workflows"))
 
+        # ── Analyses (dynamically registered single analyses) ──
         # Importing the analysis package fires every module's
         # @register_analysis side effect. Importing the dialog module
         # late-binds PerParticleDonut.dialog_class = PerParticleDonutDialog
@@ -321,20 +322,93 @@ class LauncherWindow(QMainWindow):
             whole_field_intensity_dialog,
         )
 
+        analyses_group = QGroupBox("Analyses")
+        analyses_layout = QVBoxLayout(analyses_group)
         entries = list_analyses()
         if not entries:
-            layout.addWidget(QLabel("No analyses registered."))
-            layout.addStretch()
-            return panel
+            analyses_layout.addWidget(QLabel("No analyses registered."))
+        else:
+            for info in entries:
+                btn = QPushButton(info.display_name)
+                if info.description:
+                    btn.setToolTip(info.description)
+                btn.clicked.connect(
+                    lambda _checked=False, name=info.name: self._on_open_analysis(name)
+                )
+                analyses_layout.addWidget(btn)
+        layout.addWidget(analyses_group)
 
-        for info in entries:
-            btn = QPushButton(info.display_name)
-            if info.description:
-                btn.setToolTip(info.description)
-            btn.clicked.connect(
-                lambda _checked=False, name=info.name: self._on_open_analysis(name)
-            )
-            layout.addWidget(btn)
+        # ── Workflows (hard-coded multi-step batch workflows) ──
+        workflows_group = QGroupBox("Workflows")
+        workflows_layout = QVBoxLayout(workflows_group)
+
+        self._btn_single_cell_workflow = QPushButton(
+            "Single-cell thresholding analysis workflow"
+        )
+        self._btn_single_cell_workflow.setToolTip(
+            "Batch workflow: Cellpose → seg QC → grouped thresholding → "
+            "per-cell measurement → Parquet + CSV export. Opens a "
+            "configuration dialog."
+        )
+        self._btn_single_cell_workflow.clicked.connect(
+            self._on_open_single_cell_workflow
+        )
+        workflows_layout.addWidget(self._btn_single_cell_workflow)
+
+        self._btn_dilute_phase_workflow = QPushButton(
+            "Dilute phase mask generation"
+        )
+        self._btn_dilute_phase_workflow.setToolTip(
+            "Interactive single-dataset workflow: iterate Grouped "
+            "Threshold + dilation + NaN-subtract on the active channel; "
+            "save one final mask of the in-cell dilute phase."
+        )
+        self._btn_dilute_phase_workflow.clicked.connect(
+            self._on_open_dilute_phase_workflow
+        )
+        workflows_layout.addWidget(self._btn_dilute_phase_workflow)
+
+        self._btn_dilute_from_mask_workflow = QPushButton(
+            "Dilute phase mask from mask"
+        )
+        self._btn_dilute_from_mask_workflow.setToolTip(
+            "Batch workflow: from an existing condensed-phase mask, grow it by "
+            "an expansion radius and invert within cell boundaries to make a "
+            "dilute-phase mask — across N .h5 datasets."
+        )
+        self._btn_dilute_from_mask_workflow.clicked.connect(
+            self._on_open_dilute_from_mask_workflow
+        )
+        workflows_layout.addWidget(self._btn_dilute_from_mask_workflow)
+
+        self._btn_flim_fret_workflow = QPushButton(
+            "FLIM-FRET analysis"
+        )
+        self._btn_flim_fret_workflow.setToolTip(
+            "Batch workflow: compare donor / donor+acceptor dataset pairs; "
+            "compute mean lifetime within (mask ∩ phasor) and a FRET "
+            "efficiency per pair (whole-field) or per cell (single-cell)."
+        )
+        self._btn_flim_fret_workflow.clicked.connect(
+            self._on_open_flim_fret_workflow
+        )
+        workflows_layout.addWidget(self._btn_flim_fret_workflow)
+
+        self._btn_phasor_masks_workflow = QPushButton(
+            "Automated phasor-masks workflow"
+        )
+        self._btn_phasor_masks_workflow.setToolTip(
+            "Batch workflow: fit a single-cluster GMM ellipse on phasor "
+            "pixels above an intensity threshold, then apply it twice "
+            "(permissive + conservative intensity thresholds) to produce "
+            "two binary masks per channel, across N .h5 datasets."
+        )
+        self._btn_phasor_masks_workflow.clicked.connect(
+            self._on_open_phasor_masks_workflow
+        )
+        workflows_layout.addWidget(self._btn_phasor_masks_workflow)
+
+        layout.addWidget(workflows_group)
 
         layout.addStretch()
         return panel
@@ -383,84 +457,6 @@ class LauncherWindow(QMainWindow):
                 )
         finally:
             dialog.deleteLater()
-
-    def _create_workflows_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setAlignment(Qt.AlignTop)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
-
-        layout.addWidget(theme.section_label("Workflows"))
-
-        self._btn_single_cell_workflow = QPushButton(
-            "Single-cell thresholding analysis workflow"
-        )
-        self._btn_single_cell_workflow.setToolTip(
-            "Batch workflow: Cellpose → seg QC → grouped thresholding → "
-            "per-cell measurement → Parquet + CSV export. Opens a "
-            "configuration dialog."
-        )
-        self._btn_single_cell_workflow.clicked.connect(
-            self._on_open_single_cell_workflow
-        )
-        layout.addWidget(self._btn_single_cell_workflow)
-
-        self._btn_dilute_phase_workflow = QPushButton(
-            "Dilute phase mask generation"
-        )
-        self._btn_dilute_phase_workflow.setToolTip(
-            "Interactive single-dataset workflow: iterate Grouped "
-            "Threshold + dilation + NaN-subtract on the active channel; "
-            "save one final mask of the in-cell dilute phase."
-        )
-        self._btn_dilute_phase_workflow.clicked.connect(
-            self._on_open_dilute_phase_workflow
-        )
-        layout.addWidget(self._btn_dilute_phase_workflow)
-
-        self._btn_dilute_from_mask_workflow = QPushButton(
-            "Dilute phase mask from mask"
-        )
-        self._btn_dilute_from_mask_workflow.setToolTip(
-            "Batch workflow: from an existing condensed-phase mask, grow it by "
-            "an expansion radius and invert within cell boundaries to make a "
-            "dilute-phase mask — across N .h5 datasets."
-        )
-        self._btn_dilute_from_mask_workflow.clicked.connect(
-            self._on_open_dilute_from_mask_workflow
-        )
-        layout.addWidget(self._btn_dilute_from_mask_workflow)
-
-        self._btn_flim_fret_workflow = QPushButton(
-            "FLIM-FRET analysis"
-        )
-        self._btn_flim_fret_workflow.setToolTip(
-            "Batch workflow: compare donor / donor+acceptor dataset pairs; "
-            "compute mean lifetime within (mask ∩ phasor) and a FRET "
-            "efficiency per pair (whole-field) or per cell (single-cell)."
-        )
-        self._btn_flim_fret_workflow.clicked.connect(
-            self._on_open_flim_fret_workflow
-        )
-        layout.addWidget(self._btn_flim_fret_workflow)
-
-        self._btn_phasor_masks_workflow = QPushButton(
-            "Automated phasor-masks workflow"
-        )
-        self._btn_phasor_masks_workflow.setToolTip(
-            "Batch workflow: fit a single-cluster GMM ellipse on phasor "
-            "pixels above an intensity threshold, then apply it twice "
-            "(permissive + conservative intensity thresholds) to produce "
-            "two binary masks per channel, across N .h5 datasets."
-        )
-        self._btn_phasor_masks_workflow.clicked.connect(
-            self._on_open_phasor_masks_workflow
-        )
-        layout.addWidget(self._btn_phasor_masks_workflow)
-
-        layout.addStretch()
-        return panel
 
     def _on_open_flim_fret_workflow(self) -> None:
         """Open the FLIM-FRET analysis dialog.

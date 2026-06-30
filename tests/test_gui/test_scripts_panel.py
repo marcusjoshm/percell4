@@ -1,11 +1,11 @@
-"""Tests for the Scripts tab wiring (U8)."""
+"""Tests for the merged Analyses & Workflows tab wiring (U8)."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 
 import pytest
-from qtpy.QtWidgets import QDialog, QLabel, QPushButton
+from qtpy.QtWidgets import QDialog, QGroupBox, QLabel, QPushButton
 
 from percell4.application.analysis import registry as registry_mod
 from percell4.application.analysis.modules.per_particle_donut import (  # noqa: F401
@@ -37,7 +37,7 @@ def _make_launcher() -> LauncherWindow:
 def test_scripts_panel_populates_button_for_registered_analysis(qtbot):
     launcher = _make_launcher()
     qtbot.addWidget(launcher)
-    panel = launcher._create_scripts_panel()
+    panel = launcher._create_scripts_workflows_panel()
     qtbot.addWidget(panel)
     button_labels = [
         b.text() for b in panel.findChildren(QPushButton)
@@ -48,7 +48,7 @@ def test_scripts_panel_populates_button_for_registered_analysis(qtbot):
 def test_scripts_panel_button_tooltip_uses_description(qtbot):
     launcher = _make_launcher()
     qtbot.addWidget(launcher)
-    panel = launcher._create_scripts_panel()
+    panel = launcher._create_scripts_workflows_panel()
     qtbot.addWidget(panel)
     btn = next(
         b for b in panel.findChildren(QPushButton)
@@ -64,17 +64,57 @@ def test_scripts_panel_empty_registry_shows_friendly_label(qtbot):
     saved = dict(registry_mod._REGISTRY)
     registry_mod._REGISTRY.clear()
     try:
-        panel = launcher._create_scripts_panel()
+        panel = launcher._create_scripts_workflows_panel()
         qtbot.addWidget(panel)
-        labels = [lbl.text() for lbl in panel.findChildren(QLabel)]
+        from qtpy.QtWidgets import QGroupBox
+        analyses_group = next(
+            g for g in panel.findChildren(QGroupBox) if g.title() == "Analyses"
+        )
+        labels = [lbl.text() for lbl in analyses_group.findChildren(QLabel)]
         assert any("No analyses registered" in t for t in labels)
-        # No analysis buttons exist (the section_label is a QLabel, not a button).
-        analysis_buttons = [
-            b for b in panel.findChildren(QPushButton)
-        ]
-        assert analysis_buttons == []
+        # No analysis buttons in the Analyses section (Workflows buttons live
+        # in their own group and are unaffected by the analysis registry).
+        assert analyses_group.findChildren(QPushButton) == []
     finally:
         registry_mod._REGISTRY.update(saved)
+
+
+def test_merged_panel_has_analyses_and_workflows_sections(qtbot):
+    launcher = _make_launcher()
+    qtbot.addWidget(launcher)
+    panel = launcher._create_scripts_workflows_panel()
+    qtbot.addWidget(panel)
+    titles = {g.title() for g in panel.findChildren(QGroupBox)}
+    assert "Analyses" in titles
+    assert "Workflows" in titles
+
+
+def test_merged_panel_keeps_all_five_workflow_buttons(qtbot):
+    launcher = _make_launcher()
+    qtbot.addWidget(launcher)
+    panel = launcher._create_scripts_workflows_panel()
+    qtbot.addWidget(panel)
+    workflows_group = next(
+        g for g in panel.findChildren(QGroupBox) if g.title() == "Workflows"
+    )
+    labels = {b.text() for b in workflows_group.findChildren(QPushButton)}
+    assert {
+        "Single-cell thresholding analysis workflow",
+        "Dilute phase mask generation",
+        "Dilute phase mask from mask",
+        "FLIM-FRET analysis",
+        "Automated phasor-masks workflow",
+    } <= labels
+
+
+def test_sidebar_has_seven_tabs_and_no_standalone_scripts_or_workflows(qtbot):
+    launcher = _make_launcher()
+    qtbot.addWidget(launcher)
+    names = [b.text() for b in launcher._sidebar_buttons]
+    assert len(names) == 7
+    assert "Scripts" not in names
+    assert "Workflows" not in names
+    assert "Analyses & Workflows" in names
 
 
 def test_on_open_analysis_workflow_locked_short_circuits(qtbot, monkeypatch):
