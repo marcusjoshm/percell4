@@ -188,40 +188,41 @@ widgets:
     keystroke: null
     notes: "I1 candidate per plan §Problem Frame: line 545-546 calls session.set_active_channel(None) when the deleted channel was active. Plan's Open Questions §Deferred-to-Implementation explicitly defers the Creator-cleanup vs Action-with-side-effect verdict to U3. Flag for U3."
 
-  # ── analysis_panel.py ────────────────────────────────────────
-  - id: analysis_panel.clear_selection_button
+  # ── viewer_panel.py (Cell Filter — relocated from analysis_panel.py) ──
+  - id: viewer_panel.clear_selection_button
     class: Selector
-    path: src/percell4/interfaces/gui/task_panels/analysis_panel.py
-    lines: "90-93, 286-287"
+    path: src/percell4/interfaces/gui/task_panels/viewer_panel.py
+    lines: "88-92, 131-132"
     widget_type: QPushButton
     handler: _on_clear_selection
     reads: [selection]
     writes: [selection]
     keystroke: null
-    notes: "Selector for `selection` — sets selection to []. Per plan I1 scope extension, selection is in scope."
+    notes: "Selector for `selection` — sets selection to []. `selection` is intentionally multi-writer (viewer canvas, cell table, data plot, multi-select, threshold-QC); single-writer applies only to filter_ids."
 
-  - id: analysis_panel.filter_to_selection_button
+  - id: viewer_panel.filter_to_selection_button
     class: Selector
-    path: src/percell4/interfaces/gui/task_panels/analysis_panel.py
-    lines: "97-100, 289-294"
+    path: src/percell4/interfaces/gui/task_panels/viewer_panel.py
+    lines: "94-105, 134-139"
     widget_type: QPushButton
     handler: _on_filter_to_selection
     reads: [selection, filter_ids]
     writes: [filter_ids]
     keystroke: null
-    notes: "Per plan Key Technical Decisions: Filter / Clear-Filter buttons reclassify as Selectors for filter_ids. Reads selection, writes filter_ids."
+    notes: "Canonical Selector for filter_ids — reads selection as the operand, writes filter_ids. Relocated to the Viewer tab; exactly one filter_ids writer."
 
-  - id: analysis_panel.clear_filter_button
+  - id: viewer_panel.clear_filter_button
     class: Selector
-    path: src/percell4/interfaces/gui/task_panels/analysis_panel.py
-    lines: "102-105, 296-297"
+    path: src/percell4/interfaces/gui/task_panels/viewer_panel.py
+    lines: "99-105, 141-142"
     widget_type: QPushButton
     handler: _on_clear_filter
     reads: [filter_ids]
     writes: [filter_ids]
     keystroke: null
-    notes: "Per plan Key Technical Decisions: Selector for filter_ids. Disabled when no filter active."
+    notes: "Selector for filter_ids (writes None). Disabled when no filter active."
 
+  # ── analysis_panel.py ────────────────────────────────────────
   - id: analysis_panel.threshold_method_combo
     class: Action
     path: src/percell4/interfaces/gui/task_panels/analysis_panel.py

@@ -79,35 +79,6 @@ class AnalysisPanel(QWidget):
 
         layout.addWidget(theme.section_label("Analysis"))
 
-        # ── Cell Filter group ──
-        filter_group = QGroupBox("Cell Filter")
-        filter_layout = QVBoxLayout(filter_group)
-
-        sel_btn_row = QHBoxLayout()
-        btn_clear_sel = QPushButton("Clear Selection")
-        btn_clear_sel.setToolTip("Deselect all cells and restore viewer to normal")
-        btn_clear_sel.clicked.connect(self._on_clear_selection)
-        sel_btn_row.addWidget(btn_clear_sel)
-        filter_layout.addLayout(sel_btn_row)
-
-        filter_btn_row = QHBoxLayout()
-        btn_filter = QPushButton("Filter to Selection")
-        btn_filter.setToolTip("Show only the currently selected cells in all windows")
-        btn_filter.clicked.connect(self._on_filter_to_selection)
-        filter_btn_row.addWidget(btn_filter)
-
-        self._clear_filter_btn = QPushButton("Clear Filter")
-        self._clear_filter_btn.setEnabled(False)
-        self._clear_filter_btn.clicked.connect(self._on_clear_filter)
-        filter_btn_row.addWidget(self._clear_filter_btn)
-        filter_layout.addLayout(filter_btn_row)
-
-        self._filter_status_label = QLabel("No filter active")
-        self._filter_status_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        filter_layout.addWidget(self._filter_status_label)
-
-        layout.addWidget(filter_group)
-
         # ── Whole Field Thresholding group ──
         thresh_group = QGroupBox("Whole Field Thresholding")
         thresh_layout = QVBoxLayout(thresh_group)
@@ -304,41 +275,8 @@ class AnalysisPanel(QWidget):
     # ── State change routing ─────────────────────────────────
 
     def _on_state_changed(self, change) -> None:
-        if change.filter:
-            self._on_filter_state_changed()
         if change.data or change.channel:
             self._update_channel_display()
-
-    # ── Cell Filter ──────────────────────────────────────────
-
-    def _on_clear_selection(self) -> None:
-        self.data_model.set_selection([])
-
-    def _on_filter_to_selection(self) -> None:
-        selected = self.data_model.selected_ids
-        if not selected:
-            self._show_status("No cells selected to filter")
-            return
-        self.data_model.set_filter(list(selected))
-
-    def _on_clear_filter(self) -> None:
-        self.data_model.set_filter(None)
-
-    def _on_filter_state_changed(self) -> None:
-        if self.data_model.is_filtered:
-            n_filtered = len(self.data_model.filtered_df)
-            n_total = len(self.data_model.df)
-            self._filter_status_label.setText(
-                f"Showing {n_filtered} of {n_total} cells"
-            )
-            self._filter_status_label.setStyleSheet(
-                f"color: {theme.ACCENT}; font-weight: bold;"
-            )
-            self._clear_filter_btn.setEnabled(True)
-        else:
-            self._filter_status_label.setText("No filter active")
-            self._filter_status_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-            self._clear_filter_btn.setEnabled(False)
 
     # ── Whole Field Thresholding ─────────────────────────────
 

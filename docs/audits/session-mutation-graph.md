@@ -119,8 +119,8 @@ coupling). No new todos are filed in this unit.
 
 | File:line | Caller | YAML id | Class | Verdict | Notes |
 |---|---|---|---|---|---|
-| `src/percell4/interfaces/gui/task_panels/analysis_panel.py:294` | `_on_filter_to_selection` (Filter to Selection button) | `analysis_panel.filter_to_selection_button` | Selector | Compliant | Reclassified as Selector for `filter_ids` per Key Technical Decision "I1 scope extension". See "Borderline: filter / clear-filter buttons" below. |
-| `src/percell4/interfaces/gui/task_panels/analysis_panel.py:297` | `_on_clear_filter` (Clear Filter button) | `analysis_panel.clear_filter_button` | Selector | Compliant | Same reclassification rationale. |
+| `src/percell4/interfaces/gui/task_panels/viewer_panel.py` `_on_filter_to_selection` | `_on_filter_to_selection` (Filter to Selection button) | `viewer_panel.filter_to_selection_button` | Selector | Compliant | Canonical Selector for `filter_ids` (reads `selection` as the operand). Relocated to the Viewer tab; the sole `filter_ids` writer. See "Borderline: filter / clear-filter buttons" below. |
+| `src/percell4/interfaces/gui/task_panels/viewer_panel.py` `_on_clear_filter` | `_on_clear_filter` (Clear Filter button) | `viewer_panel.clear_filter_button` | Selector | Compliant | Same reclassification rationale; relocated to the Viewer tab. |
 | `src/percell4/application/session.py:146, 180, 217` | `Session.set_dataset` (reset) / `Session.set_measurements` (prune stale filter) / `Session.clear` | (n/a — application layer) | Lifecycle handler | Compliant | Three non-UI-driven writes triggered by lifecycle events (dataset switch, measurement update, dataset close). Permitted because they're internal to Session, not the result of a UI invocation. |
 | (no other GUI writers) | — | — | — | — | The Filter/Clear-Filter pair are the only GUI-side writers. |
 
@@ -128,7 +128,7 @@ coupling). No new todos are filed in this unit.
 
 | File:line | Caller | YAML id | Class | Verdict | Notes |
 |---|---|---|---|---|---|
-| `src/percell4/interfaces/gui/task_panels/analysis_panel.py:287` | `_on_clear_selection` | `analysis_panel.clear_selection_button` | Selector | Compliant | Explicit Clear-Selection button. |
+| `src/percell4/interfaces/gui/task_panels/viewer_panel.py` `_on_clear_selection` | `_on_clear_selection` | `viewer_panel.clear_selection_button` | Selector | Compliant | Explicit Clear-Selection button (relocated to the Viewer tab). `selection` is intentionally multi-writer. |
 | `src/percell4/interfaces/gui/peer_views/data_plot.py:314, 316` | `_on_scatter_clicked` (left-click and Ctrl-click toggle) | `data_plot.scatter_point_click` | Selector | Compliant | Scatter plot click → set selection. |
 | `src/percell4/interfaces/gui/peer_views/data_plot.py:330` | `_on_rect_selected` (Shift+drag rect select) | `data_plot.shift_drag_rect_select` | Selector | Compliant | Rect-select → set selection. |
 | `src/percell4/interfaces/gui/peer_views/data_plot.py:339` | `eventFilter` Esc handler | `data_plot.escape_clear_selection` | Selector | Compliant | Esc clears selection. |
@@ -179,7 +179,7 @@ channel would point at a key that no longer exists. The
 `if session.active_channel == old_name:` guard means the write only fires
 when needed.
 
-### `analysis_panel.filter_to_selection_button` and `analysis_panel.clear_filter_button` — Selectors for `filter_ids`
+### `viewer_panel.filter_to_selection_button` and `viewer_panel.clear_filter_button` — Selectors for `filter_ids`
 
 **Verdict.** Classified as **Selectors for `filter_ids`**, per the plan's
 Key Technical Decision "I1 scope extension". Cleared by I1.
