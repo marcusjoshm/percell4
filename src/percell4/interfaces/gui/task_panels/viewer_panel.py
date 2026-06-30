@@ -28,6 +28,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.gui import theme
+from percell4.model import CellDataModel
 
 
 class ViewerPanel(QWidget):
@@ -39,7 +40,7 @@ class ViewerPanel(QWidget):
 
     def __init__(
         self,
-        data_model: Any,
+        data_model: CellDataModel,
         *,
         show_window: Callable[[str], None],
         get_viewer_window: Callable[[], Any],

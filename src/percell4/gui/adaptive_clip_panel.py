@@ -240,8 +240,6 @@ class AdaptiveClipPanel(QWidget):
         self._show_status_cb = show_status
         self._worker = None
         self._pending_name: str | None = None
-        self._pending_auto = False
-        self._pending_particle = False
         # CNR classification (separate Action path — its own worker + pending state
         # so it never collides with the detection run's _pending_* flags).
         self._cnr_worker = None
@@ -468,8 +466,6 @@ class AdaptiveClipPanel(QWidget):
             return
 
         self._pending_name = mask_name
-        self._pending_auto = False
-        self._pending_particle = False
         # Remember whether to back-fill the smallest-Ø readout after the run.
         self._pending_ae_auto = config.auto_extract_smallest_auto
         self._run_btn.setEnabled(False)
@@ -546,31 +542,17 @@ class AdaptiveClipPanel(QWidget):
         if getattr(self, "_pending_ae_auto", False) and valid:
             self._settings.set_smallest_value(valid[0].smallest_diameter_px)
         self._pending_ae_auto = False
-        # Reuse the standard Creator save (no window write-back; the pending flags were
-        # cleared so no auto/particle note is fabricated). For a stack, pass the per-frame
-        # fine-window list so _on_detect_done's is_stack handling applies.
-        if is_stack:
-            windows = [(r.fine_window if r is not None else 0) for r in reports]
-            self._on_detect_done((mask, windows))
-        else:
-            self._on_detect_done((mask, report.fine_window))
+        # Reuse the standard Creator save. The detected window is no longer surfaced
+        # in the UI (the form has no window field), so it is not threaded through.
+        self._on_detect_done(mask)
 
     def _on_detect_error(self, err) -> None:
-        # Clear the pending flags so a failed run cannot mislabel the NEXT run.
-        self._pending_auto = False
-        self._pending_particle = False
         self._run_btn.setEnabled(True)
         self._settings.set_enabled(True)
         self._show_status(f"Detection error: {err.exc_type}: {err.message}")
 
-    def _on_detect_done(self, result) -> None:
-        """Creator-save the detected mask (shared by the auto-extraction handler).
-
-        ``result`` is ``(mask, window_used)`` — ``window_used`` is the per-frame
-        fine-window list (stack) or one int (single frame); it is no longer
-        surfaced in the UI (the form has no window field), so it is ignored here.
-        """
-        mask, _window_used = result
+    def _on_detect_done(self, mask) -> None:
+        """Creator-save the detected mask (shared by the auto-extraction handler)."""
         self._run_btn.setEnabled(True)
         self._settings.set_enabled(True)
 
