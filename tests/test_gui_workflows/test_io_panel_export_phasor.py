@@ -1,9 +1,8 @@
-"""Tests for the Export Phasor (.npz) button on IoPanel.
+"""Tests for the Export ▾ menu on IoPanel (U3).
 
-The IoPanel is a thin Tier-1 panel — its only job is to wire button
-clicks to injected callbacks. The launcher's _on_export_phasor_npz
-handler does the real work; that's tested via U4's use-case tests
-plus the dialog flow here.
+The three export targets are now actions inside the "Export" menu button
+rather than standalone buttons. The IoPanel is a thin Tier-1 panel — its
+only job is to wire actions to injected callbacks.
 """
 
 from __future__ import annotations
@@ -36,29 +35,34 @@ def panel(qtbot):
     return p
 
 
-def test_export_phasor_button_present_with_correct_label(panel):
-    buttons = panel.findChildren(QPushButton)
-    labels = [b.text() for b in buttons]
-    assert "Export Phasor (.npz)..." in labels
+def _export_actions(panel) -> dict:
+    btn = next(b for b in panel.findChildren(QPushButton) if b.text() == "Export")
+    menu = btn.menu()
+    assert menu is not None
+    return {a.text(): a for a in menu.actions()}
 
 
-def test_export_phasor_button_invokes_callback(panel, qtbot):
-    buttons = panel.findChildren(QPushButton)
-    btn = next(b for b in buttons if b.text() == "Export Phasor (.npz)...")
-    btn.click()
+def test_export_menu_has_all_three_targets(panel):
+    actions = _export_actions(panel)
+    assert "Measurements (CSV)..." in actions
+    assert "Images (TIFF)..." in actions
+    assert "Phasor (.npz)..." in actions
+
+
+def test_export_phasor_action_invokes_callback(panel):
+    _export_actions(panel)["Phasor (.npz)..."].trigger()
     panel._test_callbacks["on_export_phasor_npz"].assert_called_once()
 
 
-def test_export_phasor_button_has_tooltip(panel):
-    buttons = panel.findChildren(QPushButton)
-    btn = next(b for b in buttons if b.text() == "Export Phasor (.npz)...")
-    assert btn.toolTip() != ""
-    assert "phasor" in btn.toolTip().lower()
+def test_export_csv_and_images_actions_invoke_callbacks(panel):
+    actions = _export_actions(panel)
+    actions["Measurements (CSV)..."].trigger()
+    actions["Images (TIFF)..."].trigger()
+    panel._test_callbacks["on_export_csv"].assert_called_once()
+    panel._test_callbacks["on_export_images"].assert_called_once()
 
 
-def test_existing_export_buttons_still_present(panel):
-    """Regression guard: don't accidentally remove the existing export buttons."""
-    buttons = panel.findChildren(QPushButton)
-    labels = [b.text() for b in buttons]
-    assert "Export Measurements to CSV..." in labels
-    assert "Export Images..." in labels
+def test_export_phasor_action_has_tooltip(panel):
+    act = _export_actions(panel)["Phasor (.npz)..."]
+    assert act.toolTip() != ""
+    assert "phasor" in act.toolTip().lower()

@@ -10,8 +10,7 @@ from collections.abc import Callable
 
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QGroupBox,
-    QLabel,
+    QMenu,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -59,58 +58,50 @@ class IoPanel(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(theme.section_label("Import / Export"))
+        layout.addWidget(theme.section_label("I/O"))
 
-        # ── Import ──
-        import_group = QGroupBox("Import")
-        import_layout = QVBoxLayout(import_group)
+        btn_new = QPushButton("New Dataset...")
+        btn_new.setToolTip("Create a new dataset by compressing a TIFF dataset into HDF5.")
+        btn_new.clicked.connect(lambda: self._on_import())
+        layout.addWidget(btn_new)
 
-        btn_import = QPushButton("Compress TIFF Dataset...")
-        btn_import.clicked.connect(lambda: self._on_import())
-        import_layout.addWidget(btn_import)
+        btn_open = QPushButton("Open Dataset...")
+        btn_open.setToolTip("Open an existing .h5 dataset.")
+        btn_open.clicked.connect(lambda: self._on_load())
+        layout.addWidget(btn_open)
 
-        btn_load = QPushButton("Load Dataset...")
-        btn_load.clicked.connect(lambda: self._on_load())
-        import_layout.addWidget(btn_load)
-
-        btn_add_layer = QPushButton("Add Layer to Dataset...")
-        btn_add_layer.clicked.connect(lambda: self._on_add_layer())
-        import_layout.addWidget(btn_add_layer)
-
-        btn_batch_tcspc = QPushButton("Batch TCSPC Append...")
-        btn_batch_tcspc.setToolTip(
+        # ── Add Data ▾ — menu of ways to add data to the open dataset ──
+        btn_add = QPushButton("Add Data")
+        add_menu = QMenu(btn_add)
+        act_layer = add_menu.addAction("Layer...")
+        act_layer.triggered.connect(lambda: self._on_add_layer())
+        act_batch = add_menu.addAction("Batch TCSPC...")
+        act_batch.setToolTip(
             "Append .bin decay layers to many existing datasets at once "
             "(uses one calibration CSV)."
         )
-        btn_batch_tcspc.clicked.connect(lambda: self._on_batch_tcspc())
-        import_layout.addWidget(btn_batch_tcspc)
+        act_batch.triggered.connect(lambda: self._on_batch_tcspc())
+        btn_add.setMenu(add_menu)
+        layout.addWidget(btn_add)
 
         btn_close = QPushButton("Close Dataset")
         btn_close.clicked.connect(lambda: self._on_close())
-        import_layout.addWidget(btn_close)
+        layout.addWidget(btn_close)
 
-        layout.addWidget(import_group)
-
-        # ── Export ──
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout(export_group)
-
-        btn_export_csv = QPushButton("Export Measurements to CSV...")
-        btn_export_csv.clicked.connect(lambda: self._on_export_csv())
-        export_layout.addWidget(btn_export_csv)
-
-        btn_export_images = QPushButton("Export Images...")
-        btn_export_images.clicked.connect(lambda: self._on_export_images())
-        export_layout.addWidget(btn_export_images)
-
-        btn_export_phasor = QPushButton("Export Phasor (.npz)...")
-        btn_export_phasor.setToolTip(
+        # ── Export ▾ — menu of export targets ──
+        btn_export = QPushButton("Export")
+        export_menu = QMenu(btn_export)
+        act_csv = export_menu.addAction("Measurements (CSV)...")
+        act_csv.triggered.connect(lambda: self._on_export_csv())
+        act_images = export_menu.addAction("Images (TIFF)...")
+        act_images.triggered.connect(lambda: self._on_export_images())
+        act_phasor = export_menu.addAction("Phasor (.npz)...")
+        act_phasor.setToolTip(
             "Export cached phasor data for every channel as one .npz file per "
             "channel for use with external Python scripts."
         )
-        btn_export_phasor.clicked.connect(lambda: self._on_export_phasor_npz())
-        export_layout.addWidget(btn_export_phasor)
-
-        layout.addWidget(export_group)
+        act_phasor.triggered.connect(lambda: self._on_export_phasor_npz())
+        btn_export.setMenu(export_menu)
+        layout.addWidget(btn_export)
 
         layout.addStretch()
