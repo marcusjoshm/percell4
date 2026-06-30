@@ -1,7 +1,7 @@
 ---
 title: "refactor: Launcher window cosmetic / UX cleanup"
 type: refactor
-status: active
+status: completed
 date: 2026-06-30
 origin: docs/brainstorms/2026-06-30-launcher-window-cosmetic-refactor-requirements.md
 ---
