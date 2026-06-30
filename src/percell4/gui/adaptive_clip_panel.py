@@ -1,11 +1,12 @@
-"""Adaptive Local Clipping panel — interactive whole-frame `adaptive` detection.
+"""Adaptive Local Clipping panel — interactive two-pass auto-extraction.
 
-Exposes the production `adaptive` puncta detector in the Analysis tab. A
-**Creator**: the Run button detects puncta on the active channel (optionally
-auto-sizing the local window from an Otsu first-pass), writes a new
-``/masks/<name>`` layer, auto-selects it, and shows it in napari. Heavy compute
-runs in a :class:`~percell4.gui.workers.Worker`. Reads ``session.active_channel``
-directly; the Run button writes only ``active_mask`` (via ``AcceptPunctaMask``).
+Exposes the production `adaptive` puncta detector in the Analysis tab via the
+single auto-extraction (two-pass) mode. A **Creator**: the Run button runs the
+per-cell auto-extraction on the active channel (off the active segmentation),
+writes a new ``/masks/<name>`` layer, auto-selects it, and shows it in napari.
+Heavy compute runs in a :class:`~percell4.gui.workers.Worker`. Reads
+``session.active_channel`` directly; the Run button writes only ``active_mask``
+(via ``AcceptPunctaMask``).
 """
 
 from __future__ import annotations
@@ -24,142 +25,6 @@ from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
-
-
-def run_adaptive_detection(image, gaussian_sigma, settings, auto_window, window_method="otsu-mean"):
-    """Worker body: optionally estimate the window via the finder registry, then detect.
-
-    Returns ``(mask uint8, window_used int)``. When ``auto_window`` is True the
-    window is estimated by ``adaptive_clip.auto_window`` using the named
-    ``window_method`` (a ``WINDOW_FINDERS`` registry key, e.g. ``granule-size``)
-    and the settings are rebuilt with it; otherwise the settings' window is used
-    as-is. Pure (no Qt) so it is unit-testable and worker-safe.
-    """
-    from percell4.domain.measure.adaptive_clip import (
-        auto_window as compute_auto_window,
-    )
-    from percell4.domain.measure.adaptive_clip import (
-        detect_adaptive_whole_frame,
-    )
-    from percell4.workflows.models import PunctaDetectorSettings
-
-    window_used = int(dict(settings.detector_params).get("window_px", 15))
-    if auto_window:
-        window_used = compute_auto_window(image, gaussian_sigma, settings, method=window_method)
-        params = dict(settings.detector_params)
-        params["window_px"] = window_used
-        settings = PunctaDetectorSettings(
-            detector_name=settings.detector_name,
-            seed_detector_name=settings.seed_detector_name,
-            background_estimator_name=settings.background_estimator_name,
-            detector_params=params,
-            seed_params=settings.seed_params,
-            min_spot_px=settings.min_spot_px,
-            max_spot_px=settings.max_spot_px,
-            spot_scale_prior=settings.spot_scale_prior,
-        )
-    mask = detect_adaptive_whole_frame(image, gaussian_sigma, settings)
-    return mask, window_used
-
-
-def run_adaptive_detection_stack(image, gaussian_sigma, settings, auto_window, window_method="otsu-mean"):
-    """Worker body for a time-lapse ``(T, H, W)`` channel: detect each frame.
-
-    Loops over the leading time axis, runs :func:`run_adaptive_detection` on each
-    frame, and stacks the per-frame masks into ``(T, H, W)``. The auto window is
-    estimated per frame (contract D3) with the named ``window_method``, so frames
-    with different intensity stats get their own window. Mirrors
-    ``segmentation_panel.run_cellpose_stack``'s per-frame dispatch. Returns
-    ``(mask (T,H,W) uint8, windows list[int])``. Pure (no Qt) so it is
-    unit-testable and worker-safe.
-    """
-    image = np.asarray(image)
-    frames: list[np.ndarray] = []
-    windows: list[int] = []
-    for t in range(image.shape[0]):
-        mask_t, window_t = run_adaptive_detection(
-            image[t], gaussian_sigma, settings, auto_window, window_method
-        )
-        frames.append(np.asarray(mask_t, dtype=np.uint8))
-        windows.append(int(window_t))
-    return np.stack(frames, axis=0), windows
-
-
-def run_adaptive_detection_by_particle_size(
-    image, labels, pixel_size_um, d_min_um, k, presmooth_sigma_px
-):
-    """Worker body for the one-knob particle-size detector (per-cell).
-
-    Derives the window from ``d_min`` (returned for the status note) and runs the
-    eye-validated per-cell adaptive clip: window + size filter follow ``d_min``,
-    the noise floor is each cell's own robust MAD, and ``k`` is the caller's
-    sensitivity setting (defaults to 1 in the panel; raise to be conservative).
-    Returns ``(mask uint8, window_used int)``. Pure (no Qt) so it is worker-safe
-    and unit-testable.
-    """
-    from percell4.domain.measure.adaptive_clip import (
-        detect_adaptive_by_particle_size,
-        window_min_spot_for_particle,
-    )
-
-    window_used, _ = window_min_spot_for_particle(d_min_um, pixel_size_um)
-    mask = detect_adaptive_by_particle_size(
-        image,
-        labels,
-        pixel_size_um,
-        d_min_um,
-        k=k,
-        presmooth_sigma_px=presmooth_sigma_px,
-    )
-    return mask, window_used
-
-
-def run_adaptive_detection_per_cell(image, labels, window_px, min_spot_px, k, presmooth_sigma_px):
-    """Worker body for manual mode off a segmentation (per-cell, explicit window).
-
-    Thresholds each Cellpose cell against its own robust MAD σ at the manual
-    window + k (the segmentation-aware sibling of the whole-frame manual path).
-    Returns ``(mask uint8, window_used int)``. Pure (no Qt) so it is worker-safe.
-    """
-    from percell4.domain.measure.adaptive_clip import detect_adaptive_per_cell
-
-    mask = detect_adaptive_per_cell(
-        image,
-        labels,
-        window_px=int(window_px),
-        min_spot_px=int(min_spot_px),
-        k=k,
-        presmooth_sigma_px=presmooth_sigma_px,
-    )
-    return mask, int(window_px)
-
-
-def run_adaptive_detection_multiscale(
-    image, labels, start_window_px, max_particle_px, k, presmooth_sigma_px,
-    force_passes=None, min_spot_px=1,
-):
-    """Worker body for the multi-scale routine (per-cell, doubling windows OR-combined).
-
-    Runs the per-cell adaptive clip at a doubling window sequence (from
-    ``start_window_px`` until past ``max_particle_px``, or exactly ``force_passes``
-    passes when set) and unions the masks, so particles across a wide size range are
-    all captured. ``min_spot_px`` is the Min-particle-size filter applied once to the
-    combined mask. Returns ``(mask uint8, largest_window_used int)``. Pure (no Qt) so
-    it is worker-safe.
-    """
-    from percell4.domain.measure.adaptive_clip import detect_adaptive_multiscale
-
-    mask, windows = detect_adaptive_multiscale(
-        image,
-        labels,
-        start_window_px=start_window_px,
-        max_particle_px=max_particle_px,
-        k=k,
-        presmooth_sigma_px=presmooth_sigma_px,
-        min_spot_px=min_spot_px,
-        force_passes=force_passes,
-    )
-    return mask, int(windows[-1]) if windows else 0
 
 
 def run_adaptive_auto_extract(
@@ -199,8 +64,7 @@ def run_adaptive_auto_extract_stack(
     detectable particles in auto-detect mode (``smallest_particle_px is None``) yields
     an empty plane rather than aborting the whole run (R9: the dissolved end of a
     washout). Returns ``(mask (T,H,W) uint8, reports list[AutoExtractReport | None])``;
-    a frame that degraded to empty has a ``None`` report. Mirrors
-    ``run_adaptive_detection_stack``'s per-frame dispatch. Pure (no Qt) so it is
+    a frame that degraded to empty has a ``None`` report. Pure (no Qt) so it is
     unit-testable and worker-safe.
     """
     from percell4.domain.measure.auto_extraction import NoParticlesFound, auto_extract
@@ -378,7 +242,6 @@ class AdaptiveClipPanel(QWidget):
         self._pending_name: str | None = None
         self._pending_auto = False
         self._pending_particle = False
-        self._pending_d_min = 0.0
         # CNR classification (separate Action path — its own worker + pending state
         # so it never collides with the detection run's _pending_* flags).
         self._cnr_worker = None
@@ -496,36 +359,14 @@ class AdaptiveClipPanel(QWidget):
     # ── debug (terminal) ─────────────────────────────────────────
 
     def _print_settings_debug(self, config) -> None:
-        """Print every Adaptive Local Clipping setting to the terminal (debug)."""
+        """Print the Adaptive Local Clipping (auto-extraction) settings (debug)."""
         print(
             "\n===== Adaptive Local Clipping run =====\n"
-            f"  auto_window       : {config.auto_window}\n"
-            f"  window_method     : {config.window_method}\n"
-            f"  particle_mode     : {config.particle_mode}\n"
-            f"  multiscale_mode   : {config.multiscale_mode}\n"
-            f"  window            : {config.window_value} {config.window_unit}\n"
-            f"  k                 : {config.k}\n"
-            f"  gaussian_sigma    : {config.gaussian_sigma}\n"
-            f"  noise_estimator   : {config.noise_estimator}\n"
-            f"  size_percentile   : {config.particle_percentile} %\n"
-            f"  detected Ø (µm)   : {config.d_min_um}\n"
-            f"  size_cutoff (px)  : {config.size_cutoff_px}  auto_start={config.ms_auto_start}"
-            f"  iterations={config.ms_iterations or 'auto'}\n"
-            f"  min particle size : {config.min_size_value} {config.min_size_unit}",
-            flush=True,
-        )
-
-    def _print_otsu_report(self, report) -> None:
-        """Print the Otsu first-pass diagnostics for an Otsu particle-size run (debug)."""
-        print(
-            f"  [otsu first-pass] scope={report.scope}\n"
-            f"    Otsu threshold               : {report.otsu_threshold:.4f}\n"
-            f"    particle size (p{report.percentile:g})       : {report.diameter_px:.3f} px"
-            f" = {report.d_min_um:.4f} µm  (n_components={report.n_components})\n"
-            f"    threshold-area mean intensity: {report.area_mean:.4f}\n"
-            f"    mean − threshold             : {report.mean_minus_threshold:.4f}\n"
-            f"    threshold-area max intensity : {report.area_max:.4f}\n"
-            f"    threshold-area min intensity : {report.area_min:.4f}",
+            f"  gaussian_sigma             : {config.gaussian_sigma}\n"
+            f"  smallest particle Ø        : {config.smallest_particle_value} "
+            f"{config.smallest_particle_unit}\n"
+            f"  auto-detect smallest (LoG) : {config.auto_extract_smallest_auto}\n"
+            f"  min particle size          : {config.min_size_value} {config.min_size_unit}",
             flush=True,
         )
 
@@ -550,8 +391,8 @@ class AdaptiveClipPanel(QWidget):
         if image is None:
             self._show_status(f"Channel '{channel}' not found in viewer")
             return
-        # Time-lapse: a (T,H,W) channel layer is detected per frame (stacked to
-        # a (T,H,W) mask), not sliced to the displayed frame. A 2D channel takes
+        # Time-lapse: a (T,H,W) channel layer is auto-extracted per frame (stacked
+        # to a (T,H,W) mask), not sliced to the displayed frame. A 2D channel takes
         # the historical single-frame path.
         n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
         is_timelapse = image.ndim == 3 and n_timepoints > 1
@@ -559,294 +400,8 @@ class AdaptiveClipPanel(QWidget):
         config = self._settings.current_config()
         self._print_settings_debug(config)
 
-        # "Otsu detect particle size" runs the per-cell detector off a fresh Otsu
-        # measurement (needs labels + a known pixel size).
-        if config.particle_mode:
-            self._run_particle_mode(config, image, is_timelapse, store, viewer_win)
-            return
-
-        # Multi-scale: per-cell Otsu size assessment -> doubling windows OR-combined.
-        if config.multiscale_mode:
-            self._run_multiscale_mode(config, image, is_timelapse, store, viewer_win)
-            return
-
-        # Auto extraction: two-pass (fine + LoG-sized coarse) per-cell union.
-        if config.auto_extract_mode:
-            self._run_auto_extract_mode(config, image, is_timelapse, store, viewer_win)
-            return
-
-        # Manual mode (Auto off): window in px/µm, per-cell off the active
-        # segmentation (whole-frame fallback when none is active).
-        if not config.auto_window:
-            self._run_manual_mode(config, image, is_timelapse, store, viewer_win)
-            return
-
-        # Auto-window finder modes (granule-size / otsu-mean): whole-frame.
-        # Resolve the particle-size filter to a px area (µm² needs calibration).
-        from percell4.domain.measure.adaptive_clip import resolve_min_area_px
-
-        pixel_size_um = self._pixel_size_um(store)
-        try:
-            min_spot_px = resolve_min_area_px(
-                config.min_size_value, config.min_size_unit, pixel_size_um
-            )
-        except ValueError as e:
-            self._show_status(str(e))
-            return
-
-        existing = store.list_masks() if hasattr(store, "list_masks") else []
-        mask_name = prompt_for_resource_name(
-            self,
-            title="Save Adaptive Clipping Mask",
-            label="Mask name:",
-            default="adaptive",
-            existing_names=existing,
-        )
-        if mask_name is None:
-            return
-
-        from percell4.workflows.models import PunctaDetectorSettings
-
-        settings = PunctaDetectorSettings(
-            detector_name="adaptive",
-            seed_detector_name="otsu",
-            background_estimator_name=config.noise_estimator,
-            # window_px is overwritten by the finder (auto_window is always True here).
-            detector_params={"window_px": 15, "k": config.k},
-            min_spot_px=max(1, int(min_spot_px)),
-            spot_scale_prior=(1.0, 4.0),
-        )
-
-        self._pending_name = mask_name
-        self._pending_auto = config.auto_window
-        self._pending_particle = False  # this is the auto-finder whole-frame path
-        self._run_btn.setEnabled(False)
-        self._settings.set_enabled(False)
-        n_frames = image.shape[0] if is_timelapse else 1
-        detecting = (
-            f"Detecting (auto window: {config.window_method})..."
-            if config.auto_window
-            else "Detecting..."
-        )
-        if is_timelapse:
-            detecting = f"Detecting across {n_frames} timepoints..."
-        self._show_status(detecting)
-
-        from percell4.gui.workers import Worker
-
-        worker_fn = run_adaptive_detection_stack if is_timelapse else run_adaptive_detection
-        self._worker = Worker(
-            worker_fn, image, config.gaussian_sigma, settings, config.auto_window, config.window_method
-        )
-        self._worker.finished.connect(self._on_detect_done)
-        self._worker.error.connect(self._on_detect_error)
-        self._worker.start()
-
-    def _run_manual_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
-        """Creator path for manual mode (Auto off): explicit window, off the segmentation.
-
-        The window is the manual value resolved to an odd px count (px as-is, or
-        µm via the dataset pixel size). Detection goes per-cell against the active
-        segmentation's own noise floor when one is present (and single-frame);
-        otherwise it falls back to whole-frame detection.
-        """
-        from percell4.domain.measure.adaptive_clip import resolve_min_area_px, resolve_window_px
-
-        pixel_size_um = self._pixel_size_um(store)
-        try:
-            window_px = resolve_window_px(config.window_value, config.window_unit, pixel_size_um)
-            min_spot_px = max(
-                1, resolve_min_area_px(config.min_size_value, config.min_size_unit, pixel_size_um)
-            )
-        except ValueError as e:
-            self._show_status(str(e))
-            return
-
-        # Go off the active segmentation (per-cell) when present + single-frame;
-        # otherwise fall back to whole-frame detection.
-        seg = self.data_model.session.active_segmentation
-        labels = self._find_layer_data(viewer_win, "Labels", seg) if seg else None
-        per_cell = labels is not None and not is_timelapse and labels.shape == image.shape
-
-        existing = store.list_masks() if hasattr(store, "list_masks") else []
-        mask_name = prompt_for_resource_name(
-            self,
-            title="Save Adaptive Clipping Mask",
-            label="Mask name:",
-            default="adaptive",
-            existing_names=existing,
-        )
-        if mask_name is None:
-            return
-
-        self._pending_name = mask_name
-        self._pending_auto = False
-        self._pending_particle = False
-        self._run_btn.setEnabled(False)
-        self._settings.set_enabled(False)
-        if per_cell:
-            scope = "per-cell"
-        else:
-            scope = "whole-frame, per frame" if is_timelapse else "whole-frame"
-        self._show_status(f"Detecting (window {window_px} px, {scope})...")
-        print(
-            f"  [manual] window {window_px} px"
-            f" (from {config.window_value:g} {config.window_unit}), scope={scope}",
-            flush=True,
-        )
-
-        from percell4.gui.workers import Worker
-
-        if per_cell:
-            self._worker = Worker(
-                run_adaptive_detection_per_cell,
-                image,
-                labels,
-                window_px,
-                min_spot_px,
-                float(config.k),
-                config.gaussian_sigma,
-            )
-        else:
-            from percell4.workflows.models import PunctaDetectorSettings
-
-            settings = PunctaDetectorSettings(
-                detector_name="adaptive",
-                seed_detector_name="otsu",
-                background_estimator_name=config.noise_estimator,
-                detector_params={"window_px": window_px, "k": config.k},
-                min_spot_px=min_spot_px,
-                spot_scale_prior=(1.0, 4.0),
-            )
-            worker_fn = run_adaptive_detection_stack if is_timelapse else run_adaptive_detection
-            self._worker = Worker(
-                worker_fn, image, config.gaussian_sigma, settings, False, config.window_method
-            )
-        self._worker.finished.connect(self._on_detect_done)
-        self._worker.error.connect(self._on_detect_error)
-        self._worker.start()
-
-    def _run_multiscale_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
-        """Creator path for the multi-scale routine (per-cell, doubling windows).
-
-        Per-cell Otsu measures the particle-size range on the current image; the
-        starting window is ½ × mean particle (or the manual Window field); the
-        per-cell detector runs at a doubling window sequence until past the largest
-        particle, and the masks are OR-combined. Per-cell ⇒ requires an active
-        segmentation, single-frame.
-        """
-        if is_timelapse:
-            self._show_status("Multi-scale mode supports single-frame channels only")
-            return
-        seg = self.data_model.session.active_segmentation
-        if not seg:
-            self._show_status("Multi-scale mode needs an active segmentation")
-            return
-        labels = self._find_layer_data(viewer_win, "Labels", seg)
-        if labels is None:
-            self._show_status(f"Segmentation '{seg}' not found in viewer")
-            return
-        if labels.shape != image.shape:
-            self._show_status("Segmentation and channel shapes differ")
-            return
-
-        from percell4.domain.measure.adaptive_clip import (
-            assess_particle_sizes_per_cell,
-            multiscale_windows,
-            resolve_min_area_px,
-            resolve_window_px,
-        )
-
-        # Min-particle-size filter applied to the OR-combined output (µm² needs calibration).
-        try:
-            min_spot_px = max(
-                1,
-                resolve_min_area_px(
-                    config.min_size_value, config.min_size_unit, self._pixel_size_um(store)
-                ),
-            )
-        except ValueError as e:
-            self._show_status(str(e))
-            return
-
-        # First pass: per-cell Otsu size assessment on the current image.
-        report = assess_particle_sizes_per_cell(
-            image, labels, config.gaussian_sigma, cutoff_px=float(config.size_cutoff_px)
-        )
-        if report is None:
-            self._show_status("Multi-scale: Otsu found no particles to size from")
-            return
-
-        # Starting window: ½ × mean particle (auto) or the manual Window field.
-        if config.ms_auto_start:
-            start_window_px = max(3, int(round(0.5 * report.mean_px)) | 1)
-        else:
-            try:
-                start_window_px = resolve_window_px(
-                    config.window_value, config.window_unit, self._pixel_size_um(store)
-                )
-            except ValueError as e:
-                self._show_status(str(e))
-                return
-
-        force_passes = config.ms_iterations if config.ms_iterations > 0 else None
-        windows = multiscale_windows(
-            start_window_px, report.largest_px, force_passes=force_passes
-        )
-        stop_note = (
-            f"{len(windows)} forced passes"
-            if force_passes
-            else "stop > largest"
-        )
-        # Debug: raw Otsu min/max (calibration), post-cutoff stats, and the windows.
-        print(
-            f"  [multi-scale] Otsu raw particle Ø: min {report.raw_min_px:.2f} px, "
-            f"max {report.raw_max_px:.2f} px  (n_raw={report.n_raw})\n"
-            f"    post-cutoff (>= {config.size_cutoff_px:g} px): smallest "
-            f"{report.smallest_px:.2f}, mean {report.mean_px:.2f}, largest "
-            f"{report.largest_px:.2f}, range {report.range_px:.2f}  (n={report.n_particles})\n"
-            f"    start window {start_window_px} px "
-            f"({'½×mean auto' if config.ms_auto_start else 'manual'}); "
-            f"windows {windows} ({stop_note}); min particle {min_spot_px} px² (output filter)",
-            flush=True,
-        )
-
-        existing = store.list_masks() if hasattr(store, "list_masks") else []
-        mask_name = prompt_for_resource_name(
-            self,
-            title="Save Adaptive Clipping Mask",
-            label="Mask name:",
-            default="adaptive",
-            existing_names=existing,
-        )
-        if mask_name is None:
-            return
-
-        self._pending_name = mask_name
-        self._pending_auto = False
-        self._pending_particle = False
-        self._run_btn.setEnabled(False)
-        self._settings.set_enabled(False)
-        self._show_status(
-            f"Detecting (multi-scale, {len(windows)} windows {windows[0]}–{windows[-1]} px)..."
-        )
-
-        from percell4.gui.workers import Worker
-
-        self._worker = Worker(
-            run_adaptive_detection_multiscale,
-            image,
-            labels,
-            start_window_px,
-            report.largest_px,
-            float(config.k),
-            config.gaussian_sigma,
-            force_passes,
-            min_spot_px,
-        )
-        self._worker.finished.connect(self._on_detect_done)
-        self._worker.error.connect(self._on_detect_error)
-        self._worker.start()
+        # Auto extraction (two-pass) is the only detection mode.
+        self._run_auto_extract_mode(config, image, is_timelapse, store, viewer_win)
 
     def _run_auto_extract_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
         """Creator path for the two-pass auto-extraction routine (per-cell).
@@ -1000,105 +555,8 @@ class AdaptiveClipPanel(QWidget):
         else:
             self._on_detect_done((mask, report.fine_window))
 
-    def _run_particle_mode(self, config, image, is_timelapse, store, viewer_win) -> None:
-        """Creator path for the one-knob particle-size detector (per-cell).
-
-        The smallest-particle Ø is re-measured FRESH from the current image's Otsu
-        first-pass at each run and drives the window (the d_min field is a readout
-        only); the run never reuses a cached value. Requires a known pixel size
-        (the window is physical) and an active segmentation (σ is per-cell).
-        Restricted to single-frame channels — the per-cell loop expects 2D image +
-        2D labels.
-        """
-        if is_timelapse:
-            self._show_status("Particle-size mode supports single-frame channels only")
-            return
-
-        pixel_size_um = self._pixel_size_um(store)
-        if not pixel_size_um or float(pixel_size_um) <= 0:
-            self._show_status(
-                "Particle-size mode needs a known pixel size (µm/px) on this dataset"
-            )
-            return
-
-        seg = self.data_model.session.active_segmentation
-        if not seg:
-            self._show_status("Particle-size mode needs an active segmentation")
-            return
-        labels = self._find_layer_data(viewer_win, "Labels", seg)
-        if labels is None:
-            self._show_status(f"Segmentation '{seg}' not found in viewer")
-            return
-        if labels.shape != image.shape:
-            self._show_status("Segmentation and channel shapes differ")
-            return
-
-        # Re-detect the smallest particle FRESH on this dataset (the d_min field is
-        # a readout, not an input): the window is sized from the current image's
-        # Otsu first-pass, never a cached/stale value.
-        from percell4.domain.measure.adaptive_clip import otsu_smallest_particle
-
-        try:
-            report = otsu_smallest_particle(
-                image,
-                config.gaussian_sigma,
-                float(pixel_size_um),
-                cp_mask=labels > 0,
-                percentile=config.particle_percentile,
-            )
-        except Exception as e:  # noqa: BLE001 — surface any detection failure
-            self._show_status(f"Otsu first-pass failed: {e}")
-            return
-        if report is None:
-            self._show_status(
-                "Otsu first-pass found no particle to size the window — "
-                "check the channel / segmentation"
-            )
-            return
-        d_min_um = report.d_min_um
-        self._settings.set_d_min_um(d_min_um)  # surface the value the run will use
-        self._print_otsu_report(report)
-
-        existing = store.list_masks() if hasattr(store, "list_masks") else []
-        mask_name = prompt_for_resource_name(
-            self,
-            title="Save Adaptive Clipping Mask",
-            label="Mask name:",
-            default="adaptive",
-            existing_names=existing,
-        )
-        if mask_name is None:
-            return
-
-        self._pending_name = mask_name
-        self._pending_auto = False
-        self._pending_particle = True
-        self._pending_d_min = float(d_min_um)
-        self._run_btn.setEnabled(False)
-        self._settings.set_enabled(False)
-        self._show_status(
-            f"Detecting (smallest particle {d_min_um:g} µm, per-cell)..."
-        )
-
-        from percell4.gui.workers import Worker
-
-        self._worker = Worker(
-            run_adaptive_detection_by_particle_size,
-            image,
-            labels,
-            float(pixel_size_um),
-            float(d_min_um),
-            float(config.k),  # sensitivity knob (defaults to 1; raise to be conservative)
-            config.gaussian_sigma,
-        )
-        self._worker.finished.connect(self._on_detect_done)
-        self._worker.error.connect(self._on_detect_error)
-        self._worker.start()
-
     def _on_detect_error(self, err) -> None:
-        # Clear the pending flags so a failed run cannot mislabel the NEXT run
-        # (e.g. a failed per-cell run leaving _pending_particle set, which would
-        # then overwrite the manual Window spinbox + fabricate a per-cell note).
+        # Clear the pending flags so a failed run cannot mislabel the NEXT run.
         self._pending_auto = False
         self._pending_particle = False
         self._run_btn.setEnabled(True)
@@ -1106,15 +564,15 @@ class AdaptiveClipPanel(QWidget):
         self._show_status(f"Detection error: {err.exc_type}: {err.message}")
 
     def _on_detect_done(self, result) -> None:
-        mask, window_used = result
+        """Creator-save the detected mask (shared by the auto-extraction handler).
+
+        ``result`` is ``(mask, window_used)`` — ``window_used`` is the per-frame
+        fine-window list (stack) or one int (single frame); it is no longer
+        surfaced in the UI (the form has no window field), so it is ignored here.
+        """
+        mask, _window_used = result
         self._run_btn.setEnabled(True)
         self._settings.set_enabled(True)
-
-        # The time-lapse stack worker returns a per-frame list of windows;
-        # the single-frame worker returns one int. Normalize for the spinbox
-        # (show the first frame's auto window) and the status note.
-        is_stack = isinstance(window_used, (list, tuple))
-        window_display = (window_used[0] if window_used else 0) if is_stack else window_used
 
         name = self._pending_name or "adaptive"
         try:
@@ -1131,26 +589,9 @@ class AdaptiveClipPanel(QWidget):
         if viewer_win is not None:
             viewer_win.add_mask(np.asarray(mask, dtype=np.uint8), name=name)
 
-        # Surface the window that was used (auto-estimated, or derived from d_min).
-        if self._pending_auto or self._pending_particle:
-            self._settings.set_window_value(window_display)
-
-        if self._pending_particle:
-            win_note = (
-                f" (Ø {self._pending_d_min:g} µm → window {window_display} px, per-cell)"
-            )
-        elif self._pending_auto:
-            win_note = (
-                f" (auto window {window_display}, per frame)"
-                if is_stack
-                else f" (auto window {window_display})"
-            )
-        else:
-            win_note = ""
-        self._pending_particle = False
         # A new mask is now available as a CNR classification source.
         self._refresh_cnr_masks()
-        self._show_status(f"Saved '{name}': {res.n_positive:,} px{win_note}")
+        self._show_status(f"Saved '{name}': {res.n_positive:,} px")
 
     # ── CNR subpopulation classification (Action) ─────────────────
 

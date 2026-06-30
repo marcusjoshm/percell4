@@ -26,40 +26,6 @@ def _fake_report(image, presmooth_sigma_px, n_pos):
     )
 
 
-def test_run_adaptive_detection_stack_loops_and_stacks(monkeypatch):
-    """The stack worker runs detection per frame and stacks to (T,H,W); each
-    frame's mask is that frame's own detection (not frame 0 broadcast), and the
-    auto window is computed per frame (contract D3)."""
-
-    def fake_detect(frame, sigma, settings, auto_window, window_method="otsu-mean"):
-        # Encode the frame's mean in the window so per-frame computation shows.
-        w = int(frame.mean())
-        m = (frame > frame.mean()).astype(np.uint8)
-        return m, w
-
-    monkeypatch.setattr(acp, "run_adaptive_detection", fake_detect)
-
-    image = np.stack(
-        [
-            np.full((4, 4), 1, dtype=np.float32),
-            np.full((4, 4), 10, dtype=np.float32),
-        ],
-        axis=0,
-    )
-    image[1, 0, 0] = 100  # frame 1 has a bright pixel -> non-trivial mask
-
-    mask, windows = acp.run_adaptive_detection_stack(image, 0.0, object(), True)
-
-    assert mask.shape == (2, 4, 4)
-    assert mask.dtype == np.uint8
-    # Per-frame windows differ -> the window was computed per frame, not once.
-    assert windows == [1, 15]
-    assert windows[0] != windows[1]
-    # Frame 1's mask flags only its bright pixel; frame 0 is uniform -> all zero.
-    assert mask[0].sum() == 0
-    assert mask[1, 0, 0] == 1
-
-
 def test_run_adaptive_auto_extract_stack_loops_and_stacks(monkeypatch):
     """The auto-extract stack worker runs auto_extract per frame and stacks to (T,H,W);
     each frame is sized on its own data (not frame 0 broadcast)."""
