@@ -254,20 +254,15 @@ class LauncherWindow(QMainWindow):
         return self._io_panel
 
     def _create_viewer_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setAlignment(Qt.AlignTop)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        from percell4.interfaces.gui.task_panels.viewer_panel import ViewerPanel
 
-        layout.addWidget(theme.section_label("Viewer"))
-
-        btn_open = QPushButton("Open Viewer")
-        btn_open.clicked.connect(lambda: self._show_window("viewer"))
-        layout.addWidget(btn_open)
-
-        layout.addStretch()
-        return panel
+        self._viewer_panel = ViewerPanel(
+            self.data_model,
+            show_window=self._show_window,
+            get_viewer_window=lambda: self._windows.get("viewer"),
+            show_status=lambda msg: self.statusBar().showMessage(msg),
+        )
+        return self._viewer_panel
 
     def _create_segment_panel(self) -> QWidget:
         from percell4.gui.segmentation_panel import SegmentationPanel
