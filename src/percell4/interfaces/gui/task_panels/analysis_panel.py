@@ -176,21 +176,6 @@ class AnalysisPanel(QWidget):
         adaptive_layout.addWidget(self._adaptive_clip_panel)
         layout.addWidget(adaptive_group)
 
-        # ── Iterative Otsu Thresholding ──
-        from percell4.gui.iterative_otsu_panel import IterativeOtsuPanel
-
-        self._iterative_otsu_panel = IterativeOtsuPanel(
-            self.data_model,
-            get_repo=self._get_repo,
-            get_store=self._get_store,
-            get_viewer_window=self._get_viewer_window,
-            show_status=self._show_status,
-        )
-        iterative_group = QGroupBox("Iterative Otsu Thresholding")
-        iterative_layout = QVBoxLayout(iterative_group)
-        iterative_layout.addWidget(self._iterative_otsu_panel)
-        layout.addWidget(iterative_group)
-
         # ── Measurements group ──
         meas_group = QGroupBox("Measurements")
         meas_layout = QVBoxLayout(meas_group)

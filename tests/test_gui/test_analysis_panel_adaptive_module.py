@@ -38,7 +38,8 @@ def test_adaptive_module_present_and_positioned(qtbot):
     assert titles.index("Adaptive Local Clipping") < titles.index("Measurements")
 
 
-def test_iterative_otsu_module_present_and_positioned(qtbot):
+def test_iterative_otsu_module_removed(qtbot):
+    """The Iterative Otsu Thresholding GUI module no longer exists (U5)."""
     from percell4.interfaces.gui.task_panels.analysis_panel import AnalysisPanel
     from percell4.model import CellDataModel
 
@@ -53,12 +54,5 @@ def test_iterative_otsu_module_present_and_positioned(qtbot):
     )
     qtbot.addWidget(panel)
 
-    titles = _ordered_group_titles(panel)
-    assert "Iterative Otsu Thresholding" in titles
-    # Mounts right after Adaptive Local Clipping, before Measurements.
-    assert (
-        titles.index("Iterative Otsu Thresholding")
-        == titles.index("Adaptive Local Clipping") + 1
-    )
-    assert titles.index("Iterative Otsu Thresholding") < titles.index("Measurements")
-    assert panel._iterative_otsu_panel is not None
+    assert "Iterative Otsu Thresholding" not in _ordered_group_titles(panel)
+    assert not hasattr(panel, "_iterative_otsu_panel")
