@@ -1,4 +1,4 @@
-"""U5: the Adaptive Local Clipping module mounts after Grouped Thresholding."""
+"""U7: the Analysis tab modules render in detection-first order."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _ordered_group_titles(panel) -> list[str]:
     return titles
 
 
-def test_adaptive_module_present_and_positioned(qtbot):
+def test_analysis_modules_in_detection_first_order(qtbot):
     from percell4.interfaces.gui.task_panels.analysis_panel import AnalysisPanel
     from percell4.model import CellDataModel
 
@@ -31,11 +31,13 @@ def test_adaptive_module_present_and_positioned(qtbot):
     )
     qtbot.addWidget(panel)
 
-    titles = _ordered_group_titles(panel)
-    assert "Adaptive Local Clipping" in titles
-    # Immediately after Grouped Thresholding, and before Measurements.
-    assert titles.index("Adaptive Local Clipping") == titles.index("Grouped Thresholding") + 1
-    assert titles.index("Adaptive Local Clipping") < titles.index("Measurements")
+    assert _ordered_group_titles(panel) == [
+        "Adaptive Local Clipping",
+        "Particle Analysis",
+        "Measurements",
+        "Grouped Thresholding",
+        "Whole Field Thresholding",
+    ]
 
 
 def test_iterative_otsu_module_removed(qtbot):

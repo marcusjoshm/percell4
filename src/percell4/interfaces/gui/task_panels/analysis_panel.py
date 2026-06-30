@@ -79,6 +79,101 @@ class AnalysisPanel(QWidget):
 
         layout.addWidget(theme.section_label("Analysis"))
 
+        # Module order is detection-first: the most-used detection tool
+        # (Adaptive Local Clipping) on top, paired with Particle Analysis
+        # (which consumes the mask it produces), then Measurements; the two
+        # thresholding modules sit at the bottom.
+
+        # ── Adaptive Local Clipping ──
+        from percell4.gui.adaptive_clip_panel import AdaptiveClipPanel
+
+        self._adaptive_clip_panel = AdaptiveClipPanel(
+            self.data_model,
+            get_repo=self._get_repo,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
+        )
+        adaptive_group = QGroupBox("Adaptive Local Clipping")
+        adaptive_layout = QVBoxLayout(adaptive_group)
+        adaptive_layout.addWidget(self._adaptive_clip_panel)
+        layout.addWidget(adaptive_group)
+
+        # ── Particle Analysis ──
+        particle_group = QGroupBox("Particle Analysis")
+        particle_layout = QVBoxLayout(particle_group)
+
+        particle_layout.addWidget(QLabel(
+            "Counts particles within each cell using\n"
+            "the active mask as the particle source."
+        ))
+
+        min_area_row = QHBoxLayout()
+        min_area_row.addWidget(QLabel("Min particle area (px):"))
+        self._particle_min_area = QSpinBox()
+        self._particle_min_area.setRange(1, 10000)
+        self._particle_min_area.setValue(1)
+        min_area_row.addWidget(self._particle_min_area)
+        particle_layout.addLayout(min_area_row)
+
+        btn_particle = QPushButton("Analyze Particles")
+        btn_particle.clicked.connect(self._on_analyze_particles)
+        particle_layout.addWidget(btn_particle)
+
+        btn_export_particle = QPushButton("Export Particle Data to CSV...")
+        btn_export_particle.clicked.connect(self._on_export_particle_csv)
+        particle_layout.addWidget(btn_export_particle)
+
+        self._particle_result_label = QLabel("")
+        self._particle_result_label.setWordWrap(True)
+        particle_layout.addWidget(self._particle_result_label)
+
+        layout.addWidget(particle_group)
+
+        # ── Measurements group ──
+        meas_group = QGroupBox("Measurements")
+        meas_layout = QVBoxLayout(meas_group)
+
+        meas_layout.addWidget(QLabel(
+            "Measures per-cell metrics using the active\n"
+            "channel, segmentation, and mask from Data tab."
+        ))
+
+        self._meas_result_label = QLabel("")
+        self._meas_result_label.setWordWrap(True)
+        meas_layout.addWidget(self._meas_result_label)
+
+        btn_measure = QPushButton("Measure Cells")
+        btn_measure.clicked.connect(self._on_measure_cells)
+        meas_layout.addWidget(btn_measure)
+
+        btn_row = QHBoxLayout()
+        btn_plot = QPushButton("Open Data Plot")
+        btn_plot.clicked.connect(lambda: self._show_window("data_plot"))
+        btn_row.addWidget(btn_plot)
+
+        btn_table = QPushButton("Open Cell Table")
+        btn_table.clicked.connect(lambda: self._show_window("cell_table"))
+        btn_row.addWidget(btn_table)
+        meas_layout.addLayout(btn_row)
+
+        layout.addWidget(meas_group)
+
+        # ── Grouped Thresholding ──
+        from percell4.gui.grouped_seg_panel import GroupedSegPanel
+
+        self._grouped_seg_panel = GroupedSegPanel(
+            self.data_model,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
+            repopulate_viewer=self._repopulate_viewer_cb,
+        )
+        grouped_group = QGroupBox("Grouped Thresholding")
+        grouped_layout = QVBoxLayout(grouped_group)
+        grouped_layout.addWidget(self._grouped_seg_panel)
+        layout.addWidget(grouped_group)
+
         # ── Whole Field Thresholding group ──
         thresh_group = QGroupBox("Whole Field Thresholding")
         thresh_layout = QVBoxLayout(thresh_group)
@@ -145,96 +240,6 @@ class AnalysisPanel(QWidget):
         thresh_layout.addWidget(self._thresh_result_label)
 
         layout.addWidget(thresh_group)
-
-        # ── Grouped Thresholding ──
-        from percell4.gui.grouped_seg_panel import GroupedSegPanel
-
-        self._grouped_seg_panel = GroupedSegPanel(
-            self.data_model,
-            get_store=self._get_store,
-            get_viewer_window=self._get_viewer_window,
-            show_status=self._show_status,
-            repopulate_viewer=self._repopulate_viewer_cb,
-        )
-        grouped_group = QGroupBox("Grouped Thresholding")
-        grouped_layout = QVBoxLayout(grouped_group)
-        grouped_layout.addWidget(self._grouped_seg_panel)
-        layout.addWidget(grouped_group)
-
-        # ── Adaptive Local Clipping ──
-        from percell4.gui.adaptive_clip_panel import AdaptiveClipPanel
-
-        self._adaptive_clip_panel = AdaptiveClipPanel(
-            self.data_model,
-            get_repo=self._get_repo,
-            get_store=self._get_store,
-            get_viewer_window=self._get_viewer_window,
-            show_status=self._show_status,
-        )
-        adaptive_group = QGroupBox("Adaptive Local Clipping")
-        adaptive_layout = QVBoxLayout(adaptive_group)
-        adaptive_layout.addWidget(self._adaptive_clip_panel)
-        layout.addWidget(adaptive_group)
-
-        # ── Measurements group ──
-        meas_group = QGroupBox("Measurements")
-        meas_layout = QVBoxLayout(meas_group)
-
-        meas_layout.addWidget(QLabel(
-            "Measures per-cell metrics using the active\n"
-            "channel, segmentation, and mask from Data tab."
-        ))
-
-        self._meas_result_label = QLabel("")
-        self._meas_result_label.setWordWrap(True)
-        meas_layout.addWidget(self._meas_result_label)
-
-        btn_measure = QPushButton("Measure Cells")
-        btn_measure.clicked.connect(self._on_measure_cells)
-        meas_layout.addWidget(btn_measure)
-
-        btn_row = QHBoxLayout()
-        btn_plot = QPushButton("Open Data Plot")
-        btn_plot.clicked.connect(lambda: self._show_window("data_plot"))
-        btn_row.addWidget(btn_plot)
-
-        btn_table = QPushButton("Open Cell Table")
-        btn_table.clicked.connect(lambda: self._show_window("cell_table"))
-        btn_row.addWidget(btn_table)
-        meas_layout.addLayout(btn_row)
-
-        layout.addWidget(meas_group)
-
-        # ── Particle Analysis ──
-        particle_group = QGroupBox("Particle Analysis")
-        particle_layout = QVBoxLayout(particle_group)
-
-        particle_layout.addWidget(QLabel(
-            "Counts particles within each cell using\n"
-            "the active mask as the particle source."
-        ))
-
-        min_area_row = QHBoxLayout()
-        min_area_row.addWidget(QLabel("Min particle area (px):"))
-        self._particle_min_area = QSpinBox()
-        self._particle_min_area.setRange(1, 10000)
-        self._particle_min_area.setValue(1)
-        min_area_row.addWidget(self._particle_min_area)
-        particle_layout.addLayout(min_area_row)
-
-        btn_particle = QPushButton("Analyze Particles")
-        btn_particle.clicked.connect(self._on_analyze_particles)
-        particle_layout.addWidget(btn_particle)
-
-        btn_export_particle = QPushButton("Export Particle Data to CSV...")
-        btn_export_particle.clicked.connect(self._on_export_particle_csv)
-        particle_layout.addWidget(btn_export_particle)
-
-        self._particle_result_label = QLabel("")
-        self._particle_result_label.setWordWrap(True)
-        particle_layout.addWidget(self._particle_result_label)
-
-        layout.addWidget(particle_group)
 
         layout.addStretch()
 
