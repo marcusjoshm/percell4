@@ -1,10 +1,11 @@
 """Regression tests for Manual Editing auto-save (segmentation_panel.py).
 
-Bug: edits made via the Manual Editing buttons (Delete Selected Label,
+Bug: edits made via the Edit Labels buttons (Delete Selected Label,
 Add New Label, Clean Up Labels, Relabel Sequential) and via napari's own
 brush/erase tools modified ``labels_layer.data`` only — they did not
 write to HDF5. Closing and reloading the dataset silently lost every
-edit unless the user clicked the separate "Save Labels to HDF5" button.
+edit. (The old manual "Save Labels to HDF5" button was removed once
+auto-save made it redundant — auto-save is now the only persistence path.)
 
 Fix: every button handler now calls ``_persist_labels_layer`` after its
 in-memory write, and napari ``Labels.events.paint`` strokes are wired to

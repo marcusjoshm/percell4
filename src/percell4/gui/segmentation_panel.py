@@ -94,8 +94,7 @@ class SegmentationPanel(QWidget):
         if change.data:
             # A dataset was loaded (or cleared). Wire auto-save so that any
             # napari-level paint/erase or in-place mutations on Labels
-            # layers get persisted without the user remembering to click
-            # "Save Labels to HDF5".
+            # layers get persisted automatically — no manual save step.
             # Defer to the next event-loop tick: ``Session.set_dataset``
             # emits ``state_changed.data`` *before* the launcher's load path
             # creates the viewer window and adds Labels layers, so wiring
@@ -178,26 +177,18 @@ class SegmentationPanel(QWidget):
         track_layout.addWidget(self._btn_track)
         layout.addWidget(track_group)
 
-        # ── Manual Editing section ─────────────────────────────
-        draw_group = QGroupBox("Manual Editing")
-        draw_layout = QVBoxLayout(draw_group)
+        # ── Edit Labels section (manual editing + cleanup) ─────
+        edit_group = QGroupBox("Edit Labels")
+        edit_layout = QVBoxLayout(edit_group)
 
-        draw_layout.addWidget(QLabel(
+        edit_layout.addWidget(QLabel(
             "Create, add, or remove labels using napari's\n"
             "built-in paint/fill/erase tools."
         ))
 
         btn_new_labels = QPushButton("Create Empty Labels Layer")
         btn_new_labels.clicked.connect(self._on_create_empty_labels)
-        draw_layout.addWidget(btn_new_labels)
-
-        btn_delete_label = QPushButton("Delete Selected Label")
-        btn_delete_label.setToolTip(
-            "Click a cell in the viewer, then click this button\n"
-            "to remove that label from the active labels layer."
-        )
-        btn_delete_label.clicked.connect(self._on_delete_selected_label)
-        draw_layout.addWidget(btn_delete_label)
+        edit_layout.addWidget(btn_new_labels)
 
         btn_add_label = QPushButton("Add New Label (next ID)")
         btn_add_label.setToolTip(
@@ -205,7 +196,15 @@ class SegmentationPanel(QWidget):
             "so you can draw a new cell with napari's polygon tool."
         )
         btn_add_label.clicked.connect(self._on_add_new_label)
-        draw_layout.addWidget(btn_add_label)
+        edit_layout.addWidget(btn_add_label)
+
+        btn_delete_label = QPushButton("Delete Selected Label")
+        btn_delete_label.setToolTip(
+            "Click a cell in the viewer, then click this button\n"
+            "to remove that label from the active labels layer."
+        )
+        btn_delete_label.clicked.connect(self._on_delete_selected_label)
+        edit_layout.addWidget(btn_delete_label)
 
         btn_relabel = self._btn_relabel = QPushButton(
             "Clean Up Labels (relabel sequential)"
@@ -215,15 +214,9 @@ class SegmentationPanel(QWidget):
             "after adding or deleting cells."
         )
         btn_relabel.clicked.connect(self._on_relabel_sequential)
-        draw_layout.addWidget(btn_relabel)
+        edit_layout.addWidget(btn_relabel)
 
-        layout.addWidget(draw_group)
-
-        # ── Label Cleanup section ─────────────────────────────
-        cleanup_group = QGroupBox("Label Cleanup")
-        cleanup_layout = QVBoxLayout(cleanup_group)
-
-        cleanup_layout.addWidget(QLabel(
+        edit_layout.addWidget(QLabel(
             "Remove partial cells at image edges and\n"
             "cells below a minimum area threshold."
         ))
@@ -238,7 +231,7 @@ class SegmentationPanel(QWidget):
             ">0 = also remove cells within this many pixels of the border."
         )
         margin_row.addWidget(self._cleanup_margin)
-        cleanup_layout.addLayout(margin_row)
+        edit_layout.addLayout(margin_row)
 
         min_area_row = QHBoxLayout()
         min_area_row.addWidget(QLabel("Min cell area (px):"))
@@ -250,7 +243,7 @@ class SegmentationPanel(QWidget):
             "0 = no area filtering."
         )
         min_area_row.addWidget(self._cleanup_min_area)
-        cleanup_layout.addLayout(min_area_row)
+        edit_layout.addLayout(min_area_row)
 
         btn_preview = QPushButton("Preview Removal")
         btn_preview.setToolTip(
@@ -258,28 +251,22 @@ class SegmentationPanel(QWidget):
             "Does not modify the labels layer."
         )
         btn_preview.clicked.connect(self._on_cleanup_preview)
-        cleanup_layout.addWidget(btn_preview)
+        edit_layout.addWidget(btn_preview)
 
         self._btn_apply_cleanup = QPushButton("Apply Removal")
         self._btn_apply_cleanup.setEnabled(False)
         self._btn_apply_cleanup.clicked.connect(self._on_cleanup_apply)
-        cleanup_layout.addWidget(self._btn_apply_cleanup)
+        edit_layout.addWidget(self._btn_apply_cleanup)
 
         self._cleanup_status = QLabel("")
         self._cleanup_status.setWordWrap(True)
-        cleanup_layout.addWidget(self._cleanup_status)
+        edit_layout.addWidget(self._cleanup_status)
 
-        layout.addWidget(cleanup_group)
+        auto_saved = QLabel("Edits auto-saved to the dataset.")
+        auto_saved.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        edit_layout.addWidget(auto_saved)
 
-        # ── Save ──────────────────────────────────────────────
-        save_group = QGroupBox("Save")
-        save_layout = QVBoxLayout(save_group)
-
-        btn_save = QPushButton("Save Labels to HDF5")
-        btn_save.clicked.connect(self._on_save_labels)
-        save_layout.addWidget(btn_save)
-
-        layout.addWidget(save_group)
+        layout.addWidget(edit_group)
 
         layout.addStretch()
 
@@ -1009,30 +996,3 @@ class SegmentationPanel(QWidget):
         self._cleanup_status.setStyleSheet(f"color: {theme.SUCCESS};")
         self._show_status(f"Cleanup: removed {total_removed}, {n_remaining} remaining")
 
-    # ── Save ──────────────────────────────────────────────────
-
-    def _on_save_labels(self) -> None:
-        store = getattr(self._launcher, "_current_store", None) if self._launcher else None
-        if store is None:
-            self._show_status("No dataset loaded")
-            return
-        viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self._show_status("Viewer not open")
-            return
-
-        import napari
-        active = viewer_win.viewer.layers.selection.active
-        if active is not None and isinstance(active, napari.layers.Labels):
-            name = active.name
-            data = active.data
-        else:
-            labels_layer = self._get_active_labels_layer()
-            if labels_layer is None:
-                self._show_status("No labels layer to save")
-                return
-            name = labels_layer.name
-            data = labels_layer.data
-
-        count = store.write_labels(name, np.asarray(data, dtype=np.int32))
-        self._show_status(f"Saved labels '{name}' ({count} pixels)")
