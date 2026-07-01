@@ -204,7 +204,7 @@ class LauncherWindow(QMainWindow):
         categories = [
             ("I/O", self._create_io_panel),
             ("Viewer", self._create_viewer_panel),
-            ("Segment", self._create_segment_panel),
+            ("Segmentation", self._create_segment_panel),
             ("Analysis", self._create_analysis_panel),
             ("FLIM", self._create_flim_panel),
             ("Workflows", self._create_scripts_workflows_panel),
