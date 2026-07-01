@@ -107,14 +107,14 @@ def test_merged_panel_keeps_all_five_workflow_buttons(qtbot):
     } <= labels
 
 
-def test_sidebar_has_seven_tabs_and_no_standalone_scripts_or_workflows(qtbot):
+def test_sidebar_has_seven_tabs_with_merged_workflows_tab(qtbot):
     launcher = _make_launcher()
     qtbot.addWidget(launcher)
     names = [b.text() for b in launcher._sidebar_buttons]
     assert len(names) == 7
+    # No standalone "Scripts" tab; the merged tab is named "Workflows".
     assert "Scripts" not in names
-    assert "Workflows" not in names
-    assert "Analyses & Workflows" in names
+    assert "Workflows" in names
 
 
 def test_on_open_analysis_workflow_locked_short_circuits(qtbot, monkeypatch):

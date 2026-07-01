@@ -207,7 +207,7 @@ class LauncherWindow(QMainWindow):
             ("Segment", self._create_segment_panel),
             ("Analysis", self._create_analysis_panel),
             ("FLIM", self._create_flim_panel),
-            ("Analyses & Workflows", self._create_scripts_workflows_panel),
+            ("Workflows", self._create_scripts_workflows_panel),
             ("Data", self._create_data_panel),
         ]
 
@@ -308,7 +308,7 @@ class LauncherWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(theme.section_label("Analyses & Workflows"))
+        layout.addWidget(theme.section_label("Workflows"))
 
         # ── Analyses (dynamically registered single analyses) ──
         # Importing the analysis package fires every module's
