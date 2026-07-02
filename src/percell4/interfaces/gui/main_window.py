@@ -208,6 +208,7 @@ class LauncherWindow(QMainWindow):
             ("Analysis", self._create_analysis_panel),
             ("FLIM", self._create_flim_panel),
             ("Workflows", self._create_scripts_workflows_panel),
+            ("Batch Tools", self._create_batch_console_panel),
             ("Data", self._create_data_panel),
         ]
 
@@ -220,7 +221,13 @@ class LauncherWindow(QMainWindow):
             self._sidebar_buttons.append(btn)
 
             panel = panel_factory()
-            self._content_stack.addWidget(self._wrap_in_scroll(panel))
+            # Panels that manage their own scrolling (e.g. the streaming
+            # Batch Tools console) are added directly; the rest are wrapped
+            # in a QScrollArea so they can exceed the window height.
+            if getattr(panel, "manages_own_scroll", False):
+                self._content_stack.addWidget(panel)
+            else:
+                self._content_stack.addWidget(self._wrap_in_scroll(panel))
 
         sidebar_layout.addStretch()
         layout.addWidget(sidebar)
@@ -888,6 +895,37 @@ class LauncherWindow(QMainWindow):
             show_status=lambda msg: self.statusBar().showMessage(msg),
         )
         return self._data_panel
+
+    def _create_batch_console_panel(self) -> QWidget:
+        from percell4.interfaces.gui.task_panels.batch_console_panel import (
+            BatchConsolePanel,
+        )
+
+        self._batch_console_panel = BatchConsolePanel(
+            get_open_h5_path=lambda: getattr(self, "_current_h5_path", None),
+            reload_open_dataset=self._reload_current_dataset,
+            show_status=lambda msg: self.statusBar().showMessage(msg),
+        )
+        return self._batch_console_panel
+
+    def _reload_current_dataset(self) -> None:
+        """Reload the open dataset from disk after a batch run that wrote it.
+
+        A full re-open via ``_load_h5_into_viewer``: refreshes handle
+        metadata, the segmentation/mask dropdowns, and the viewer, so
+        segmentations or masks a batch tool wrote into the open ``.h5``
+        become visible. This resets session selection/active fields and
+        re-shows the viewer (a documented tradeoff; a non-resetting surgical
+        refresh is deferred). No-op when nothing is open.
+
+        Note: ``percell4-batch-measure`` writes external CSV/parquet run
+        folders, not the ``.h5``, and the app has no on-open
+        measurements-from-disk load — so per-cell measurements are not part
+        of this reload.
+        """
+        h5_path = getattr(self, "_current_h5_path", None)
+        if h5_path:
+            self._load_h5_into_viewer(h5_path)
 
     # ── Helpers ────────────────────────────────────────────────
 

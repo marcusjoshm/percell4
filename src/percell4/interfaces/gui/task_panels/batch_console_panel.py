@@ -53,6 +53,10 @@ _OUTPUT_TAIL_CAP = 8192
 class BatchConsolePanel(QWidget):
     """Command console for running the ``percell4-*`` batch CLI catalog."""
 
+    # The streaming console manages its own scroll — the launcher adds it to
+    # the content stack directly rather than wrapping it in a QScrollArea.
+    manages_own_scroll = True
+
     def __init__(
         self,
         *,
