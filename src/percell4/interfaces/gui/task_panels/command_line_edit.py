@@ -62,6 +62,10 @@ class CommandLineEdit(QLineEdit):
         if usable:
             self.insert(" ".join(shlex.quote(p) for p in usable) + " ")
 
+    def submit(self) -> None:
+        """Submit the current text as if Enter was pressed (for a Run button)."""
+        self._on_return()
+
     # ── history ─────────────────────────────────────────────────────────
 
     def _on_return(self) -> None:
