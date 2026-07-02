@@ -21,13 +21,15 @@ Usage:
     # Verbose: surface Cellpose/laptrack native logs + per-frame timing:
     percell4-batch-cellpose-laptrack /data/h5/movie.h5 --verbose
 
-Each positional argument is either a dataset's TIFF source **directory** (which
-is imported to ``<output-dir>/<source_dirname>.h5``) or an already-compressed
-``.h5`` **file** (the compress/import step is skipped). With ``--output-dir``
-an ``.h5`` source is copied there first and the copy is processed; without it
-the ``.h5`` is segmented in place. TIFF directory sources require
-``--output-dir``. Time-lapse datasets (``_tN`` filename tokens) are segmented
-across every timepoint and tracked unless ``--no-track`` is given.
+Each positional argument is an already-compressed ``.h5`` **file** (the
+compress/import step is skipped), a **directory of ``.h5`` files** (globbed
+non-recursively, one dataset per file), or a dataset's TIFF source
+**directory** (a folder with no ``.h5`` files, imported to
+``<output-dir>/<source_dirname>.h5``). With ``--output-dir`` an ``.h5`` source
+is copied there first and the copy is processed; without it the ``.h5`` is
+segmented in place. TIFF directory sources require ``--output-dir``. Time-lapse
+datasets (``_tN`` filename tokens) are segmented across every timepoint and
+tracked unless ``--no-track`` is given.
 
 ``--channel-names`` renames the imported channels (one comma-separated name
 per channel, in order); ``--seg-channel`` is then matched against these new
@@ -88,24 +90,33 @@ def _build_specs(sources: list[Path], output_dir: Path | None) -> list[DatasetSp
 
     A ``.h5`` file becomes ``<output-dir>/<name>.h5`` when ``output_dir`` is
     given (copy-then-segment) or its own path when not (segment in place). A
-    directory is treated as a TIFF source and requires ``output_dir``;
-    anything else is skipped with a note.
+    directory that directly contains ``*.h5`` files is expanded (non-recursive,
+    alphabetical) into one such spec per file — matching the rest of the batch
+    CLI suite. A directory with no ``.h5`` files is a TIFF source and requires
+    ``output_dir``; anything else is skipped with a note.
     """
+
+    def _h5_spec(h5: Path) -> DatasetSpec:
+        out = (output_dir / f"{h5.stem}.h5") if output_dir is not None else h5
+        return DatasetSpec(source_dir=h5, output_h5=out)
+
     specs: list[DatasetSpec] = []
     for src in sources:
         if src.suffix.lower() == ".h5" and src.is_file():
-            out = (output_dir / f"{src.stem}.h5") if output_dir is not None else src
-            specs.append(DatasetSpec(source_dir=src, output_h5=out))
+            specs.append(_h5_spec(src))
         elif src.is_dir():
-            if output_dir is None:
+            h5_files = sorted(src.glob("*.h5"))
+            if h5_files:
+                specs.extend(_h5_spec(h5) for h5 in h5_files)
+            elif output_dir is None:
                 print(
                     f"skipping {src}: TIFF source directory requires --output-dir",
                     file=sys.stderr,
                 )
-                continue
-            specs.append(
-                DatasetSpec(source_dir=src, output_h5=output_dir / f"{src.name}.h5")
-            )
+            else:
+                specs.append(
+                    DatasetSpec(source_dir=src, output_h5=output_dir / f"{src.name}.h5")
+                )
         else:
             print(f"skipping {src}: not a directory or .h5 file", file=sys.stderr)
     return specs
@@ -122,15 +133,18 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Headless batch compress + Cellpose segment (all timepoints) + "
             "laptrack tracking for multi-timepoint experiments. Each positional "
-            "argument is a TIFF source directory (imported to "
-            "<output-dir>/<source_dirname>.h5) or an already-compressed .h5 "
-            "(segmented in place, or copied to --output-dir first). Time-lapse "
+            "argument is an already-compressed .h5 (segmented in place, or "
+            "copied to --output-dir first), a directory of .h5 files (globbed "
+            "non-recursively), or a TIFF source directory (imported to "
+            "<output-dir>/<source_dirname>.h5). Time-lapse "
             "datasets are tracked unless --no-track."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("sources", nargs="+", type=Path,
-                        help="Dataset TIFF source directories and/or .h5 files.")
+                        help="One or more .h5 files, directories of .h5 files "
+                             "(globbed non-recursively), and/or TIFF source "
+                             "directories.")
     parser.add_argument("--output-dir", default=None, type=Path,
                         help="Directory for the output .h5 files. Required for "
                              "TIFF directory sources; for .h5 sources, omit to "
