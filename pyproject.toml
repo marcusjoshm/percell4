@@ -190,5 +190,6 @@ extend-exclude = ["src/percell4/domain/_vendor"]
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# Qt overrides use camelCase (closeEvent, showEvent, etc.)
+# Qt overrides use camelCase (closeEvent, showEvent, dropEvent, etc.)
 "src/percell4/gui/*.py" = ["N802"]
+"src/percell4/interfaces/gui/**/*.py" = ["N802"]

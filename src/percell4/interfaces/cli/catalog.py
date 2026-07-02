@@ -25,7 +25,7 @@ class CommandParseError(ValueError):
     """The typed command line could not be tokenized (e.g. unbalanced quotes)."""
 
 
-class UnknownCommand(ValueError):
+class UnknownCommandError(ValueError):
     """The first token is not an importable ``percell4-*`` catalog tool."""
 
     def __init__(self, name: str) -> None:
@@ -91,7 +91,7 @@ def resolve_command(line: str) -> list[str]:
     ``[sys.executable, "-m", <module>, *rest]``.
 
     Raises :class:`CommandParseError` on unbalanced quotes and
-    :class:`UnknownCommand` when the first token is empty or not a catalog
+    :class:`UnknownCommandError` when the first token is empty or not a catalog
     tool.
     """
     try:
@@ -99,11 +99,11 @@ def resolve_command(line: str) -> list[str]:
     except ValueError as exc:
         raise CommandParseError(str(exc)) from exc
     if not argv:
-        raise UnknownCommand("")
+        raise UnknownCommandError("")
     name, *rest = argv
     module = _module_for(name)
     if module is None:
-        raise UnknownCommand(name)
+        raise UnknownCommandError(name)
     return [sys.executable, "-m", module, *rest]
 
 

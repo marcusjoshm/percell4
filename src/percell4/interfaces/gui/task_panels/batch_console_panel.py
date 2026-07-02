@@ -18,7 +18,6 @@ import shlex
 import time
 from collections.abc import Callable
 
-from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -31,7 +30,7 @@ from qtpy.QtWidgets import (
 from percell4.gui import theme
 from percell4.interfaces.cli.catalog import (
     CommandParseError,
-    UnknownCommand,
+    UnknownCommandError,
     list_batch_tools,
     resolve_command,
 )
@@ -172,7 +171,7 @@ class BatchConsolePanel(QWidget):
         except CommandParseError as exc:
             self._emit(f"[Error] {exc}", _RED)
             return
-        except UnknownCommand as exc:
+        except UnknownCommandError as exc:
             self._emit(
                 f"[Error] {exc.name!r} is not a percell4-* batch tool — "
                 "pick from the catalog or type a percell4-* command.",

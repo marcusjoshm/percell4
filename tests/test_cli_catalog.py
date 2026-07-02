@@ -13,7 +13,7 @@ import pytest
 
 from percell4.interfaces.cli.catalog import (
     CommandParseError,
-    UnknownCommand,
+    UnknownCommandError,
     list_batch_tools,
     resolve_command,
 )
@@ -88,15 +88,15 @@ def test_resolve_quoted_path_with_spaces():
 
 
 def test_resolve_unknown_command():
-    with pytest.raises(UnknownCommand) as exc:
+    with pytest.raises(UnknownCommandError) as exc:
         resolve_command("ls -la")
     assert exc.value.name == "ls"
 
 
 def test_resolve_empty_and_whitespace():
-    with pytest.raises(UnknownCommand):
+    with pytest.raises(UnknownCommandError):
         resolve_command("")
-    with pytest.raises(UnknownCommand):
+    with pytest.raises(UnknownCommandError):
         resolve_command("   ")
 
 

@@ -2,8 +2,8 @@
 
 Runs one batch-tool argv as a child process, streaming merged stdout/stderr
 live on the main thread — QProcess emits its signals on the event loop, so
-there is no manual threading and no cross-thread GUI writes (the class of bug
-documented in ``docs/solutions/architecture-decisions/percell4-code-review-findings-phases-0-6.md``).
+there is no manual threading and no cross-thread GUI writes (the class of
+cross-thread-GUI-write bug documented under ``docs/solutions/``).
 
 Output bytes are decoded through a *stateful* incremental UTF-8 decoder, so a
 multibyte glyph (e.g. the ``█`` progress-bar block) split across QProcess read
