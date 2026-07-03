@@ -43,8 +43,14 @@ class CachedPhasorResult:
     recompute when the user picks a different level instead of serving a
     stale cache. It is ``None`` when there is no filtered cache, when the
     attr is absent (pre-attr files), or when the repo does not implement
-    ``read_array_attrs`` (test fakes). Other writer attrs (harmonic,
-    flim_frequency_mhz) remain unsurfaced — no consumer needs them.
+    ``read_array_attrs`` (test fakes). ``cached_harmonic`` is the Fourier
+    harmonic ComputePhasor stamped on the raw ``g`` array, surfaced the
+    same way so the Compute-Phasor handler can recompute when the user
+    picks a different harmonic instead of serving a stale cache computed
+    at another harmonic. It is ``None`` when the attr is absent (pre-attr
+    files) or the repo lacks ``read_array_attrs`` (test fakes). Remaining
+    writer attrs (flim_frequency_mhz) stay unsurfaced — no consumer needs
+    them.
     """
 
     g_map: NDArray[np.float32]
@@ -54,6 +60,7 @@ class CachedPhasorResult:
     intensity: NDArray[np.float32] | None
     channel: str
     cached_filter_level: int | None = None
+    cached_harmonic: int | None = None
 
 
 class LoadCachedPhasor:
@@ -166,6 +173,26 @@ class LoadCachedPhasor:
                         channel, exc_info=True,
                     )
 
+        # Harmonic stamped on the raw g array by ComputePhasor — lets the
+        # Compute-Phasor handler detect a harmonic change and recompute
+        # rather than serving a cache computed at a different harmonic.
+        # Same defensive read as filter_level: a repo without
+        # read_array_attrs (test fakes) or a pre-attr file leaves this
+        # None, which the caller treats as "harmonic unknown → serve cache".
+        cached_harmonic: int | None = None
+        attr_reader = getattr(self._repo, "read_array_attrs", None)
+        if attr_reader is not None:
+            try:
+                attrs = attr_reader(handle, f"phasor/{channel}/g")
+                harm = attrs.get("harmonic")
+                if harm is not None:
+                    cached_harmonic = int(harm)
+            except Exception:
+                logger.debug(
+                    "Failed to read cached phasor harmonic for %s",
+                    channel, exc_info=True,
+                )
+
         # Decay-derived intensity for the intensity-weighted histogram.
         # Per the cross-layer-alignment learning, intensity MUST come
         # from decay.sum(axis=-1), NOT from /intensity[ch_idx]. None is
@@ -207,4 +234,5 @@ class LoadCachedPhasor:
             intensity=intensity,
             channel=channel,
             cached_filter_level=cached_filter_level,
+            cached_harmonic=cached_harmonic,
         )

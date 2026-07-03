@@ -25,6 +25,11 @@ from qtpy.QtWidgets import (
 
 from percell4.application.session import Event
 from percell4.config import viewer_presets as vp
+from percell4.domain.flim.phasor import (
+    cal_mod_key,
+    cal_phase_key,
+    resolve_calibration,
+)
 from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.gui import theme
 from percell4.model import CellDataModel
@@ -74,6 +79,16 @@ class FlimPanel(QWidget):
             Event.ACTIVE_CHANNEL_CHANGED, self._refresh_lifetime_source_enabled
         )
         self._refresh_lifetime_source_enabled()
+        # Reflect the stored per-harmonic calibration into the φ/M spinboxes
+        # when the dataset or active channel switches (harmonic changes are
+        # wired directly on the combo in _build_ui).
+        self.data_model.session.subscribe(
+            Event.DATASET_CHANGED, self._load_harmonic_cal_into_spinboxes
+        )
+        self.data_model.session.subscribe(
+            Event.ACTIVE_CHANNEL_CHANGED, self._load_harmonic_cal_into_spinboxes
+        )
+        self._load_harmonic_cal_into_spinboxes()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -93,6 +108,53 @@ class FlimPanel(QWidget):
         self._phasor_harmonic.addItems(["1", "2", "3"])
         harm_row.addWidget(self._phasor_harmonic)
         phasor_layout.addLayout(harm_row)
+
+        # Per-harmonic calibration. Calibration φ/M are frequency-dependent,
+        # so each harmonic needs its own values; the phasor lands off the
+        # universal circle if computed at a harmonic it wasn't calibrated
+        # for. The spinboxes show the stored calibration for the selected
+        # harmonic (editable). "Override" applies them for the NEXT Compute
+        # Phasor only (non-persisted preview, forces a recompute); "Save"
+        # persists them to /metadata as this channel+harmonic's calibration.
+        cal_row = QHBoxLayout()
+        cal_row.addWidget(QLabel("Cal φ:"))
+        self._cal_override_phase = QDoubleSpinBox()
+        self._cal_override_phase.setRange(-6.283, 6.283)
+        self._cal_override_phase.setDecimals(4)
+        self._cal_override_phase.setValue(0.0)
+        self._cal_override_phase.setSuffix(" rad")
+        cal_row.addWidget(self._cal_override_phase)
+        cal_row.addWidget(QLabel("M:"))
+        self._cal_override_mod = QDoubleSpinBox()
+        self._cal_override_mod.setRange(0.0, 10.0)
+        self._cal_override_mod.setDecimals(4)
+        self._cal_override_mod.setValue(1.0)
+        cal_row.addWidget(self._cal_override_mod)
+        phasor_layout.addLayout(cal_row)
+
+        cal_btn_row = QHBoxLayout()
+        self._cal_override_enable = QCheckBox("Override (this run)")
+        self._cal_override_enable.setToolTip(
+            "Apply the φ/M above instead of the stored calibration for the\n"
+            "next Compute Phasor only. Nothing is saved to disk; enabling\n"
+            "this forces a recompute."
+        )
+        cal_btn_row.addWidget(self._cal_override_enable)
+        self._btn_save_cal = QPushButton("Save as harmonic cal")
+        self._btn_save_cal.setToolTip(
+            "Persist the φ/M above to /metadata as this channel's calibration\n"
+            "for the selected harmonic (flim_cal_{phase,mod}_<ch>_h<n>). Later\n"
+            "computes at this harmonic use it automatically — no override needed."
+        )
+        self._btn_save_cal.clicked.connect(self._on_save_harmonic_cal)
+        cal_btn_row.addWidget(self._btn_save_cal)
+        phasor_layout.addLayout(cal_btn_row)
+
+        # Load the stored calibration for the selected harmonic into the
+        # spinboxes, and reload whenever the harmonic changes.
+        self._phasor_harmonic.currentTextChanged.connect(
+            self._load_harmonic_cal_into_spinboxes
+        )
 
         btn_phasor = QPushButton("Compute Phasor")
         btn_phasor.setToolTip(
@@ -342,14 +404,109 @@ class FlimPanel(QWidget):
 
     # ── Phasor ───────────────────────────────────────────────
 
+    def _load_harmonic_cal_into_spinboxes(self, *_args) -> None:
+        """Reflect the stored calibration for the active channel + selected
+        harmonic into the φ/M spinboxes.
+
+        No-ops gracefully when there is no dataset or no active channel
+        (leaves whatever the spinboxes currently show). Reads metadata via
+        the repo when available, else falls back to the session handle's
+        snapshot; an uncalibrated harmonic resolves to (0.0, 1.0).
+        """
+        channel = self._get_active_channel()
+        if channel is None:
+            return
+        handle = self.data_model.session.dataset
+        if handle is None:
+            return
+        try:
+            harmonic = int(self._phasor_harmonic.currentText())
+        except (ValueError, AttributeError):
+            return
+
+        meta: dict = {}
+        try:
+            repo = self._get_repo()
+            reader = getattr(repo, "read_metadata", None)
+            meta = dict(reader(handle)) if reader is not None else dict(
+                handle.metadata
+            )
+        except Exception:
+            meta = dict(getattr(handle, "metadata", {}) or {})
+
+        phase, mod = resolve_calibration(meta, channel, harmonic)
+        # Block signals in case future edits wire spinbox change handlers.
+        self._cal_override_phase.blockSignals(True)
+        self._cal_override_mod.blockSignals(True)
+        self._cal_override_phase.setValue(float(phase))
+        self._cal_override_mod.setValue(float(mod))
+        self._cal_override_phase.blockSignals(False)
+        self._cal_override_mod.blockSignals(False)
+
+    def _on_save_harmonic_cal(self) -> None:
+        """Persist the φ/M spinbox values as this channel's calibration for
+        the selected harmonic (``flim_cal_{phase,mod}_<ch>_h<n>``)."""
+        channel = self._get_active_channel()
+        if channel is None:
+            self._show_status("Select a channel in the viewer first")
+            return
+        handle = self.data_model.session.dataset
+        if handle is None:
+            self._show_status("No dataset loaded")
+            return
+        harmonic = int(self._phasor_harmonic.currentText())
+        phase = float(self._cal_override_phase.value())
+        mod = float(self._cal_override_mod.value())
+
+        try:
+            repo = self._get_repo()
+            writer = getattr(repo, "write_metadata", None)
+            if writer is None:
+                self._show_status(
+                    "This dataset store cannot save calibration metadata"
+                )
+                return
+            writer(
+                handle,
+                {
+                    cal_phase_key(channel, harmonic): phase,
+                    cal_mod_key(channel, harmonic): mod,
+                },
+            )
+        except Exception as e:
+            self._show_status(f"Failed to save calibration: {e}")
+            return
+
+        self._show_status(
+            f"Saved calibration for {channel} harmonic {harmonic}: "
+            f"φ={phase:.4f} rad  M={mod:.4f}"
+        )
+
     def _on_compute_phasor(self) -> None:
         active_channel = self._get_active_channel()
         if active_channel is None:
             self._show_status("Select a channel in the viewer first")
             return
 
-        # Cache-check unless Shift forces recompute.
-        if not self._shift_held():
+        # Selected harmonic — read up front so the cache check below can
+        # detect a harmonic change and recompute rather than serving a
+        # cache computed at a different harmonic.
+        harmonic = int(self._phasor_harmonic.currentText())
+
+        # Temporary calibration override (non-persisted). When enabled it
+        # both feeds the new φ/M into ComputePhasor and forces a recompute:
+        # the phasor cache is keyed only on harmonic, so without bypassing
+        # it a same-harmonic override would be masked by a stale cache.
+        cal_override = self._cal_override_enable.isChecked()
+        cal_phase_override = (
+            float(self._cal_override_phase.value()) if cal_override else None
+        )
+        cal_mod_override = (
+            float(self._cal_override_mod.value()) if cal_override else None
+        )
+
+        # Cache-check unless Shift or a calibration override forces recompute.
+        if not self._shift_held() and not cal_override:
             try:
                 from percell4.application.use_cases.load_cached_phasor import (
                     LoadCachedPhasor,
@@ -373,24 +530,33 @@ class FlimPanel(QWidget):
                 self._show_status(str(e))
                 return
             else:
-                # Cache hit — push to phasor window with the unfiltered call
-                # shape (raw g/s, no g_unfiltered/s_unfiltered).
-                self._show_window("phasor_plot")
-                seg_labels = self._get_active_seg_labels()
-                phasor_win = self._get_phasor_window()
-                if phasor_win is not None:
-                    phasor_win.set_phasor_data(
-                        cached.g_map, cached.s_map,
-                        intensity=cached.intensity, labels=seg_labels,
-                    )
-                self._show_status(
-                    f"Loaded cached phasor (channel: {active_channel})"
+                # Serve the cache only when it was computed at the selected
+                # harmonic. A mismatch falls through to recompute so the
+                # harmonic dropdown actually takes effect; an unknown cached
+                # harmonic (pre-attr file / test fake) is served as before.
+                harmonic_matches = (
+                    cached.cached_harmonic is None
+                    or cached.cached_harmonic == harmonic
                 )
-                self._refresh_ref_circle_enabled()
-                self._refresh_lifetime_source_enabled()
-                return
+                if harmonic_matches:
+                    # Cache hit — push to phasor window with the unfiltered call
+                    # shape (raw g/s, no g_unfiltered/s_unfiltered).
+                    self._show_window("phasor_plot")
+                    seg_labels = self._get_active_seg_labels()
+                    phasor_win = self._get_phasor_window()
+                    if phasor_win is not None:
+                        phasor_win.set_phasor_data(
+                            cached.g_map, cached.s_map,
+                            intensity=cached.intensity, labels=seg_labels,
+                        )
+                    self._show_status(
+                        f"Loaded cached phasor (channel: {active_channel})"
+                    )
+                    self._refresh_ref_circle_enabled()
+                    self._refresh_lifetime_source_enabled()
+                    return
+                # Harmonic changed — fall through to recompute below.
 
-        harmonic = int(self._phasor_harmonic.currentText())
         recompute_prefix = (
             "Recomputing phasor (Shift)" if self._shift_held()
             else f"Computing phasor for {active_channel}"
@@ -405,6 +571,8 @@ class FlimPanel(QWidget):
             active_bin = self.data_model.session.active_bin
             result = uc.execute(
                 channel=active_channel, harmonic=harmonic, view_bin=active_bin,
+                cal_phase_override=cal_phase_override,
+                cal_mod_override=cal_mod_override,
             )
         except ValueError as e:
             self._show_status(str(e))
@@ -439,6 +607,11 @@ class FlimPanel(QWidget):
         freq = handle.metadata.get("flim_frequency_mhz", "unknown") if handle else "unknown"
         verb = "Recomputed" if self._shift_held() else "Phasor computed:"
         suffix = " (Shift)" if self._shift_held() else ""
+        if cal_override:
+            suffix += (
+                f" | cal override φ={cal_phase_override:.4f} rad "
+                f"M={cal_mod_override:.4f}"
+            )
         self._show_status(
             f"{verb} {result.n_valid:,} valid pixels | "
             f"channel: {active_channel} | harmonic: {harmonic} | freq: {freq} MHz{suffix}"

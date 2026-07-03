@@ -24,6 +24,76 @@ from numpy.typing import NDArray
 # tests and future tuning can override it.
 MAX_GMM_PIXELS = 100_000
 
+# Highest harmonic offered for stored per-harmonic calibration. Matches the
+# FLIM panel's Harmonic dropdown (1, 2, 3). Raise here and in the dropdown
+# together if more harmonics are ever needed.
+MAX_CAL_HARMONIC = 3
+
+
+# ── Per-harmonic calibration metadata ─────────────────────────
+#
+# Calibration phase/modulation are frequency-dependent, so a phasor computed
+# at harmonic n must use the calibration measured at harmonic n. These are
+# stored in /metadata as scalar attrs keyed by channel and harmonic:
+#
+#     flim_cal_phase_<ch>_h<n>   (radians)
+#     flim_cal_mod_<ch>_h<n>     (dimensionless, 1.0 == no scaling)
+#
+# The legacy single-value keys ``flim_cal_phase_<ch>`` / ``flim_cal_mod_<ch>``
+# (written by the import dialog, no harmonic suffix) are the harmonic-1
+# calibration — ``resolve_calibration`` falls back to them so pre-existing
+# datasets keep working unchanged.
+
+
+def cal_phase_key(channel: str, harmonic: int) -> str:
+    """Metadata key for the stored calibration phase (radians) of
+    ``channel`` at ``harmonic``."""
+    return f"flim_cal_phase_{channel}_h{harmonic}"
+
+
+def cal_mod_key(channel: str, harmonic: int) -> str:
+    """Metadata key for the stored calibration modulation of ``channel``
+    at ``harmonic``."""
+    return f"flim_cal_mod_{channel}_h{harmonic}"
+
+
+def resolve_calibration(
+    meta: dict, channel: str, harmonic: int
+) -> tuple[float, float]:
+    """Resolve the (phase, modulation) calibration for ``channel`` at
+    ``harmonic`` from a ``/metadata`` dict.
+
+    Resolution order:
+
+    1. Per-harmonic keys ``flim_cal_{phase,mod}_<ch>_h<n>`` when present.
+    2. For harmonic 1 only, the legacy single-value keys
+       ``flim_cal_{phase,mod}_<ch>`` (import-dialog format, no suffix).
+    3. Identity — ``(0.0, 1.0)`` — for a higher harmonic with no stored
+       calibration, i.e. uncalibrated (the phasor lands off the universal
+       circle until a calibration is saved for that harmonic).
+
+    Phase and modulation resolve independently: a stored phase with no
+    stored modulation yields ``(phase, 1.0)``.
+    """
+    phase_key = cal_phase_key(channel, harmonic)
+    mod_key = cal_mod_key(channel, harmonic)
+
+    if phase_key in meta:
+        phase = float(meta[phase_key])
+    elif harmonic == 1:
+        phase = float(meta.get(f"flim_cal_phase_{channel}", 0.0))
+    else:
+        phase = 0.0
+
+    if mod_key in meta:
+        mod = float(meta[mod_key])
+    elif harmonic == 1:
+        mod = float(meta.get(f"flim_cal_mod_{channel}", 1.0))
+    else:
+        mod = 1.0
+
+    return phase, mod
+
 
 def compute_phasor(
     decay_stack: NDArray,

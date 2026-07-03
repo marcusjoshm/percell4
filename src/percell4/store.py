@@ -278,6 +278,25 @@ def _compression_kwargs(is_decay: bool = False) -> dict[str, Any]:
     )
 
 
+def _cal_harmonic_suffix(key: str, base: str) -> str | None:
+    """If ``key`` is ``base`` followed by a ``_h<digits>`` harmonic suffix,
+    return that suffix (e.g. ``'_h2'``); otherwise ``None``.
+
+    Lets the per-harmonic calibration attrs
+    (``flim_cal_phase_<ch>_h<n>`` / ``flim_cal_mod_<ch>_h<n>``) follow their
+    channel on rename/remove alongside the legacy suffix-less key. The
+    ``_h<digits>`` guard avoids matching a different channel whose name
+    merely extends ``base`` (e.g. base ``flim_cal_phase_ch1`` vs a real key
+    ``flim_cal_phase_ch10``).
+    """
+    if not key.startswith(base):
+        return None
+    suffix = key[len(base):]
+    if suffix.startswith("_h") and suffix[2:].isdigit():
+        return suffix
+    return None
+
+
 class DatasetStore:
     """Read/write interface for a single .h5 dataset file.
 
@@ -1594,8 +1613,9 @@ class DatasetStore:
         - ``/decay/<name>`` group (if present)
         - ``/phasor/<name>`` group (if present)
         - ``name`` entry in ``metadata.channel_names`` (if present)
-        - ``flim_cal_phase_<name>`` and ``flim_cal_mod_<name>`` attrs
-          on ``/metadata`` (if present)
+        - ``flim_cal_phase_<name>`` / ``flim_cal_mod_<name>`` attrs on
+          ``/metadata``, plus every per-harmonic variant
+          ``flim_cal_{phase,mod}_<name>_h<n>`` (if present)
 
         Returns ``True`` if anything was actually removed on disk,
         ``False`` if the channel was already absent everywhere
@@ -1618,11 +1638,14 @@ class DatasetStore:
                     deleted_any = True
                 # Per-channel FLIM calibration attrs are removed regardless
                 # of whether they contributed to deleted_any — they're
-                # bookkeeping that should follow the channel out.
+                # bookkeeping that should follow the channel out. Both the
+                # legacy suffix-less key and every per-harmonic variant
+                # (flim_cal_phase_<name>_h<n>) are swept.
                 for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
-                    key = f"{key_prefix}{name}"
-                    if key in attrs:
-                        del attrs[key]
+                    base = f"{key_prefix}{name}"
+                    for key in list(attrs.keys()):
+                        if key == base or _cal_harmonic_suffix(key, base):
+                            del attrs[key]
         return deleted_any
 
     def rename_channel(self, old_name: str, new_name: str) -> None:
@@ -1630,7 +1653,8 @@ class DatasetStore:
 
         Moves ``/decay/<old>`` and ``/phasor/<old>`` groups, updates the
         ``channel_names`` list, and renames per-channel FLIM calibration
-        attrs (``flim_cal_phase_<name>``, ``flim_cal_mod_<name>``). Silent
+        attrs (``flim_cal_phase_<name>``, ``flim_cal_mod_<name>``, and every
+        per-harmonic variant ``flim_cal_{phase,mod}_<name>_h<n>``). Silent
         no-op for paths/attrs that don't exist.
         """
         if old_name == new_name:
@@ -1650,11 +1674,17 @@ class DatasetStore:
                     names[names.index(old_name)] = new_name
                     attrs["channel_names"] = names
                 for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
-                    old_key = f"{key_prefix}{old_name}"
-                    new_key = f"{key_prefix}{new_name}"
-                    if old_key in attrs:
-                        attrs[new_key] = attrs[old_key]
-                        del attrs[old_key]
+                    old_base = f"{key_prefix}{old_name}"
+                    new_base = f"{key_prefix}{new_name}"
+                    for key in list(attrs.keys()):
+                        if key == old_base:
+                            attrs[new_base] = attrs[key]
+                            del attrs[key]
+                        else:
+                            suffix = _cal_harmonic_suffix(key, old_base)
+                            if suffix is not None:
+                                attrs[new_base + suffix] = attrs[key]
+                                del attrs[key]
 
     @staticmethod
     def create_atomic(

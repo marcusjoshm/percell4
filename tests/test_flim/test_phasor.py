@@ -6,11 +6,14 @@ import numpy as np
 import pytest
 
 from percell4.domain.flim.phasor import (
+    cal_mod_key,
+    cal_phase_key,
     compute_phasor,
     measure_phasor_per_cell,
     median_filter_gs,
     phasor_roi_to_mask,
     phasor_to_lifetime,
+    resolve_calibration,
 )
 
 
@@ -241,3 +244,49 @@ def test_median_filter_gs_rejects_invalid_size(bad_size):
     s = np.zeros((4, 4), dtype=np.float32)
     with pytest.raises(ValueError):
         median_filter_gs(g, s, size=bad_size)
+
+
+# ── Per-harmonic calibration resolution ────────────────────────
+
+
+class TestResolveCalibration:
+    """resolve_calibration picks the right (phase, mod) for a channel +
+    harmonic, with legacy fallback for harmonic 1 and identity for an
+    uncalibrated higher harmonic. Phase and modulation resolve
+    independently.
+    """
+
+    def test_legacy_keys_serve_harmonic_1(self):
+        meta = {"flim_cal_phase_mNG": 0.3, "flim_cal_mod_mNG": 1.2}
+        assert resolve_calibration(meta, "mNG", 1) == (0.3, 1.2)
+
+    def test_higher_harmonic_without_cal_is_identity(self):
+        meta = {"flim_cal_phase_mNG": 0.3, "flim_cal_mod_mNG": 1.2}
+        assert resolve_calibration(meta, "mNG", 2) == (0.0, 1.0)
+
+    def test_per_harmonic_keys_take_precedence(self):
+        meta = {
+            "flim_cal_phase_mNG": 0.3,
+            "flim_cal_mod_mNG": 1.2,
+            cal_phase_key("mNG", 2): 0.9,
+            cal_mod_key("mNG", 2): 1.5,
+        }
+        assert resolve_calibration(meta, "mNG", 2) == (0.9, 1.5)
+
+    def test_per_harmonic_h1_overrides_legacy(self):
+        meta = {
+            "flim_cal_phase_mNG": 0.3,
+            "flim_cal_mod_mNG": 1.2,
+            cal_phase_key("mNG", 1): 0.11,
+        }
+        # h1 phase now comes from the explicit per-harmonic key; mod still
+        # from the legacy key (independent resolution).
+        assert resolve_calibration(meta, "mNG", 1) == (0.11, 1.2)
+
+    def test_phase_and_mod_resolve_independently(self):
+        meta = {cal_phase_key("ch1", 2): 0.5}
+        assert resolve_calibration(meta, "ch1", 2) == (0.5, 1.0)
+
+    def test_empty_meta_is_identity(self):
+        assert resolve_calibration({}, "ch0", 1) == (0.0, 1.0)
+        assert resolve_calibration({}, "ch0", 3) == (0.0, 1.0)

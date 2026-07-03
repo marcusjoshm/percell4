@@ -101,6 +101,32 @@ def test_delete_channel_drops_flim_calibration_attrs(tmp_path):
         assert attrs["flim_frequency_mhz"] == pytest.approx(80.0)
 
 
+def test_delete_channel_drops_per_harmonic_calibration_attrs(tmp_path):
+    """Per-harmonic cal keys flim_cal_{phase,mod}_<name>_h<n> follow the
+    channel out; a same-prefixed sibling channel keeps all of its keys."""
+    p = tmp_path / "ds.h5"
+    _make_h5(p, channels=["ch1", "ch10"])
+    with h5py.File(p, "a") as f:
+        attrs = f["metadata"].attrs
+        for n in (1, 2, 3):
+            attrs[f"flim_cal_phase_ch1_h{n}"] = 0.1 * n
+            attrs[f"flim_cal_mod_ch1_h{n}"] = 1.0 + 0.1 * n
+        # Sibling whose name extends 'ch1' — must NOT be swept.
+        attrs["flim_cal_phase_ch10_h2"] = 0.5
+    store = DatasetStore(p)
+
+    store.delete_channel("ch1")
+
+    with h5py.File(p, "r") as f:
+        attrs = dict(f["metadata"].attrs)
+        assert not any(k.startswith("flim_cal_phase_ch1_h") for k in attrs)
+        assert not any(k.startswith("flim_cal_mod_ch1_h") for k in attrs)
+        assert "flim_cal_phase_ch1" not in attrs
+        # Sibling ch10 untouched (exact key and its per-harmonic variant).
+        assert attrs["flim_cal_phase_ch10"] == pytest.approx(0.1)
+        assert attrs["flim_cal_phase_ch10_h2"] == pytest.approx(0.5)
+
+
 def test_delete_channel_returns_false_when_absent(tmp_path):
     """delete_channel returns False if the channel doesn't exist anywhere."""
     p = tmp_path / "ds.h5"
