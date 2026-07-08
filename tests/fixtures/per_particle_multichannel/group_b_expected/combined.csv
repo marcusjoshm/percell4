@@ -1,0 +1,4 @@
+group,particle_id,cell_id,particle_area_px,donut_area_px,condensed_mNG_mean,dilute_mNG_mean,mNG_condensed_over_dilute,condensed_mNG_integ,dilute_mNG_integ,condensed_mTQ2_mean,dilute_mTQ2_mean,mTQ2_condensed_over_dilute,condensed_mTQ2_integ,dilute_mTQ2_integ
+b1,1,1,36,275,800.0,120.0,6.666666666666667,28800.0,33000.0,350.0,60.0,5.833333333333333,12600.0,16500.0
+b1,2,1,25,286,700.0,120.0,5.833333333333333,17500.0,34320.0,300.0,60.0,5.0,7500.0,17160.0
+b1,3,2,36,336,500.0,120.0,4.166666666666667,18000.0,40320.0,250.0,60.0,4.166666666666667,9000.0,20160.0

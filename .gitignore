@@ -43,6 +43,8 @@ Thumbs.db
 *.csv
 *.xlsx
 *.xls
+# ...but test-fixture CSVs are committed parity baselines the suite reads.
+!tests/fixtures/**/*.csv
 
 # R
 .Rhistory

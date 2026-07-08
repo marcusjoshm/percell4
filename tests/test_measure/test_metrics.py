@@ -83,11 +83,12 @@ def test_empty_mask_returns_zero():
         assert fn(image, mask) == 0.0, f"{name} should return 0.0 for empty mask"
 
 
-def test_builtin_metrics_has_all_seven():
-    """BUILTIN_METRICS dict contains exactly 7 metrics."""
-    assert len(BUILTIN_METRICS) == 7
+def test_builtin_metrics_has_all_nine():
+    """BUILTIN_METRICS dict contains exactly the nine built-in metrics."""
+    assert len(BUILTIN_METRICS) == 9
     expected = {
         "mean_intensity", "max_intensity", "min_intensity",
-        "integrated_intensity", "std_intensity", "median_intensity", "area",
+        "integrated_intensity", "std_intensity", "median_intensity",
+        "mode_intensity", "sg_ratio", "area",
     }
     assert set(BUILTIN_METRICS.keys()) == expected

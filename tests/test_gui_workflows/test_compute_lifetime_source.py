@@ -32,6 +32,9 @@ class FakeRepo:
             raise KeyError(f"Array not found: {path}")
         return self.arrays[path]
 
+    def array_exists(self, handle, path):
+        return path in self.arrays
+
     def read_metadata(self, handle):
         return dict(self.disk_metadata)
 
