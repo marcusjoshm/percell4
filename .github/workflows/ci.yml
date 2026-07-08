@@ -11,13 +11,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Non-blocking for now: the tree is not yet globally ruff-clean, so lint
-  # findings are surfaced in the run but do not fail CI. Flip continue-on-error
-  # to false once a dedicated ruff-cleanup pass lands.
   lint:
-    name: Ruff lint (non-blocking)
+    name: Ruff lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

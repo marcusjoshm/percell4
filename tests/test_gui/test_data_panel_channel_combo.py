@@ -12,10 +12,8 @@ first (canonical), then union with napari Image layers for orphan support.
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from percell4.application.session import Session

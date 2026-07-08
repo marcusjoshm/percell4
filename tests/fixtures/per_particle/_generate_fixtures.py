@@ -25,7 +25,6 @@ import numpy as np
 import tifffile
 from skimage.draw import disk
 
-
 HERE = Path(__file__).resolve().parent
 GROUP_A = HERE / "group_a"
 GROUP_B = HERE / "group_b"

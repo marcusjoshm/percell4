@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from percell4.application.use_cases.add_decay_to_dataset import (

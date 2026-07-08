@@ -13,12 +13,11 @@ the AddLayerDialog scaffolding. Tests cover:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from qtpy.QtCore import Qt
-from qtpy.QtWidgets import QFileDialog, QLineEdit, QPushButton, QTableWidget
+from qtpy.QtWidgets import QFileDialog
 
 from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle

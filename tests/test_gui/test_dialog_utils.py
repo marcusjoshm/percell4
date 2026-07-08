@@ -6,7 +6,6 @@ from qtpy.QtWidgets import QDialog, QLabel, QScrollArea, QWidget
 
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 
-
 # ── wrap_in_scroll ───────────────────────────────────────────────────
 
 

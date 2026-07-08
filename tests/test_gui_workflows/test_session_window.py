@@ -14,11 +14,10 @@ from pathlib import Path
 import pytest
 from qtpy.QtCore import QSettings, Qt
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Event
 from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.session_window import SessionWindow
 from percell4.model import CellDataModel
-
 
 # ── Fixtures ────────────────────────────────────────────────────────
 

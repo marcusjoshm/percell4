@@ -73,7 +73,10 @@ def _print_table(report) -> None:
     for name, o in report.oracles.items():
         flat = (max(o.iou_curve) - (sum(o.iou_curve) / len(o.iou_curve))) if o.iou_curve else 0.0
         note = "  [IoU peak flat — check boundary]" if o.iou_curve and flat < 0.02 else ""
-        print(f"  oracle[{name}]: ideal_window={o.ideal_window}  max_iou={max(o.iou_curve):.3f}{note}")
+        print(
+            f"  oracle[{name}]: ideal_window={o.ideal_window}  "
+            f"max_iou={max(o.iou_curve):.3f}{note}"
+        )
     print("\n  rank  finder           mean|err|")
     for i, (m, err) in enumerate(report.ranking, 1):
         print(f"  {i:>4}  {m:<15}  {err:>8.1f}")
@@ -123,7 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     finders = list(args.finders) if args.finders else list(WINDOW_FINDER_NAMES)
     unknown = [f for f in finders if f not in WINDOW_FINDER_NAMES]
     if unknown:
-        print(f"error: unknown finder(s) {unknown}; known: {list(WINDOW_FINDER_NAMES)}", file=sys.stderr)
+        print(
+            f"error: unknown finder(s) {unknown}; known: {list(WINDOW_FINDER_NAMES)}",
+            file=sys.stderr,
+        )
         return 1
 
     settings = PunctaDetectorSettings(

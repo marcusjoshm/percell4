@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from percell4.application.session import Session
+from percell4.domain.errors import NoDatasetError
 from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
@@ -17,7 +18,6 @@ from percell4.domain.segmentation.postprocess import (
 )
 from percell4.ports.dataset_repository import DatasetRepository
 from percell4.ports.segmenter import Segmenter
-from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 logger = logging.getLogger(__name__)
 

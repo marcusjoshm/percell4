@@ -7,11 +7,9 @@ for the selected category. Manages all other windows.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-
-logger = logging.getLogger(__name__)
-
 from datetime import UTC
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QAction
@@ -35,6 +33,11 @@ from percell4.config import viewer_presets as vp
 from percell4.domain.io.layout import split_intensity_layers
 from percell4.gui import theme
 from percell4.model import CellDataModel
+
+if TYPE_CHECKING:
+    import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class LauncherWindow(QMainWindow):
@@ -1132,7 +1135,7 @@ class LauncherWindow(QMainWindow):
                 output_path = ds.output_path.parent / f"{config.dataset_name_overrides[ds.name]}.h5"
 
             try:
-                n_ch = import_dataset(
+                import_dataset(
                     str(ds.source_dir) if ds.source_dir else str(ds.files[0].path.parent),
                     str(output_path),
                     token_config=config.token_config,

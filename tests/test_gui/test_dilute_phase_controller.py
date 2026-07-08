@@ -32,7 +32,6 @@ import pytest
 
 from percell4.gui._grouped_threshold_settings import GroupedThresholdConfig
 
-
 # ── Fakes ───────────────────────────────────────────────────
 
 

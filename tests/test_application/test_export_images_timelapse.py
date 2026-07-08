@@ -10,7 +10,6 @@ from percell4.application.use_cases.batch_export_images import _enumerate_channe
 from percell4.application.use_cases.export_images import ExportImages, ExportRequest
 from percell4.store import DatasetStore
 
-
 # ── _enumerate_channels: strip the leading T axis ─────────────
 
 

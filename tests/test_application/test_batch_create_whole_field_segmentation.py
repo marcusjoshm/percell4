@@ -12,16 +12,13 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import pytest
 
 from percell4.application.use_cases.batch_create_whole_field_segmentation import (
     batch_create_whole_field_segmentation,
 )
 from percell4.application.use_cases.batch_rename_resource import (
-    BatchOperationItemResult,
     BatchOperationReport,
 )
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

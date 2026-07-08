@@ -21,7 +21,6 @@ from percell4.domain.flim.phasor import (
     universal_circle_gs,
 )
 
-
 # ── universal_circle_gs ───────────────────────────────────────────────
 
 

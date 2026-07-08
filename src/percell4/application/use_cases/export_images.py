@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from percell4.ports.dataset_repository import DatasetRepository
+
+if TYPE_CHECKING:
+    from percell4.domain.dataset import DatasetHandle
 
 
 @dataclass
@@ -52,7 +56,7 @@ class ExportImages:
     def __init__(self, repo: DatasetRepository) -> None:
         self._repo = repo
 
-    def execute(self, handle: "DatasetHandle", request: ExportRequest) -> ExportResult:
+    def execute(self, handle: DatasetHandle, request: ExportRequest) -> ExportResult:
         from percell4.adapters.tiff_writer import write_tiff_with_metadata
 
         request.output_folder.mkdir(parents=True, exist_ok=True)

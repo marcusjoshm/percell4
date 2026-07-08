@@ -203,7 +203,6 @@ def test_paint_autosave_wires_when_viewer_appears_after_data_event(qtbot, tmp_pa
     the viewer (label visible) but disappears on close+reload.
     """
     from napari.layers import Labels
-    from qtpy.QtCore import QTimer
 
     from percell4.model import StateChange
 

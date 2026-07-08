@@ -23,7 +23,6 @@ from percell4.interfaces.gui.peer_views.phasor_plot import (
     PhasorPlotWindow,
 )
 
-
 # ── Fixtures ─────────────────────────────────────────────────
 
 

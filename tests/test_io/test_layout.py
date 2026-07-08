@@ -10,7 +10,6 @@ from percell4.domain.io.layout import (
     split_intensity_layers,
 )
 
-
 # ── split_channels_2d (single-timepoint plane) ────────────────
 
 

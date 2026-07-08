@@ -11,8 +11,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
-from qtpy.QtCore import QEvent
 
 from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle

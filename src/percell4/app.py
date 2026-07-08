@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import sys
 
-import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
-
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QIcon, QPixmap
 from qtpy.QtWidgets import QApplication, QSplashScreen
+
+import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
 
 
 def _make_splash() -> QSplashScreen:

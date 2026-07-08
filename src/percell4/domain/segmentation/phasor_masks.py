@@ -67,7 +67,6 @@ from percell4.domain.flim.phasor import (
     single_component_fit_phasor,
 )
 
-
 # The FLIM panel default ellipse stretch ("2 sigma" along each
 # principal axis). Matches the GUI's GMM "fit" preset.
 _DEFAULT_STRETCH = 2.0

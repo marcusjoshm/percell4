@@ -15,7 +15,6 @@ import pytest
 
 from percell4.gui import segmentation_panel as sp_module
 
-
 # ── SegmentCells.finalize: optional name parameter ───────────────────
 
 

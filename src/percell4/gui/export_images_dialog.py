@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -40,7 +39,7 @@ class ExportImagesDialog(QDialog):
         self,
         parent,
         store,
-        session: "Session | None" = None,
+        session: Session | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export Images")

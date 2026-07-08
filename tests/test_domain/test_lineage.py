@@ -154,6 +154,12 @@ def test_build_graph_from_lineage_empty_when_all_roots():
     from percell4.domain.tracking.lineage import build_graph_from_lineage
 
     lineage = pd.DataFrame(
-        {"track_id": [1, 2], "tree_id": [0, 1], "begin_t": [0, 0], "end_t": [2, 2], "parent_track_id": [-1, -1]}
+        {
+            "track_id": [1, 2],
+            "tree_id": [0, 1],
+            "begin_t": [0, 0],
+            "end_t": [2, 2],
+            "parent_track_id": [-1, -1],
+        }
     )
     assert build_graph_from_lineage(lineage) == {}

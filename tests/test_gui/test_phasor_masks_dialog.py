@@ -21,10 +21,7 @@ import numpy as np
 import pytest
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QApplication,
     QComboBox,
-    QLabel,
-    QListWidgetItem,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -35,14 +32,13 @@ from percell4.application.use_cases.batch_compute_phasor import (
     BatchPhasorReport,
 )
 from percell4.gui.phasor_masks_dialog import (
-    PhasorMasksDialog,
     _DEFAULT_SUFFIX_A,
     _DEFAULT_SUFFIX_B,
     _DEFAULT_T_FIT,
     _DEFAULT_T_MASK_A,
     _DEFAULT_T_MASK_B,
+    PhasorMasksDialog,
 )
-
 
 # ── Fixture builders ──────────────────────────────────────────
 

@@ -38,8 +38,8 @@ def stub_use_case(monkeypatch):
 
     def fake_run(paths, *, kind, old_name, new_name, dry_run=False, progress_callback=None):
         from percell4.application.use_cases.batch_rename_resource import (
-            BatchOperationReport,
             BatchOperationItemResult,
+            BatchOperationReport,
         )
         calls["paths"] = list(paths)
         calls["kind"] = kind
@@ -142,18 +142,26 @@ def test_cli_returns_zero_when_any_dataset_processed(tmp_path, monkeypatch):
     b = _make_h5_with_channel(tmp_path / "b.h5")
 
     from percell4.application.use_cases.batch_rename_resource import (
-        BatchOperationReport,
         BatchOperationItemResult,
+        BatchOperationReport,
     )
 
     def fake(paths, **kw):
         return BatchOperationReport(items=(
-            BatchOperationItemResult(h5_path=Path(paths[0]), status="succeeded", processed=("ch0",)),
-            BatchOperationItemResult(h5_path=Path(paths[1]), status="skipped_no_changes", skipped={"ch0": "not found"}),
+            BatchOperationItemResult(
+                h5_path=Path(paths[0]), status="succeeded", processed=("ch0",)
+            ),
+            BatchOperationItemResult(
+                h5_path=Path(paths[1]),
+                status="skipped_no_changes",
+                skipped={"ch0": "not found"},
+            ),
         ))
 
     monkeypatch.setattr(cli, "batch_rename_resource", fake)
-    exit_code = cli.main([str(a), str(b), "--kind", "channel", "--from-name", "ch0", "--to-name", "ch1"])
+    exit_code = cli.main(
+        [str(a), str(b), "--kind", "channel", "--from-name", "ch0", "--to-name", "ch1"]
+    )
     assert exit_code == 0
 
 
@@ -161,13 +169,17 @@ def test_cli_returns_one_when_no_progress(tmp_path, monkeypatch):
     """All skipped → exit 1."""
     a = _make_h5_with_channel(tmp_path / "a.h5")
     from percell4.application.use_cases.batch_rename_resource import (
-        BatchOperationReport,
         BatchOperationItemResult,
+        BatchOperationReport,
     )
 
     def fake(paths, **kw):
         return BatchOperationReport(items=(
-            BatchOperationItemResult(h5_path=Path(paths[0]), status="skipped_no_changes", skipped={"ch0": "not found"}),
+            BatchOperationItemResult(
+                h5_path=Path(paths[0]),
+                status="skipped_no_changes",
+                skipped={"ch0": "not found"},
+            ),
         ))
 
     monkeypatch.setattr(cli, "batch_rename_resource", fake)

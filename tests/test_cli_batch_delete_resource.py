@@ -34,8 +34,8 @@ def stub_use_case(monkeypatch):
         dry_run=False, progress_callback=None,
     ):
         from percell4.application.use_cases.batch_rename_resource import (
-            BatchOperationReport,
             BatchOperationItemResult,
+            BatchOperationReport,
         )
         calls["paths"] = list(paths)
         calls["kind"] = kind
@@ -115,14 +115,20 @@ def test_cli_returns_zero_when_any_dataset_processed(tmp_path, monkeypatch):
     a = _make_h5_with_channel(tmp_path / "a.h5")
     b = _make_h5_with_channel(tmp_path / "b.h5")
     from percell4.application.use_cases.batch_rename_resource import (
-        BatchOperationReport,
         BatchOperationItemResult,
+        BatchOperationReport,
     )
 
     def fake(paths, **kw):
         return BatchOperationReport(items=(
-            BatchOperationItemResult(h5_path=Path(paths[0]), status="succeeded", processed=("ch0",)),
-            BatchOperationItemResult(h5_path=Path(paths[1]), status="skipped_no_changes", skipped={"ch0": "not found"}),
+            BatchOperationItemResult(
+                h5_path=Path(paths[0]), status="succeeded", processed=("ch0",)
+            ),
+            BatchOperationItemResult(
+                h5_path=Path(paths[1]),
+                status="skipped_no_changes",
+                skipped={"ch0": "not found"},
+            ),
         ))
 
     monkeypatch.setattr(cli, "batch_delete_resource", fake)
@@ -133,13 +139,17 @@ def test_cli_returns_zero_when_any_dataset_processed(tmp_path, monkeypatch):
 def test_cli_returns_one_when_no_progress(tmp_path, monkeypatch):
     a = _make_h5_with_channel(tmp_path / "a.h5")
     from percell4.application.use_cases.batch_rename_resource import (
-        BatchOperationReport,
         BatchOperationItemResult,
+        BatchOperationReport,
     )
 
     def fake(paths, **kw):
         return BatchOperationReport(items=(
-            BatchOperationItemResult(h5_path=Path(paths[0]), status="skipped_no_changes", skipped={"ch0": "not found"}),
+            BatchOperationItemResult(
+                h5_path=Path(paths[0]),
+                status="skipped_no_changes",
+                skipped={"ch0": "not found"},
+            ),
         ))
 
     monkeypatch.setattr(cli, "batch_delete_resource", fake)

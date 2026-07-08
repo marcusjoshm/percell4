@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from qtpy.QtWidgets import QPushButton
 
 from percell4.interfaces.gui.main_window import LauncherWindow

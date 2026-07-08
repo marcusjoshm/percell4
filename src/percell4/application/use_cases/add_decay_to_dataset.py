@@ -431,7 +431,11 @@ def add_decay_to_dataset(
         _write_provenance_attrs(h5_path, ch_name, prov)
 
     # Persist cross_format_rule to /metadata so subsequent flows can read it
-    if written and cross_format_rule is not None and not isinstance(cross_format_rule, ExplicitRule):
+    if (
+        written
+        and cross_format_rule is not None
+        and not isinstance(cross_format_rule, ExplicitRule)
+    ):
         from percell4.domain.io.cross_format import serialize_rule
         try:
             store.set_metadata({"cross_format_rule": serialize_rule(cross_format_rule)})

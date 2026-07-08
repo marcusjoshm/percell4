@@ -7,12 +7,10 @@ goes through the existing ComputePhasor / ApplyWavelet use cases.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from qtpy.QtCore import Qt
 
 from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
@@ -99,7 +97,8 @@ def panel(qtbot, session_with_dataset):
 
 
 def test_compute_phasor_loads_from_cache_when_no_shift(panel):
-    """No Shift held + cache present → compute use case NOT invoked; phasor window populated from cache."""
+    """No Shift held + cache present → compute use case NOT invoked;
+    phasor window populated from cache."""
     with patch(
         "percell4.application.use_cases.compute_phasor.ComputePhasor.execute"
     ) as mock_compute:

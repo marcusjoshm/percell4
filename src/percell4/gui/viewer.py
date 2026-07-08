@@ -35,7 +35,7 @@ CHANNEL_COLORMAPS = vp.CHANNEL_COLORMAPS
 # A WeakSet — not a dict — so closed-then-GC'd ViewerWindows drop out
 # without bookkeeping. Resolution is O(N_viewers); the launcher creates
 # one ViewerWindow, so N is effectively 1.
-_VIEWER_WINDOWS: "weakref.WeakSet[ViewerWindow]" = weakref.WeakSet()
+_VIEWER_WINDOWS: weakref.WeakSet[ViewerWindow] = weakref.WeakSet()
 # Subscribers (typically LauncherWindow) interested in `M` events.
 # Each is a callable taking the originating `ViewerWindow`.
 # Stored as a list of weak method refs so a closed launcher drops out.
@@ -59,7 +59,7 @@ def _prune_dead_subscribers() -> None:
     _M_SUBSCRIBERS[:] = [r for r in _M_SUBSCRIBERS if r() is not None]
 
 
-def _dispatch_multi_select_for_viewer(vw: "ViewerWindow") -> None:
+def _dispatch_multi_select_for_viewer(vw: ViewerWindow) -> None:
     """Emit the `multi_select_requested` signal and run module-level
     subscribers. Shared by the Labels-active and viewer-level paths.
 

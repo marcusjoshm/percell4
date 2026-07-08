@@ -10,8 +10,6 @@ SpinBox's responsibility (consolidate-canonical-state).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import h5py
 import numpy as np
 import pytest

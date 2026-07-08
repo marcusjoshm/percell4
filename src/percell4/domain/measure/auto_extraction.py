@@ -62,11 +62,11 @@ __all__ = [
     "noise_symmetry_floor_k",
     "noise_symmetry_floor_k_per_cell",
     "AutoExtractReport",
-    "NoParticlesFound",
+    "NoParticlesFoundError",
 ]
 
 
-class NoParticlesFound(ValueError):
+class NoParticlesFoundError(ValueError):
     """Auto-detect-smallest found no particles to size (no LoG blobs).
 
     A ``ValueError`` subclass so existing ``except ValueError`` handlers keep working,
@@ -395,7 +395,7 @@ def auto_extract(
             presmooth_sigma_px=log_presmooth, max_sigma=max_sigma,
         )
         if d_small <= 0:
-            raise NoParticlesFound(
+            raise NoParticlesFoundError(
                 "smallest-particle autodetection found no blobs; supply a smallest "
                 "particle Ø (turn off Auto-detect smallest) instead"
             )

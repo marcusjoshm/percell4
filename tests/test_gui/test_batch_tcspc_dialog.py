@@ -14,7 +14,6 @@ from typing import Any
 
 import h5py
 import pandas as pd
-import pytest
 from qtpy.QtWidgets import QCheckBox, QComboBox
 
 from percell4.application.use_cases.add_decay_to_dataset import AppendReport

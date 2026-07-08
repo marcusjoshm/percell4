@@ -816,7 +816,7 @@ def _apply_auto_extract_cells(
     """
     from percell4.domain.measure.auto_extraction import (
         FILL_FACTOR,
-        NoParticlesFound,
+        NoParticlesFoundError,
         _win,
         auto_extract,
     )
@@ -855,7 +855,7 @@ def _apply_auto_extract_cells(
             smallest_particle_px=smallest_particle_px,
             presmooth_sigma_px=float(settings.presmooth_sigma_px),
         )
-    except NoParticlesFound:
+    except NoParticlesFoundError:
         # Auto-detect found no particles to size in this frame. A recoverable "no
         # particles" outcome (e.g. the dissolved end of a washout time-lapse), NOT a
         # dataset error: the time-lapse loop turns it into an empty frame (R9). The

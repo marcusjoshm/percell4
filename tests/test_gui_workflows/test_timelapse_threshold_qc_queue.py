@@ -28,7 +28,6 @@ from percell4.workflows.models import (
     WorkflowDatasetEntry,
 )
 
-
 N_TP = 3
 H = W = 12
 
@@ -75,7 +74,7 @@ class _FakeController:
     start() fires on_complete(True, msg, mask) where mask = (seg_labels > 0).
     """
 
-    instances: list["_FakeController"] = []
+    instances: list[_FakeController] = []
 
     def __init__(self, *, seg_labels, channel_image, on_complete, **kwargs):
         self.seg_labels = np.asarray(seg_labels)

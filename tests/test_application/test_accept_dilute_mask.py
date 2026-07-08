@@ -19,7 +19,6 @@ from percell4.application.session import Event, Session
 from percell4.application.use_cases.accept_dilute_mask import AcceptDiluteMask
 from percell4.domain.dataset import DatasetHandle
 
-
 # ── Fakes ────────────────────────────────────────────────────
 
 
@@ -96,13 +95,6 @@ def test_refresh_before_set_active_mask(handle):
     mask = np.ones((4, 4), dtype=bool)
     uc.execute(handle, "dilute_v1", mask)
 
-    # Build observed call sequence on (repo, session)
-    expected = [
-        ("repo.write_mask", call(handle, "dilute_v1", repo.write_mask.call_args[0][2])),
-        ("repo.list_masks", call(handle)),
-        ("session.refresh_resource_lists", call(mask_names=["dilute_v1"])),
-        ("session.set_active_mask", call("dilute_v1")),
-    ]
     # The simplest assertion: refresh_resource_lists invoked before set_active_mask
     refresh_idx = None
     set_idx = None
@@ -185,7 +177,10 @@ def test_integration_real_repo_and_session(tmp_path):
     session.set_dataset(handle)
 
     fire_count = {"n": 0}
-    session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: fire_count.__setitem__("n", fire_count["n"] + 1))
+    session.subscribe(
+        Event.ACTIVE_MASK_CHANGED,
+        lambda: fire_count.__setitem__("n", fire_count["n"] + 1),
+    )
 
     repo = Hdf5DatasetRepository()
     uc = AcceptDiluteMask(repo=repo, session=session)

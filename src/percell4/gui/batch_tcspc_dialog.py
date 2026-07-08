@@ -71,7 +71,6 @@ from percell4.domain.io.models import (
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.gui._stitching_flim_form import StitchingFlimForm
 from percell4.gui.tcspc_tab_state import build_rule_from_preset
-from percell4.store import DatasetStore
 
 _NO_PAIR_LABEL = "— select —"
 _SKIP_LABEL = "— skip —"

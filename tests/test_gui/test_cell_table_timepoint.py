@@ -47,6 +47,6 @@ def test_label_to_row_unique_per_frame():
 
 def test_peer_views_import():
     """Both peer views import cleanly with the new subscription wiring."""
+    import percell4.interfaces.gui.main_window  # noqa: F401
     import percell4.interfaces.gui.peer_views.cell_table  # noqa: F401
     import percell4.interfaces.gui.peer_views.data_plot  # noqa: F401
-    import percell4.interfaces.gui.main_window  # noqa: F401

@@ -32,7 +32,6 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.domain.io.models import (
     CompressConfig,
     DatasetGuiState,
@@ -42,6 +41,7 @@ from percell4.domain.io.models import (
     TileConfig,
     TokenConfig,
 )
+from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 
 
 class CompressDialog(QDialog):

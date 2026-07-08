@@ -7,14 +7,11 @@ The orchestrator is injected for controllable per-test reports.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import h5py
 import numpy as np
-import pytest
-from qtpy.QtCore import Qt
-from qtpy.QtWidgets import QComboBox, QDialog, QMessageBox, QPushButton
+from qtpy.QtWidgets import QComboBox, QMessageBox, QPushButton
 
 from percell4.gui.flim_fret_dialog import (
     FlimFretDialog,
@@ -22,12 +19,10 @@ from percell4.gui.flim_fret_dialog import (
     _PairConfig,
 )
 from percell4.workflows.models import (
-    FlimFretPair,
     FlimFretPairResult,
     FlimFretReport,
     FlimFretStatus,
 )
-
 
 # ── Fixture builders ──────────────────────────────────────
 
@@ -389,8 +384,8 @@ def test_start_disabled_when_donor_equals_da(qtbot, tmp_path):
 
 
 def test_start_disabled_when_configure_not_done(qtbot, tmp_path):
-    donor = _good_dataset(tmp_path, "donor.h5")
-    da = _good_dataset(tmp_path, "da.h5")
+    _good_dataset(tmp_path, "donor.h5")
+    _good_dataset(tmp_path, "da.h5")
     dlg = FlimFretDialog()
     qtbot.addWidget(dlg)
     dlg._set_source_folder(tmp_path)
@@ -445,9 +440,7 @@ def test_source_folder_change_prompts_when_pairs_exist(qtbot, tmp_path, monkeypa
 
     # User confirms the clear.
     monkeypatch.setattr(
-        QFileDialog := __import__(
-            "qtpy.QtWidgets", fromlist=["QFileDialog"]
-        ).QFileDialog,
+        __import__("qtpy.QtWidgets", fromlist=["QFileDialog"]).QFileDialog,
         "getExistingDirectory",
         staticmethod(lambda *args, **kwargs: str(new_folder)),
     )

@@ -33,7 +33,6 @@ from percell4.domain.segmentation.phasor_masks import (
     fit_phasor_ellipse_and_apply_masks,
 )
 
-
 # ── helpers ─────────────────────────────────────────────────────────────
 
 
@@ -297,10 +296,8 @@ def test_output_shape_dtype_and_max_value_contract():
 def test_pure_domain_no_forbidden_imports():
     """Domain isolation: ``phasor_masks`` must not pull in qtpy,
     napari, h5py, or percell4.application.session."""
-    import sys
 
     # The helper module is already imported via the test imports above.
-    forbidden = ("qtpy", "napari", "h5py", "percell4.application.session")
     # Sanity: the helper itself must not have grabbed any forbidden
     # symbol into its own module namespace. We don't audit sys.modules
     # globally (other tests may have imported them).
@@ -323,7 +320,7 @@ def test_pure_domain_no_forbidden_imports():
     # text to be sure.
     src = mod.__file__
     assert src is not None
-    with open(src, "r", encoding="utf-8") as f:
+    with open(src, encoding="utf-8") as f:
         text = f.read()
     for token in ("import qtpy", "from qtpy", "import napari", "from napari",
                   "import h5py", "from h5py",

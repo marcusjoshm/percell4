@@ -316,12 +316,12 @@ def test_export_then_import_round_trip(tmp_path, session, repo):
     """End-to-end: export a channel via U4, delete cache, re-import via U6."""
     rng = np.random.default_rng(0)
     repo.disk_metadata = {"channel_names": ["mTQ2"], "flim_frequency_mhz": 80.0}
-    repo.arrays[f"phasor/mTQ2/g"] = rng.uniform(size=(8, 8)).astype(np.float32)
-    repo.arrays[f"phasor/mTQ2/s"] = rng.uniform(size=(8, 8)).astype(np.float32)
-    repo.arrays[f"phasor/mTQ2/g_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
-    repo.arrays[f"phasor/mTQ2/s_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
-    repo.arrays[f"phasor/mTQ2/lifetime_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
-    repo.arrays[f"decay/mTQ2"] = rng.uniform(size=(8, 8, 16)).astype(np.float32)
+    repo.arrays["phasor/mTQ2/g"] = rng.uniform(size=(8, 8)).astype(np.float32)
+    repo.arrays["phasor/mTQ2/s"] = rng.uniform(size=(8, 8)).astype(np.float32)
+    repo.arrays["phasor/mTQ2/g_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
+    repo.arrays["phasor/mTQ2/s_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
+    repo.arrays["phasor/mTQ2/lifetime_filtered"] = rng.uniform(size=(8, 8)).astype(np.float32)
+    repo.arrays["decay/mTQ2"] = rng.uniform(size=(8, 8, 16)).astype(np.float32)
     originals = {
         k: repo.arrays[k].copy()
         for k in (

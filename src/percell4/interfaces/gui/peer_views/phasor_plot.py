@@ -8,13 +8,14 @@ integer-labeled mask for downstream measurement.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Final
+from typing import Any, Final
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QRectF, QSettings, QTimer, Qt, Signal
+from qtpy.QtCore import QRectF, QSettings, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,7 +23,6 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -37,11 +37,11 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
-from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.domain.flim.phasor_display import (
     compute_valid_phasor_pixels,
     mask_shape_matches,
 )
+from percell4.gui._resource_name_prompt import prompt_for_resource_name
 
 COLOR_CYCLE: Final[tuple[str, ...]] = (
     "#3498db", "#e74c3c", "#2ecc71", "#f39c12",
@@ -1091,7 +1091,9 @@ class PhasorPlotWindow(QMainWindow):
             )
             self._roi_list.addItem(item)
         self._roi_list.blockSignals(False)
-        if self._selected_roi_index is not None and self._selected_roi_index < len(self._roi_widgets):
+        if self._selected_roi_index is not None and self._selected_roi_index < len(
+            self._roi_widgets
+        ):
             self._roi_list.setCurrentRow(self._selected_roi_index)
 
     def _on_roi_list_item_changed(self, item: QListWidgetItem) -> None:

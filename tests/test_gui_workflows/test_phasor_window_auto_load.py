@@ -7,13 +7,10 @@ channel changes while it is already visible.
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock
-
 import numpy as np
 import pytest
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
 

@@ -12,7 +12,6 @@ from percell4.domain.io.assembler import (
     stack_timepoints,
 )
 
-
 # ── Timepoint stacking ────────────────────────────────────────
 
 

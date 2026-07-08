@@ -30,7 +30,9 @@ def _make_store(path: Path, *, with_sg: bool = True) -> None:
     for cy, cx in centers:
         rr, cc = disk((cy, cx), 8, shape=(160, 160))
         g3[rr, cc] = 220.0
-    store.write_array("intensity", np.stack([g3, np.zeros_like(g3)], 0), attrs={"dims": ["C", "H", "W"]})
+    store.write_array(
+        "intensity", np.stack([g3, np.zeros_like(g3)], 0), attrs={"dims": ["C", "H", "W"]}
+    )
     labels = np.zeros((160, 160), dtype=np.int32)
     labels[20:140, 20:140] = 1
     store.write_labels("cp_mask", labels)

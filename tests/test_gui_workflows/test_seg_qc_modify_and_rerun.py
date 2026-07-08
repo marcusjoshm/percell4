@@ -17,12 +17,11 @@ import numpy as np
 import pytest
 
 from percell4.application.session import Session
+from percell4.domain.segmentation.preprocess import apply_lut as _apply_lut
 from percell4.gui.viewer import ViewerWindow
 from percell4.gui.workflows.base_runner import PhaseResult
-from percell4.domain.segmentation.preprocess import apply_lut as _apply_lut
 from percell4.gui.workflows.single_cell.seg_qc import (
     SegmentationQCController,
-    _LAYER_IMAGE,
 )
 from percell4.model import CellDataModel
 from percell4.store import DatasetStore
@@ -133,7 +132,10 @@ def test_rerun_with_modify_collapsed_uses_raw_channel(qtbot, controller, monkeyp
     captured: dict = {}
     monkeypatch.setattr(
         "percell4.adapters.cellpose.run_cellpose",
-        lambda image, **kw: (captured.setdefault("image", np.array(image, copy=True)), np.zeros(image.shape, dtype=np.int32))[1],
+        lambda image, **kw: (
+            captured.setdefault("image", np.array(image, copy=True)),
+            np.zeros(image.shape, dtype=np.int32),
+        )[1],
     )
     monkeypatch.setattr(
         "percell4.adapters.cellpose.build_cellpose_model",

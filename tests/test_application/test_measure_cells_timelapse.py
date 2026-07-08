@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from percell4.application.session import Session
 from percell4.application.use_cases.measure_cells import MeasureCells

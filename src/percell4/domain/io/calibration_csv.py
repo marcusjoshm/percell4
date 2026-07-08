@@ -15,10 +15,10 @@ bailing on the first. Numeric fields are parsed strictly — no auto-coercion.
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
 
 from percell4.domain.errors import CalibrationCSVError
 

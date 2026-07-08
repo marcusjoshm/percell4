@@ -8,17 +8,14 @@ from __future__ import annotations
 
 import logging
 import weakref
-from pathlib import Path
 
 import numpy as np
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QCheckBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -77,7 +74,7 @@ class SegmentationPanel(QWidget):
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(_PAINT_AUTOSAVE_DEBOUNCE_MS)
         self._autosave_timer.timeout.connect(self._flush_pending_autosave)
-        self._pending_autosave_layer: "weakref.ref | None" = None
+        self._pending_autosave_layer: weakref.ref | None = None
         self._wired_viewer_id: int | None = None
         self._wired_layer_ids: set[int] = set()
 
@@ -479,8 +476,8 @@ class SegmentationPanel(QWidget):
         else:
             image = _preprocess(raw)
 
-        from percell4.gui.workers import Worker
         from percell4.adapters.cellpose import run_cellpose, run_cellpose_stack
+        from percell4.gui.workers import Worker
 
         # A time-lapse channel layer is (T, H, W): segment every frame and
         # write one (T, H, W) raw-label resource. A 2D layer is the historical
@@ -524,8 +521,8 @@ class SegmentationPanel(QWidget):
             self._show_status(f"Error: {err.exc_type}: {err.message}")
 
     def _on_cellpose_done(self, masks) -> None:
-        from percell4.application.use_cases.segment_cells import SegmentCells
         from percell4.adapters.hdf5_store import Hdf5DatasetRepository
+        from percell4.application.use_cases.segment_cells import SegmentCells
 
         # Delegate post-processing + store write to the use case. The
         # captured bin (set at queue time) is what the finalize call uses

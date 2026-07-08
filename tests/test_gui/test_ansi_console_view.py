@@ -13,7 +13,6 @@ from percell4.interfaces.gui.task_panels.ansi_console_view import (
     Style,
 )
 
-
 # ── Pure parser ─────────────────────────────────────────────────────────
 
 

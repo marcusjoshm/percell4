@@ -67,7 +67,7 @@ def run_adaptive_auto_extract_stack(
     a frame that degraded to empty has a ``None`` report. Pure (no Qt) so it is
     unit-testable and worker-safe.
     """
-    from percell4.domain.measure.auto_extraction import NoParticlesFound, auto_extract
+    from percell4.domain.measure.auto_extraction import NoParticlesFoundError, auto_extract
 
     image = np.asarray(image)
     labels = np.asarray(labels)
@@ -82,7 +82,7 @@ def run_adaptive_auto_extract_stack(
                 presmooth_sigma_px=presmooth_sigma_px,
                 min_spot_px=min_spot_px,
             )
-        except NoParticlesFound:
+        except NoParticlesFoundError:
             # Auto-detect found no particles to size this frame — a recoverable empty
             # frame, not a failed run (R9). Only raised in auto-detect mode; genuine
             # errors propagate to the worker's error signal.

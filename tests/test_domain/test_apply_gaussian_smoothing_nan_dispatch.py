@@ -14,7 +14,6 @@ helper so finite pixels stay finite even when neighbors are NaN.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from scipy.ndimage import gaussian_filter
 
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing

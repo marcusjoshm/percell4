@@ -12,7 +12,6 @@ from typing import Any
 
 import numpy as np
 
-
 # TIFF ResolutionUnit values (TIFF 6.0 spec):
 #   1 = no unit (resolution is pixel aspect ratio, not physical)
 #   2 = inch

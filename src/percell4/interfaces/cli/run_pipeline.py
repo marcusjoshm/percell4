@@ -23,9 +23,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
 import numpy as np
 
+import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
 from percell4.adapters.hdf5_store import Hdf5DatasetRepository
 from percell4.adapters.null_viewer import NullViewerAdapter
 from percell4.application.session import Session
@@ -91,7 +91,11 @@ def run_pipeline(
     # ── Load dataset ──
     load_uc = LoadDataset(repo, viewer, session)
     handle = load_uc.execute(h5_path)
-    logger.info("Loaded: %s (%d channels)", handle.name, len(handle.metadata.get("channel_names", [])))
+    logger.info(
+        "Loaded: %s (%d channels)",
+        handle.name,
+        len(handle.metadata.get("channel_names", [])),
+    )
 
     seg_name = None
     mask_name = None
@@ -217,7 +221,11 @@ def run_pipeline(
             thresh_uc = AcceptThreshold(repo, viewer, session)
             thresh_result = thresh_uc.execute(image, value, threshold_method, ch_name)
             mask_name = thresh_result.mask_name
-            pct = 100.0 * thresh_result.n_positive / thresh_result.n_total if thresh_result.n_total else 0
+            pct = (
+                100.0 * thresh_result.n_positive / thresh_result.n_total
+                if thresh_result.n_total
+                else 0
+            )
             logger.info(
                 "Threshold: %s = %.1f → %d/%d px (%.1f%%)",
                 mask_name, value, thresh_result.n_positive, thresh_result.n_total, pct,
@@ -260,9 +268,15 @@ def main() -> int:
     parser.add_argument("--cellpose-model", default="cpsam_v2", help="Cellpose 4.x model")
     parser.add_argument("--cellpose-diameter", type=float, help="Cell diameter (auto if omitted)")
     parser.add_argument("--output", "-o", type=Path, help="Output CSV path")
-    parser.add_argument("--skip-segmentation", action="store_true", help="Use existing segmentation")
+    parser.add_argument(
+        "--skip-segmentation", action="store_true", help="Use existing segmentation"
+    )
     parser.add_argument("--skip-threshold", action="store_true", help="Skip thresholding")
-    parser.add_argument("--track", action="store_true", help="Track cells across timepoints (time-lapse only)")
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Track cells across timepoints (time-lapse only)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()

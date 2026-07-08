@@ -32,7 +32,6 @@ import pytest
 from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
 
-
 # ── Fixtures ────────────────────────────────────────────────
 
 

@@ -53,13 +53,13 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.config import viewer_presets as vp
-from percell4.gui.workflows.base_runner import PhaseResult
 from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
     relabel_sequential,
 )
 from percell4.domain.segmentation.preprocess import apply_lut
+from percell4.gui.workflows.base_runner import PhaseResult
 from percell4.store import DatasetStore
 from percell4.workflows.models import CELLPOSE_MODELS, WorkflowDatasetEntry
 

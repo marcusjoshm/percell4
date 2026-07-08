@@ -93,16 +93,16 @@ class DilutePhaseMaskController(QObject):
 
     def __init__(
         self,
-        viewer_win: "ViewerWindow",
-        data_model: "CellDataModel",
-        store: "DatasetStore",
-        session: "Session",
+        viewer_win: ViewerWindow,
+        data_model: CellDataModel,
+        store: DatasetStore,
+        session: Session,
         channel_image: NDArray[np.float32],
         seg_labels: NDArray[np.int32],
         locked_config: GroupedThresholdConfig,
         dilation_radius_px: int,
         final_mask_name: str,
-        handle: "DatasetHandle",
+        handle: DatasetHandle,
         channel: str = "",
         session_free: bool = False,
     ) -> None:

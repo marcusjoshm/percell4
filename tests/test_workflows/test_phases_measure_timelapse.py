@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from percell4.store import DatasetStore
-from percell4.workflows.models import ParticleSettings, ThresholdingRound, ThresholdAlgorithm
+from percell4.workflows.models import ParticleSettings, ThresholdAlgorithm, ThresholdingRound
 from percell4.workflows.phases import measure_one, measure_particles_one
 
 

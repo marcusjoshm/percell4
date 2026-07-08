@@ -10,7 +10,6 @@ CLI behavior, not the FLIM math.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import h5py
@@ -19,7 +18,6 @@ import pytest
 
 from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.interfaces.cli import batch_phasor as cli
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -431,10 +429,6 @@ def test_cli_module_imports_without_qt() -> None:
     """Importing the batch_phasor CLI must not pull in Qt or napari."""
     # The module is already imported at test-collection time; check
     # whether Qt / napari leaked in via that import.
-    qt_modules = {
-        m for m in sys.modules
-        if "PyQt" in m or "qtpy" in m or m.startswith("napari")
-    }
     # Some Qt may be in sys.modules from OTHER tests in the same
     # session. The test is meaningful only on a clean import. Just
     # verify the CLI module is loaded without crashing -- the import

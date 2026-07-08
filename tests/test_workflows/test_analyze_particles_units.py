@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from percell4.store import DatasetStore
@@ -27,7 +26,6 @@ from percell4.workflows.phases import (
     measure_one,
     measure_particles_one,
 )
-
 
 # ── Pure helper unit tests ────────────────────────────────────────────
 
@@ -218,7 +216,6 @@ def test_measure_one_writes_min_area_resolved_to_run_log(tmp_path):
     under phase='measure'. Two phases, two log lines per dataset."""
     import json
 
-    from percell4.workflows.phases import measure_one
     from percell4.workflows.run_log import RunLog
 
     store = _build_store_with_labels(
@@ -255,7 +252,6 @@ def test_measure_one_um2_failure_logs_to_run_log(tmp_path):
     grepping stderr."""
     import json
 
-    from percell4.workflows.phases import measure_one
     from percell4.workflows.run_log import RunLog
 
     store = _build_store_with_labels(tmp_path / "ds.h5", pixel_size_um=None)
@@ -291,7 +287,6 @@ def test_measure_one_um2_without_pixel_size_fails_with_empty_df(tmp_path):
     store = _build_store_with_labels(tmp_path / "ds.h5", pixel_size_um=None)
     settings = ParticleSettings(min_area=0.5, min_area_unit="um2")
 
-    from percell4.workflows.phases import measure_one
 
     df, failure, msg = measure_one(
         store,

@@ -90,12 +90,12 @@ class DilutePhaseMaskPanel(QWidget):
     def __init__(
         self,
         parent: QWidget | None,
-        store: "DatasetStore",
-        data_model: "CellDataModel",
-        session: "Session",
-        viewer_win: "ViewerWindow",
+        store: DatasetStore,
+        data_model: CellDataModel,
+        session: Session,
+        viewer_win: ViewerWindow,
         get_active_seg_labels: Callable[[], NDArray[np.int32] | None],
-        handle: "DatasetHandle",
+        handle: DatasetHandle,
     ) -> None:
         super().__init__(parent)
         self._store = store

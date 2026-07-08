@@ -31,7 +31,6 @@ import sys
 from pathlib import Path
 
 import percell4._compat  # noqa: F401 — NumPy 2.0 shims
-
 from percell4.application.use_cases.batch_export_images import (
     BatchExportItemResult,
     batch_export_images,

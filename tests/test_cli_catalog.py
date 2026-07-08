@@ -18,7 +18,6 @@ from percell4.interfaces.cli.catalog import (
     resolve_command,
 )
 
-
 # ── Enumeration ─────────────────────────────────────────────────────────
 
 

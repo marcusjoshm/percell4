@@ -10,7 +10,6 @@ is the end-to-end CLI check.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import h5py
@@ -20,7 +19,6 @@ import tifffile
 
 from percell4.interfaces.cli import batch_export as cli
 from percell4.store import DatasetStore
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

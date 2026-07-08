@@ -12,8 +12,6 @@ import pytest
 from skimage import measure
 from skimage.draw import disk
 
-from percell4.workflows.models import PunctaDetectorSettings
-
 from percell4.domain.measure.puncta_scoring import (
     FinderScore,
     MatchCounts,
@@ -27,6 +25,7 @@ from percell4.domain.measure.puncta_scoring import (
     score_finder,
     sweep_ideal_window,
 )
+from percell4.workflows.models import PunctaDetectorSettings
 
 
 def _label(mask: np.ndarray) -> np.ndarray:
@@ -257,8 +256,10 @@ def test_mask_iou_encoding_invariant():
 
 
 def test_mask_iou_half_overlap():
-    a = np.zeros((10, 20), dtype=np.uint8); a[:, :10] = 1
-    b = np.zeros((10, 20), dtype=np.uint8); b[:, 5:15] = 1
+    a = np.zeros((10, 20), dtype=np.uint8)
+    a[:, :10] = 1
+    b = np.zeros((10, 20), dtype=np.uint8)
+    b[:, 5:15] = 1
     # intersection 50 px, union 150 px
     assert mask_iou(a, b) == pytest.approx(50 / 150)
 
@@ -300,14 +301,18 @@ def test_sweep_ideal_window_structure_and_peak():
 
 
 def test_sweep_ideal_window_empty_grid():
-    oracle = sweep_ideal_window(_disk_image([(80, 80)], 8), 1.0, _adaptive_settings(), _disk_mask([(80, 80)], 8), [])
+    oracle = sweep_ideal_window(
+        _disk_image([(80, 80)], 8), 1.0, _adaptive_settings(), _disk_mask([(80, 80)], 8), []
+    )
     assert oracle == WindowOracle(0, (), (), ())
 
 
 def test_score_finder_fields():
     sg = _disk_mask([(80, 80)], 10)
     finder_mask = _disk_mask([(80, 80)], 10)
-    oracle = WindowOracle(ideal_window=91, windows=(11, 91), iou_curve=(0.1, 0.9), recall_curve=(0.2, 1.0))
+    oracle = WindowOracle(
+        ideal_window=91, windows=(11, 91), iou_curve=(0.1, 0.9), recall_curve=(0.2, 1.0)
+    )
     fs = score_finder("granule-size", 71, oracle, finder_mask, sg, k=3.0, in_sample=True)
     assert isinstance(fs, FinderScore)
     assert fs.window_error == abs(71 - 91)

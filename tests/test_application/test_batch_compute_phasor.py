@@ -10,7 +10,6 @@ and view_bin caller-wiring, not re-test the compute/wavelet engines.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import h5py
 import numpy as np
@@ -23,7 +22,6 @@ from percell4.application.use_cases.batch_compute_phasor import (
     batch_compute_phasor,
 )
 from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

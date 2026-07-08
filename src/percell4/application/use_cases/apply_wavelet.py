@@ -9,8 +9,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from percell4.application.session import Session
+from percell4.domain.errors import NoDatasetError
 from percell4.ports.dataset_repository import DatasetRepository
-from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 logger = logging.getLogger(__name__)
 
