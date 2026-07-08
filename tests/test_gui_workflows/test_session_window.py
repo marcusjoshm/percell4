@@ -384,6 +384,11 @@ def test_geometry_round_trip_via_close_and_reopen(qtbot, isolated_settings):
     # Allow geometry to apply
     win1.show()
     qtbot.waitExposed(win1)
+    # Qt may clamp the width up to the natural minimum of the Selectors row,
+    # which is font-metric dependent (wider under a headless WM than on a
+    # desktop). Capture the *realized* geometry and assert the round-trip
+    # reproduces that, so the test measures persistence, not the WM's clamp.
+    saved = win1.geometry()
     win1.close()
 
     # New window in the same settings sandbox
@@ -395,8 +400,8 @@ def test_geometry_round_trip_via_close_and_reopen(qtbot, isolated_settings):
 
     g = win2.geometry()
     # restoreGeometry may adjust by 1-2 px on some platforms; use loose equality
-    assert abs(g.width() - 1100) <= 5
-    assert abs(g.height() - 90) <= 5
+    assert abs(g.width() - saved.width()) <= 5
+    assert abs(g.height() - saved.height()) <= 5
 
 
 # ── No reads of viewer.layers ───────────────────────────────────────

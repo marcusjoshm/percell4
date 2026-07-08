@@ -23,6 +23,10 @@ def _phasor_window(session, mask_array=None):
     repo = MagicMock()
     if mask_array is not None:
         repo.read_mask = MagicMock(return_value=mask_array)
+    # A mock dataset has no cached phasor on disk: reading /phasor/<ch>/g must
+    # raise KeyError so the auto-load-cached path resolves to NoCachedPhasorError
+    # (a bare MagicMock would otherwise feed mock "arrays" into the histogram).
+    repo.read_array = MagicMock(side_effect=KeyError("no cached phasor"))
     win = PhasorPlotWindow(session, get_repo=lambda: repo)
     return win, repo
 

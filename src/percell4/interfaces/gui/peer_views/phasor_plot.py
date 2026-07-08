@@ -1417,11 +1417,6 @@ class PhasorPlotWindow(QMainWindow):
         """
         if self._g_map is None or self._s_map is None:
             return None
-        # Degenerate phasor (empty or 0-d, e.g. an empty cached map auto-loaded
-        # on a dataset switch): nothing is visible and reshape(g.shape) on a
-        # size-0 array would raise. Honor the "nothing visible" contract.
-        if self._g_map.size == 0 or self._g_map.ndim < 2:
-            return None
 
         g, s = self._get_active_gs_maps()
         mask_flat = self._load_active_mask_flat()
