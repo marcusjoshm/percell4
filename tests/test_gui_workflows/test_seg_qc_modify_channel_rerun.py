@@ -232,7 +232,7 @@ def test_modify_rerun_with_active_lut_feeds_modified_image(
 
     captured: dict = {}
     def fake_run(image, **kwargs):
-        captured["image"] = np.asarray(image, copy=True)
+        captured["image"] = np.array(image, copy=True)
         return np.zeros(image.shape, dtype=np.int32)
     monkeypatch.setattr("percell4.adapters.cellpose.run_cellpose", fake_run)
     monkeypatch.setattr(

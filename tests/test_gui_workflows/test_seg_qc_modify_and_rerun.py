@@ -103,7 +103,7 @@ def test_rerun_with_modify_active_uses_clipped_image(qtbot, controller, monkeypa
 
     captured: dict = {}
     def fake_run(image, **kwargs):
-        captured["image"] = np.asarray(image, copy=True)
+        captured["image"] = np.array(image, copy=True)
         return np.zeros(image.shape, dtype=np.int32)
 
     monkeypatch.setattr("percell4.adapters.cellpose.run_cellpose", fake_run)
@@ -133,7 +133,7 @@ def test_rerun_with_modify_collapsed_uses_raw_channel(qtbot, controller, monkeyp
     captured: dict = {}
     monkeypatch.setattr(
         "percell4.adapters.cellpose.run_cellpose",
-        lambda image, **kw: (captured.setdefault("image", np.asarray(image, copy=True)), np.zeros(image.shape, dtype=np.int32))[1],
+        lambda image, **kw: (captured.setdefault("image", np.array(image, copy=True)), np.zeros(image.shape, dtype=np.int32))[1],
     )
     monkeypatch.setattr(
         "percell4.adapters.cellpose.build_cellpose_model",
@@ -153,7 +153,7 @@ def test_collapse_then_rerun_uses_raw_again(qtbot, controller, monkeypatch):
 
     received = []
     def fake_run(image, **kwargs):
-        received.append(np.asarray(image, copy=True))
+        received.append(np.array(image, copy=True))
         return np.zeros(image.shape, dtype=np.int32)
 
     monkeypatch.setattr("percell4.adapters.cellpose.run_cellpose", fake_run)

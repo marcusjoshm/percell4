@@ -719,12 +719,6 @@ class SegmentationQCController(QObject):
                 pass
             self._rerun_progress = None
         msg = getattr(err, "message", None) or str(err)
-        # TEMP-DIAG: surface the hidden worker traceback in CI captured stdout.
-        import sys as _sys
-        print(f"[DIAG _on_rerun_error] {getattr(err, 'exc_type', '?')}: {msg}", file=_sys.stderr, flush=True)
-        _tb = getattr(err, "traceback", None)
-        if _tb:
-            print(_tb, file=_sys.stderr, flush=True)
         self._set_rerun_status(f"Re-run failed: {msg}")
         if self._rerun_button is not None:
             self._rerun_button.setEnabled(True)
