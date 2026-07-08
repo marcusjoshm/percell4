@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from skimage.draw import disk
 
 from percell4.domain.measure.window_finders import WINDOW_FINDERS
@@ -89,7 +88,9 @@ def test_run_bakeoff_in_sample_flag_default_and_holdout():
 
 
 def test_run_bakeoff_flags_missing_sg_mask():
-    rep = run_bakeoff([_field("labeled"), _field("unlabeled", sg=False)], ["otsu-mean"], _settings(), GRID)
+    rep = run_bakeoff(
+        [_field("labeled"), _field("unlabeled", sg=False)], ["otsu-mean"], _settings(), GRID
+    )
     assert rep.missing_label_fields == ["unlabeled"]
     assert "unlabeled" not in rep.oracles  # not scored
     assert "labeled" in rep.oracles
@@ -168,9 +169,12 @@ def test_load_bakeoff_field_binarizes_nonbinary_sg(tmp_path):
     store.create(metadata={"channel_names": ["G3BP1", "DNA"]})
     centers = [(80, 80)]
     g3 = _granule_image(centers, 8)
-    store.write_array("intensity", np.stack([g3, np.zeros_like(g3)], 0), attrs={"dims": ["C", "H", "W"]})
+    store.write_array(
+        "intensity", np.stack([g3, np.zeros_like(g3)], 0), attrs={"dims": ["C", "H", "W"]}
+    )
     sg = _disk_mask(centers, 8) * np.uint8(255)
-    store.write_mask("SG_mask", (sg > 0).astype(np.uint8))  # store enforces {0,1}; read back boolean
+    # store enforces {0,1}; read back boolean
+    store.write_mask("SG_mask", (sg > 0).astype(np.uint8))
     s2 = DatasetStore(p)
     with s2.open_read():
         fld = load_bakeoff_field(s2, "G3BP1")

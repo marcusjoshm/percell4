@@ -42,7 +42,6 @@ import sys
 from pathlib import Path
 
 import percell4._compat  # noqa: F401 — NumPy 2.0 shims for dtcwt
-
 from percell4.application.use_cases.batch_compute_phasor import (
     BatchPhasorItemResult,
     batch_compute_phasor,

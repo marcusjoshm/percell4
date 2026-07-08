@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-
 # ──────────────────────────────────────────────────────────────
 # Standalone-widget tests
 # ──────────────────────────────────────────────────────────────
@@ -254,7 +253,6 @@ def test_panel_run_grouping_reads_algorithm_through_settings_widget(
     import pandas as pd
 
     from percell4.gui import grouped_seg_panel as gsp_module
-    from percell4.gui.workers import Worker
 
     panel, _store = _build_panel(qtbot)
 

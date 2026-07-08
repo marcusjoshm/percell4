@@ -6,7 +6,6 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import pytest
 
 from percell4.application.use_cases.flim_fret_discovery import (
     DatasetCandidate,
@@ -16,7 +15,6 @@ from percell4.application.use_cases.flim_fret_discovery import (
 )
 from percell4.store import DatasetStore
 from percell4.workflows.models import FlimFretPair
-
 
 # ── Fixture builder ─────────────────────────────────────────
 

@@ -41,12 +41,6 @@ from percell4.application.use_cases.add_decay_to_dataset import (
     AppendReport,
     add_decay_to_dataset,
 )
-from percell4.gui._add_layer_logic import (
-    build_added_channel_intensity,
-    coerce_added_array,
-    is_time_invariant_add,
-)
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.domain.io.cross_format import (
     IntensityChannel,
     match_bin_to_intensity,
@@ -56,6 +50,12 @@ from percell4.domain.io.models import (
     TileConfig,
     TokenConfig,
 )
+from percell4.gui._add_layer_logic import (
+    build_added_channel_intensity,
+    coerce_added_array,
+    is_time_invariant_add,
+)
+from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.gui.tcspc_tab_state import TcspcTabState
 
 
@@ -538,9 +538,9 @@ class AddLayerDialog(QDialog):
         from qtpy.QtWidgets import QApplication
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            import tifffile
-
             from collections import defaultdict
+
+            import tifffile
 
             from percell4.domain.io.assembler import (
                 assemble_tiles,
@@ -576,7 +576,11 @@ class AddLayerDialog(QDialog):
                 # Scan this dataset's files
                 scanner = FileScanner(token_config)
                 if ds.files:
-                    scan = scanner.scan(files=[str(f.path) if hasattr(f, "path") else str(f) for f in ds.files])
+                    scan = scanner.scan(
+                        files=[
+                            str(f.path) if hasattr(f, "path") else str(f) for f in ds.files
+                        ]
+                    )
                 else:
                     scan = scanner.scan(path=ds.source_dir)
 
@@ -1941,10 +1945,13 @@ class AddLayerDialog(QDialog):
 
     def _phasor_npz_add_row(self, npz_path: Path) -> None:
         """Probe the .npz at file-add time; populate one table row."""
-        from percell4.application.use_cases.import_phasor_npz import (
-            _validate_npz, _sanitize_channel_name, _decode_metadata,
-        )
         import re
+
+        from percell4.application.use_cases.import_phasor_npz import (
+            _decode_metadata,
+            _sanitize_channel_name,
+            _validate_npz,
+        )
 
         row = self._phasor_npz_table.rowCount()
         self._phasor_npz_table.insertRow(row)

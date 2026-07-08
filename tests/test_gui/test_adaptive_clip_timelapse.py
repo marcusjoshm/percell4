@@ -58,12 +58,12 @@ def test_run_adaptive_auto_extract_stack_blank_frame_degrades(monkeypatch):
     """R9: in auto-detect mode a frame with no blobs becomes an empty plane, not an
     aborted run."""
     import percell4.domain.measure.auto_extraction as ae_mod
-    from percell4.domain.measure.auto_extraction import NoParticlesFound
+    from percell4.domain.measure.auto_extraction import NoParticlesFoundError
 
     def fake_auto_extract(image, labels, *, smallest_particle_px=None,
                           presmooth_sigma_px=1.0, min_spot_px=2):
         if image.max() < 50:  # a "blank" frame: auto-detect finds nothing
-            raise NoParticlesFound("autodetection found no blobs")
+            raise NoParticlesFoundError("autodetection found no blobs")
         m = (image > image.mean()).astype(np.uint8)
         return m, _fake_report(image, presmooth_sigma_px, int(m.sum()))
 

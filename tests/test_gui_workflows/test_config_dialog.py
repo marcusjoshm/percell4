@@ -951,10 +951,6 @@ def test_dilute_name_collision_with_round_name_warns(
 def test_particle_metrics_round_trip_into_csv_columns(dialog, h5_ds1, tmp_path):
     """U7 / Configure CSV Export: selected particle metrics produce
     <round>_<metric> and <round>_<channel>_<metric> columns."""
-    from percell4.gui.workflows.single_cell.config_dialog import (
-        _PARTICLE_PER_CELL_METRICS,
-        _PARTICLE_PER_CHANNEL_METRICS,
-    )
 
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()

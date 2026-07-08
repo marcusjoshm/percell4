@@ -13,9 +13,9 @@ import json
 import pytest
 
 from percell4.interfaces.gui.peer_views.phasor_plot import (
+    ROI_JSON_SCHEMA_VERSION,
     GMMFit,
     PhasorROI,
-    ROI_JSON_SCHEMA_VERSION,
 )
 
 

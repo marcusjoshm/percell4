@@ -201,7 +201,10 @@ def test_rerun_channel_switch_reads_different_channel(qtbot, controller, monkeyp
     captured: dict = {}
     monkeypatch.setattr(
         "percell4.adapters.cellpose.run_cellpose",
-        lambda image, **kw: (captured.setdefault("image", image), np.zeros(image.shape, dtype=np.int32))[1],
+        lambda image, **kw: (
+            captured.setdefault("image", image),
+            np.zeros(image.shape, dtype=np.int32),
+        )[1],
     )
     monkeypatch.setattr(
         "percell4.adapters.cellpose.build_cellpose_model",

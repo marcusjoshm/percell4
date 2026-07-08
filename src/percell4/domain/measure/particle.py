@@ -13,8 +13,8 @@ internal _iter_particles() iterator to avoid redundant computation.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator
 
 import numpy as np
 import pandas as pd
@@ -24,7 +24,6 @@ from scipy.ndimage import label as ndlabel
 from skimage.measure import regionprops
 
 from percell4.domain.measure.metrics import BUILTIN_METRICS
-
 
 # Per-particle intensity metrics — the BUILTIN_METRICS set minus
 # ``area`` (the particle's own area is already a first-class field

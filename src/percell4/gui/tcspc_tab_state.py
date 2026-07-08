@@ -29,7 +29,6 @@ from percell4.domain.io.models import (
     ZeroPadOffsetRule,
 )
 
-
 # Kept for backwards-compatibility with test imports — no longer wired to UI.
 RULE_AUTO_ZERO_PAD = "direct_token_match"
 RULE_AUTO_BASE_STEM = "direct_token_match"

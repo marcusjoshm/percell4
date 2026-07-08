@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from percell4.interfaces.cli import batch_measure as cli
 from percell4.store import DatasetStore

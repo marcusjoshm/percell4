@@ -23,8 +23,6 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-logger = logging.getLogger(__name__)
-
 from percell4.domain.io.cross_format import deserialize_rule, serialize_rule
 from percell4.domain.io.models import (
     CrossFormatRule,
@@ -39,6 +37,8 @@ from percell4.domain.io.view_bin import (
     sum_bin_2d,
     sum_bin_decay,
 )
+
+logger = logging.getLogger(__name__)
 
 # Chunk cache size for session reads (64 MB)
 _READ_CACHE_BYTES = 64 * 1024 * 1024

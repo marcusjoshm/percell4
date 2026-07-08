@@ -5,17 +5,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
-
 from percell4.gui.workflows.single_cell.runner import SingleCellThresholdingRunner
 from percell4.workflows.models import (
     CellposeSettings,
     DatasetSource,
+    RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
     WorkflowConfig,
     WorkflowDatasetEntry,
-    RunMetadata,
 )
 
 

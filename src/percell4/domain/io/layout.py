@@ -11,7 +11,6 @@ Pure numpy — no h5py, Qt, or napari.
 
 from __future__ import annotations
 
-import numpy as np
 from numpy.typing import NDArray
 
 __all__ = [

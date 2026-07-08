@@ -378,7 +378,11 @@ class CellTableWindow(QMainWindow):
         if df.empty:
             self._status.showMessage("No data to export")
             return
-        label = "Export Filtered Measurements" if self._session.is_filtered else "Export All Measurements"
+        label = (
+            "Export Filtered Measurements"
+            if self._session.is_filtered
+            else "Export All Measurements"
+        )
         path, _ = QFileDialog.getSaveFileName(
             self, label, "measurements.csv", "CSV (*.csv)"
         )

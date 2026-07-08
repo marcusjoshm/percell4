@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from percell4.interfaces.cli import inspect_dataset as cli
 from percell4.store import DatasetStore

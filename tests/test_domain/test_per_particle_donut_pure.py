@@ -23,7 +23,6 @@ from percell4.domain.analysis._impl.per_particle_donut import (
     run_one_image_set,
 )
 
-
 # Mirror the CLI's ORIGINAL_DEFAULTS argparse defaults. Tests that need
 # different values override individual keys via dict-spread.
 DEFAULT_PARAMS = {

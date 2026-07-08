@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from percell4.domain.errors import NoDatasetError, NoSegmentationError
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -18,7 +16,7 @@ from percell4.application.use_cases.accept_threshold import AcceptThreshold
 from percell4.application.use_cases.close_dataset import CloseDataset
 from percell4.application.use_cases.measure_cells import MeasureCells
 from percell4.domain.dataset import DatasetHandle
-
+from percell4.domain.errors import NoDatasetError, NoSegmentationError
 
 # ── Fakes ────────────────────────────────────────────────────
 
@@ -1042,8 +1040,8 @@ class TestPhasorWritesViewBin:
         underlying DTCWT implementation pulls in a numpy-2-incompatible
         library, and we only care about the upsample/attr discipline
         added in U14 around it, not the wavelet math itself."""
-        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
         import percell4.domain.flim.wavelet_filter as wf
+        from percell4.application.use_cases.apply_wavelet import ApplyWavelet
 
         # Replace denoise_phasor with a passthrough.
         def fake_denoise(g, s, intensity, filter_level=1, omega=None):
@@ -1144,7 +1142,8 @@ class TestComputeLifetimeSource:
 
     def test_unfiltered_registers_channel_and_writes_intensity(self):
         from percell4.application.use_cases.compute_lifetime import (
-            ComputeLifetime, lifetime_channel_name,
+            ComputeLifetime,
+            lifetime_channel_name,
         )
         from percell4.domain.flim.phasor import phasor_to_lifetime
 
@@ -1176,7 +1175,8 @@ class TestComputeLifetimeSource:
 
     def test_median_applies_kernel_and_returns_size(self):
         from percell4.application.use_cases.compute_lifetime import (
-            ComputeLifetime, lifetime_channel_name,
+            ComputeLifetime,
+            lifetime_channel_name,
         )
         from percell4.domain.flim.phasor import median_filter_gs, phasor_to_lifetime
 
@@ -1200,7 +1200,8 @@ class TestComputeLifetimeSource:
 
     def test_wavelet_reads_filtered_maps(self):
         from percell4.application.use_cases.compute_lifetime import (
-            ComputeLifetime, lifetime_channel_name,
+            ComputeLifetime,
+            lifetime_channel_name,
         )
         from percell4.domain.flim.phasor import phasor_to_lifetime
 

@@ -13,17 +13,14 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import pytest
 import tifffile
 
 from percell4.application.use_cases.batch_export_images import (
     BatchExportItemResult,
-    BatchExportReport,
     _enumerate_channels,
     batch_export_images,
 )
 from percell4.store import DatasetStore
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

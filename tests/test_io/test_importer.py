@@ -162,7 +162,7 @@ def test_import_bin_only_splits_channels_by_token(tmp_path):
         },
     }
     from percell4.domain.io.models import TileConfig
-    n_ch = import_dataset(
+    import_dataset(
         src,
         h5_path,
         flim_params=flim_params,

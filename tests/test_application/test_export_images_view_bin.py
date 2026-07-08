@@ -17,18 +17,14 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import h5py
 import numpy as np
-import pytest
 import tifffile
 
 from percell4.application.use_cases.export_images import (
     ExportImages,
     ExportRequest,
-    ExportResult,
 )
 from percell4.domain.dataset import DatasetHandle
-
 
 # ── Mock-repo unit tests (forwarding contract) ──────────────────────
 
@@ -169,7 +165,11 @@ def test_default_view_bin_one_propagates_to_repo_reads(tmp_path):
 
     uc.execute(handle, req)
 
-    for mock_call in (repo.read_array.call_args, repo.read_labels.call_args, repo.read_mask.call_args):
+    for mock_call in (
+        repo.read_array.call_args,
+        repo.read_labels.call_args,
+        repo.read_mask.call_args,
+    ):
         args, kwargs = mock_call
         forwarded = kwargs.get("view_bin")
         if forwarded is None and len(args) >= 3:

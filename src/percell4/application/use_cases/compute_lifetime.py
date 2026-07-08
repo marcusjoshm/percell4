@@ -8,9 +8,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from percell4.application.session import Session
+from percell4.domain.errors import NoDatasetError
 from percell4.domain.flim.phasor import median_filter_gs, phasor_to_lifetime
 from percell4.ports.dataset_repository import DatasetRepository
-from percell4.domain.errors import NoDatasetError
 
 # Valid lifetime sources, in user-facing order.
 LIFETIME_SOURCES = ("unfiltered", "median", "wavelet")

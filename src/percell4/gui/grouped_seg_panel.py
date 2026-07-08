@@ -18,7 +18,6 @@ import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QLabel,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -196,8 +195,8 @@ class GroupedSegPanel(QWidget):
     def _auto_measure_then_group(
         self, channel, channel_image, seg_labels, metric, sigma, mask_name,
     ) -> None:
-        from percell4.gui.workers import Worker
         from percell4.domain.measure.measurer import measure_cells
+        from percell4.gui.workers import Worker
 
         self._pending = {
             "channel": channel,

@@ -15,12 +15,11 @@ import numpy as np
 import pytest
 
 from percell4.application.session import Session
+from percell4.domain.segmentation.preprocess import apply_lut as _apply_lut
 from percell4.gui.viewer import ViewerWindow
 from percell4.gui.workflows.base_runner import PhaseResult
-from percell4.domain.segmentation.preprocess import apply_lut as _apply_lut
 from percell4.gui.workflows.single_cell.seg_qc import (
     SegmentationQCController,
-    _LAYER_IMAGE,
 )
 from percell4.model import CellDataModel
 from percell4.store import DatasetStore
@@ -232,7 +231,7 @@ def test_modify_rerun_with_active_lut_feeds_modified_image(
 
     captured: dict = {}
     def fake_run(image, **kwargs):
-        captured["image"] = np.asarray(image, copy=True)
+        captured["image"] = np.array(image, copy=True)
         return np.zeros(image.shape, dtype=np.int32)
     monkeypatch.setattr("percell4.adapters.cellpose.run_cellpose", fake_run)
     monkeypatch.setattr(

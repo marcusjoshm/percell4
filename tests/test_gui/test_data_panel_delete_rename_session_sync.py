@@ -10,8 +10,6 @@ never called ``session.refresh_resource_lists(...)``, leaving Session's
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from percell4.application.session import Event, Session

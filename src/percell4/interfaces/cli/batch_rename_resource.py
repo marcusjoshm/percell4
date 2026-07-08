@@ -34,8 +34,8 @@ import logging
 import sys
 
 from percell4.application.use_cases.batch_rename_resource import (
-    BatchOperationItemResult,
     VALID_KINDS,
+    BatchOperationItemResult,
     batch_rename_resource,
 )
 from percell4.interfaces.cli._batch_report import (

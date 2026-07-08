@@ -66,7 +66,8 @@ class BakeoffReport:
     oracles: dict[str, WindowOracle] = field(default_factory=dict)  # field name -> oracle
     scores: list[FinderFieldScore] = field(default_factory=list)
     missing_label_fields: list[str] = field(default_factory=list)
-    ranking: list[tuple[str, float]] = field(default_factory=list)  # (method, mean |err|) best first
+    # (method, mean |err|) best first
+    ranking: list[tuple[str, float]] = field(default_factory=list)
 
 
 def _binarize_2d(arr: NDArray) -> NDArray:
@@ -112,7 +113,9 @@ def load_bakeoff_field(
         labels = store.list_labels() if hasattr(store, "list_labels") else []
         if cp_name in labels:
             cp = _binarize_2d(store.read_labels(cp_name))
-    return BakeoffField(name=name, image=image, sg_mask=sg, cp_mask=cp, gaussian_sigma=gaussian_sigma)
+    return BakeoffField(
+        name=name, image=image, sg_mask=sg, cp_mask=cp, gaussian_sigma=gaussian_sigma
+    )
 
 
 def run_bakeoff(
@@ -149,7 +152,9 @@ def run_bakeoff(
         if fld.sg_mask is None:
             report.missing_label_fields.append(fld.name)
             continue
-        oracle = sweep_ideal_window(fld.image, fld.gaussian_sigma, settings, fld.sg_mask, window_grid)
+        oracle = sweep_ideal_window(
+            fld.image, fld.gaussian_sigma, settings, fld.sg_mask, window_grid
+        )
         report.oracles[fld.name] = oracle
         in_sample = (not holdout) or (fld.name not in holdout)
 
@@ -199,7 +204,9 @@ def calibrate_c(
     """
     best: tuple[float, float] | None = None
     for c in c_grid:
-        rep = run_bakeoff(fields, [method], settings, window_grid, finder_params={method: {"c": float(c)}})
+        rep = run_bakeoff(
+            fields, [method], settings, window_grid, finder_params={method: {"c": float(c)}}
+        )
         errs = [s.score.window_error for s in rep.scores if s.score is not None]
         if not errs:
             continue

@@ -28,7 +28,12 @@ def _accept_default_name(monkeypatch) -> None:
     monkeypatch.setattr(
         QInputDialog,
         "getText",
-        staticmethod(lambda *args, **kwargs: (kwargs.get("text", args[3] if len(args) > 3 else ""), True)),
+        staticmethod(
+            lambda *args, **kwargs: (
+                kwargs.get("text", args[3] if len(args) > 3 else ""),
+                True,
+            )
+        ),
     )
 
 

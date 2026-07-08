@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import h5py
 import numpy as np
@@ -23,7 +22,6 @@ from percell4.workflows.models import (
     FlimFretStatus,
 )
 from percell4.workflows.run_log import RunLog
-
 
 # ── Fixture builders ────────────────────────────────────────
 
@@ -695,13 +693,8 @@ def test_multiple_pairs_concatenate_rows(tmp_path):
 
 def test_orchestrator_is_qt_free(tmp_path):
     """Smoke test: importing the orchestrator does not import Qt."""
-    import sys
-
     import percell4.application.use_cases.run_flim_fret  # noqa: F401
 
-    qt_modules = [
-        m for m in sys.modules if m.startswith(("qtpy", "PyQt5", "napari"))
-    ]
     # Other tests may have imported Qt indirectly. Just assert the module
     # itself has no Qt imports.
     src = Path(percell4.application.use_cases.run_flim_fret.__file__).read_text()

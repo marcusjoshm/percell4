@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 import h5py
 import numpy as np
 import pytest
-
-import json
 
 from percell4.domain.io.cross_format import deserialize_rule, serialize_rule
 from percell4.domain.io.models import (

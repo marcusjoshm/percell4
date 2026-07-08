@@ -20,7 +20,6 @@ from scipy.ndimage import gaussian_filter
 
 from percell4.domain.image import nan_safe_gaussian_filter
 
-
 # ---------------------------------------------------------------------------
 # Happy path: clean input matches scipy
 # ---------------------------------------------------------------------------

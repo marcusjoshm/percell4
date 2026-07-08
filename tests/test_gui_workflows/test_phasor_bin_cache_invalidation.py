@@ -8,12 +8,10 @@ enumerated cache list; this file exercises every enumerated member.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
 

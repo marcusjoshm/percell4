@@ -23,8 +23,6 @@ calls in the corresponding branches of ``_write_layer``.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 from qtpy.QtWidgets import QWidget

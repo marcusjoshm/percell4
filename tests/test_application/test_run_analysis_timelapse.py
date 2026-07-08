@@ -6,7 +6,6 @@ import types
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from percell4.application.analysis.loader import load_layers
 from percell4.application.use_cases.run_analysis import _aggregate_timepoints

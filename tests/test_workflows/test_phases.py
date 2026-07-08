@@ -622,10 +622,14 @@ def test_apply_adaptive_clip_presmooth_defaults_to_one_not_round_sigma(tmp_path)
     grouping = _trivial_grouping(np.array([1], dtype=np.int32))
     mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, ps)
     assert err == ""
-    expected = detect_adaptive_by_particle_size(image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=1.0)
+    expected = detect_adaptive_by_particle_size(
+        image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=1.0
+    )
     assert np.array_equal(mask, expected)
     # And NOT the sigma=0 (no-presmooth) result, which differs on noisy data.
-    no_presmooth = detect_adaptive_by_particle_size(image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=0.0)
+    no_presmooth = detect_adaptive_by_particle_size(
+        image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=0.0
+    )
     assert not np.array_equal(expected, no_presmooth)
 
 

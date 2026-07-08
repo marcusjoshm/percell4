@@ -24,7 +24,6 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event
-from percell4.config import viewer_presets as vp
 from percell4.domain.flim.phasor import (
     cal_mod_key,
     cal_phase_key,
@@ -657,7 +656,9 @@ class FlimPanel(QWidget):
                     active_channel, view_bin=active_bin,
                 )
             except NoCachedPhasorError:
-                pass  # No raw phasor either — fall through to compute (will fail in apply_wavelet with a clear ValueError)
+                # No raw phasor either — fall through to compute
+                # (will fail in apply_wavelet with a clear ValueError)
+                pass
             except NoDatasetError as e:
                 self._show_status(str(e))
                 return

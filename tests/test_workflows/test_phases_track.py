@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from percell4.ports.tracker import TrackingResult
 from percell4.store import DatasetStore

@@ -456,7 +456,9 @@ def test_adaptive_apply_handler_emits_no_qc_status(qtbot, tmp_path):
     meta = _make_metadata(run_folder)
     runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=True)
     runner._effective_seg["ac"] = "cellpose_qc"
-    grouping, failure, _ = threshold_compute_one(DatasetStore(p), round_spec, seg_name="cellpose_qc")
+    grouping, failure, _ = threshold_compute_one(
+        DatasetStore(p), round_spec, seg_name="cellpose_qc"
+    )
     assert failure is None
     runner._grouping_cache[("ac", "acr")] = grouping
 

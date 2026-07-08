@@ -230,9 +230,8 @@ def test_click_without_open_dataset_surfaces_status_message(
 ):
     """No open dataset (session.dataset is None) → status message,
     no panel construction."""
-    from percell4.interfaces.gui.main_window import LauncherWindow
-
     from percell4.application.session import Session
+    from percell4.interfaces.gui.main_window import LauncherWindow
     from percell4.model import CellDataModel
 
     win = LauncherWindow(CellDataModel(Session()))

@@ -11,8 +11,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
-from qtpy.QtCore import QEvent
 
 from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
@@ -23,6 +21,10 @@ def _phasor_window(session, mask_array=None):
     repo = MagicMock()
     if mask_array is not None:
         repo.read_mask = MagicMock(return_value=mask_array)
+    # A mock dataset has no cached phasor on disk: reading /phasor/<ch>/g must
+    # raise KeyError so the auto-load-cached path resolves to NoCachedPhasorError
+    # (a bare MagicMock would otherwise feed mock "arrays" into the histogram).
+    repo.read_array = MagicMock(side_effect=KeyError("no cached phasor"))
     win = PhasorPlotWindow(session, get_repo=lambda: repo)
     return win, repo
 

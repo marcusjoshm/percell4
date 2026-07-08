@@ -18,10 +18,8 @@ from percell4.application.use_cases.batch_delete_resource import (
     batch_delete_resource,
 )
 from percell4.application.use_cases.batch_rename_resource import (
-    BatchOperationItemResult,
     BatchOperationReport,
 )
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

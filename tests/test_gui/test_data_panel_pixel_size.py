@@ -8,8 +8,6 @@ Legacy datasets without ``pixel_size_um`` render as ``unknown``.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -21,7 +19,6 @@ from percell4.interfaces.gui.task_panels.data_panel import (
 )
 from percell4.model import CellDataModel
 from percell4.store import DatasetStore
-
 
 # ── Pure formatter unit tests (no Qt) ─────────────────────────────────
 

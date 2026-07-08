@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 from qtpy.QtCore import QObject, Qt
@@ -62,7 +62,6 @@ from percell4.gui.workflows.dilute_phase.controller import DilutePhaseMaskContro
 from percell4.store import DatasetStore
 from percell4.workflows.models import (
     DiluteSettings,
-    GmmCriterion,
     ThresholdAlgorithm,
     WorkflowDatasetEntry,
 )
@@ -126,9 +125,9 @@ class DilutePhaseQueueEntry(QObject):
         *,
         entry: WorkflowDatasetEntry,
         dilute_settings: DiluteSettings,
-        viewer_win: "ViewerWindow",
-        data_model: "CellDataModel",
-        session: "Session",
+        viewer_win: ViewerWindow,
+        data_model: CellDataModel,
+        session: Session,
         queue_index: int,
         queue_total: int,
         on_complete: Callable[[PhaseResult], None],

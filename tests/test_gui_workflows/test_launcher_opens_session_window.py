@@ -6,8 +6,6 @@ visible from the moment the app launches.
 
 from __future__ import annotations
 
-import pytest
-
 from percell4.interfaces.gui.main_window import LauncherWindow
 from percell4.interfaces.gui.peer_views.session_window import SessionWindow
 from percell4.model import CellDataModel

@@ -89,7 +89,6 @@ def group_cells_gmm(
     -------
     GroupingResult with 1-indexed group assignments ordered by ascending mean.
     """
-    from sklearn.mixture import GaussianMixture
 
     if len(values) < min_cells:
         logger.warning(

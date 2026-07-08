@@ -11,12 +11,10 @@ keep the native default.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Session
 from percell4.gui.export_images_dialog import ExportImagesDialog
 from percell4.store import DatasetStore
 

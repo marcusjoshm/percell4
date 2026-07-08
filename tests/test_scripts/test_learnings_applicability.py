@@ -6,14 +6,11 @@ import time
 from pathlib import Path
 
 import pytest
-
 from scripts.learnings_applicability import (
-    _glob_to_regex,
     _matches,
     _parse_frontmatter,
     applicable_entries,
 )
-
 
 # ── _glob_to_regex / _matches ───────────────────────────────────────
 

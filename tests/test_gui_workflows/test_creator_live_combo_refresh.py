@@ -9,10 +9,6 @@ re-list immediately.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
-import pytest
-
 from percell4.application.session import Event, Session
 from percell4.domain.dataset import DatasetHandle
 

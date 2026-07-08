@@ -4,6 +4,7 @@
 
 # PerCell4
 
+[![CI](https://github.com/marcusjoshm/percell4/actions/workflows/ci.yml/badge.svg)](https://github.com/marcusjoshm/percell4/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](#license)
@@ -38,6 +39,7 @@
 - [Standalone bundle (PyInstaller)](#standalone-bundle-pyinstaller)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
+- [Citing PerCell4](#citing-percell4)
 
 ---
 
@@ -865,4 +867,10 @@ Bundled apps are large (scientific stack + napari). GPU/CUDA is not included in 
 
 ## License
 
-MIT (see `pyproject.toml`).
+MIT — see [`LICENSE`](LICENSE).
+
+## Citing PerCell4
+
+If you use PerCell4 in your research, please cite it using the metadata in
+[`CITATION.cff`](CITATION.cff) (GitHub's "Cite this repository" button reads
+this file).

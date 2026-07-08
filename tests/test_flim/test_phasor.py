@@ -26,7 +26,6 @@ def _make_single_exponential(tau_ns: float, n_bins: int = 256, freq_mhz: float =
         S = omega*tau / (1 + (omega*tau)^2)
     """
     t = np.arange(n_bins, dtype=np.float64)
-    period_bins = n_bins  # one full period
     decay = np.exp(-t / (tau_ns * freq_mhz * n_bins / 1000.0))
     return decay
 

@@ -13,12 +13,12 @@ from __future__ import annotations
 import enum
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
-from qtpy.QtCore import QObject, QTimer, Qt
+from qtpy.QtCore import QObject, QTimer
 from qtpy.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -29,10 +29,9 @@ from qtpy.QtWidgets import (
 )
 
 if TYPE_CHECKING:
-    import pandas as pd
 
-    from percell4.gui.viewer import ViewerWindow
     from percell4.domain.measure.grouper import GroupingResult
+    from percell4.gui.viewer import ViewerWindow
     from percell4.model import CellDataModel
     from percell4.store import DatasetStore
 
@@ -355,7 +354,8 @@ class ThresholdQCController(QObject):
         btn_row = QHBoxLayout()
         proceed_btn = QPushButton("Proceed to Thresholding")
         proceed_btn.setStyleSheet(
-            f"background-color: {theme.ACTION_GREEN}; color: white; padding: 6px; font-weight: bold;"
+            f"background-color: {theme.ACTION_GREEN}; color: white; "
+            "padding: 6px; font-weight: bold;"
         )
         proceed_btn.clicked.connect(self._on_proceed)
         btn_row.addWidget(proceed_btn)
@@ -574,7 +574,8 @@ class ThresholdQCController(QObject):
         row1 = QHBoxLayout()
         accept_btn = QPushButton("Accept")
         accept_btn.setStyleSheet(
-            f"background-color: {theme.ACTION_GREEN}; color: white; padding: 6px; font-weight: bold;"
+            f"background-color: {theme.ACTION_GREEN}; color: white; "
+            "padding: 6px; font-weight: bold;"
         )
         accept_btn.clicked.connect(self._on_accept)
         row1.addWidget(accept_btn)
@@ -650,7 +651,6 @@ class ThresholdQCController(QObject):
 
         # Extract pixels within ROI (if drawn) and group cell mask
         pixels_mask = group_cell_mask.copy()
-        roi_drawn = False
 
         for layer in viewer.layers:
             if layer.name == _LAYER_ROI and len(layer.data) > 0:
@@ -664,7 +664,6 @@ class ThresholdQCController(QObject):
                     x_max = min(group_cell_mask.shape[1], int(coords[:, 1].max()))
                     roi_mask[y_min:y_max, x_min:x_max] = True
                 pixels_mask = group_cell_mask & roi_mask
-                roi_drawn = True
                 break
 
         source_pixels = self._group_image_buffer[pixels_mask]

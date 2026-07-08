@@ -14,8 +14,13 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from percell4.workflows.models import CellposeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +93,7 @@ def batch_process_datasets(
     seg_channel: str | None = None,
     channel_names: list[str] | None = None,
     seg_name: str | None = None,
-    settings: "CellposeSettings | None" = None,
+    settings: CellposeSettings | None = None,
     remove_edge_cells: bool = True,
     edge_margin: int = 0,
     skip_segmentation: bool = False,
@@ -146,8 +151,8 @@ def batch_process_datasets(
     Granular per-frame / timing detail is emitted via this module's logger at
     DEBUG level (surfaced by the CLI's ``--verbose``).
     """
-    from time import perf_counter
     import shutil
+    from time import perf_counter
 
     from percell4.adapters.hdf5_store import Hdf5DatasetRepository
     from percell4.adapters.importer import import_dataset

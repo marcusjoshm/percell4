@@ -192,4 +192,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.ruff.lint.per-file-ignores]
 # Qt overrides use camelCase (closeEvent, showEvent, dropEvent, etc.)
 "src/percell4/gui/*.py" = ["N802"]
-"src/percell4/interfaces/gui/**/*.py" = ["N802"]
+# Qt overrides (N802) + Qt signals are mixedCase by convention (N815).
+"src/percell4/interfaces/gui/**/*.py" = ["N802", "N815"]
+# scikit-learn convention: `X` / `X_sample` is the standard feature-matrix name.
+"src/percell4/domain/measure/grouper.py" = ["N803", "N806"]
+# Tests use requirement-ID / shape-acronym function names (test_AE2_*, test_*_THW,
+# test_compose_with_AND) and scientific / mock locals (H, W, X, A, B, MockUC).
+"tests/**/*.py" = ["N802", "N803", "N806"]

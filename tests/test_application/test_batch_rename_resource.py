@@ -17,11 +17,9 @@ import numpy as np
 import pytest
 
 from percell4.application.use_cases.batch_rename_resource import (
-    BatchOperationItemResult,
     BatchOperationReport,
     batch_rename_resource,
 )
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

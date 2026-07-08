@@ -532,9 +532,9 @@ def patched_runner_with_dilute(monkeypatch):
     _FakeDilutePhaseQueueEntry.instances.clear()
     _FakeDilutePhaseQueueEntry.script = []
 
+    import percell4.gui.workflows.single_cell.dilute_queue as dilute_mod
     import percell4.gui.workflows.single_cell.seg_qc as seg_qc_mod
     import percell4.gui.workflows.single_cell.threshold_qc_queue as thresh_mod
-    import percell4.gui.workflows.single_cell.dilute_queue as dilute_mod
 
     monkeypatch.setattr(
         seg_qc_mod, "SegmentationQCController", _FakeSegQCController

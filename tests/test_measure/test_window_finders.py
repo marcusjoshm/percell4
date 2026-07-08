@@ -149,6 +149,8 @@ def test_granule_size_beats_otsu_mean_floor_intuition():
     """On a black-background granule frame, granule-size yields a usable window
     where the speck-prone otsu-mean is far less reliable — sanity that the new
     finder is in the granule regime."""
-    img = _black_bg_image([(120, 120), (120, 150), (150, 135)], radius=10, cell_box=(90, 180, 90, 180))
+    img = _black_bg_image(
+        [(120, 120), (120, 150), (150, 135)], radius=10, cell_box=(90, 180, 90, 180)
+    )
     gs = WINDOW_FINDERS["granule-size"](img, {"c": 4.5})
     assert gs > 0.0

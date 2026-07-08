@@ -17,7 +17,6 @@ from percell4.gui._add_layer_logic import (
 )
 from percell4.store import DatasetStore, LayerSizeMismatchError
 
-
 # ── coerce_added_array ────────────────────────────────────────
 
 
@@ -183,8 +182,9 @@ def test_batch_groups_by_timepoint_and_stacks(tmp_path):
     stacks them into (T,H,W) -- the fix for collapsing every timepoint to one
     plane. Exercises the canonical scan -> group -> stack composition the loop
     delegates to, with real TIFF I/O."""
-    import tifffile
     from collections import defaultdict
+
+    import tifffile
 
     from percell4.domain.io.assembler import stack_timepoints
     from percell4.domain.io.models import TokenConfig
@@ -224,8 +224,9 @@ def test_batch_groups_by_timepoint_and_stacks(tmp_path):
 def test_batch_single_timepoint_stays_2d(tmp_path):
     """A flat single-timepoint folder yields one 2D plane per channel (no T
     axis), byte-identical to the old behavior."""
-    import tifffile
     from collections import defaultdict
+
+    import tifffile
 
     from percell4.domain.io.models import TokenConfig
     from percell4.domain.io.scanner import FileScanner

@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-import pytest
 
 from percell4.application.session import Event, Session
 from percell4.gui.segmentation_panel import SegmentationPanel

@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 from vispy import keys
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Session
 from percell4.config.viewer_presets import (
     STAGED_OVERLAY_LAYER_NAME as _OVERLAY_LAYER_NAME,
 )
@@ -40,7 +40,6 @@ from percell4.gui.viewer import (
 )
 from percell4.interfaces.gui.main_window import LauncherWindow
 from percell4.model import CellDataModel
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Fixture — real Session + CellDataModel + ViewerWindow + LauncherWindow.
@@ -231,8 +230,9 @@ def test_m_with_no_labels_layer_surfaces_status_message(
         _press_m(viewer, qtbot)
 
         # Multi-select must not have opened — there is no labels layer.
-        assert viewer_win._multi_select_controller is None or not (
-            _OVERLAY_LAYER_NAME in viewer.layers
+        assert (
+            viewer_win._multi_select_controller is None
+            or _OVERLAY_LAYER_NAME not in viewer.layers
         )
 
         # Launcher's status bar must convey the per-cause refusal.

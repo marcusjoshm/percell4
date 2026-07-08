@@ -11,9 +11,6 @@ behind on success, and partial failures don't replace the target.
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import numpy as np
 import pytest
 import tifffile
@@ -23,7 +20,6 @@ from percell4.adapters.tiff_writer import (
     _resolution_kwargs,
     write_tiff_with_metadata,
 )
-
 
 # ── Resolution kwarg derivation (pure unit math, no I/O) ─────────────
 

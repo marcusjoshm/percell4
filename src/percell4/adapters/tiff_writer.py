@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +88,7 @@ def write_tiff_with_metadata(
             tmp_path,
             data,
             software="PerCell4",
-            datetime=datetime.now(timezone.utc),
+            datetime=datetime.now(UTC),
             **res_kwargs,
         )
         os.replace(tmp_path, path)

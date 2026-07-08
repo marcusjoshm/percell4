@@ -8,8 +8,9 @@ original CLI (``per_particle_multichannel.py``) against each group directory:
 
     python per_particle_multichannel.py --data-dir group_a \
         --output group_a_expected/combined.csv
+    # per-particle (cp_mask present -> cell_id col)
     python per_particle_multichannel.py --data-dir group_b \
-        --output group_b_expected/combined.csv          # per-particle (cp_mask present -> cell_id col)
+        --output group_b_expected/combined.csv
     python per_particle_multichannel.py --data-dir group_b --single-cell \
         --output group_b_expected/sc.csv
 
