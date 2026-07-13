@@ -33,9 +33,30 @@ from percell4.gui.threshold_qc import ThresholdQCController
 from percell4.gui.workflows.base_runner import PhaseResult
 from percell4.store import DatasetStore
 from percell4.workflows.models import ThresholdingRound, WorkflowDatasetEntry
-from percell4.workflows.phases import _channel_from_frame, _channel_index
+from percell4.workflows.phases import _channel_from_frame, _channel_index, _resolve_area_px
 
 logger = logging.getLogger(__name__)
+
+
+def _round_min_size_px(store: DatasetStore, round_spec: ThresholdingRound) -> int:
+    """Resolve a round's min particle size to an integer pixel threshold.
+
+    Mirrors the headless apply path: µm² needs the dataset's pixel size and
+    raises ``ValueError`` otherwise so the caller can fail the dataset cleanly
+    instead of silently defaulting to ``pixel_size_um=1``. ``0`` (the default)
+    returns ``0`` (no filter) without touching the pixel size.
+    """
+    if round_spec.min_particle_size <= 0:
+        return 0
+    raw_ps = store.metadata.get("pixel_size_um")
+    pixel_size_um = float(raw_ps) if raw_ps else None
+    return _resolve_area_px(
+        float(round_spec.min_particle_size),
+        round_spec.min_particle_size_unit,
+        pixel_size_um,
+        dataset_name=store.path.name,
+        knob="min particle size",
+    )
 
 
 class ThresholdQCQueueEntry:
@@ -142,6 +163,12 @@ class ThresholdQCQueueEntry:
             return
 
         try:
+            min_size_px = _round_min_size_px(self._store, self._round_spec)
+        except ValueError as e:
+            self._finish(PhaseResult(success=False, message=str(e)))
+            return
+
+        try:
             self._controller = ThresholdQCController(
                 viewer_win=self._viewer_win,
                 data_model=self._data_model,
@@ -158,6 +185,7 @@ class ThresholdQCQueueEntry:
                 # owns that artifact in its run folder. See
                 # docs/solutions/tech-debt/threshold-qc-measurements-write-owned-by-controller.md
                 write_measurements_to_store=False,
+                min_size_px=min_size_px,
             )
         except Exception as e:
             logger.exception("failed to instantiate ThresholdQCController")
@@ -253,6 +281,7 @@ class TimelapseThresholdQCQueueEntry:
         self._mask_frames: dict[int, np.ndarray] = {}
         self._group_dfs: list[pd.DataFrame] = []
         self._controller: ThresholdQCController | None = None
+        self._min_size_px = 0
         self._finished = False
 
     def start(self) -> None:
@@ -270,6 +299,12 @@ class TimelapseThresholdQCQueueEntry:
                 self._round_spec.name,
             )
             self._finish(PhaseResult(success=False, message=f"load failed: {e}"))
+            return
+        # Resolve the round's min particle size to px once (shared across frames).
+        try:
+            self._min_size_px = _round_min_size_px(self._store, self._round_spec)
+        except ValueError as e:
+            self._finish(PhaseResult(success=False, message=str(e)))
             return
         self._process_next()
 
@@ -350,6 +385,7 @@ class TimelapseThresholdQCQueueEntry:
                 # (T,H,W) /masks + /groups writes (deferred to _persist_and_finish).
                 write_measurements_to_store=False,
                 persist_round_outputs=False,
+                min_size_px=self._min_size_px,
             )
         except Exception as e:
             logger.exception(

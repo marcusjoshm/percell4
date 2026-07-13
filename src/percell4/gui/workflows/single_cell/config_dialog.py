@@ -153,10 +153,13 @@ _ROUND_COL_KMEANS_K = 6
 _ROUND_COL_SIGMA = 7
 _ROUND_COL_DMIN = 8
 _ROUND_COL_K = 9
-_ROUND_COL_SIZE_UNIT = 10
-_ROUND_COL_CNR_ON = 11
-_ROUND_COL_CNR_THR = 12
-_ROUND_COL_COUNT = 13
+_ROUND_COL_GLOBAL = 10
+_ROUND_COL_SIZE_UNIT = 11
+_ROUND_COL_CNR_ON = 12
+_ROUND_COL_CNR_THR = 13
+_ROUND_COL_MIN_SIZE = 14
+_ROUND_COL_MIN_SIZE_UNIT = 15
+_ROUND_COL_COUNT = 16
 _ROUND_COL_HEADERS = (
     "Name",
     "Channel",
@@ -168,17 +171,29 @@ _ROUND_COL_HEADERS = (
     "σ",
     "d_min",
     "k",
+    "global",
     "Unit",
     "CNR split",
     "CNR thr",
+    "Min size",
+    "Min unit",
 )
 
-# Method dropdown labels. "Grouped Otsu" is the default (the legacy per-group
-# path); "Adaptive sigma clipping" carries an AdaptiveClipSettings sentinel;
-# "Auto extraction (two-pass)" carries an AutoExtractSettings sentinel.
+# Method dropdown labels. "Grouped Otsu" is the default (the legacy per-group path).
+# The two per-cell ALC methods are named to match the Analysis-panel terminology so
+# a user reproducing a single-dataset GUI run picks the SAME detector in batch:
+#   - "Adaptive Local Clipping (two-pass)" is the two-pass auto-extractor — the exact
+#     algorithm the GUI "Adaptive Local Clipping" panel runs (its only mode). Carries
+#     an AutoExtractSettings sentinel.
+#   - "Adaptive σ-clipping (single-window)" is the older single-window detector, which
+#     has NO GUI panel counterpart. Carries an AdaptiveClipSettings sentinel. Kept for
+#     configs/users that want it, but clearly distinguished so it is not mistaken for
+#     the GUI's "Adaptive Local Clipping".
+# The constants' VALUES are display text only; routing and serialization key off the
+# sentinel dataclass, so relabeling here does not touch saved run_config.json files.
 _METHOD_GROUPED = "Grouped Otsu"
-_METHOD_ADAPTIVE = "Adaptive sigma clipping"
-_METHOD_AUTO_EXTRACT = "Auto extraction (two-pass)"
+_METHOD_ADAPTIVE = "Adaptive σ-clipping (single-window)"
+_METHOD_AUTO_EXTRACT = "Adaptive Local Clipping (two-pass)"
 
 
 # ── Internal per-dataset record ──────────────────────────────────────────
@@ -794,9 +809,12 @@ class WorkflowConfigDialog(QDialog):
             _ROUND_COL_SIGMA: 90,
             _ROUND_COL_DMIN: 100,
             _ROUND_COL_K: 70,
+            _ROUND_COL_GLOBAL: 60,
             _ROUND_COL_SIZE_UNIT: 70,
             _ROUND_COL_CNR_ON: 80,
             _ROUND_COL_CNR_THR: 80,
+            _ROUND_COL_MIN_SIZE: 90,
+            _ROUND_COL_MIN_SIZE_UNIT: 70,
         }
         for col, width in _initial_round_col_widths.items():
             self._rounds_table.setColumnWidth(col, width)
@@ -1347,11 +1365,16 @@ class WorkflowConfigDialog(QDialog):
         method_combo.addItems([_METHOD_GROUPED, _METHOD_ADAPTIVE, _METHOD_AUTO_EXTRACT])
         method_combo.setToolTip(
             "Grouped Otsu: per-intensity-group Otsu (uses Algorithm/GMM/K-means).\n"
-            "Adaptive sigma clipping: per-cell single-window detector driven by the\n"
-            "smallest particle diameter (d_min) and a robust per-cell noise floor.\n"
-            "Auto extraction (two-pass): per-cell two-pass detector driven by the same\n"
-            "d_min (0 = auto-detect the smallest particle). Both per-cell methods use\n"
-            "σ as the detector presmooth and ignore grouping; µm units need a pixel size."
+            "Adaptive Local Clipping (two-pass): the SAME detector the GUI 'Adaptive\n"
+            "Local Clipping' panel runs — a per-cell two-pass extractor driven by the\n"
+            "smallest particle Ø (d_min; 0 = auto-detect). Pick this to reproduce a\n"
+            "single-dataset GUI run in batch; the Min size column = the panel's Min\n"
+            "particle size.\n"
+            "Adaptive σ-clipping (single-window): an older per-cell single-window\n"
+            "detector (d_min + per-cell noise floor). It has NO GUI panel — do not use\n"
+            "it to match a GUI result.\n"
+            "Both per-cell methods use σ as the detector presmooth and ignore grouping;\n"
+            "µm units need a pixel size."
         )
         method_combo.currentTextChanged.connect(
             lambda _text, r=row: self._on_method_changed(r)
@@ -1420,6 +1443,17 @@ class WorkflowConfigDialog(QDialog):
         k_spin.setValue(1.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_K, k_spin)
 
+        # global — threshold every cell against ONE pooled σ (1.4826·MAD over all
+        # cell pixels) at the same k, instead of each cell's own per-cell σ.
+        # Adaptive sigma clipping only (auto-extraction derives its floor per cell).
+        global_check = QCheckBox()
+        global_check.setToolTip(
+            "Global σ: threshold every cell against one shared noise floor "
+            "(1.4826·MAD pooled over all cell pixels) at the same k, instead of "
+            "each cell's own per-cell σ. Adaptive sigma clipping only."
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_GLOBAL, global_check)
+
         # Unit — px or µm for d_min. µm resolves via the dataset pixel size; px is
         # used directly (for datasets that lack a pixel size). Switching units does
         # NOT auto-convert the value.
@@ -1455,6 +1489,36 @@ class WorkflowConfigDialog(QDialog):
         cnr_thr_spin.setSingleStep(0.5)
         cnr_thr_spin.setValue(5.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_THR, cnr_thr_spin)
+
+        # Min size — a method-agnostic post-mask size filter applied to every
+        # method's produced mask: connected components below this area are dropped
+        # before the mask is written. 0 keeps every particle. The unit (px² / µm²)
+        # is set by the adjacent Min unit combo; µm² needs a dataset pixel size.
+        min_size_spin = QDoubleSpinBox()
+        min_size_spin.setRange(0.0, 1_000_000.0)
+        min_size_spin.setDecimals(2)
+        min_size_spin.setSingleStep(1.0)
+        min_size_spin.setValue(0.0)
+        min_size_spin.setToolTip(
+            "Minimum particle size: drop connected components below this area from "
+            "the round's mask (any method). 0 = keep every particle. The unit is set "
+            "by the Min unit column; µm² resolves via the dataset pixel size."
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_MIN_SIZE, min_size_spin)
+
+        # Min unit — px² or µm² for the Min size value. µm² resolves to a per-dataset
+        # pixel threshold; px² applies the value directly. Switching units does NOT
+        # auto-convert the value (mirrors the d_min Unit column).
+        min_unit_combo = QComboBox()
+        min_unit_combo.addItem("px²", userData="px")
+        min_unit_combo.addItem("µm²", userData="um2")
+        min_unit_combo.setCurrentIndex(0)  # px² — no pixel size required
+        min_unit_combo.setToolTip(
+            "Unit for Min size. px² applies the value directly; µm² resolves to "
+            "pixels per dataset using each dataset's pixel size — pick px² for "
+            "datasets that have no pixel size metadata."
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_MIN_SIZE_UNIT, min_unit_combo)
 
         self._update_method_columns_enabled(row)
         self._refresh_column_picker()
@@ -1535,6 +1599,9 @@ class WorkflowConfigDialog(QDialog):
             "k": self._rounds_table.cellWidget(
                 row, _ROUND_COL_K
             ).value(),
+            "global_sigma": self._rounds_table.cellWidget(
+                row, _ROUND_COL_GLOBAL
+            ).isChecked(),
             "size_unit": self._rounds_table.cellWidget(
                 row, _ROUND_COL_SIZE_UNIT
             ).currentData(),
@@ -1544,6 +1611,12 @@ class WorkflowConfigDialog(QDialog):
             "cnr_threshold": self._rounds_table.cellWidget(
                 row, _ROUND_COL_CNR_THR
             ).value(),
+            "min_particle_size": self._rounds_table.cellWidget(
+                row, _ROUND_COL_MIN_SIZE
+            ).value(),
+            "min_particle_size_unit": self._rounds_table.cellWidget(
+                row, _ROUND_COL_MIN_SIZE_UNIT
+            ).currentData(),
         }
 
     def _write_round_row(self, row: int, data: dict[str, Any]) -> None:
@@ -1579,6 +1652,9 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.cellWidget(
             row, _ROUND_COL_K
         ).setValue(float(data.get("k", 1.0)))
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_GLOBAL
+        ).setChecked(bool(data.get("global_sigma", False)))
         unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
         unit_idx = unit_combo.findData(data.get("size_unit", "um"))
         unit_combo.setCurrentIndex(unit_idx if unit_idx >= 0 else 0)
@@ -1588,6 +1664,12 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.cellWidget(
             row, _ROUND_COL_CNR_THR
         ).setValue(float(data.get("cnr_threshold", 5.0)))
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_MIN_SIZE
+        ).setValue(float(data.get("min_particle_size", 0.0)))
+        min_unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_MIN_SIZE_UNIT)
+        min_unit_idx = min_unit_combo.findData(data.get("min_particle_size_unit", "px"))
+        min_unit_combo.setCurrentIndex(min_unit_idx if min_unit_idx >= 0 else 0)
         self._update_method_columns_enabled(row)
 
     def _is_adaptive_row(self, row: int) -> bool:
@@ -1670,6 +1752,14 @@ class WorkflowConfigDialog(QDialog):
         k = self._rounds_table.cellWidget(row, _ROUND_COL_K)
         if k is not None:
             k.setEnabled(adaptive)
+        # global σ is the k companion — adaptive only (auto-extraction derives its
+        # noise floor per cell). Clear a stale check when leaving adaptive so a
+        # greyed toggle can't silently ride along.
+        global_check = self._rounds_table.cellWidget(row, _ROUND_COL_GLOBAL)
+        if global_check is not None:
+            if not adaptive and global_check.isChecked():
+                global_check.setChecked(False)
+            global_check.setEnabled(adaptive)
         # The Unit applies to d_min on any per-cell ALC row; greyed for Grouped Otsu.
         unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
         if unit_combo is not None:
@@ -2136,16 +2226,18 @@ class WorkflowConfigDialog(QDialog):
                     and r.auto_extract.smallest_particle_um is not None
                     and r.auto_extract.smallest_particle_unit == "um"
                 )
+                or (r.min_particle_size > 0 and r.min_particle_size_unit == "um2")
                 for r in rounds
             )
             if needs_pixel_size:
                 missing = self._datasets_without_pixel_size(kept_datasets)
                 if missing:
                     self._warn(
-                        "µm d_min / smallest-particle values need a pixel size (µm/px) "
-                        "on every dataset, but it is missing on: " + ", ".join(missing)
+                        "µm d_min / smallest-particle / µm² min-size values need a "
+                        "pixel size (µm/px) on every dataset, but it is missing on: "
+                        + ", ".join(missing)
                         + ". Set the pixel size on these datasets, switch the round's "
-                        "Unit to px, or use auto-detect (Smallest = 0)."
+                        "Unit / Min unit to px, or use auto-detect (Smallest = 0)."
                     )
                     return None
 
@@ -2364,6 +2456,7 @@ class WorkflowConfigDialog(QDialog):
                     k=float(data["k"]),
                     presmooth_sigma_px=sigma,
                     d_min_unit=size_unit,
+                    global_sigma=bool(data.get("global_sigma", False)),
                 )
             elif method == _METHOD_AUTO_EXTRACT:
                 # 0 (the auto-extraction floor) means auto-detect the smallest → None.
@@ -2394,6 +2487,8 @@ class WorkflowConfigDialog(QDialog):
                         adaptive_clip=adaptive,
                         auto_extract=auto_extract,
                         cnr_classify=cnr_classify,
+                        min_particle_size=float(data.get("min_particle_size", 0.0)),
+                        min_particle_size_unit=data.get("min_particle_size_unit", "px"),
                     )
                 )
             except ValueError as e:

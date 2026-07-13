@@ -22,6 +22,7 @@ from percell4.domain.measure.adaptive_clip import (
     otsu_first_pass,
     otsu_smallest_particle,
     per_cell_sigma,
+    pooled_sigma,
     resolve_min_area_px,
     resolve_window_px,
     window_min_spot_for_particle,
@@ -483,6 +484,76 @@ def test_detect_adaptive_per_cell_matches_particle_size_engine():
         img, labels, window_px=window_px, min_spot_px=min_spot_px, k=1.0
     )
     via_engine = detect_adaptive_by_particle_size(img, labels, px, d_min, k=1.0)
+    assert np.array_equal(via_core, via_engine)
+
+
+# ── global σ mode (pooled noise floor) ───────────────────────────────────
+
+
+def test_pooled_sigma_matches_manual_mad_over_in_cell_pixels():
+    """pooled_sigma is 1.4826·MAD over all labelled pixels of the working image."""
+    rng = np.random.default_rng(3)
+    work = (10.0 + rng.normal(0.0, 4.0, size=(80, 80))).astype(np.float32)
+    labels = np.zeros((80, 80), dtype=np.int32)
+    labels[10:40, 10:40] = 1  # two disjoint cells; pixels outside are ignored
+    labels[50:70, 50:70] = 2
+    vals = work[labels > 0]
+    expected = 1.4826 * float(np.median(np.abs(vals - np.median(vals))))
+    assert pooled_sigma(work, labels) == pytest.approx(expected)
+
+
+def test_pooled_sigma_none_on_flat_or_empty_selection():
+    flat = np.full((32, 32), 7.0, dtype=np.float32)
+    assert pooled_sigma(flat, np.ones((32, 32), np.int32)) is None  # MAD == 0
+    noisy = np.random.default_rng(0).normal(0, 1, (32, 32)).astype(np.float32)
+    assert pooled_sigma(noisy, np.zeros((32, 32), np.int32)) is None  # no cell pixels
+
+
+def test_detect_adaptive_per_cell_global_marks_blobs_and_is_binary():
+    img = _blobs_image([(50, 50), (50, 150), (150, 100)], radius=6)
+    labels = np.ones(img.shape, dtype=np.int32)
+    mask = detect_adaptive_per_cell(
+        img, labels, window_px=21, min_spot_px=3, k=1.0, global_sigma=True
+    )
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    for cy, cx in [(50, 50), (50, 150), (150, 100)]:
+        assert mask[cy, cx] == 1
+
+
+def test_global_sigma_thresholds_a_cell_that_per_cell_omits():
+    """A flat quiet cell has MAD 0 (per-cell omits it), but the pooled σ from a
+    noisy neighbour gives global mode a finite floor, so its blob is detected."""
+    img = np.full((120, 240), 10.0, dtype=np.float32)
+    # Cell 1 (left): perfectly flat except one bright disk → per-cell MAD == 0.
+    rr, cc = disk((60, 60), 8, shape=img.shape)
+    img[rr, cc] = 200.0
+    # Cell 2 (right): noisy background, no blob → supplies a finite pooled σ.
+    rng = np.random.default_rng(1)
+    img[:, 120:] = 10.0 + rng.normal(0.0, 6.0, size=(120, 120)).astype(np.float32)
+    labels = np.zeros(img.shape, dtype=np.int32)
+    labels[:, :120] = 1
+    labels[:, 120:] = 2
+
+    per_cell = detect_adaptive_per_cell(img, labels, window_px=21, min_spot_px=3, k=1.0)
+    glob = detect_adaptive_per_cell(
+        img, labels, window_px=21, min_spot_px=3, k=1.0, global_sigma=True
+    )
+    assert per_cell[60, 60] == 0  # cell 1 omitted: its MAD is 0
+    assert glob[60, 60] == 1      # global pooled σ gives it a finite floor
+
+
+def test_detect_by_particle_size_threads_global_sigma():
+    img = _blobs_image([(60, 60), (60, 160), (160, 100)], radius=5)
+    labels = np.ones(img.shape, dtype=np.int32)
+    px, d_min = 0.120369, 0.40
+    window_px, min_spot_px = window_min_spot_for_particle(d_min, px)
+    via_core = detect_adaptive_per_cell(
+        img, labels, window_px=window_px, min_spot_px=min_spot_px, k=1.0, global_sigma=True
+    )
+    via_engine = detect_adaptive_by_particle_size(
+        img, labels, px, d_min, k=1.0, global_sigma=True
+    )
     assert np.array_equal(via_core, via_engine)
 
 

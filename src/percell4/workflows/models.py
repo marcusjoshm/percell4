@@ -313,12 +313,20 @@ class AdaptiveClipSettings:
     adaptive round must not silently inherit ``0`` (which collapses detection on
     noisy data). ``k`` defaults to 1 (the validated value); raise it to be more
     conservative.
+
+    ``global_sigma`` (default False) swaps the per-cell noise floor for a single σ
+    pooled over all cell pixels (``adaptive_clip.pooled_sigma``), so every cell is
+    thresholded against one shared ``k*σ`` instead of its own MAD — the "global"
+    mode. Use it when the per-cell σ over-adapts (e.g. cells that are uniformly
+    dim get an inappropriately low floor); the default per-cell σ is what lets one
+    ``k`` transfer across cells whose intensity scale varies many-fold.
     """
 
     d_min_um: float
     k: float = 1.0
     presmooth_sigma_px: float = 1.0
     d_min_unit: str = "um"
+    global_sigma: bool = False
 
     def __post_init__(self) -> None:
         if self.d_min_um <= 0:
@@ -424,6 +432,17 @@ class ThresholdingRound:
     CNR subpopulation classification); it is valid only when the round carries an
     ALC method (``adaptive_clip`` or ``auto_extract``) and is NOT part of the
     method exclusion.
+
+    ``min_particle_size`` is a method-agnostic post-mask size filter: after the
+    round's feature mask is produced (by *any* method), connected components below
+    this area are dropped before the mask is written and before the CNR post-step.
+    ``0`` (the default) keeps every component. The unit is set by
+    ``min_particle_size_unit``:
+
+    - ``"px"`` — area in pixels, applied uniformly across datasets.
+    - ``"um2"`` — area in µm², converted to a per-dataset pixel threshold using
+      that dataset's ``pixel_size_um``; a dataset missing a pixel size fails its
+      threshold phase explicitly rather than silently defaulting to ``1`` µm/px.
     """
 
     name: str
@@ -439,6 +458,8 @@ class ThresholdingRound:
     adaptive_clip: AdaptiveClipSettings | None = None
     auto_extract: AutoExtractSettings | None = None
     cnr_classify: CnrClassifySettings | None = None
+    min_particle_size: float = 0.0
+    min_particle_size_unit: str = "px"
 
     def __post_init__(self) -> None:
         if not _ROUND_NAME_RE.match(self.name):
@@ -478,6 +499,15 @@ class ThresholdingRound:
             raise ValueError(
                 "cnr_classify requires an Adaptive Local Clipping method on the "
                 "round (adaptive_clip or auto_extract)"
+            )
+        if self.min_particle_size < 0:
+            raise ValueError(
+                f"min_particle_size must be >= 0, got {self.min_particle_size}"
+            )
+        if self.min_particle_size_unit not in ("px", "um2"):
+            raise ValueError(
+                "min_particle_size_unit must be 'px' or 'um2', got "
+                f"{self.min_particle_size_unit!r}"
             )
 
 

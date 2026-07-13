@@ -101,6 +101,7 @@ class ThresholdQCController(QObject):
         ) = None,
         write_measurements_to_store: bool = True,
         persist_round_outputs: bool = True,
+        min_size_px: int = 0,
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -114,6 +115,10 @@ class ThresholdQCController(QObject):
         self._sigma = sigma
         self._mask_name = mask_name
         self._on_complete = on_complete
+        # Method-agnostic post-mask size filter (px). Connected components below
+        # this area are dropped from the combined mask at finalize, matching the
+        # headless apply path (`phases._apply_threshold_frame`). 0 = keep all.
+        self._min_size_px = int(min_size_px)
 
         # Two independent persistence switches:
         #   - persist_round_outputs=False suppresses the full /masks/<name>,
@@ -812,6 +817,14 @@ class ThresholdQCController(QObject):
         for gs in self._groups:
             if gs.mask is not None:
                 np.maximum(combined, gs.mask, out=combined)
+
+        # Method-agnostic min particle size filter — drop connected components
+        # below the round's threshold before persisting / handing to the caller,
+        # so the interactive grouped-Otsu path matches the headless apply path.
+        if self._min_size_px > 1:
+            from percell4.workflows.phases import _filter_small_components
+
+            combined = _filter_small_components(combined, self._min_size_px)
 
         if self._persist_round_outputs:
             # Save mask to HDF5

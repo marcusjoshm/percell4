@@ -756,6 +756,7 @@ def _apply_adaptive_clip_cells(
             float(settings.d_min_um),
             k=float(settings.k),
             presmooth_sigma_px=float(settings.presmooth_sigma_px),
+            global_sigma=bool(settings.global_sigma),
         )
     except Exception as e:
         logger.exception("adaptive clip failed for round %s", round_name)
@@ -765,11 +766,12 @@ def _apply_adaptive_clip_cells(
     np.minimum(combined, 1, out=combined)
     n_pos = int(combined.sum())
     logger.info(
-        "round %s: adaptive clip (d_min=%.3g %s, k=%.3g) — %d positive px",
+        "round %s: adaptive clip (d_min=%.3g %s, k=%.3g, σ=%s) — %d positive px",
         round_name,
         settings.d_min_um,
         settings.d_min_unit,
         settings.k,
+        "global" if settings.global_sigma else "per-cell",
         n_pos,
     )
     if n_pos == 0:
@@ -802,6 +804,7 @@ def _apply_auto_extract_cells(
     combined: NDArray,
     pixel_size_um: float | None,
     round_name: str,
+    min_spot_px: int | None = None,
 ) -> str:
     """Per-cell two-pass auto-extraction over one frame, into ``combined``.
 
@@ -811,8 +814,11 @@ def _apply_auto_extract_cells(
     grouped-Otsu ``gaussian_sigma``, which defaults to 0). ``smallest_particle_um``
     overrides auto-detection of the smallest particle and is converted to pixels via
     ``pixel_size_um``; ``None`` leaves the smallest auto-detected (no pixel size
-    needed). Unions the ``{0,1}`` result into ``combined`` in place. Returns an error
-    string on failure, else ``""``.
+    needed). ``min_spot_px`` is the union size filter — the round's Min particle size
+    resolved to px, threaded so the batch path matches the GUI 'Adaptive Local
+    Clipping' panel (which passes its Min-particle-size as ``min_spot_px``); ``None``
+    leaves ``auto_extract``'s own default. Unions the ``{0,1}`` result into
+    ``combined`` in place. Returns an error string on failure, else ``""``.
     """
     from percell4.domain.measure.auto_extraction import (
         FILL_FACTOR,
@@ -848,12 +854,17 @@ def _apply_auto_extract_cells(
                 f"check the smallest particle and the dataset pixel size"
             )
 
+    # Thread the round's Min particle size into the detector's own size filter when
+    # set, so the union is filtered exactly as the GUI panel does (which passes its
+    # Min-particle-size as min_spot_px). None → auto_extract keeps its own default.
+    extra = {} if min_spot_px is None else {"min_spot_px": int(min_spot_px)}
     try:
         mask, report = auto_extract(
             image,
             labels,
             smallest_particle_px=smallest_particle_px,
             presmooth_sigma_px=float(settings.presmooth_sigma_px),
+            **extra,
         )
     except NoParticlesFoundError:
         # Auto-detect found no particles to size in this frame. A recoverable "no
@@ -926,12 +937,31 @@ def _apply_threshold_frame(
     puncta = round_spec.puncta
     use_puncta = puncta is not None and puncta.detector_name != "otsu"
 
+    # Resolve the round's Min particle size once (may need the dataset pixel size for
+    # µm²). 0 = no filter. Auto-extract threads it straight into the detector's own
+    # size filter (GUI parity); every other method applies it as a post-mask filter
+    # below.
+    min_size_px = 0
+    if round_spec.min_particle_size > 0:
+        try:
+            min_size_px = _resolve_area_px(
+                float(round_spec.min_particle_size),
+                round_spec.min_particle_size_unit,
+                pixel_size_um,
+                knob="min particle size",
+            )
+        except ValueError as e:
+            return None, None, str(e)
+
     combined = np.zeros(labels.shape, dtype=np.uint8)
     if auto_extract is not None:
         # Two-pass auto-extraction also presmooths the RAW image itself (at its own
         # validated presmooth_sigma_px, default 1 px) — same trap guard as adaptive.
+        # The Min particle size is threaded into the detector's union filter (matching
+        # the GUI panel), so the generic post-filter below is skipped for this method.
         err = _apply_auto_extract_cells(
             image, labels, auto_extract, combined, pixel_size_um, round_spec.name,
+            min_spot_px=(min_size_px if min_size_px > 0 else None),
         )
         if err:
             return None, None, err
@@ -981,6 +1011,13 @@ def _apply_threshold_frame(
                 logger.exception("otsu failed for group %d", group_id)
                 return None, None, f"otsu for group {group_id}: {e}"
             np.maximum(combined, group_mask.astype(np.uint8), out=combined)
+
+    # Post-mask size filter: drop connected components below the round's min particle
+    # size before the mask is written (and before the CNR post-step, which reads this
+    # mask). Applied here for every method EXCEPT auto-extract, which threaded the same
+    # value into its own detector-level union filter above for exact GUI parity.
+    if min_size_px > 0 and auto_extract is None:
+        combined = _filter_small_components(combined, min_size_px)
 
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
@@ -1545,35 +1582,70 @@ def _read_pixel_size_um(store: DatasetStore) -> float | None:
     return value if value > 0 else None
 
 
-def _resolve_min_area_px(
-    particle_settings: ParticleSettings,
+def _filter_small_components(mask: NDArray, min_px: int) -> NDArray:
+    """Drop connected components with area < ``min_px`` from a binary mask.
+
+    4-connectivity (``scipy.ndimage.label`` default), matching the particle
+    analysis size filter (``domain/measure/particle``). Returns a ``uint8`` mask;
+    a ``min_px <= 1`` is a no-op (every non-empty component survives).
+    """
+    if min_px <= 1 or not mask.any():
+        return mask.astype(np.uint8, copy=False)
+    from scipy.ndimage import label as ndlabel
+
+    labeled, n = ndlabel(mask)
+    if n == 0:
+        return mask.astype(np.uint8, copy=False)
+    counts = np.bincount(labeled.ravel())
+    keep = counts >= min_px
+    keep[0] = False  # background is never a particle
+    return keep[labeled].astype(np.uint8)
+
+
+def _resolve_area_px(
+    value: float,
+    unit: str,
     pixel_size_um: float | None,
     *,
     dataset_name: str = "",
+    knob: str = "particle area",
 ) -> int:
-    """Convert a ParticleSettings.min_area into an integer pixel threshold.
+    """Convert an area value in ``unit`` into an integer pixel threshold.
 
-    px mode is a straight ``int(round(value))``. µm² mode divides by the
-    dataset's pixel area; a µm² threshold against a dataset without a
-    known pixel size raises ``ValueError`` so the workflow phase can
-    record the failure rather than silently default to ``pixel_size_um=1``
-    (which would produce a threshold orders of magnitude off).
+    ``"px"`` mode is a straight ``int(round(value))``. ``"um2"`` mode divides by
+    the dataset's pixel area; a µm² threshold against a dataset without a known
+    pixel size raises ``ValueError`` so the caller can record the failure rather
+    than silently default to ``pixel_size_um=1`` (which would produce a threshold
+    orders of magnitude off).
     """
-    unit = particle_settings.min_area_unit
-    value = float(particle_settings.min_area)
     if unit == "px":
         return int(round(value))
     if unit == "um2":
         if pixel_size_um is None or pixel_size_um <= 0:
             label = f" for dataset {dataset_name!r}" if dataset_name else ""
             raise ValueError(
-                f"µm² particle threshold requires a known pixel size{label}; "
+                f"µm² {knob} threshold requires a known pixel size{label}; "
                 "re-import the dataset with TIFF resolution metadata or "
-                "switch the workflow Min particle area unit to px."
+                "switch the unit to px."
             )
         return int(round(value / (pixel_size_um * pixel_size_um)))
     # __post_init__ guards against unknown units, but stay defensive.
-    raise ValueError(f"unknown min_area_unit: {unit!r}")
+    raise ValueError(f"unknown area unit: {unit!r}")
+
+
+def _resolve_min_area_px(
+    particle_settings: ParticleSettings,
+    pixel_size_um: float | None,
+    *,
+    dataset_name: str = "",
+) -> int:
+    """Convert a ParticleSettings.min_area into an integer pixel threshold."""
+    return _resolve_area_px(
+        float(particle_settings.min_area),
+        particle_settings.min_area_unit,
+        pixel_size_um,
+        dataset_name=dataset_name,
+    )
 
 
 def _add_area_um2_columns(df: pd.DataFrame, pixel_size_um: float | None) -> pd.DataFrame:

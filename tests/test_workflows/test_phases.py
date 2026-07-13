@@ -839,6 +839,101 @@ def test_apply_auto_extract_is_bit_identical_to_bare_detector(tmp_path):
     assert np.array_equal(mask, expected)
 
 
+def test_apply_auto_extract_threads_round_min_size_to_min_spot(tmp_path):
+    """GUI parity: a workflow auto-extract round threads its Min size into
+    auto_extract's ``min_spot_px`` — the GUI 'Adaptive Local Clipping' panel passes
+    its Min-particle-size the same way — instead of the hardcoded default 2."""
+    from unittest.mock import patch
+
+    import percell4.domain.measure.auto_extraction as ae_mod
+    from percell4.workflows import phases as phases_mod
+    from percell4.workflows.phases import _trivial_grouping
+
+    store = _make_auto_extract_store(tmp_path / "minspot.h5", pixel_size_um=None)
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    round_spec = _auto_extract_round(
+        gaussian_sigma=0.0,
+        auto_extract=AutoExtractSettings(smallest_particle_um=3.0, smallest_particle_unit="px"),
+        min_particle_size=7.0,
+        min_particle_size_unit="px",
+    )
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+
+    captured = {}
+    real = ae_mod.auto_extract
+
+    def _spy(img, lab, *, min_spot_px=2, **kw):
+        captured["min_spot_px"] = min_spot_px
+        return real(img, lab, min_spot_px=min_spot_px, **kw)
+
+    with patch.object(ae_mod, "auto_extract", _spy):
+        mask, _gdf, err = phases_mod._apply_threshold_frame(
+            image, labels, grouping, round_spec, None
+        )
+    assert err == ""
+    assert captured["min_spot_px"] == 7  # the round's Min size, not the default 2
+
+
+def test_apply_auto_extract_min_size_unset_keeps_detector_default(tmp_path):
+    """Backward-compat: an auto-extract round with no Min size (0) leaves
+    auto_extract's own default min_spot_px untouched (not forced to 0)."""
+    from unittest.mock import patch
+
+    import percell4.domain.measure.auto_extraction as ae_mod
+    from percell4.workflows import phases as phases_mod
+    from percell4.workflows.phases import _trivial_grouping
+
+    store = _make_auto_extract_store(tmp_path / "default.h5", pixel_size_um=None)
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    round_spec = _auto_extract_round(
+        gaussian_sigma=0.0,
+        auto_extract=AutoExtractSettings(smallest_particle_um=3.0, smallest_particle_unit="px"),
+    )  # min_particle_size defaults to 0
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+
+    captured = {}
+    real = ae_mod.auto_extract
+
+    def _spy(img, lab, *, min_spot_px=2, **kw):
+        captured["min_spot_px"] = min_spot_px
+        return real(img, lab, min_spot_px=min_spot_px, **kw)
+
+    with patch.object(ae_mod, "auto_extract", _spy):
+        _mask, _gdf, err = phases_mod._apply_threshold_frame(
+            image, labels, grouping, round_spec, None
+        )
+    assert err == ""
+    assert captured["min_spot_px"] == 2  # detector default, unchanged
+
+
+def test_apply_auto_extract_with_min_size_is_bit_identical_to_bare(tmp_path):
+    """The apply branch with a Min size equals a direct auto_extract call passing
+    that value as min_spot_px — full GUI parity, no extra post-filter divergence."""
+    from percell4.domain.measure.auto_extraction import auto_extract
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    store = _make_auto_extract_store(tmp_path / "id.h5", pixel_size_um=None)
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    round_spec = _auto_extract_round(
+        gaussian_sigma=0.0,
+        auto_extract=AutoExtractSettings(
+            smallest_particle_um=3.0, smallest_particle_unit="px", presmooth_sigma_px=1.0
+        ),
+        min_particle_size=5.0,
+        min_particle_size_unit="px",
+    )
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+    mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, None)
+    assert err == ""
+    expected, _ = auto_extract(
+        image, labels, smallest_particle_px=3.0, presmooth_sigma_px=1.0, min_spot_px=5
+    )
+    assert np.array_equal(mask, expected)
+
+
 def test_auto_extract_oversized_window_fails_cleanly(tmp_path):
     """The plausibility guard bounds the FINE WINDOW (≈3× smallest), not the diameter:
     a smallest-particle whose px diameter < frame but whose ≈3× window > frame must
@@ -1005,6 +1100,114 @@ def test_apply_adaptive_clip_is_bit_identical_to_bare_detector(tmp_path):
             image, labels, ps, 0.12, k=1.0, presmooth_sigma_px=presmooth
         )
         assert np.array_equal(mask, expected)
+
+
+def test_apply_adaptive_clip_global_sigma_threads_to_detector(tmp_path):
+    """A global-σ round applies the pooled-σ detector — bit-identical to a direct
+    detector call with global_sigma=True."""
+    from percell4.domain.measure.adaptive_clip import detect_adaptive_by_particle_size
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    store = _make_adaptive_store(tmp_path / "global.h5")
+    image = store.read_channel("intensity", 0)
+    labels = store.read_labels("cellpose_qc")
+    ps = float(store.metadata["pixel_size_um"])
+
+    round_spec = _adaptive_apply_round(
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.12, global_sigma=True)
+    )
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+    mask, _gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, ps)
+    assert err == ""
+    expected = detect_adaptive_by_particle_size(
+        image, labels, ps, 0.12, k=1.0, global_sigma=True
+    )
+    assert np.array_equal(mask, expected)
+
+
+def _min_size_inputs():
+    """One whole-field cell with two bright blobs: 9 px (3×3) and 100 px (10×10)."""
+    labels = np.ones((40, 40), dtype=np.int32)
+    image = np.zeros((40, 40), dtype=np.float32)
+    image[2:5, 2:5] = 100.0  # 9 px small blob
+    image[10:20, 10:20] = 100.0  # 100 px large blob
+    return image, labels
+
+
+def test_apply_threshold_frame_min_particle_size_drops_small_components():
+    """A round's px min particle size drops connected components below that area
+    from the produced mask (applies to every method, here grouped Otsu)."""
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    image, labels = _min_size_inputs()
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+
+    unfiltered = ThresholdingRound(
+        name="r",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        gaussian_sigma=0.0,  # no presmoothing so blob areas stay exact
+    )
+    mask0, _g0, err0 = _apply_threshold_frame(image, labels, grouping, unfiltered)
+    assert err0 == ""
+    assert int(mask0.sum()) == 109  # both blobs
+
+    filtered = ThresholdingRound(
+        name="r",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        gaussian_sigma=0.0,
+        min_particle_size=50,
+        min_particle_size_unit="px",
+    )
+    mask1, _g1, err1 = _apply_threshold_frame(image, labels, grouping, filtered)
+    assert err1 == ""
+    assert int(mask1.sum()) == 100  # only the 100 px blob survives
+
+
+def test_apply_threshold_frame_min_size_um2_needs_pixel_size():
+    """A µm² min particle size on a dataset with no pixel size fails the frame
+    cleanly rather than silently defaulting to 1 µm/px."""
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    image, labels = _min_size_inputs()
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+    round_spec = ThresholdingRound(
+        name="r",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        gaussian_sigma=0.0,
+        min_particle_size=5.0,
+        min_particle_size_unit="um2",
+    )
+    mask, gdf, err = _apply_threshold_frame(image, labels, grouping, round_spec, None)
+    assert mask is None
+    assert gdf is None
+    assert "pixel size" in err
+
+
+def test_apply_threshold_frame_min_size_um2_resolves_with_pixel_size():
+    """With a pixel size, a µm² min particle size converts to a pixel threshold
+    and filters accordingly (0.12 µm/px → 5 µm² ≈ 347 px keeps neither blob)."""
+    from percell4.workflows.phases import _apply_threshold_frame, _trivial_grouping
+
+    image, labels = _min_size_inputs()
+    grouping = _trivial_grouping(np.array([1], dtype=np.int32))
+    round_spec = ThresholdingRound(
+        name="r",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        gaussian_sigma=0.0,
+        min_particle_size=1.0,  # 1 µm² / (0.12²) ≈ 69 px → drops the 9 px, keeps the 100 px
+        min_particle_size_unit="um2",
+    )
+    mask, _g, err = _apply_threshold_frame(image, labels, grouping, round_spec, 0.12)
+    assert err == ""
+    assert int(mask.sum()) == 100
 
 
 def test_apply_adaptive_clip_empty_labels_yields_zero_mask(tmp_path):

@@ -23,10 +23,13 @@ from percell4.gui.workflows.single_cell.config_dialog import (
     _ROUND_COL_CNR_ON,
     _ROUND_COL_CNR_THR,
     _ROUND_COL_DMIN,
+    _ROUND_COL_GLOBAL,
     _ROUND_COL_GMM_MAX,
     _ROUND_COL_K,
     _ROUND_COL_KMEANS_K,
     _ROUND_COL_METHOD,
+    _ROUND_COL_MIN_SIZE,
+    _ROUND_COL_MIN_SIZE_UNIT,
     _ROUND_COL_SIGMA,
     _ROUND_COL_SIZE_UNIT,
     WorkflowConfigDialog,
@@ -306,6 +309,25 @@ def test_adaptive_method_builds_adaptive_round(dialog, h5_ds1):
     assert rounds[0].iterative_otsu is None
 
 
+def test_gui_matching_method_builds_auto_extract_round(dialog, h5_ds1):
+    """The method a user maps from the GUI 'Adaptive Local Clipping' panel builds an
+    AutoExtractSettings round — the same detector the GUI runs — not the single-window
+    AdaptiveClipSettings. Guards the naming trap (batch != GUI thresholding)."""
+    # The GUI-matching label is the two-pass method; its name references the GUI panel.
+    assert "Adaptive Local Clipping" in _METHOD_AUTO_EXTRACT
+    assert "single-window" in _METHOD_ADAPTIVE  # the orphan is clearly marked
+
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(2.0)
+    unit = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIZE_UNIT)
+    unit.setCurrentIndex(unit.findData("px"))
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].auto_extract is not None  # the GUI's two-pass detector
+    assert rounds[0].adaptive_clip is None  # NOT the single-window detector
+
+
 def test_method_switch_toggles_columns_and_retains_values(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
@@ -333,6 +355,73 @@ def test_adaptive_dmin_minimum_is_positive(dialog, h5_ds1):
     assert dmin.minimum() > 0
     dmin.setValue(0.0)  # clamped to the minimum
     assert dmin.value() > 0
+
+
+def test_adaptive_global_sigma_checkbox_builds_round(dialog, h5_ds1):
+    """Ticking 'global' on an adaptive row builds a global-σ AdaptiveClipSettings."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    glob = dialog._rounds_table.cellWidget(0, _ROUND_COL_GLOBAL)
+    assert glob.isEnabled() is True  # enabled on adaptive rows
+    glob.setChecked(True)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].adaptive_clip is not None
+    assert rounds[0].adaptive_clip.global_sigma is True
+
+
+def test_global_sigma_defaults_off_and_disabled_off_adaptive(dialog, h5_ds1):
+    """The global checkbox is off by default, and disabled + cleared on non-adaptive
+    rows so a stale tick can never ride along into a non-adaptive method."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    glob = dialog._rounds_table.cellWidget(0, _ROUND_COL_GLOBAL)
+    assert glob.isChecked() is False
+    assert glob.isEnabled() is False  # Grouped Otsu default: disabled
+
+    method.setCurrentText(_METHOD_ADAPTIVE)
+    glob.setChecked(True)
+    # Auto-extraction derives its floor per cell → global is cleared + disabled.
+    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    assert glob.isEnabled() is False
+    assert glob.isChecked() is False
+
+
+def test_min_particle_size_builds_into_round(dialog, h5_ds1):
+    """Setting Min size + Min unit on a row builds a ThresholdingRound carrying
+    the size filter — on any method (here the default Grouped Otsu)."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE).setValue(25.0)
+    unit = dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE_UNIT)
+    unit.setCurrentIndex(unit.findData("um2"))
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].min_particle_size == 25.0
+    assert rounds[0].min_particle_size_unit == "um2"
+
+
+def test_min_particle_size_defaults_to_no_filter(dialog, h5_ds1):
+    """A fresh row builds a round with no size filter (0 px)."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].min_particle_size == 0.0
+    assert rounds[0].min_particle_size_unit == "px"
+
+
+def test_min_particle_size_survives_row_reorder(dialog, h5_ds1):
+    """Min size + unit round-trip through the read/write used by row reordering."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE).setValue(12.0)
+    u0 = dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE_UNIT)
+    u0.setCurrentIndex(u0.findData("um2"))
+    dialog._swap_rounds(0, 1)  # the row's data moves to index 1
+    moved = dialog._read_round_row(1)
+    assert moved["min_particle_size"] == 12.0
+    assert moved["min_particle_size_unit"] == "um2"
 
 
 def test_datasets_without_pixel_size_flags_missing(dialog, tmp_path):

@@ -97,6 +97,28 @@ def test_round_rejects_empty_channel():
         _valid_round(channel="")
 
 
+def test_round_min_particle_size_defaults_to_no_filter():
+    r = _valid_round()
+    assert r.min_particle_size == 0.0
+    assert r.min_particle_size_unit == "px"
+
+
+def test_round_accepts_min_particle_size():
+    r = _valid_round(min_particle_size=12.5, min_particle_size_unit="um2")
+    assert r.min_particle_size == 12.5
+    assert r.min_particle_size_unit == "um2"
+
+
+def test_round_rejects_negative_min_particle_size():
+    with pytest.raises(ValueError, match="min_particle_size must be >= 0"):
+        _valid_round(min_particle_size=-1.0)
+
+
+def test_round_rejects_bad_min_particle_size_unit():
+    with pytest.raises(ValueError, match="min_particle_size_unit must be"):
+        _valid_round(min_particle_size=5.0, min_particle_size_unit="nm")
+
+
 def test_round_is_frozen():
     r = _valid_round()
     with pytest.raises((AttributeError, TypeError)):
@@ -408,6 +430,14 @@ def test_adaptive_clip_accepts_px_unit():
 def test_adaptive_clip_rejects_bad_unit():
     with pytest.raises(ValueError, match="d_min_unit"):
         AdaptiveClipSettings(d_min_um=0.4, d_min_unit="nm")
+
+
+def test_adaptive_clip_global_sigma_defaults_to_false():
+    assert AdaptiveClipSettings(d_min_um=0.4).global_sigma is False
+
+
+def test_adaptive_clip_accepts_global_sigma():
+    assert AdaptiveClipSettings(d_min_um=0.4, global_sigma=True).global_sigma is True
 
 
 def test_auto_extract_unit_defaults_to_um():

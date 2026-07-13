@@ -499,6 +499,52 @@ def test_pre_evolution_round_without_puncta_loads_as_otsu() -> None:
     assert r.puncta is None
 
 
+# ── min_particle_size round-trip ─────────────────────────────
+
+
+def test_round_min_particle_size_round_trips() -> None:
+    """A round with a µm² min particle size survives to_dict → from_dict."""
+    r = ThresholdingRound(
+        name="GFP_bright",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.GMM,
+        min_particle_size=8.0,
+        min_particle_size_unit="um2",
+    )
+    d = _round_to_dict(r)
+    assert d["min_particle_size"] == 8.0
+    assert d["min_particle_size_unit"] == "um2"
+    assert _round_from_dict(d) == r
+
+
+def test_round_without_min_particle_size_omits_keys() -> None:
+    """A round with no size filter serializes without the min-size keys, so
+    legacy run_config.json files round-trip unchanged."""
+    r = ThresholdingRound(
+        name="GFP_bright",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.GMM,
+    )
+    d = _round_to_dict(r)
+    assert "min_particle_size" not in d
+    assert "min_particle_size_unit" not in d
+
+
+def test_legacy_round_without_min_particle_size_loads_as_no_filter() -> None:
+    """A round dict predating the size filter reconstructs with no filter."""
+    legacy_round = {
+        "name": "GFP_bright",
+        "channel": "GFP",
+        "metric": "mean_intensity",
+        "algorithm": "gmm",
+    }
+    r = _round_from_dict(legacy_round)
+    assert r.min_particle_size == 0.0
+    assert r.min_particle_size_unit == "px"
+
+
 def test_adaptive_clip_round_round_trips() -> None:
     """An adaptive-clip round survives to_dict → from_dict with params intact."""
     r = ThresholdingRound(
@@ -674,6 +720,25 @@ def test_legacy_adaptive_round_defaults_size_unit_to_um() -> None:
     }
     r = _round_from_dict(legacy)
     assert r.adaptive_clip.d_min_unit == "um"
+
+
+def test_global_sigma_round_trips() -> None:
+    """The global-σ flag survives the round-trip."""
+    ac = ThresholdingRound(
+        name="ac", channel="GFP", metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        adaptive_clip=AdaptiveClipSettings(d_min_um=0.4, global_sigma=True),
+    )
+    assert _round_from_dict(_round_to_dict(ac)).adaptive_clip.global_sigma is True
+
+
+def test_legacy_adaptive_round_defaults_global_sigma_to_false() -> None:
+    """A legacy adaptive_clip dict without global_sigma reconstructs as per-cell."""
+    legacy = {
+        "name": "ac", "channel": "GFP", "metric": "mean_intensity",
+        "algorithm": "kmeans", "adaptive_clip": {"d_min_um": 0.4},
+    }
+    assert _round_from_dict(legacy).adaptive_clip.global_sigma is False
 
 
 def test_puncta_round_round_trips_with_real_tuple_and_dict_params() -> None:

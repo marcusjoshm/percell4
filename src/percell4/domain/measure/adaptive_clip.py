@@ -99,6 +99,26 @@ def per_cell_sigma(work: np.ndarray, labels: np.ndarray) -> dict[int, float]:
     return sigma
 
 
+def pooled_sigma(work: np.ndarray, labels: np.ndarray) -> float | None:
+    """Robust *global* noise scale ``1.4826 * MAD(work)`` over all in-cell pixels.
+
+    The whole-selection counterpart to :func:`per_cell_sigma`: one σ pooled from
+    every labelled (``labels > 0``), finite pixel of the **presmoothed** working
+    image — the noise floor for the "global" Adaptive Local Clipping mode, where a
+    single σ thresholds every cell instead of each cell's own. Returns ``None``
+    when the pooled MAD is zero or non-finite (no threshold can be defined); the
+    caller then produces an empty mask, mirroring the per-cell skip.
+    """
+    w = np.asarray(work)
+    lab = np.asarray(labels)
+    vals = w[(lab > 0) & np.isfinite(w)]
+    if vals.size == 0:
+        return None
+    med = float(np.median(vals))
+    s = 1.4826 * float(np.median(np.abs(vals - med)))
+    return s if (np.isfinite(s) and s > 0.0) else None
+
+
 def _filter_by_area(mask: np.ndarray, min_spot_px: int) -> np.ndarray:
     """Keep only connected components with area ``>= min_spot_px`` (boolean out).
 
@@ -190,6 +210,7 @@ def detect_adaptive_by_particle_size(
     k: float = 1.0,
     presmooth_sigma_px: float = 1.0,
     factor: float = PARTICLE_WINDOW_FACTOR,
+    global_sigma: bool = False,
 ) -> np.ndarray:
     """Per-cell adaptive local clip driven by one physical knob, ``d_min_um``.
 
@@ -205,7 +226,8 @@ def detect_adaptive_by_particle_size(
     * **noise floor** = robust ``1.4826*MAD`` of the smoothed image, computed
       **per cell** — the per-cell σ is what lets one ``k`` hold across cells whose
       intensity scale varies many-fold (observed 3× within a field, 40× across
-      datasets),
+      datasets); pass ``global_sigma=True`` to instead pool one σ over all cell
+      pixels and threshold every cell against it,
     * **k = 1**.
 
     The local background (hence ``diff = work - background``) is computed over the
@@ -230,6 +252,7 @@ def detect_adaptive_by_particle_size(
         min_spot_px=min_spot_px,
         k=k,
         presmooth_sigma_px=presmooth_sigma_px,
+        global_sigma=global_sigma,
     )
 
 
@@ -242,6 +265,7 @@ def detect_adaptive_per_cell(
     k: float | Mapping[int, float] = 1.0,
     presmooth_sigma_px: float = 1.0,
     fill_holes: bool = False,
+    global_sigma: bool = False,
 ) -> np.ndarray:
     """Per-cell adaptive local clip with an explicit window + size filter.
 
@@ -259,7 +283,11 @@ def detect_adaptive_per_cell(
     pass, where the noise-symmetry floor is estimated per cell). With a mapping, a
     cell absent from it is **not** thresholded this pass (it has no defined k) —
     callers build the mapping over the same finite-σ cells this function thresholds,
-    so in practice every thresholded cell is present. When ``fill_holes`` is True,
+    so in practice every thresholded cell is present. When ``global_sigma`` is True,
+    a single σ pooled over all in-cell pixels (:func:`pooled_sigma`) thresholds
+    every cell instead of each cell's own robust MAD — the "global" mode, for when
+    a shared noise floor at one ``k`` is wanted rather than a per-cell one (a flat
+    or non-finite pool then omits every cell → empty mask). When ``fill_holes`` is True,
     enclosed interior holes are filled per pass (a large particle under-windowed
     into a ring is closed solid) **before** the size filter; default False leaves
     the mask as detected. Components smaller than ``min_spot_px`` are dropped (a
@@ -277,13 +305,17 @@ def detect_adaptive_per_cell(
     # reduces to image > local_background + k*sigma (see adaptive_local_clip.ijm).
     diff = work - gaussian_filter(work, (window_px - 1) / 6.0)
 
-    sigmas = per_cell_sigma(work, lab)
+    # Noise floor: one σ pooled over all cell pixels (global mode), else each
+    # cell's own robust MAD. A None global σ (flat/empty pool) omits every cell,
+    # exactly as a per-cell None does.
+    global_s = pooled_sigma(work, lab) if global_sigma else None
+    sigmas = {} if global_sigma else per_cell_sigma(work, lab)
     out = np.zeros(img.shape, dtype=bool)
     for idx, sl in enumerate(find_objects(lab)):
         if sl is None:
             continue
         cid = idx + 1
-        s = sigmas.get(cid)
+        s = global_s if global_sigma else sigmas.get(cid)
         if s is None:  # zero/non-finite MAD: cell omitted (cannot threshold)
             continue
         if k_is_map:

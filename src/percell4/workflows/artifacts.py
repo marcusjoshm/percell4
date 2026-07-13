@@ -247,6 +247,7 @@ def _adaptive_clip_to_dict(s: AdaptiveClipSettings) -> dict[str, Any]:
         "k": s.k,
         "presmooth_sigma_px": s.presmooth_sigma_px,
         "d_min_unit": s.d_min_unit,
+        "global_sigma": s.global_sigma,
     }
 
 
@@ -257,6 +258,8 @@ def _adaptive_clip_from_dict(d: dict[str, Any]) -> AdaptiveClipSettings:
         presmooth_sigma_px=d.get("presmooth_sigma_px", 1.0),
         # Absent in legacy configs → µm (the original behavior).
         d_min_unit=d.get("d_min_unit", "um"),
+        # Absent in legacy configs → per-cell σ (the original behavior).
+        global_sigma=d.get("global_sigma", False),
     )
 
 
@@ -310,6 +313,12 @@ def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
         out["auto_extract"] = _auto_extract_to_dict(r.auto_extract)
     if r.cnr_classify is not None:
         out["cnr_classify"] = _cnr_classify_to_dict(r.cnr_classify)
+    # Additive: only emitted when a size filter is set, so legacy configs
+    # round-trip unchanged and old run_config.json files keep loading (absent
+    # keys reconstruct as no filter).
+    if r.min_particle_size > 0:
+        out["min_particle_size"] = r.min_particle_size
+        out["min_particle_size_unit"] = r.min_particle_size_unit
     return out
 
 
@@ -341,6 +350,9 @@ def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
         cnr_classify=(
             _cnr_classify_from_dict(cnr_classify_raw) if cnr_classify_raw is not None else None
         ),
+        # Absent in legacy configs → no size filter (0.0 / px).
+        min_particle_size=float(d.get("min_particle_size", 0.0)),
+        min_particle_size_unit=str(d.get("min_particle_size_unit", "px")),
     )
 
 
