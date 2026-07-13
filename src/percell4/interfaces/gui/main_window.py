@@ -1322,8 +1322,12 @@ class LauncherWindow(QMainWindow):
                     s.read_labels(label_name, view_bin=view_bin), name=label_name
                 )
             for mask_name in mask_names:
+                # Masks come up hidden on open — the user toggles the eye to
+                # reveal them (see also _populate_parallel).
                 viewer_win.add_mask(
-                    s.read_mask(mask_name, view_bin=view_bin), name=mask_name
+                    s.read_mask(mask_name, view_bin=view_bin),
+                    name=mask_name,
+                    visible=False,
                 )
 
     def _populate_parallel(
@@ -1440,7 +1444,9 @@ class LauncherWindow(QMainWindow):
                 elif kind == "labels":
                     viewer_win.add_labels(arr, name=name)
                 else:
-                    viewer_win.add_mask(arr, name=name)
+                    # Masks come up hidden on open — the user toggles the eye
+                    # to reveal them (see also _populate_serial).
+                    viewer_win.add_mask(arr, name=name, visible=False)
                 print(
                     f"[PC4-LOAD] <- finished '{hp}'",
                     file=_sys.stderr,
