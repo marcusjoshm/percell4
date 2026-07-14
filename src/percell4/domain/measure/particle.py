@@ -34,11 +34,16 @@ from percell4.domain.measure.metrics import BUILTIN_METRICS
 
 # ── Per-particle focus/sharpness metrics ────────────────────────────────
 # A dedicated metric family, deliberately kept OUT of BUILTIN_METRICS so it
-# never leaks into per-cell measurement, threshold-metric validation, or the
-# GUI metric pickers. Computed only inside _iter_particles (which alone has
-# the cell mask needed to keep the edge-skirt annulus inside the owning cell)
-# and emitted only by analyze_particles_detail. See
-# docs/plans/2026-07-14-001-feat-particle-sharpness-metrics-plan.md.
+# never leaks into per-cell measurement, threshold-metric validation, or any
+# BUILTIN_METRICS-driven GUI picker (grouping / threshold-config / per-cell CSV
+# selectors). Computed inside _iter_particles (which alone has the cell mask
+# needed to keep the edge-skirt annulus inside the owning cell) and emitted by
+# analyze_particles_detail. The interactive Segment-by-Metric tool
+# (metric_segmentation.py) deliberately exposes `edge_skirt_ratio` in its OWN,
+# separate picker — that is consistent with this invariant because it reads
+# through the dedicated per-cell emitter, not through BUILTIN_METRICS. See
+# docs/plans/2026-07-14-001-feat-particle-sharpness-metrics-plan.md and
+# docs/plans/2026-07-14-002-feat-interactive-metric-segmenter-plan.md.
 _PARTICLE_SHARPNESS_METRICS = (
     "edge_skirt_ratio",   # raw skirt mean / peak — high = haze past the edge (out of focus)
     "boundary_gradient",  # mean edge gradient / peak — high = steep edge (in focus)
@@ -191,6 +196,34 @@ def _sharpness_for_particle(
     }
 
 
+def sharpness_buffers(crop: NDArray) -> tuple[NDArray, NDArray]:
+    """Sobel-magnitude and Laplacian of a lightly-presmoothed cell crop.
+
+    Computed once per (cell, channel); shared by :func:`_iter_particles` and
+    the segment-by-metric emitter so both derive identical sharpness values.
+    """
+    work = gaussian_filter(crop.astype(np.float64), sigma=_SHARPNESS_PRESMOOTH_SIGMA)
+    gy = sobel(work, axis=0)
+    gx = sobel(work, axis=1)
+    return np.hypot(gy, gx), laplace(work)
+
+
+def skirt_and_boundary(
+    this_particle: NDArray[np.bool_],
+    cell_mask: NDArray[np.bool_],
+    other_particles: NDArray[np.bool_],
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """The cell-restricted, neighbour-excluded skirt annulus and the inner rim.
+
+    Single source of truth for the edge-skirt geometry, shared by
+    :func:`_iter_particles` and the segment-by-metric emitter.
+    """
+    dilated = binary_dilation(this_particle, iterations=_SKIRT_DILATION_PX)
+    skirt = dilated & ~this_particle & cell_mask & ~other_particles
+    boundary = this_particle & ~binary_erosion(this_particle)
+    return skirt, boundary
+
+
 def _iter_particles(
     images: dict[str, NDArray],
     labels: NDArray[np.int32],
@@ -253,14 +286,9 @@ def _iter_particles(
         lap_crops: dict[str, NDArray] = {}
         if compute_sharpness:
             for ch_name in channel_names:
-                work = gaussian_filter(
-                    channel_crops[ch_name].astype(np.float64),
-                    sigma=_SHARPNESS_PRESMOOTH_SIGMA,
+                grad_crops[ch_name], lap_crops[ch_name] = sharpness_buffers(
+                    channel_crops[ch_name]
                 )
-                gy = sobel(work, axis=0)
-                gx = sobel(work, axis=1)
-                grad_crops[ch_name] = np.hypot(gy, gx)
-                lap_crops[ch_name] = laplace(work)
 
         for pid, prop in enumerate(first_props, start=1):
             if prop.area < min_area:
@@ -295,11 +323,9 @@ def _iter_particles(
                 # the owning cell and excluding other particles (so haze from a
                 # neighbour never leaks into this particle's skirt).
                 other_particles = (particle_labels > 0) & ~this_particle
-                dilated = binary_dilation(
-                    this_particle, iterations=_SKIRT_DILATION_PX
+                skirt, boundary = skirt_and_boundary(
+                    this_particle, cell_mask, other_particles
                 )
-                skirt = dilated & ~this_particle & cell_mask & ~other_particles
-                boundary = this_particle & ~binary_erosion(this_particle)
                 # Geometric-validity flag (channel-agnostic): the particle must
                 # have >=2px and a non-empty skirt for the measurement to exist.
                 sharpness_computable = bool(
