@@ -48,6 +48,15 @@ _PARTICLE_SHARPNESS_METRICS = (
 # particle geometry permits the skirt/derivative measurement at all; lets the
 # researcher count particles whose metrics are NaN for degeneracy rather than
 # having those rows silently vanish from eye-gated distributions.
+#
+# IMPORTANT: this flag is GEOMETRY ONLY. It says nothing about per-channel
+# signal. A particle that is geometrically valid (True) but has no signal in a
+# given channel (peak <= 0 there — the normal case when the mask was detected on
+# a different channel) still yields NaN for that channel's metrics. So
+# `sharpness_computable == True` does NOT imply "no NaN in this row": a
+# downstream filter that needs finite values for channel X must AND this flag
+# with that channel's own `notna()`. For the detection channel (which has signal
+# by construction on a detected particle), the flag and finite metrics coincide.
 _SHARPNESS_COMPUTABLE_COL = "sharpness_computable"
 
 # Buffer + geometry knobs (tunable; validated by eye — see plan "Deferred").
@@ -55,7 +64,12 @@ _SHARPNESS_COMPUTABLE_COL = "sharpness_computable"
 # lighter than the detection pipeline's sigma=1px so pixel noise is tamed
 # without erasing the edge-sharpness signal the metrics rely on.
 _SHARPNESS_PRESMOOTH_SIGMA = 0.5
-_SKIRT_DILATION_PX = 1
+# 2px annulus: a slightly more robust skirt mean than 1px, and — because the
+# connected-component labels are 4-connected — the only width at which a
+# *separate* neighbouring particle can actually land in the skirt (at 1px, any
+# orthogonal neighbour would be part of the same component), so the neighbour
+# exclusion below is genuinely active.
+_SKIRT_DILATION_PX = 2
 
 # Per-particle intensity metrics — the BUILTIN_METRICS set minus
 # ``area`` (the particle's own area is already a first-class field
@@ -396,6 +410,25 @@ def analyze_particles(
     return df
 
 
+def _detail_columns(channel_names: list[str]) -> list[str]:
+    """Ordered column schema for the per-particle detail frame.
+
+    Single source of truth for :func:`analyze_particles_detail`: base fields,
+    then per-channel intensity metrics, then per-channel sharpness metrics, then
+    the channel-agnostic validity flag (appended last). Both the populated-row
+    and empty-frame paths build from this so the schema cannot drift.
+    """
+    cols = ["cell_id", "particle_id", "area", "centroid_y", "centroid_x"]
+    for ch in channel_names:
+        prefix = f"{ch}_" if len(channel_names) > 1 else ""
+        cols.extend(f"{prefix}{m}" for m in _PARTICLE_INTENSITY_METRICS)
+    for ch in channel_names:
+        prefix = f"{ch}_" if len(channel_names) > 1 else ""
+        cols.extend(f"{prefix}{m}" for m in _PARTICLE_SHARPNESS_METRICS)
+    cols.append(_SHARPNESS_COMPUTABLE_COL)
+    return cols
+
+
 def analyze_particles_detail(
     images: dict[str, NDArray],
     labels: NDArray[np.int32],
@@ -426,6 +459,7 @@ def analyze_particles_detail(
         columns are appended last so existing column order is unchanged.
     """
     channel_names = list(images.keys())
+    cols = _detail_columns(channel_names)
     rows: list[dict] = []
 
     for rec in _iter_particles(
@@ -449,20 +483,9 @@ def analyze_particles_detail(
         row[_SHARPNESS_COMPUTABLE_COL] = rec.sharpness_computable
         rows.append(row)
 
-    if not rows:
-        cols = ["cell_id", "particle_id", "area", "centroid_y", "centroid_x"]
-        for ch in channel_names:
-            prefix = f"{ch}_" if len(channel_names) > 1 else ""
-            for metric_name in _PARTICLE_INTENSITY_METRICS:
-                cols.append(f"{prefix}{metric_name}")
-        for ch in channel_names:
-            prefix = f"{ch}_" if len(channel_names) > 1 else ""
-            for metric_name in _PARTICLE_SHARPNESS_METRICS:
-                cols.append(f"{prefix}{metric_name}")
-        cols.append(_SHARPNESS_COMPUTABLE_COL)
-        return pd.DataFrame(columns=cols)
-
-    return pd.DataFrame(rows)
+    # `columns=cols` on both branches makes _detail_columns the single source of
+    # truth for the schema — the empty frame and the populated frame cannot drift.
+    return pd.DataFrame(rows, columns=cols)
 
 
 def _zero_summary_row(

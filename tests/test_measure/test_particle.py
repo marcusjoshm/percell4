@@ -329,41 +329,83 @@ def test_sharpness_empty_skirt_is_nan_and_flagged():
 
 
 def test_sharpness_skirt_excludes_neighbor_particle():
-    """The edge-skirt annulus excludes a bright neighbouring particle, so its
-    intensity does not leak into this particle's skirt."""
-    labels = np.zeros((30, 40), dtype=np.int32)
-    labels[2:28, 2:38] = 1  # one big cell holding both particles
-    img = np.full((30, 40), 10.0, dtype=np.float32)
-    img[13:16, 10:13] = 200.0  # particle A
-    img[13:16, 15:18] = 200.0  # bright particle B, 2px away from A
-    mask = np.zeros((30, 40), dtype=np.uint8)
-    mask[13:16, 10:13] = 1
-    mask[13:16, 15:18] = 1
+    """The edge-skirt annulus excludes a bright neighbouring particle that sits
+    WITHIN the 2px skirt reach. B is placed 1px from A (a separate component)
+    so that without the `~other_particles` exclusion its 250-valued pixels would
+    enter A's skirt and push the ratio well above 0.1; the assertion only holds
+    because the exclusion is active. (Verified to fail if the clause is removed.)"""
+    labels = np.zeros((40, 40), dtype=np.int32)
+    labels[2:38, 2:38] = 1  # one big cell holding both particles
+    img = np.full((40, 40), 10.0, dtype=np.float32)
+    img[18:20, 18:20] = 200.0   # particle A (2x2), peak 200
+    img[15:24, 21:32] = 250.0   # bright wall B, 1px gap (col 20) from A
+    mask = np.zeros((40, 40), dtype=np.uint8)
+    mask[18:20, 18:20] = 1
+    mask[15:24, 21:32] = 1
 
     df = analyze_particles_detail({"C0": img}, labels, mask)
-    # Particle A's skirt should read the ~10 background, not B's 200. If B were
-    # included the ratio (skirt_mean / 200) would exceed background/peak = 0.05
-    # substantially; assert it stays low.
-    a = df.sort_values("centroid_x").iloc[0]
-    assert a["edge_skirt_ratio"] < 0.2
+    a = df.sort_values("centroid_x").iloc[0]  # leftmost component = A
+    # With exclusion the skirt is pure background (10/200 = 0.05).
+    assert a["edge_skirt_ratio"] < 0.1
 
 
 def test_sharpness_skirt_excludes_neighboring_cell():
-    """The skirt is restricted to the owning cell, so a bright neighbouring
-    CELL's pixels are not counted."""
-    labels = np.zeros((30, 40), dtype=np.int32)
-    labels[2:28, 2:19] = 1   # cell 1
-    labels[2:28, 19:38] = 2  # cell 2, adjacent
-    img = np.full((30, 40), 10.0, dtype=np.float32)
-    img[13:16, 15:18] = 200.0   # particle in cell 1, near the shared border
-    img[:, 19:38] = 220.0       # cell 2 is uniformly bright
-    mask = np.zeros((30, 40), dtype=np.uint8)
-    mask[13:16, 15:18] = 1
+    """The skirt is restricted to the owning cell. Cell 2 is EMBEDDED inside
+    cell 1's bounding box (so cell 1's bbox crop actually contains cell-2
+    pixels — the only situation where the `cell_mask` term is load-bearing;
+    for merely-adjacent rectangular cells the crop boundary already excludes
+    the neighbour). A sits 2px from cell 2's edge, so without `cell_mask` the
+    bright cell-2 pixels would enter A's skirt. (Verified to fail if removed.)"""
+    labels = np.full((30, 30), 0, dtype=np.int32)
+    labels[2:28, 2:28] = 1          # cell 1 fills the box (incl. all corners)
+    labels[20:26, 20:26] = 2        # cell 2 embedded inside cell 1's bbox
+    img = np.full((30, 30), 10.0, dtype=np.float32)
+    img[20:26, 20:26] = 220.0       # cell 2 uniformly bright (not in the mask)
+    img[20:23, 17:19] = 200.0       # particle A in cell 1, 2px left of cell 2
+    mask = np.zeros((30, 30), dtype=np.uint8)
+    mask[20:23, 17:19] = 1
 
     df = analyze_particles_detail({"C0": img}, labels, mask)
     row = df[df["cell_id"] == 1].iloc[0]
-    # Skirt reads cell-1 background (~10), not cell-2's 220.
-    assert row["edge_skirt_ratio"] < 0.2
+    # With cell_mask the skirt reads cell-1 background (10/200 = 0.05).
+    assert row["edge_skirt_ratio"] < 0.1
+
+
+def test_sharpness_detail_empty_when_no_particles():
+    """Zero particles -> empty frame carrying the full column schema (base +
+    intensity + sharpness + validity flag), exercising the empty-frame branch
+    that _detail_columns now shares with the populated path."""
+    labels = np.zeros((10, 10), dtype=np.int32)  # no cells
+    img = np.ones((10, 10), dtype=np.float32)
+    mask = np.zeros((10, 10), dtype=np.uint8)
+    df = analyze_particles_detail({"Halo": img, "mNG": img}, labels, mask)
+    assert len(df) == 0
+    for ch in ("Halo", "mNG"):
+        for metric in _SHARPNESS_COLS:
+            assert f"{ch}_{metric}" in df.columns
+    assert list(df.columns)[-1] == _SHARPNESS_COMPUTABLE_COL
+
+
+def test_sharpness_computable_is_geometric_dark_channel_stays_nan():
+    """sharpness_computable is geometry-only: a particle bright in one channel
+    but dark (zero) in another is flagged computable=True, yet the dark
+    channel's metrics are NaN while the bright channel's are finite. Downstream
+    filters must AND the flag with per-channel notna()."""
+    labels = np.zeros((30, 30), dtype=np.int32)
+    labels[2:28, 2:28] = 1
+    bright = np.full((30, 30), 8.0, dtype=np.float32)
+    bright[13:16, 13:16] = 200.0
+    dark = np.zeros((30, 30), dtype=np.float32)  # no signal in this channel
+    mask = np.zeros((30, 30), dtype=np.uint8)
+    mask[13:16, 13:16] = 1
+
+    df = analyze_particles_detail({"mNG": bright, "Halo": dark}, labels, mask)
+    row = df.iloc[0]
+    assert bool(row[_SHARPNESS_COMPUTABLE_COL]) is True   # geometry is fine
+    assert np.isfinite(row["mNG_edge_skirt_ratio"])        # bright channel OK
+    assert np.isnan(row["Halo_edge_skirt_ratio"])          # dark channel NaN
+    assert np.isnan(row["Halo_boundary_gradient"])
+    assert np.isnan(row["Halo_laplacian_variance"])
 
 
 def test_sharpness_not_computed_for_per_cell_summary():
