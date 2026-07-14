@@ -1,6 +1,7 @@
 ---
 title: "Adding a thresholding method to the single-cell workflow (and the shared-GUI-default trap)"
 date: 2026-06-15
+last_updated: 2026-07-13
 category: architecture-patterns
 module: src/percell4/workflows
 problem_type: architecture_pattern
@@ -46,6 +47,19 @@ sentinel (`models.py`), dispatch + apply (`phases.py`), JSON round-trip
 (`artifacts.py`), the GUI rounds-table picker (`config_dialog.py`), runner routing
 (`runner.py`), and the CLI (`batch_threshold.py`). It surfaced one near-invisible
 ship-blocker plus four structural patterns worth reusing for the next method.
+
+> **Update (2026-07-13) — naming correction.** At the time this was written, the
+> single-window `detect_adaptive_by_particle_size` was *the* workflow's "Adaptive
+> Local Clipping" method. That name no longer identifies the GUI's algorithm: the
+> GUI **Adaptive Local Clipping** Analysis panel (`src/percell4/gui/adaptive_clip_panel.py`)
+> runs *only* the two-pass **auto-extractor** (`domain/measure/auto_extraction.auto_extract`),
+> and `detect_adaptive_by_particle_size` has **no** GUI caller. In the workflow config
+> dialog the single-window method was relabeled **"Adaptive σ-clipping (single-window)"**
+> and the two-pass method **"Adaptive Local Clipping (two-pass)"** (= the GUI panel) to
+> stop users picking the wrong detector — see
+> [`conventions/gui-panel-and-batch-workflow-method-parity-2026-07-13.md`](../conventions/gui-panel-and-batch-workflow-method-parity-2026-07-13.md).
+> The lead lesson below (own-field validated default) is unaffected: it is about
+> `adaptive_clip` / `detect_adaptive_by_particle_size`, which still exists.
 
 ## Guidance
 
