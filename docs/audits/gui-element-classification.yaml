@@ -2431,3 +2431,77 @@ widgets:
     writes: []
     keystroke: null
     notes: "User-facing toggle for Qt.WindowStaysOnTopHint. Pure window-state operation; no session write. Persisted via QSettings('LeeLabPerCell4','PerCell4') key 'session_window/pin_on_top'."
+
+  # ── Segment by Metric module (feat/interactive-metric-segmenter U3/U4) ──
+  # A new AnalysisPanel QGroupBox. Only the shared segmenter window's Save is a
+  # Creator; the panel's combos + button and the window's interactive controls
+  # are Actions writing no session field.
+  - id: metric_segmenter_panel.source_combo
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Picks the /masks source to split. Populated from store.list_masks() on showEvent; reads/writes no session field."
+
+  - id: metric_segmenter_panel.metric_combo
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QComboBox
+    handler: _on_metric_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Picks the per-particle metric. currentIndexChanged closes any open (stale-unit) window and sets a status note; writes no session field."
+
+  - id: metric_segmenter_panel.segment_button
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QPushButton
+    handler: _on_segment
+    reads: [active_channel, active_segmentation]
+    writes: []
+    keystroke: null
+    notes: "Measures the metric off-thread and opens the MetricSegmenterWindow. Reads active_channel/active_segmentation for the measurement inputs; writes NO session field (the window's Save is the sole Creator)."
+
+  - id: cnr_segmenter.save_button
+    class: Creator
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: QPushButton
+    handler: _on_save
+    reads: []
+    writes: [active_mask]
+    keystroke: null
+    notes: "The sole Creator of the shared segmenter window (used by both 'Segment by CNR' and 'Segment by Metric'). Writes each non-empty segment as a /masks resource via AcceptPunctaMask; sets active_mask exactly once (metric low/high mode via active_segment + AcceptPunctaMask(select=False); CNR mode keeps last-wins)."
+
+  - id: cnr_segmenter.divider_lines
+    class: Action
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: pg.InfiniteLine
+    handler: _on_divider_moved
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Draggable threshold divider(s). Drive the live preview overlay (pushed to napari one-way) and the readout; write no session field."
+
+  - id: cnr_segmenter.log_axis_check
+    class: Action
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: QCheckBox
+    handler: _on_log_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Toggles the histogram x-axis linear/log; preserves divider values. No session write."
+
+  - id: cnr_segmenter.add_remove_divider_buttons
+    class: Action
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: QPushButton
+    handler: "_add_divider / _remove_divider"
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Add/remove dividers (CNR N-segment mode only; hidden in the metric single-divider mode). Preview-only; no session write."

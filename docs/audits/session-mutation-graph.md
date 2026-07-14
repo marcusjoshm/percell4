@@ -339,3 +339,22 @@ only its `metadata` dict — which is a mutable field on the frozen
 dataclass — is updated in place.
 
 No new edges in this mutation graph.
+
+## 2026-07-14 — Segment by Metric module
+
+`MetricSegmenterPanel` (`gui/metric_segmenter_panel.py`, plan
+`docs/plans/2026-07-14-002-feat-interactive-metric-segmenter-plan.md`) adds
+one new session-mutation edge, and only from the shared segmenter window's
+**Save**:
+
+| Writer | File | Field | Notes |
+|---|---|---|---|
+| `CnrSegmenterWindow._on_save` | `gui/cnr_segmenter.py` | `active_mask` | Creator: writes each non-empty segment as a `/masks` resource via `AcceptPunctaMask` and calls `refresh_resource_lists`; sets `active_mask` **exactly once** across the two writes (metric low/high mode uses `active_segment` + `AcceptPunctaMask(select=False)` for the non-active mask; CNR mode keeps its last-wins select). |
+
+Everything else in the module writes **no** session field: the panel's
+source-mask combo, metric combo, and Segment button (it reads
+`active_channel` / `active_segmentation` for measurement inputs only), and
+the window's draggable divider(s), log-axis toggle, and add/remove-divider
+buttons (preview-only, pushed to napari one-way). The live preview layer is
+a transient overlay cleared on window close and on re-measure; it is never
+read back into `active_mask` (session → napari stays one-way).

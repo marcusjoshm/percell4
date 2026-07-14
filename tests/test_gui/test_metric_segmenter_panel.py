@@ -180,6 +180,29 @@ def test_channel_guard_warns_when_all_nan(qtbot, monkeypatch):
     assert "NaN for every particle" in panel._status.text()
 
 
+def test_no_session_write_from_non_save_widgets(qtbot, monkeypatch):
+    """R6 guard: exercising the metric combo, source combo, the Segment button
+    (measure + open window), and dragging the divider writes NO session field —
+    only the window's Save is a Creator."""
+    from percell4.application.session import Event
+
+    panel, _viewer_win, _repo, model = _build(qtbot, monkeypatch)
+    fired: list = []
+    model.session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: fired.append(1))
+
+    panel._metric.setCurrentIndex(1)   # Area
+    panel._metric.setCurrentIndex(0)   # back to edge-skirt
+    panel._source.setCurrentIndex(0)
+    panel._on_segment()                # measure + open window
+    if panel._window is not None:
+        qtbot.addWidget(panel._window)
+        panel._window._dividers[0].setValue(0.2)  # drag the threshold
+        panel._window._update_preview()
+
+    assert fired == []                 # no ACTIVE_MASK_CHANGED from any Action
+    assert model.session.active_mask is None  # active mask untouched until Save
+
+
 def test_resolve_requires_channel(qtbot, monkeypatch):
     from percell4.domain.dataset import DatasetHandle
     from percell4.model import CellDataModel
