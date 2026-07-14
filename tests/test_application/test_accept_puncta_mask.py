@@ -72,6 +72,38 @@ def test_execute_writes_uint8_mask_and_sets_active(session, repo):
     assert result.n_total == 64
 
 
+def test_select_false_writes_and_refreshes_but_does_not_set_active(session, repo):
+    """select=False writes the mask + refreshes the inventory but skips
+    set_active_mask — used when saving several masks with exactly one active."""
+    events: list[Event] = []
+    session.subscribe(
+        Event.ACTIVE_MASK_CHANGED, lambda: events.append(Event.ACTIVE_MASK_CHANGED)
+    )
+    uc = AcceptPunctaMask(repo=repo, session=session)
+    result = uc.execute(np.ones((4, 4), dtype=np.uint8), "pop_low", select=False)
+
+    assert "pop_low" in repo.masks           # written
+    assert session.active_mask is None        # NOT selected
+    assert events == []                       # no ACTIVE_MASK_CHANGED fired
+    assert result.mask_name == "pop_low"
+
+
+def test_two_masks_one_active_via_select_flag(session, repo):
+    """Writing two masks with exactly one selected fires ACTIVE_MASK_CHANGED once
+    and leaves the selected one active (the metric-segmenter low/high save)."""
+    events: list[Event] = []
+    session.subscribe(
+        Event.ACTIVE_MASK_CHANGED, lambda: events.append(Event.ACTIVE_MASK_CHANGED)
+    )
+    uc = AcceptPunctaMask(repo=repo, session=session)
+    uc.execute(np.ones((4, 4), dtype=np.uint8), "x_low", select=False)
+    uc.execute(np.ones((4, 4), dtype=np.uint8), "x_high", select=True)
+
+    assert {"x_low", "x_high"} <= set(repo.masks)
+    assert session.active_mask == "x_high"
+    assert events == [Event.ACTIVE_MASK_CHANGED]  # exactly one
+
+
 def test_coerces_non_binary_input_to_0_1_uint8(session, repo):
     """A non-{0,1} array (e.g. labels / bool) is coerced to {0,1} uint8 at write."""
     labels = np.zeros((6, 6), dtype=np.int32)

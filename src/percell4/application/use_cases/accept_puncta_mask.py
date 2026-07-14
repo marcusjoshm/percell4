@@ -37,12 +37,19 @@ class AcceptPunctaMask:
         self._repo = repo
         self._session = session
 
-    def execute(self, mask: NDArray, name: str) -> PunctaMaskResult:
-        """Coerce to ``{0, 1}`` uint8, persist, and select.
+    def execute(
+        self, mask: NDArray, name: str, *, select: bool = True
+    ) -> PunctaMaskResult:
+        """Coerce to ``{0, 1}`` uint8, persist, and (optionally) select.
 
         Args:
             mask: The detected mask (any binary-coercible array).
             name: The HDF5 ``/masks/<name>`` layer name (caller-chosen).
+            select: When True (default) the written mask becomes the active mask
+                (Creator step 4). When False, the mask is still written and the
+                resource inventory refreshed, but ``set_active_mask`` is skipped
+                — used when a caller writes several masks in one Save and wants
+                exactly one of them to become active.
         """
         handle = self._session.dataset
         if handle is None:
@@ -61,7 +68,8 @@ class AcceptPunctaMask:
         self._session.refresh_resource_lists(
             mask_names=self._repo.list_masks(handle),
         )
-        self._session.set_active_mask(name)
+        if select:
+            self._session.set_active_mask(name)
 
         return PunctaMaskResult(
             mask_name=name,

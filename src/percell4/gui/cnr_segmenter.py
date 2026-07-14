@@ -99,6 +99,16 @@ class CnrSegmenterWindow(QWidget):
         session,
         show_status=lambda _m: None,
         parent: QWidget | None = None,
+        # ── generalization knobs (defaults reproduce the CNR behaviour) ──
+        value_key: str = "cnr",
+        metric_label: str = "CNR",
+        naming: str = "seg",            # "seg" -> _seg{i}; "lowhigh" -> _low/_high
+        single_divider: bool = False,   # metric mode: exactly one divider (2 pops)
+        require_positive: bool = True,   # drop value <= 0 (CNR); metric drops NaN only
+        excluded_count: int = 0,         # particles the emitter already dropped
+        preview_layer_name: str = PREVIEW_LAYER_NAME,
+        active_segment: int | None = None,  # which segment auto-selects on Save
+        save_default_suffix: str = "_cnrseg",
     ) -> None:
         super().__init__(parent)
         self._get_viewer_window = get_viewer_window
@@ -109,25 +119,38 @@ class CnrSegmenterWindow(QWidget):
         self._source_mask = source_mask
         self._comp = np.asarray(component_labels)
 
-        valid = [r for r in records if np.isfinite(r.get("cnr", np.nan)) and r["cnr"] > 0]
-        self._cnr = np.array([float(r["cnr"]) for r in valid], dtype=float)
+        self._value_label = metric_label
+        self._naming = naming
+        self._single_divider = single_divider
+        self._preview_layer_name = preview_layer_name
+        self._active_segment = active_segment
+        self._save_default_suffix = save_default_suffix
+        self._excluded_count = int(excluded_count)
+
+        def _ok(v: float) -> bool:
+            return bool(np.isfinite(v)) and (v > 0 if require_positive else True)
+
+        valid = [r for r in records if _ok(r.get(value_key, np.nan))]
+        # ``self._cnr`` is the generic per-focus value array (kept named for
+        # backward compatibility with existing references/tests).
+        self._cnr = np.array([float(r[value_key]) for r in valid], dtype=float)
         self._focus_labels = np.array([int(r["label"]) for r in valid], dtype=np.int64)
 
         self._dividers: list = []          # pg.InfiniteLine instances
         self._plot = None
         self._bars = None                   # the histogram BarGraphItem (rebuilt on toggle)
-        self._log_mode = False              # x-axis: linear CNR (False) or log10(CNR)
+        self._log_mode = False              # x-axis: linear value (False) or log10(value)
         self._update_pending = False
         self._last_n = 0                    # last segment count (colormap rebuild guard)
 
-        self.setWindowTitle(f"CNR segmenter — {source_mask}")
+        self.setWindowTitle(f"{metric_label} segmenter — {source_mask}")
         self.setMinimumSize(560, 460)
         self.setStyleSheet(
             f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};"
         )
         self._build_ui()
 
-        # One initial divider at the CNR median (-> 2 segments), then preview.
+        # One initial divider at the median (-> 2 segments), then preview.
         if self._cnr.size:
             self._add_divider(float(np.median(self._cnr)))
         self._update_preview()
@@ -139,7 +162,11 @@ class CnrSegmenterWindow(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        title = QLabel("Drag the dividers to set CNR segment boundaries")
+        drag_word = "divider" if self._single_divider else "dividers"
+        title = QLabel(
+            f"Drag the {drag_word} to set the {self._value_label} "
+            f"{'threshold' if self._single_divider else 'segment boundaries'}"
+        )
         title.setStyleSheet(f"font-weight: bold; color: {theme.TEXT_BRIGHT};")
         layout.addWidget(title)
 
@@ -159,18 +186,21 @@ class CnrSegmenterWindow(QWidget):
             self._pg = None
             layout.addWidget(QLabel("(pyqtgraph not available for the histogram)"))
 
-        # Buttons
+        # Buttons. In single-divider (metric) mode the add/remove-divider
+        # affordances are hidden — the tool always produces exactly two
+        # populations (low/high).
         btn_row = QHBoxLayout()
-        add_btn = QPushButton("Add divider")
-        add_btn.clicked.connect(lambda: self._add_divider())
-        btn_row.addWidget(add_btn)
-        rm_btn = QPushButton("Remove divider")
-        rm_btn.clicked.connect(self._remove_divider)
-        btn_row.addWidget(rm_btn)
-        self._log_check = QCheckBox("Log CNR axis")
+        if not self._single_divider:
+            add_btn = QPushButton("Add divider")
+            add_btn.clicked.connect(lambda: self._add_divider())
+            btn_row.addWidget(add_btn)
+            rm_btn = QPushButton("Remove divider")
+            rm_btn.clicked.connect(self._remove_divider)
+            btn_row.addWidget(rm_btn)
+        self._log_check = QCheckBox(f"Log {self._value_label} axis")
         self._log_check.setToolTip(
-            "Show the CNR axis on a log scale (helpful when CNR is heavy-tailed). "
-            "Divider CNR values are preserved across the toggle."
+            f"Show the {self._value_label} axis on a log scale (helpful when the "
+            f"metric is heavy-tailed). Divider values are preserved across the toggle."
         )
         self._log_check.toggled.connect(self._on_log_toggled)
         btn_row.addWidget(self._log_check)
@@ -214,7 +244,8 @@ class CnrSegmenterWindow(QWidget):
         if self._bars is not None:
             self._plot.removeItem(self._bars)
             self._bars = None
-        self._plot.setLabel("bottom", "log₁₀(CNR)" if self._log_mode else "CNR")
+        label = f"log₁₀({self._value_label})" if self._log_mode else self._value_label
+        self._plot.setLabel("bottom", label)
         if not self._cnr.size:
             return
         data = np.log10(self._cnr) if self._log_mode else self._cnr
@@ -312,9 +343,15 @@ class CnrSegmenterWindow(QWidget):
         else:
             counts = [0] * n
         div_txt = ", ".join(f"{p:.2f}" for p in positions) if positions else "(none)"
+        seg_word = "low/high" if (self._single_divider and n == 2) else f"{n} segments"
+        excl = (
+            f"   |   {self._excluded_count} excluded (NaN)"
+            if self._excluded_count
+            else ""
+        )
         self._status.setText(
-            f"Dividers (CNR): {div_txt}   |   {n} segments   |   "
-            f"foci per segment: " + ", ".join(map(str, counts))
+            f"Dividers ({self._value_label}): {div_txt}   |   {seg_word}   |   "
+            f"foci per segment: " + ", ".join(map(str, counts)) + excl
         )
 
     def _update_preview(self) -> None:
@@ -331,7 +368,7 @@ class CnrSegmenterWindow(QWidget):
         viewer = viewer_win.viewer
         existing = None
         for layer in viewer.layers:
-            if getattr(layer, "name", None) == PREVIEW_LAYER_NAME:
+            if getattr(layer, "name", None) == self._preview_layer_name:
                 existing = layer
                 break
         if existing is not None and n == self._last_n:
@@ -343,7 +380,7 @@ class CnrSegmenterWindow(QWidget):
         cmap = DirectLabelColormap(color_dict=_segment_palette(n))
         if existing is not None:
             viewer.layers.remove(existing)
-        viewer_win.add_labels(seg_img, name=PREVIEW_LAYER_NAME, colormap=cmap)
+        viewer_win.add_labels(seg_img, name=self._preview_layer_name, colormap=cmap)
         self._last_n = n
 
     def _remove_preview_layer(self) -> None:
@@ -352,7 +389,7 @@ class CnrSegmenterWindow(QWidget):
             return
         viewer = viewer_win.viewer
         for layer in list(viewer.layers):
-            if getattr(layer, "name", None) == PREVIEW_LAYER_NAME:
+            if getattr(layer, "name", None) == self._preview_layer_name:
                 viewer.layers.remove(layer)
 
     # ── save (Creator) ───────────────────────────────────────────
@@ -375,9 +412,9 @@ class CnrSegmenterWindow(QWidget):
         existing = store.list_masks() if has_list else []
         base = prompt_for_resource_name(
             self,
-            title="Save CNR Segments",
+            title=f"Save {self._value_label} Segments",
             label="Base mask name:",
-            default=f"{self._source_mask}_cnrseg",
+            default=f"{self._source_mask}{self._save_default_suffix}",
             existing_names=existing,
         )
         if base is None:
@@ -387,11 +424,17 @@ class CnrSegmenterWindow(QWidget):
 
         viewer_win = self._get_viewer_window()
         written: list[tuple[str, int]] = []
+        # Auto-select exactly one written mask. When ``active_segment`` is set
+        # (metric mode), only that segment selects; otherwise every write selects
+        # (CNR mode — last-wins, preserving the original behaviour).
         try:
             uc = AcceptPunctaMask(self._get_repo(), self._session)
             for seg_id, m in nonempty:
-                name = f"{base}_seg{seg_id}"
-                res = uc.execute(m, name)
+                name = self._segment_mask_name(base, seg_id)
+                select = True if self._active_segment is None else (
+                    seg_id == self._active_segment
+                )
+                res = uc.execute(m, name, select=select)
                 if viewer_win is not None:
                     viewer_win.add_mask(np.asarray(m, dtype=np.uint8), name=name)
                 written.append((name, res.n_positive))
@@ -401,11 +444,26 @@ class CnrSegmenterWindow(QWidget):
 
         self._remove_preview_layer()
         summary = ", ".join(f"'{nm}' {npx:,} px" for nm, npx in written)
-        self._show_status_cb(f"Saved {len(written)} CNR segments: {summary}")
+        self._show_status_cb(f"Saved {len(written)} {self._value_label} segments: {summary}")
         self.close()
+
+    def _segment_mask_name(self, base: str, seg_id: int) -> str:
+        """Output mask name for segment ``seg_id`` under the active naming scheme.
+
+        ``lowhigh``: segment 1 -> ``<base>_low``, segment 2 -> ``<base>_high``.
+        ``seg`` (CNR default): ``<base>_seg{seg_id}`` for any number of segments.
+        """
+        if self._naming == "lowhigh":
+            return f"{base}_low" if seg_id == 1 else f"{base}_high"
+        return f"{base}_seg{seg_id}"
 
     # ── lifecycle ────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self._remove_preview_layer()
         super().closeEvent(event)
+
+
+# The window is metric-agnostic; ``MetricSegmenterWindow`` is the name the
+# Segment-by-Metric tool imports (CNR callers keep using ``CnrSegmenterWindow``).
+MetricSegmenterWindow = CnrSegmenterWindow

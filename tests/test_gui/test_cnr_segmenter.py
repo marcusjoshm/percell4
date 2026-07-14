@@ -197,3 +197,87 @@ def test_log_mode_segmentation_matches_linear(qtbot, monkeypatch):
     win._log_check.setChecked(True)
     log_img = win._current_segment_image()
     assert np.array_equal(linear_img, log_img)
+
+
+# ── Metric mode (generalized single-divider low/high segmenter) ──────────────
+
+def _build_metric(qtbot, active_segment=2, excluded_count=0):
+    """The generalized window in metric mode: value_key='value', low/high naming,
+    single divider, edge_skirt-like values."""
+    from pathlib import Path
+
+    from percell4.domain.dataset import DatasetHandle
+    from percell4.gui.cnr_segmenter import MetricSegmenterWindow
+    from percell4.model import CellDataModel
+
+    comp, _ = _comp_and_records()
+    records = [
+        {"label": 1, "value": 0.05},
+        {"label": 2, "value": 0.12},
+        {"label": 3, "value": 0.20},
+        {"label": 4, "value": 0.35},
+    ]
+    viewer_win = _FakeViewer()
+    repo = _FakeRepo()
+    store = SimpleNamespace(list_masks=lambda: [])
+    model = CellDataModel()
+    model.session.set_dataset(DatasetHandle(path=Path("/tmp/t.h5"), metadata={}))
+    win = MetricSegmenterWindow(
+        records=records,
+        component_labels=comp,
+        source_mask="pbody",
+        get_viewer_window=lambda: viewer_win,
+        get_store=lambda: store,
+        get_repo=lambda: repo,
+        session=model.session,
+        value_key="value",
+        metric_label="edge_skirt_ratio",
+        naming="lowhigh",
+        single_divider=True,
+        require_positive=False,
+        excluded_count=excluded_count,
+        preview_layer_name="edge_skirt_ratio segments (preview)",
+        active_segment=active_segment,
+        save_default_suffix="_edge_skirt_ratio",
+    )
+    qtbot.addWidget(win)
+    return win, viewer_win, repo, model.session
+
+
+def test_metric_mode_one_divider_two_populations(qtbot, monkeypatch):
+    win, viewer_win, _repo, _sess = _build_metric(qtbot)
+    assert len(win._dividers) == 1
+    assert win._n_segments() == 2
+    preview = next(
+        layer for layer in viewer_win.viewer.layers
+        if layer.name == "edge_skirt_ratio segments (preview)"
+    )
+    assert {1, 2} <= set(np.unique(preview.data))
+
+
+def test_metric_mode_save_writes_low_high(qtbot, monkeypatch):
+    from percell4.application.session import Event
+
+    win, viewer_win, repo, session = _build_metric(qtbot, active_segment=2)
+    fired = {"n": 0}
+    session.subscribe(Event.ACTIVE_MASK_CHANGED, lambda: fired.__setitem__("n", fired["n"] + 1))
+    monkeypatch.setattr(seg_module, "prompt_for_resource_name", lambda *a, **k: "gate")
+
+    win._on_save()
+
+    # median (0.16) split: low = {0.05,0.12}, high = {0.20,0.35}
+    assert "gate_low" in repo.masks
+    assert "gate_high" in repo.masks
+    assert "gate_seg1" not in repo.masks  # not the CNR naming scheme
+    # exactly one set_active_mask, and it is the _high population (active_segment=2)
+    assert fired["n"] == 1
+    assert session.active_mask == "gate_high"
+
+
+def test_metric_mode_excluded_count_in_status(qtbot, monkeypatch):
+    win, _viewer_win, _repo, _sess = _build_metric(qtbot, excluded_count=7)
+    win._update_divider_readout()
+    text = win._status.text()
+    assert "Dividers (edge_skirt_ratio):" in text
+    assert "7 excluded" in text
+    assert "low/high" in text
