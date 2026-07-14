@@ -29,6 +29,7 @@ from scipy.ndimage import find_objects
 from scipy.ndimage import label as ndlabel
 from skimage.measure import regionprops
 
+from percell4.domain.measure.cnr_classification import measure_cnr
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.domain.measure.particle import (
     _sharpness_for_particle,
@@ -36,15 +37,26 @@ from percell4.domain.measure.particle import (
     skirt_and_boundary,
 )
 
-# Metrics this emitter can measure (a subset of the per-particle families,
-# offered by the Segment-by-Metric picker). CNR is served by its own tool.
-SEGMENT_METRICS = (
+# Metrics the Segment-by-Metric picker offers.
+#
+# Substrate note: the sharpness / size / intensity metrics are measured over the
+# PER-CELL particle substrate (matching particles.csv), so a CSV-learned
+# threshold transfers to the in-app histogram. CNR is the exception — it
+# delegates to the tested ``measure_cnr``, which uses the GLOBAL
+# scipy.ndimage.label substrate (the same one the standalone "Segment by CNR"
+# button uses). So CNR results here match that button rather than the per-cell
+# CSV; a faithful per-cell CNR is deliberately not reimplemented (high risk,
+# and CNR already has its own interactive tool). The returned ``component_labels``
+# always matches the chosen metric's substrate, so a single split is internally
+# consistent.
+_PER_CELL_METRICS = (
     "edge_skirt_ratio",     # sharpness: low = in-focus, high = out-of-focus
     "area",                 # size (µm² when pixel_size_um given, else px²)
     "mean_intensity",
     "max_intensity",
     "integrated_intensity",
 )
+SEGMENT_METRICS = (*_PER_CELL_METRICS, "cnr")
 
 
 def _is_valid(metric: str, value: float) -> bool:
@@ -55,9 +67,32 @@ def _is_valid(metric: str, value: float) -> bool:
     the particle) is excluded from the histogram and from BOTH output masks. It
     is still painted into the label image (so the image is complete) but omitted
     from ``records`` — ``segment_label_image`` then leaves it as background.
-    ``area`` is always finite and positive, so it never drops.
+    ``area`` is always finite and positive, so it never drops. CNR additionally
+    drops non-positive values (matching the standalone CNR tool).
     """
+    if metric == "cnr":
+        return bool(np.isfinite(value) and value > 0.0)
     return bool(np.isfinite(value))
+
+
+def _measure_cnr_metric(
+    image: NDArray,
+    feature_mask: NDArray,
+    cell_labels: NDArray[np.int32],
+) -> tuple[list[dict], NDArray[np.int32], int]:
+    """CNR via the tested ``measure_cnr`` (global substrate). Returns records
+    keyed by the global component id + that global label image."""
+    global_labels, _ = ndlabel(np.asarray(feature_mask) > 0)
+    global_labels = global_labels.astype(np.int32)
+    records: list[dict] = []
+    excluded = 0
+    for r in measure_cnr(image, feature_mask, cell_labels):
+        value = float(r["cnr"])
+        if _is_valid("cnr", value):
+            records.append({"label": int(r["label"]), "value": value})
+        else:
+            excluded += 1
+    return records, global_labels, excluded
 
 
 def measure_metric_per_particle(
@@ -94,6 +129,8 @@ def measure_metric_per_particle(
         raise ValueError(
             f"unknown segment metric {metric!r}; expected one of {SEGMENT_METRICS}"
         )
+    if metric == "cnr":
+        return _measure_cnr_metric(image, feature_mask, cell_labels)
 
     global_labels = np.zeros(image.shape, dtype=np.int32)
     records: list[dict] = []
@@ -153,3 +190,50 @@ def measure_metric_per_particle(
                 excluded += 1
 
     return records, global_labels, excluded
+
+
+def measure_metric_per_particle_stack(
+    image: NDArray,
+    feature_mask: NDArray,
+    cell_labels: NDArray[np.int32],
+    metric: str,
+    *,
+    pixel_size_um: float | None = None,
+    min_area: int = 1,
+) -> tuple[list[dict], NDArray[np.int32], int]:
+    """Time-lapse `(T,H,W)` variant: measure each frame independently and pool.
+
+    Foci from every frame land in one record list (for a single shared
+    histogram) with globally-unique labels — the per-frame ids are offset by a
+    running counter so they never collide — and each record carries a
+    ``timepoint``. The returned ``(T,H,W)`` label image uses the same offset ids
+    per frame, so :func:`segment_label_image` (which is rank-agnostic) scatters
+    one shared threshold across all frames. Mirrors ``run_cnr_measure_stack``.
+    """
+    image = np.asarray(image)
+    feature_mask = np.asarray(feature_mask)
+    cell_labels = np.asarray(cell_labels)
+    t_frames = image.shape[0]
+
+    pooled: list[dict] = []
+    stack_labels = np.zeros(feature_mask.shape, dtype=np.int32)
+    total_excluded = 0
+    offset = 0
+    for t in range(t_frames):
+        recs, frame_labels, exc = measure_metric_per_particle(
+            image[t],
+            feature_mask[t],
+            cell_labels[t],
+            metric,
+            pixel_size_um=pixel_size_um,
+            min_area=min_area,
+        )
+        stack_labels[t] = np.where(frame_labels > 0, frame_labels + offset, 0)
+        for r in recs:
+            pooled.append(
+                {"label": r["label"] + offset, "value": r["value"], "timepoint": t}
+            )
+        offset += int(frame_labels.max())
+        total_excluded += exc
+
+    return pooled, stack_labels, total_excluded

@@ -11,6 +11,7 @@ from percell4.domain.measure.cnr_classification import (
 from percell4.domain.measure.metric_segmentation import (
     SEGMENT_METRICS,
     measure_metric_per_particle,
+    measure_metric_per_particle_stack,
 )
 from percell4.domain.measure.particle import analyze_particles_detail
 
@@ -161,10 +162,58 @@ def test_intensity_metric_parity():
         )
 
 
-def test_segment_metrics_excludes_weak_and_cnr():
-    """The offered set is the validated family; no boundary_gradient / laplacian
-    / cnr (served elsewhere)."""
+def test_segment_metrics_set_includes_cnr_excludes_weak():
+    """The offered set is the validated family + CNR; the two weak sharpness
+    metrics are excluded."""
     assert "edge_skirt_ratio" in SEGMENT_METRICS and "area" in SEGMENT_METRICS
+    assert "cnr" in SEGMENT_METRICS
     assert "boundary_gradient" not in SEGMENT_METRICS
     assert "laplacian_variance" not in SEGMENT_METRICS
-    assert "cnr" not in SEGMENT_METRICS
+
+
+def test_cnr_metric_matches_measure_cnr():
+    """The CNR metric delegates to measure_cnr (global substrate) and returns its
+    per-focus CNR values keyed by the global component id."""
+    from percell4.domain.measure.cnr_classification import measure_cnr
+
+    img, labels, mask = _two_cell_fixture()
+    records, global_labels, _ = measure_metric_per_particle(img, mask, labels, "cnr")
+    ref = {
+        int(r["label"]): float(r["cnr"])
+        for r in measure_cnr(img, mask, labels)
+        if np.isfinite(r["cnr"]) and r["cnr"] > 0
+    }
+    got = {r["label"]: r["value"] for r in records}
+    assert set(got) == set(ref)
+    for k in got:
+        assert got[k] == pytest.approx(ref[k], rel=1e-6)
+    # CNR uses the GLOBAL substrate: labels come from scipy.ndimage.label(mask).
+    assert global_labels.max() >= len(records)
+
+
+def test_timelapse_pools_frames_with_unique_offset_labels():
+    """(T,H,W) input pools all frames into one record list with globally-unique,
+    per-frame-offset labels + a timepoint, and a (T,H,W) label image."""
+    img, labels, mask = _two_cell_fixture()  # 4 particles per frame
+    t_frames = 3
+    img3 = np.stack([img] * t_frames)
+    mask3 = np.stack([mask] * t_frames)
+    lab3 = np.stack([labels] * t_frames)
+    pooled, stack_labels, excluded = measure_metric_per_particle_stack(
+        img3, mask3, lab3, "edge_skirt_ratio"
+    )
+    assert stack_labels.shape == (t_frames, 40, 60)
+    assert len(pooled) == 4 * t_frames
+    labs = [r["label"] for r in pooled]
+    assert len(set(labs)) == len(labs)  # globally unique
+    assert {r["timepoint"] for r in pooled} == {0, 1, 2}
+    # each frame's ids sit in a distinct offset range (4 particles/frame)
+    assert stack_labels[0].max() == 4
+    assert stack_labels[1].max() == 8
+    assert stack_labels[2].max() == 12
+    # rank-agnostic split pipeline accepts the (T,H,W) label image
+    seg = segment_label_image(
+        stack_labels, labs, np.arange(len(pooled)), [len(pooled) / 2]
+    )
+    assert seg.shape == (t_frames, 40, 60)
+    assert set(np.unique(seg)) <= {0, 1, 2}
