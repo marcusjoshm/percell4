@@ -99,6 +99,21 @@ class AnalysisPanel(QWidget):
         adaptive_layout.addWidget(self._adaptive_clip_panel)
         layout.addWidget(adaptive_group)
 
+        # ── Segment by Metric ──
+        from percell4.gui.metric_segmenter_panel import MetricSegmenterPanel
+
+        self._metric_segmenter_panel = MetricSegmenterPanel(
+            self.data_model,
+            get_repo=self._get_repo,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
+        )
+        metric_group = QGroupBox("Segment by Metric")
+        metric_layout = QVBoxLayout(metric_group)
+        metric_layout.addWidget(self._metric_segmenter_panel)
+        layout.addWidget(metric_group)
+
         # ── Particle Analysis ──
         particle_group = QGroupBox("Particle Analysis")
         particle_layout = QVBoxLayout(particle_group)

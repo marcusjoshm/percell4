@@ -33,11 +33,13 @@ def test_analysis_modules_in_detection_first_order(qtbot):
 
     assert _ordered_group_titles(panel) == [
         "Adaptive Local Clipping",
+        "Segment by Metric",
         "Particle Analysis",
         "Measurements",
         "Grouped Thresholding",
         "Whole Field Thresholding",
     ]
+    assert hasattr(panel, "_metric_segmenter_panel")
 
 
 def test_iterative_otsu_module_removed(qtbot):
