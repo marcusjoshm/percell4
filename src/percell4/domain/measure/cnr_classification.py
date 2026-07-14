@@ -599,6 +599,9 @@ def classify_by_cnr_stack(
                 "decision": res.report.get("decision"),
                 "low_px": int(low.sum()),
                 "high_px": int(high.sum()),
+                # The CNR value the split was placed at (the GMM boundary in forced
+                # mode); ``None`` on a frame that did not split.
+                "threshold": (float(res.threshold) if res.threshold is not None else None),
             }
         )
 

@@ -281,11 +281,14 @@ def _auto_extract_from_dict(d: dict[str, Any]) -> AutoExtractSettings:
 
 
 def _cnr_classify_to_dict(s: CnrClassifySettings) -> dict[str, Any]:
-    return {"threshold": s.threshold}
+    return {"threshold": s.threshold, "forced": s.forced}
 
 
 def _cnr_classify_from_dict(d: dict[str, Any]) -> CnrClassifySettings:
-    return CnrClassifySettings(threshold=d["threshold"])
+    # ``forced`` absent reconstructs as guided (older run_config.json).
+    return CnrClassifySettings(
+        threshold=d.get("threshold", 0.0), forced=d.get("forced", False)
+    )
 
 
 def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:

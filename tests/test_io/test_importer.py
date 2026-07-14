@@ -68,6 +68,41 @@ def test_import_with_z_projection(tmp_path):
     assert intensity[0, 0] == 102.0
 
 
+def test_grid_zstack_mosaic_projects_per_tile_then_stitches(tmp_path):
+    """Grid (non-register) z-stack mosaic: each tile's z-series is MIP'd first,
+    then the 2D projections are placed edge-to-edge. Each grid cell equals that
+    tile's MIP — projection commutes with disjoint grid placement.
+    """
+    src = tmp_path / "raw"
+    src.mkdir()
+    rng = np.random.default_rng(3)
+    th = tw = 20
+    tiles = {
+        i: rng.integers(0, 1000, size=(th, tw)).astype(np.uint16)
+        for i in range(4)
+    }
+    for i, base in tiles.items():
+        for z in range(3):
+            tifffile.imwrite(
+                str(src / f"img_s{i:02d}_z{z:02d}_ch00.tif"),
+                (base + z * 10).astype(np.uint16),
+            )
+
+    h5 = tmp_path / "out.h5"
+    tc = TileConfig(
+        grid_rows=2, grid_cols=2, grid_type="row_by_row", order="right_down",
+    )
+    import_dataset(src, h5, tile_config=tc, z_project_method="mip")
+
+    intensity = DatasetStore(h5).read_array("intensity")
+    assert intensity.shape == (2 * th, 2 * tw)
+    # MIP over z ∈ {0,10,20} shift = base + 20; each cell is one tile's MIP.
+    np.testing.assert_array_equal(intensity[:th, :tw], tiles[0] + 20)
+    np.testing.assert_array_equal(intensity[:th, tw:], tiles[1] + 20)
+    np.testing.assert_array_equal(intensity[th:, :tw], tiles[2] + 20)
+    np.testing.assert_array_equal(intensity[th:, tw:], tiles[3] + 20)
+
+
 def test_import_stores_metadata(tmp_path):
     """Import stores source_dir and channel_names in metadata."""
     src = _create_tiff_dir(tmp_path, n_channels=2)
@@ -772,13 +807,16 @@ def test_register_reimport_over_registered_no_decay_allowed(tmp_path):
     assert DatasetStore(h5).read_stitch_geometry().registered is True
 
 
-def test_register_zstack_mosaic_deferred_error(tmp_path):
-    """register=True combined with a z-stack mosaic → clear deferred error."""
+def test_register_zstack_mosaic_projects_then_registers(tmp_path):
+    """register=True with a z-stack mosaic MIPs each tile first, then registers
+    the 2D projections — recovering the same offsets/canvas as the 2D case.
+
+    Each tile's z-slices are ``tile + z``, so the MIP is a constant shift of the
+    tile's texture; phase-correlation still recovers the exact grid offsets.
+    """
     src = tmp_path / "raw"
     src.mkdir()
     scene = _textured_scene(7)
-    # Each tile has 2 z-slices → _assemble_plane z-projects → registered path
-    # cannot capture per-tile arrays at the post-projection plane in v1.
     for i, (y, x) in _REG_CORNERS.items():
         tile = scene[y : y + _REG_TH, x : x + _REG_TW]
         for z in range(2):
@@ -788,8 +826,17 @@ def test_register_zstack_mosaic_deferred_error(tmp_path):
             )
 
     h5 = tmp_path / "out.h5"
-    with pytest.raises(ValueError, match="z-stack-mosaic overlap"):
-        import_dataset(src, h5, tile_config=_reg_tile_config())
+    n = import_dataset(src, h5, tile_config=_reg_tile_config())
+
+    assert n == 1
+    store = DatasetStore(h5)
+    geo = store.read_stitch_geometry()
+    assert geo.registered is True
+    np.testing.assert_array_equal(
+        geo.offsets,
+        np.array([[0, 0], [0, 45], [45, 0], [45, 45]], dtype=np.int32),
+    )
+    assert store.read_array("intensity").shape == _REG_CANVAS
 
 
 def test_register_tcspc_tiff_decay_deferred_error(tmp_path):

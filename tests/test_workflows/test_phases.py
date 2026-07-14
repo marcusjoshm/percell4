@@ -1025,6 +1025,7 @@ def test_cnr_two_population_writes_low_high_and_table(tmp_path, monkeypatch):
     table = store.read_dataframe("/classification/ae")
     assert len(table) == 2
     assert "split into" in msg
+    assert "CNR cutoff 5.00" in msg  # guided cutoff (5.0 from the fake) is logged
 
 
 def test_cnr_single_population_writes_no_extra_masks(tmp_path, monkeypatch):
@@ -1076,6 +1077,35 @@ def test_cnr_table_write_failure_does_not_lose_masks(tmp_path, monkeypatch):
     assert failure is None  # masks survive a table failure
     assert "ae_low" in store.list_masks() and "ae_high" in store.list_masks()
     assert "table write FAILED" in msg
+
+
+def test_cnr_forced_mode_overrides_threshold_with_n_populations_2(tmp_path, monkeypatch):
+    """The GMM 2-pop (forced) checkbox routes to classify_by_cnr(n_populations=2)
+    and never passes the guided threshold — the two-group split overrides it."""
+    import percell4.domain.measure.cnr_classification as cnr_mod
+
+    calls: list[dict] = []
+
+    def _fake(image, feature_mask, cell_labels, *, threshold=None,
+              n_populations="auto", presmooth_sigma_px=1.0):
+        calls.append({"threshold": threshold, "n_populations": n_populations})
+        return _fake_two_pop_result()
+
+    monkeypatch.setattr(cnr_mod, "classify_by_cnr", _fake)
+
+    store = _make_auto_extract_store(tmp_path / "forced.h5")
+    # threshold value is present but must be ignored in forced mode.
+    round_spec = _cnr_round(cnr_classify=CnrClassifySettings(threshold=5.0, forced=True))
+    grouping, failure, _ = threshold_compute_one(store, round_spec)
+    assert failure is None
+    failure, msg = apply_threshold_headless(store, round_spec, grouping)
+    assert failure is None, msg
+    assert len(calls) == 1
+    assert calls[0]["threshold"] is None  # threshold overridden
+    assert calls[0]["n_populations"] == 2
+    assert "ae_low" in store.list_masks() and "ae_high" in store.list_masks()
+    # The GMM-found CNR cutoff between the two populations is logged (5.0 from the fake).
+    assert "GMM CNR cutoff 5.00" in msg
 
 
 def test_apply_adaptive_clip_is_bit_identical_to_bare_detector(tmp_path):

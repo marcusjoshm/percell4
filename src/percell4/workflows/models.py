@@ -387,15 +387,20 @@ class AutoExtractSettings:
 
 @dataclass(frozen=True)
 class CnrClassifySettings:
-    """Opt-in guided CNR subpopulation classification for a thresholding round.
+    """Opt-in CNR subpopulation classification for a thresholding round.
 
     A *post-step*, not a thresholding method: after the round's feature mask is
-    produced, its foci are split by contrast-to-noise ratio at ``threshold``
-    (guided mode of
-    ``percell4.domain.measure.cnr_classification.classify_by_cnr``) into per-
+    produced, its foci are split by contrast-to-noise ratio
+    (``percell4.domain.measure.cnr_classification.classify_by_cnr``) into per-
     population masks (``<round>_low`` / ``<round>_high``) plus a per-focus CNR
-    table at ``/classification/<round>``. Guided mode only — the user supplies the
-    threshold; there is no discover / forced / interactive mode here.
+    table at ``/classification/<round>``. Two modes:
+
+    * **guided** (``forced=False``, the default): split at the user-supplied
+      ``threshold`` (raw CNR units).
+    * **forced** (``forced=True``): a data-driven GMM two-group split (always two
+      populations, ``n_populations=2``) that **overrides** ``threshold`` — the
+      boundary is placed by the GaussianMixture crossover regardless of gap
+      significance. ``threshold`` is ignored in this mode.
 
     Because CNR is defined against the per-cell ``1.4826·MAD`` noise scale the
     Adaptive Local Clipping detector uses, it is only valid on a round that carries
@@ -404,11 +409,16 @@ class CnrClassifySettings:
     is NOT part of their at-most-one exclusion.
     """
 
-    threshold: float
+    threshold: float = 0.0
+    forced: bool = False
 
     def __post_init__(self) -> None:
-        if self.threshold <= 0:
-            raise ValueError(f"CNR threshold must be > 0, got {self.threshold}")
+        # In forced (GMM always-2) mode the threshold is overridden, so it need not
+        # be supplied; only guided mode requires a positive split value.
+        if not self.forced and self.threshold <= 0:
+            raise ValueError(
+                f"CNR threshold must be > 0 in guided mode, got {self.threshold}"
+            )
 
 
 @dataclass(frozen=True)

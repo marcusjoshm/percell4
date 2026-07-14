@@ -1070,13 +1070,23 @@ def _classify_and_write_cnr(
     )
 
     try:
-        result = classify_by_cnr(
-            image,
-            mask,
-            labels,
-            threshold=float(settings.threshold),
-            presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
-        )
+        if settings.forced:
+            # Forced GMM always-2 split — overrides the guided threshold.
+            result = classify_by_cnr(
+                image,
+                mask,
+                labels,
+                n_populations=2,
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
+        else:
+            result = classify_by_cnr(
+                image,
+                mask,
+                labels,
+                threshold=float(settings.threshold),
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
     except Exception as e:
         logger.exception("CNR classification failed for round %s", round_spec.name)
         return DatasetFailure.THRESHOLD_ERROR, f"CNR classification failed: {e}"
@@ -1110,12 +1120,19 @@ def _classify_and_write_cnr(
         table_note = f"; CNR table write FAILED: {e}"
 
     if not written:
+        where = "forced GMM 2-group" if settings.forced else f"threshold {settings.threshold:g}"
         return None, (
-            f"CNR: single population (no split at threshold {settings.threshold:g}); "
+            f"CNR: single population (no split at {where}); "
             f"base mask stands{table_note}"
         )
     pops_desc = ", ".join(f"{name} ({px} px)" for name, px in written)
-    return None, f"CNR: split into {pops_desc}{table_note}"
+    # Log the CNR cutoff the split was placed at — the GMM-found boundary between the
+    # two populations in forced mode (a user value in guided mode).
+    cutoff_desc = ""
+    if result.threshold is not None:
+        src = "GMM CNR cutoff" if settings.forced else "CNR cutoff"
+        cutoff_desc = f" ({src} {result.threshold:.2f})"
+    return None, f"CNR: split into {pops_desc}{cutoff_desc}{table_note}"
 
 
 def _classify_and_write_cnr_stack(
@@ -1140,14 +1157,24 @@ def _classify_and_write_cnr_stack(
     from percell4.domain.measure.cnr_classification import classify_by_cnr_stack
 
     try:
-        res = classify_by_cnr_stack(
-            image_thw,
-            mask_thw,
-            labels_thw,
-            mode="guided",
-            threshold=float(settings.threshold),
-            presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
-        )
+        if settings.forced:
+            # Forced GMM always-2 split per frame — overrides the guided threshold.
+            res = classify_by_cnr_stack(
+                image_thw,
+                mask_thw,
+                labels_thw,
+                mode="forced",
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
+        else:
+            res = classify_by_cnr_stack(
+                image_thw,
+                mask_thw,
+                labels_thw,
+                mode="guided",
+                threshold=float(settings.threshold),
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
     except Exception as e:
         logger.exception("CNR stack classification failed for round %s", round_spec.name)
         return DatasetFailure.THRESHOLD_ERROR, f"CNR classification failed: {e}"
@@ -1195,13 +1222,27 @@ def _classify_and_write_cnr_stack(
         table_note = f"; CNR table write FAILED: {e}"
 
     if not written:
+        where = "forced GMM 2-group" if settings.forced else f"threshold {settings.threshold:g}"
         return None, (
             f"CNR: single population in all {n_frames} timepoint(s) "
-            f"(no split at threshold {settings.threshold:g}); base mask stands{table_note}"
+            f"(no split at {where}); base mask stands{table_note}"
         )
     pops_desc = ", ".join(f"{name} ({px} px)" for name, px in written)
+    # Log the per-timepoint CNR cutoff each frame's split was placed at — the GMM-found
+    # boundary between the two populations in forced mode (per-frame, since σ is per-frame).
+    cutoffs = [
+        (f["timepoint"], f["threshold"])
+        for f in res.per_frame
+        if f["n_subpopulations"] >= 2 and f.get("threshold") is not None
+    ]
+    cutoff_desc = ""
+    if cutoffs:
+        src = "GMM CNR cutoff" if settings.forced else "CNR cutoff"
+        pairs = ", ".join(f"t{t}={thr:.2f}" for t, thr in cutoffs)
+        cutoff_desc = f"; {src} per timepoint: {pairs}"
     return None, (
-        f"CNR: split into {pops_desc} across {n_split}/{n_frames} timepoint(s){table_note}"
+        f"CNR: split into {pops_desc} across {n_split}/{n_frames} timepoint(s)"
+        f"{cutoff_desc}{table_note}"
     )
 
 

@@ -157,9 +157,10 @@ _ROUND_COL_GLOBAL = 10
 _ROUND_COL_SIZE_UNIT = 11
 _ROUND_COL_CNR_ON = 12
 _ROUND_COL_CNR_THR = 13
-_ROUND_COL_MIN_SIZE = 14
-_ROUND_COL_MIN_SIZE_UNIT = 15
-_ROUND_COL_COUNT = 16
+_ROUND_COL_CNR_FORCED = 14
+_ROUND_COL_MIN_SIZE = 15
+_ROUND_COL_MIN_SIZE_UNIT = 16
+_ROUND_COL_COUNT = 17
 _ROUND_COL_HEADERS = (
     "Name",
     "Channel",
@@ -175,6 +176,7 @@ _ROUND_COL_HEADERS = (
     "Unit",
     "CNR split",
     "CNR thr",
+    "GMM 2-pop",
     "Min size",
     "Min unit",
 )
@@ -813,6 +815,7 @@ class WorkflowConfigDialog(QDialog):
             _ROUND_COL_SIZE_UNIT: 70,
             _ROUND_COL_CNR_ON: 80,
             _ROUND_COL_CNR_THR: 80,
+            _ROUND_COL_CNR_FORCED: 90,
             _ROUND_COL_MIN_SIZE: 90,
             _ROUND_COL_MIN_SIZE_UNIT: 70,
         }
@@ -1490,6 +1493,21 @@ class WorkflowConfigDialog(QDialog):
         cnr_thr_spin.setValue(5.0)
         self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_THR, cnr_thr_spin)
 
+        # GMM 2-pop — forced always-2 subpopulation classification. When checked it
+        # OVERRIDES the CNR threshold: the split is placed by a data-driven GMM
+        # two-group boundary regardless of the CNR thr value (which is then greyed).
+        cnr_forced_check = QCheckBox()
+        cnr_forced_check.setToolTip(
+            "Forced always-2 subpopulation classification (GMM two-group split). "
+            "OVERRIDES the CNR threshold: the boundary is placed by a data-driven "
+            "GaussianMixture two-group fit instead of the guided CNR value. Enabled "
+            "only when CNR split is on."
+        )
+        cnr_forced_check.stateChanged.connect(
+            lambda _state, r=row: self._update_cnr_columns_enabled(r)
+        )
+        self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_FORCED, cnr_forced_check)
+
         # Min size — a method-agnostic post-mask size filter applied to every
         # method's produced mask: connected components below this area are dropped
         # before the mask is written. 0 keeps every particle. The unit (px² / µm²)
@@ -1611,6 +1629,9 @@ class WorkflowConfigDialog(QDialog):
             "cnr_threshold": self._rounds_table.cellWidget(
                 row, _ROUND_COL_CNR_THR
             ).value(),
+            "cnr_forced": self._rounds_table.cellWidget(
+                row, _ROUND_COL_CNR_FORCED
+            ).isChecked(),
             "min_particle_size": self._rounds_table.cellWidget(
                 row, _ROUND_COL_MIN_SIZE
             ).value(),
@@ -1664,6 +1685,9 @@ class WorkflowConfigDialog(QDialog):
         self._rounds_table.cellWidget(
             row, _ROUND_COL_CNR_THR
         ).setValue(float(data.get("cnr_threshold", 5.0)))
+        self._rounds_table.cellWidget(
+            row, _ROUND_COL_CNR_FORCED
+        ).setChecked(bool(data.get("cnr_forced", False)))
         self._rounds_table.cellWidget(
             row, _ROUND_COL_MIN_SIZE
         ).setValue(float(data.get("min_particle_size", 0.0)))
@@ -1776,18 +1800,29 @@ class WorkflowConfigDialog(QDialog):
 
     def _update_cnr_columns_enabled(self, row: int) -> None:
         """The CNR-split checkbox is enabled only on per-cell (ALC) rows; the CNR
-        threshold is enabled only when the checkbox is on. On a non-ALC row the
+        threshold and the GMM 2-pop override are enabled only when the checkbox is
+        on. The GMM 2-pop override, when checked, greys the CNR threshold (it is
+        overridden by the forced two-group split). On a non-ALC row the split
         checkbox is unchecked and disabled so a meaningless split can't be set."""
         is_alc = self._is_alc_row(row)
         check = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_ON)
         thr = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_THR)
+        forced = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_FORCED)
         if check is not None:
             if not is_alc and check.isChecked():
                 check.setChecked(False)  # clear a stale split on a non-ALC row
             check.setEnabled(is_alc)
         checked = check is not None and check.isChecked()
+        # The GMM 2-pop override is meaningful only when the CNR split is on; clear a
+        # stale check when the split is off so a greyed override can't ride along.
+        if forced is not None:
+            if not (is_alc and checked) and forced.isChecked():
+                forced.setChecked(False)
+            forced.setEnabled(is_alc and checked)
+        is_forced = forced is not None and forced.isChecked()
+        # The threshold drives guided mode only; forced mode overrides it, so grey it.
         if thr is not None:
-            thr.setEnabled(is_alc and checked)
+            thr.setEnabled(is_alc and checked and not is_forced)
 
     def _on_round_item_changed(self, item: QTableWidgetItem) -> None:
         """Live-validate the Name column against the round-name regex."""
@@ -2472,7 +2507,11 @@ class WorkflowConfigDialog(QDialog):
                 _METHOD_ADAPTIVE,
                 _METHOD_AUTO_EXTRACT,
             ):
-                cnr_classify = CnrClassifySettings(threshold=float(data["cnr_threshold"]))
+                # GMM 2-pop overrides the guided threshold with a forced two-group split.
+                cnr_classify = CnrClassifySettings(
+                    threshold=float(data["cnr_threshold"]),
+                    forced=bool(data.get("cnr_forced", False)),
+                )
             try:
                 rounds.append(
                     ThresholdingRound(

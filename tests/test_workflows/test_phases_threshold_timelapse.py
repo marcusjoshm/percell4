@@ -223,6 +223,8 @@ def test_cnr_timelapse_writes_THW_population_masks_and_timepoint_table(tmp_path,
     assert "timepoint" in table.columns
     assert set(table["timepoint"].unique()) == {0, 1}
     assert "n_subpopulations" in table.columns
+    # The per-timepoint CNR cutoff between the two populations is logged (5.0 per frame).
+    assert "CNR cutoff per timepoint: t0=5.00, t1=5.00" in msg
 
 
 def test_cnr_timelapse_single_population_writes_no_split(tmp_path, monkeypatch):

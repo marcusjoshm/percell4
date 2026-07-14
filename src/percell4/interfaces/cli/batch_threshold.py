@@ -193,7 +193,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     cnr.add_argument(
         "--cnr-threshold", type=float, default=None,
-        help="Guided CNR split threshold (REQUIRED with --cnr-classify).",
+        help="Guided CNR split threshold (REQUIRED with --cnr-classify unless --cnr-forced).",
+    )
+    cnr.add_argument(
+        "--cnr-forced", action="store_true",
+        help=(
+            "Forced always-2 subpopulation classification (GMM two-group split). "
+            "Overrides --cnr-threshold: the boundary is placed by a data-driven "
+            "GaussianMixture two-group fit regardless of the threshold value."
+        ),
     )
     itr = parser.add_argument_group(
         "Iterative Otsu (only used when --strategy iterative-otsu)"
@@ -285,9 +293,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if args.cnr_classify and args.cnr_threshold is None:
+    if args.cnr_classify and not args.cnr_forced and args.cnr_threshold is None:
         print(
-            "[error] --cnr-classify requires --cnr-threshold (guided CNR split value).",
+            "[error] --cnr-classify requires --cnr-threshold (guided CNR split value) "
+            "unless --cnr-forced is given.",
             file=sys.stderr,
         )
         return 1
@@ -329,7 +338,12 @@ def main(argv: list[str] | None = None) -> int:
                 smallest_particle_unit=args.smallest_particle_unit,
             )
         cnr_classify = (
-            CnrClassifySettings(threshold=args.cnr_threshold) if args.cnr_classify else None
+            CnrClassifySettings(
+                threshold=(args.cnr_threshold if args.cnr_threshold is not None else 0.0),
+                forced=args.cnr_forced,
+            )
+            if args.cnr_classify
+            else None
         )
         round_spec = ThresholdingRound(
             name=args.round_name,
@@ -410,7 +424,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             strat = ""
         if args.cnr_classify:
-            strat += f" + CNR split @ {args.cnr_threshold:g}"
+            # Surface the CNR split detail from the apply message — it carries the
+            # GMM-found CNR cutoff between the two populations for this dataset.
+            _, sep, cnr_detail = msg.partition("CNR:")
+            if sep:
+                strat += f" + CNR:{cnr_detail}"
+            else:
+                strat += (
+                    " + CNR split (forced GMM 2-group)"
+                    if args.cnr_forced
+                    else f" + CNR split @ {args.cnr_threshold:g}"
+                )
         print(f"[{idx + 1}/{n_total}] [ok] {name}: wrote /masks/{args.round_name}{strat}")
 
     print(f"\n{n_ok}/{n_total} datasets thresholded.")

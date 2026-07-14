@@ -366,8 +366,25 @@ def test_batch_threshold_cnr_classify_writes_classification_table(tmp_path, caps
     assert "ae" in store.list_masks()
     table = store.read_dataframe("/classification/ae")  # per-focus table written
     assert len(table) >= 1
-    assert "CNR split" in capsys.readouterr().out
+    assert "+ CNR:" in capsys.readouterr().out  # CNR split detail surfaced per dataset
     assert "SG_iter" not in DatasetStore(p).list_masks()
+
+
+def test_batch_threshold_cnr_forced_runs_without_threshold(tmp_path, capsys):
+    """--cnr-forced (GMM always-2) runs without --cnr-threshold and surfaces the CNR
+    detail (which carries the GMM-found cutoff when a split occurs)."""
+    p = tmp_path / "DS1.h5"
+    _make_adaptive_dataset(p)
+    rc = cli.main([
+        str(p), "--channel", "GFP", "--round-name", "ae",
+        "--segmentation", "cellpose", "--strategy", "auto-extract",
+        "--smallest-particle-um", "0.36", "--cnr-classify", "--cnr-forced",
+    ])
+    assert rc == 0
+    store = DatasetStore(p)
+    assert "ae" in store.list_masks()
+    assert len(store.read_dataframe("/classification/ae")) >= 1
+    assert "+ CNR:" in capsys.readouterr().out
 
 
 # ── px/µm size unit (U11) ────────────────────────────────────────────────

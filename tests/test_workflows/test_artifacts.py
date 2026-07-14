@@ -648,6 +648,32 @@ def test_cnr_classify_round_round_trips() -> None:
     assert restored == r
     assert restored.cnr_classify is not None
     assert restored.cnr_classify.threshold == 5.0
+    assert restored.cnr_classify.forced is False
+
+
+def test_cnr_classify_forced_round_round_trips() -> None:
+    """A forced (GMM always-2) cnr_classify round-trips the forced flag."""
+    r = ThresholdingRound(
+        name="SG",
+        channel="RFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        auto_extract=AutoExtractSettings(smallest_particle_um=0.4),
+        cnr_classify=CnrClassifySettings(forced=True),
+    )
+    restored = _round_from_dict(_round_to_dict(r))
+    assert restored == r
+    assert restored.cnr_classify is not None
+    assert restored.cnr_classify.forced is True
+
+
+def test_legacy_cnr_classify_dict_without_forced_key() -> None:
+    """A run_config.json written before the forced flag reconstructs as guided."""
+    from percell4.workflows.artifacts import _cnr_classify_from_dict
+
+    restored = _cnr_classify_from_dict({"threshold": 6.0})
+    assert restored.threshold == 6.0
+    assert restored.forced is False
 
 
 def test_legacy_round_omits_auto_extract_and_cnr_keys() -> None:

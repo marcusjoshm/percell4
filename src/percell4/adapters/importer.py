@@ -573,7 +573,7 @@ def import_dataset(
         # re-stitching the (H, W, T) TCSPC-TIFF volume at those offsets is out
         # of v1 scope). Without this guard the loop below grid-stitches decay
         # while /intensity uses the registered canvas — a silent /decay vs
-        # /intensity misalignment. Mirror the z-stack-mosaic deferral.
+        # /intensity misalignment.
         raise ValueError(
             "Overlap registration with TCSPC-TIFF decay is deferred to "
             "follow-up — use .bin decay, or import without register."
@@ -1096,28 +1096,44 @@ def _assemble_plane(
     is populated with the per-tile 2D arrays (0-based tile index → array) at
     the post-z-projection, *pre-creation_bin* plane, so the caller can register
     on them and re-stitch with solved offsets. ``None`` (default) leaves the
-    byte-identical grid path untouched. A z-stack mosaic (``len(z_groups) > 1``)
-    cannot supply a sink — its per-tile arrays only exist per z-slice, before
-    projection — so we reject that combination here (z-stack-mosaic overlap is
-    deferred to follow-up).
+    byte-identical grid path untouched.
+
+    Z-stack mosaics (``len(z_groups) > 1``) are projected *per tile first*: each
+    tile's z-series is collapsed to a 2D image, then those 2D projections are
+    stitched exactly like ordinary 2D data. This yields the per-tile 2D arrays
+    registration needs (they feed the sink), so overlap/registration works for
+    z-stacks too. For the 0%-overlap grid path this is byte-identical to
+    projecting after stitching (projection commutes with disjoint edge-to-edge
+    placement — each output pixel comes from a single tile).
     """
     z_groups = _group_by_z(files)
     if len(z_groups) > 1 and z_project_method is not None:
-        if tile_sink is not None:
-            raise ValueError(
-                "z-stack-mosaic overlap registration is deferred to follow-up: "
-                "register=True with a z-stack mosaic (multiple z-slices per "
-                "tile) is not supported in v1. Z-project to 2D first, or "
-                "disable registration."
-            )
-        z_images = []
-        for z_key in sorted(z_groups.keys()):
-            z_images.append(_load_and_stitch(z_groups[z_key], tile_config))
-        return project_z(z_images, method=z_project_method)
+        projected = _project_tiles_over_z(files, z_project_method)
+        return _stitch_tile_arrays(projected, tile_config, tile_sink=tile_sink)
     all_files = []
     for z_key in sorted(z_groups.keys()):
         all_files.extend(z_groups[z_key])
     return _load_and_stitch(all_files, tile_config, tile_sink=tile_sink)
+
+
+def _project_tiles_over_z(
+    files: list, method: str
+) -> dict[int, np.ndarray]:
+    """Collapse a z-stack mosaic to one 2D array per tile.
+
+    Groups ``files`` by tile token and z-projects each tile's z-series with
+    ``method`` (mip/mean/sum). Files with no tile token group under index 0 —
+    the plain single-position z-stack. Projection is order-independent, so the
+    z-slices need no sorting. Returns ``{tile_idx: 2D projected array}``.
+    """
+    tile_groups: dict[int, list] = defaultdict(list)
+    for f in files:
+        tile_groups[int(f.tokens.get("tile", "0"))].append(f)
+    projected: dict[int, np.ndarray] = {}
+    for tile_idx, tile_files in tile_groups.items():
+        z_slices = [read_tiff(str(f.path))["array"] for f in tile_files]
+        projected[tile_idx] = project_z(z_slices, method=method)
+    return projected
 
 
 def _load_and_stitch(
@@ -1144,23 +1160,7 @@ def _load_and_stitch(
             tile_idx = int(f.tokens.get("tile", "0"))
             data = read_tiff(str(f.path))
             tiles[tile_idx] = data["array"]
-
-        # Convert to 0-based tile indices if needed
-        if tiles:
-            min_idx = min(tiles.keys())
-            if min_idx > 0:
-                tiles = {k - min_idx: v for k, v in tiles.items()}
-
-        if tile_sink is not None:
-            tile_sink.update(tiles)
-
-        return assemble_tiles(
-            tiles,
-            grid_rows=tile_config.grid_rows,
-            grid_cols=tile_config.grid_cols,
-            grid_type=tile_config.grid_type,
-            order=tile_config.order,
-        )
+        return _stitch_tile_arrays(tiles, tile_config, tile_sink=tile_sink)
 
     # Multiple files but no tile_config and no recognized z-slice tokens
     # (the z-slice branch in _assemble_plane runs first when z tokens
@@ -1174,6 +1174,55 @@ def _load_and_stitch(
         "Either configure tile stitching (TileConfig) for the importer "
         "or check the filename token regex so z-slices are recognized. "
         f"Files: {names}"
+    )
+
+
+def _stitch_tile_arrays(
+    tiles: dict[int, np.ndarray],
+    tile_config: TileConfig | None,
+    tile_sink: dict[int, np.ndarray] | None = None,
+) -> np.ndarray:
+    """Rebase a ``{tile_idx: 2D array}`` dict to 0-based, feed the sink, and stitch.
+
+    Shared by the 2D file path (``_load_and_stitch``) and the z-projected mosaic
+    path (``_assemble_plane`` → ``_project_tiles_over_z``): both arrive at a
+    tiles dict that needs identical rebasing, sink population, and grid
+    placement, so the logic lives in one place.
+
+    A single tile (or no grid) is returned as-is. A multi-tile dict with no
+    grid tile_config raises — the same explicit failure ``_load_and_stitch``
+    gives for multiple files without stitch config, rather than silently
+    truncating to one tile.
+    """
+    # Convert to 0-based tile indices if needed.
+    if tiles:
+        min_idx = min(tiles.keys())
+        if min_idx > 0:
+            tiles = {k - min_idx: v for k, v in tiles.items()}
+
+    if tile_sink is not None:
+        tile_sink.update(tiles)
+
+    grid_cells = (
+        tile_config.grid_rows * tile_config.grid_cols
+        if tile_config is not None
+        else 1
+    )
+    if grid_cells <= 1:
+        if len(tiles) == 1:
+            return next(iter(tiles.values()))
+        raise ValueError(
+            f"_stitch_tile_arrays received {len(tiles)} tiles but no grid "
+            "tile_config (grid_rows*grid_cols <= 1); cannot place them. "
+            "Configure tile stitching (TileConfig) for the importer."
+        )
+
+    return assemble_tiles(
+        tiles,
+        grid_rows=tile_config.grid_rows,
+        grid_cols=tile_config.grid_cols,
+        grid_type=tile_config.grid_type,
+        order=tile_config.order,
     )
 
 

@@ -469,6 +469,19 @@ def test_cnr_classify_rejects_non_positive_threshold():
         CnrClassifySettings(threshold=-1.0)
 
 
+def test_cnr_classify_forced_defaults_off():
+    assert CnrClassifySettings(threshold=5.0).forced is False
+
+
+def test_cnr_classify_forced_ignores_threshold_validation():
+    """Forced (GMM always-2) mode overrides the threshold, so no positive value is
+    required — a bare forced setting is valid."""
+    s = CnrClassifySettings(forced=True)
+    assert s.forced is True and s.threshold == 0.0
+    # even a zero threshold is accepted when forced (it is overridden)
+    assert CnrClassifySettings(threshold=0.0, forced=True).forced is True
+
+
 def test_cnr_classify_allowed_on_adaptive_clip_round():
     r = _valid_round(
         adaptive_clip=AdaptiveClipSettings(d_min_um=0.4),

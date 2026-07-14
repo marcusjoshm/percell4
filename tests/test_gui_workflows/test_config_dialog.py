@@ -20,6 +20,7 @@ from percell4.gui.workflows.single_cell.config_dialog import (
     _METHOD_AUTO_EXTRACT,
     _METHOD_GROUPED,
     _ROUND_COL_ALGO,
+    _ROUND_COL_CNR_FORCED,
     _ROUND_COL_CNR_ON,
     _ROUND_COL_CNR_THR,
     _ROUND_COL_DMIN,
@@ -542,6 +543,62 @@ def test_cnr_builds_settings_on_alc_round(dialog, h5_ds1):
     assert rounds[0].cnr_classify.threshold == 7.0
 
 
+def test_cnr_forced_gated_by_split_checkbox(dialog, h5_ds1):
+    """GMM 2-pop is enabled only when CNR split is on, on an ALC row."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
+    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
+    forced = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED)
+    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    assert forced.isEnabled() is False  # off until CNR split is checked
+    cnr.setChecked(True)
+    assert forced.isEnabled() is True
+    cnr.setChecked(False)
+    assert forced.isEnabled() is False
+
+
+def test_cnr_forced_overrides_and_greys_threshold(dialog, h5_ds1):
+    """Checking GMM 2-pop greys the CNR threshold (it is overridden)."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
+    thr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR)
+    forced = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED)
+    cnr.setChecked(True)
+    assert thr.isEnabled() is True
+    forced.setChecked(True)
+    assert thr.isEnabled() is False  # overridden → greyed
+    forced.setChecked(False)
+    assert thr.isEnabled() is True
+
+
+def test_cnr_forced_builds_forced_settings(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED).setChecked(True)
+    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    assert rounds[0].cnr_classify is not None
+    assert rounds[0].cnr_classify.forced is True
+
+
+def test_cnr_forced_cleared_when_split_unchecked(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
+    forced = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED)
+    cnr.setChecked(True)
+    forced.setChecked(True)
+    # Unchecking CNR split clears the forced override so it cannot ride along greyed.
+    cnr.setChecked(False)
+    assert forced.isChecked() is False
+
+
 def test_cnr_cleared_when_switching_to_grouped(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
@@ -566,6 +623,7 @@ def test_round_row_swap_preserves_auto_extract_and_cnr(dialog, h5_ds1):
     dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
     dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
     dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR).setValue(7.0)
+    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED).setChecked(True)
 
     dialog._swap_rounds(0, 1)
 
@@ -576,6 +634,7 @@ def test_round_row_swap_preserves_auto_extract_and_cnr(dialog, h5_ds1):
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_DMIN).value() == 0.36
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_ON).isChecked() is True
     assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_THR).value() == 7.0
+    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_FORCED).isChecked() is True
 
 
 # ── d_min / Smallest px-µm Unit column (U10) ────────────────────────────

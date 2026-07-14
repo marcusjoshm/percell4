@@ -314,6 +314,8 @@ def test_classify_stack_guided_splits_every_frame_same_threshold():
     for fr in res.per_frame:
         assert fr["n_subpopulations"] == 2
         assert fr["low_px"] > 0 and fr["high_px"] > 0
+        # each split frame reports the CNR cutoff its split was placed at
+        assert fr["threshold"] is not None and fr["threshold"] > 0
     # per-focus table spans all timepoints and is flagged 2-population per frame
     assert set(res.table["timepoint"].unique()) == {0, 1, 2}
     assert (res.table["n_subpopulations"] == 2).all()
