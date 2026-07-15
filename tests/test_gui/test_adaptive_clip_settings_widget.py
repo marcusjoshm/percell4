@@ -23,6 +23,7 @@ def test_default_config(qtbot):
         smallest_particle_value=3.0,
         smallest_particle_unit="px",
         auto_extract_smallest_auto=True,
+        largest_only=False,
     )
 
 
@@ -152,3 +153,63 @@ def test_set_enabled_respects_smallest_gate(qtbot):
     assert not w._smallest.isEnabled()
     w.set_enabled(True)
     assert w._smallest.isEnabled()  # gating re-applied on unlock (manual)
+
+
+# ── largest-only single-pass mode (U2) ───────────────────────────────────────
+
+
+def test_largest_only_default_off(qtbot):
+    w = _widget(qtbot)
+    assert hasattr(w, "_largest_only")
+    assert w._largest_only.isChecked() is False
+    assert w.current_config().largest_only is False
+
+
+def test_largest_only_reaches_config(qtbot):
+    w = _widget(qtbot)
+    w._largest_only.setChecked(True)
+    assert w.current_config().largest_only is True
+
+
+def test_largest_only_disables_smallest_controls(qtbot):
+    """Largest-only has no fine pass, so the whole smallest-particle group is off."""
+    w = _widget(qtbot)
+    w._largest_only.setChecked(True)
+    assert not w._ae_smallest_auto.isEnabled()
+    assert not w._smallest.isEnabled()
+    assert not w._smallest_unit.isEnabled()
+    # Gaussian σ and the min particle-size filter stay live.
+    assert w._sigma.isEnabled()
+    assert w._min_size.isEnabled()
+    assert w._unit.isEnabled()
+
+
+def test_largest_only_off_restores_auto_detect_gating(qtbot):
+    w = _widget(qtbot)
+    w._largest_only.setChecked(True)
+    w._largest_only.setChecked(False)
+    # Back to the auto-detect gating: toggle live, smallest field follows it.
+    assert w._ae_smallest_auto.isEnabled()
+    assert not w._smallest.isEnabled()       # auto-detect on -> readout
+    w._ae_smallest_auto.setChecked(False)
+    assert w._smallest.isEnabled()           # manual override live again
+
+
+def test_largest_only_fires_config_changed(qtbot):
+    w = _widget(qtbot)
+    fired = []
+    w.config_changed.connect(lambda: fired.append(1))
+    w._largest_only.setChecked(True)
+    assert len(fired) >= 1
+
+
+def test_set_enabled_locks_largest_only(qtbot):
+    w = _widget(qtbot)
+    w._largest_only.setChecked(True)
+    w.set_enabled(False)
+    assert not w._largest_only.isEnabled()
+    w.set_enabled(True)
+    assert w._largest_only.isEnabled()
+    # Gating re-applied on unlock: smallest controls stay disabled in largest-only.
+    assert not w._smallest.isEnabled()
+    assert not w._ae_smallest_auto.isEnabled()

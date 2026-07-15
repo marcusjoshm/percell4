@@ -52,6 +52,7 @@ class AdaptiveClipConfig:
     smallest_particle_value: float
     smallest_particle_unit: str
     auto_extract_smallest_auto: bool
+    largest_only: bool = False
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -76,6 +77,21 @@ class AdaptiveClipSettingsWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+
+        # ── Largest particle only (single pass) ──
+        # When on, the run does ONE coarse pass sized to the largest particle and
+        # skips the fine/small-window pass entirely, so the smallest-particle
+        # controls below are meaningless and are disabled.
+        self._largest_only = QCheckBox("Largest particle only (single pass)")
+        self._largest_only.setChecked(False)
+        self._largest_only.setToolTip(
+            "Run a single coarse pass sized to the largest particle (measured by "
+            "Laplacian-of-Gaussian), skipping the fine/small-window pass. Use it "
+            "when only the large features matter and the fine pass would only add "
+            "small-scale junk. The smallest-particle settings are ignored in this mode."
+        )
+        self._largest_only.toggled.connect(self._on_largest_only_toggled)
+        layout.addWidget(self._largest_only)
 
         # ── Auto-detect smallest particle (LoG) ──
         # When on (default), the fine window is measured from the image each run
@@ -155,20 +171,29 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._smallest.valueChanged.connect(self.config_changed)
         self._smallest_unit.currentIndexChanged.connect(self.config_changed)
         self._ae_smallest_auto.toggled.connect(self.config_changed)
+        self._largest_only.toggled.connect(self.config_changed)
 
     # ── Slots ─────────────────────────────────────────────────────
 
     def _on_ae_smallest_auto_toggled(self, _checked: bool) -> None:
         self._apply_mode_gating()  # toggles the smallest-Ø field
 
-    def _apply_mode_gating(self) -> None:
-        """Enable/disable the smallest-Ø field for the auto-detect toggle.
+    def _on_largest_only_toggled(self, _checked: bool) -> None:
+        self._apply_mode_gating()  # disables the smallest-particle controls when on
 
-        The smallest-Ø field + unit are the manual optical-resolution override,
-        live only when "Auto-detect smallest" is off. Gaussian σ and the
-        min-particle-size filter are always live.
+    def _apply_mode_gating(self) -> None:
+        """Enable/disable the smallest-particle controls for the current mode.
+
+        In largest-only mode there is no fine pass, so the whole smallest-particle
+        group — the auto-detect toggle, the smallest-Ø field, and its unit — is
+        disabled. Otherwise the auto-detect toggle is live and the smallest-Ø field
+        + unit are the manual optical-resolution override, live only when
+        "Auto-detect smallest" is off. Gaussian σ and the min-particle-size filter
+        are always live.
         """
-        manual_smallest = not self._ae_smallest_auto.isChecked()
+        largest_only = self._largest_only.isChecked()
+        self._ae_smallest_auto.setEnabled(not largest_only)
+        manual_smallest = (not largest_only) and (not self._ae_smallest_auto.isChecked())
         self._smallest.setEnabled(manual_smallest)
         self._smallest_unit.setEnabled(manual_smallest)
 
@@ -183,6 +208,7 @@ class AdaptiveClipSettingsWidget(QWidget):
             smallest_particle_value=float(self._smallest.value()),
             smallest_particle_unit=_WINDOW_UNIT_CODES[self._smallest_unit.currentText()],
             auto_extract_smallest_auto=self._ae_smallest_auto.isChecked(),
+            largest_only=self._largest_only.isChecked(),
         )
 
     def set_smallest_value(self, diameter_px: float) -> None:
@@ -199,6 +225,7 @@ class AdaptiveClipSettingsWidget(QWidget):
     def set_enabled(self, enabled: bool) -> None:
         """Lock/unlock all widgets during a run (preserves the auto-detect gating)."""
         for widget in (
+            self._largest_only,
             self._ae_smallest_auto,
             self._smallest,
             self._smallest_unit,
@@ -208,5 +235,5 @@ class AdaptiveClipSettingsWidget(QWidget):
         ):
             widget.setEnabled(enabled)
         if enabled:
-            # Re-apply the smallest-Ø gating on top of the unlock.
+            # Re-apply the mode gating on top of the unlock.
             self._apply_mode_gating()
