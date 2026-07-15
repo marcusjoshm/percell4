@@ -8,8 +8,11 @@ from skimage.draw import disk
 
 from percell4.domain.measure.adaptive_clip import per_cell_sigma
 from percell4.domain.measure.auto_extraction import (
+    FILL_FACTOR,
     AutoExtractReport,
+    NoParticlesFoundError,
     auto_extract,
+    extract_largest_only,
     measure_largest_particle_diameter,
     measure_smallest_particle_diameter,
     noise_symmetry_floor_k,
@@ -225,3 +228,80 @@ def test_auto_extract_min_spot_filters_specks():
     assert int(big_filter.sum()) < int(no_filter.sum())
     # the large disc (area ~452 px) survives a 400 px filter
     assert big_filter[180, 180] == 1
+
+
+# --------------------------------------------------------------------------- #
+# extract_largest_only (single coarse pass) — U1
+# --------------------------------------------------------------------------- #
+def test_extract_largest_only_single_coarse_pass():
+    """One coarse pass sized to the largest particle; no fine pass."""
+    img, labels = _wide_range_image()
+    mask, report = extract_largest_only(img, labels)
+    assert report.largest_only is True
+    assert report.second_pass_used is False
+    assert report.fine_window == 0
+    assert report.smallest_diameter_px == 0.0
+    assert len(report.passes) == 1
+    assert report.largest_particle_px > 0.0
+    assert report.coarse_k_n >= 1
+    assert report.passes[0] == (report.passes[0][0], round(report.coarse_k_mean, 2))
+    assert int(mask.sum()) > 0
+
+
+def test_extract_largest_only_fills_large_particle():
+    """The coarse window + fill_holes fill the big disc solid (center detected)."""
+    img, labels = _wide_range_image()
+    mask, _ = extract_largest_only(img, labels)
+    assert mask[180, 180] == 1  # center of the radius-12 disc
+
+
+def test_extract_largest_only_window_follows_fill_factor_rule():
+    """Coarse window == fill_factor × LoG-measured largest Ø (no new constant)."""
+    img, labels = _wide_range_image()
+    _, report = extract_largest_only(img, labels)
+    coarse_window = report.passes[0][0]
+    assert coarse_window == max(3, round(FILL_FACTOR * report.largest_particle_px))
+
+
+def test_extract_largest_only_raises_on_flat_image():
+    """A flat (blob-free) image has no largest particle to size."""
+    img = np.full((64, 64), 100.0, dtype=np.float32)
+    labels = np.ones((64, 64), dtype=np.int32)
+    with pytest.raises(NoParticlesFoundError, match="no sizable"):
+        extract_largest_only(img, labels)
+
+
+def test_extract_largest_only_min_spot_filters():
+    """min_spot_px above the detected area empties the mask (filter runs last)."""
+    img, labels = _wide_range_image()
+    kept, _ = extract_largest_only(img, labels, min_spot_px=1)
+    filtered, _ = extract_largest_only(img, labels, min_spot_px=1_000_000)
+    assert int(kept.sum()) > 0
+    assert int(filtered.sum()) == 0
+
+
+def test_extract_largest_only_is_per_cell():
+    """Both cells contribute a per-cell coarse k (per-cell σ + per-cell floor)."""
+    img, labels = _two_cell_contrast_image()
+    _, report = extract_largest_only(img, labels)
+    assert report.coarse_k_n == 2
+    assert report.coarse_k_min <= report.coarse_k_mean <= report.coarse_k_max
+
+
+def test_extract_largest_only_matches_auto_extract_coarse_pass():
+    """When the fine pass adds nothing, largest-only == the coarse pass run alone.
+
+    A supplied smallest Ø large enough that the fine window swallows the small spots
+    but a bigger disc still triggers the coarse pass: the two-pass union is then
+    dominated by the coarse pass, so the largest-only mask matches it where the big
+    particle sits.
+    """
+    img, labels = _wide_range_image()
+    largest_mask, largest_report = extract_largest_only(img, labels)
+    # The large disc region is detected by both the coarse-only run and the two-pass
+    # run (which also runs the same coarse pass).
+    two_pass_mask, two_pass_report = auto_extract(img, labels, smallest_particle_px=3.0)
+    assert two_pass_report.second_pass_used is True
+    # Same coarse window in both.
+    assert largest_report.passes[0][0] == two_pass_report.passes[1][0]
+    assert largest_mask[180, 180] == two_pass_mask[180, 180] == 1

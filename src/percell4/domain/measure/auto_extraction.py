@@ -57,6 +57,7 @@ from percell4.domain.measure.thresholding import apply_gaussian_smoothing
 
 __all__ = [
     "auto_extract",
+    "extract_largest_only",
     "measure_largest_particle_diameter",
     "measure_smallest_particle_diameter",
     "noise_symmetry_floor_k",
@@ -115,6 +116,10 @@ class AutoExtractReport:
     coarse_k_min: float | None = None
     coarse_k_max: float | None = None
     coarse_k_n: int = 0                 # cells contributing a per-cell coarse k
+    # True when produced by the largest-only single-pass mode (extract_largest_only):
+    # the one pass IS the coarse pass, so there is no fine pass (fine_window == 0) and
+    # no smallest particle (smallest_diameter_px == 0).
+    largest_only: bool = False
     extra: dict = field(default_factory=dict)
 
 
@@ -474,6 +479,108 @@ def auto_extract(
         coarse_k_min=coarse_k_min,
         coarse_k_max=coarse_k_max,
         coarse_k_n=coarse_k_n,
+        extra={"fdr": float(fdr)},
+    )
+    return out, report
+
+
+def extract_largest_only(
+    image: np.ndarray,
+    cell_labels: np.ndarray,
+    *,
+    fill_factor: float = FILL_FACTOR,
+    fdr: float = FDR,
+    log_presmooth: float = LOG_PRESMOOTH,
+    presmooth_sigma_px: float = 1.0,
+    min_spot_px: int = 2,
+    size_percentile: float = SIZE_PERCENTILE,
+    max_sigma: float = MAX_SIGMA,
+    fill_holes: bool = True,
+) -> tuple[np.ndarray, AutoExtractReport]:
+    """Single **coarse** pass sized to the largest particle. Returns ``(mask uint8, report)``.
+
+    The second half of :func:`auto_extract` run alone: it measures the largest
+    particle by LoG (``size_percentile``, fixed ``log_presmooth``), sets the coarse
+    window ``= fill_factor × largest Ø`` and runs **one** per-cell pass at ``k =`` the
+    per-cell noise-symmetry floor — skipping the fine/small-window pass entirely. Use
+    it when only the large features matter and the fine pass would only add
+    small-scale junk. Per-cell (the per-cell σ is the basis of the method), so a
+    Cellpose ``cell_labels`` is required; ``fill_holes`` closes an under-windowed
+    large particle before the ``min_spot_px`` area filter (applied once at the end).
+
+    Raises :class:`NoParticlesFoundError` when LoG finds no sizable particle (nothing
+    to run a coarse pass on) — so a time-lapse caller can degrade that frame to an
+    empty plane. A frame where every cell is flat/σ-less (no per-cell floor) is not a
+    sizing failure: it returns an empty mask + a report with ``coarse_k_n == 0``.
+
+    Reuses the same eye-validated coarse-pass rules as :func:`auto_extract`; see
+    ``docs/solutions/conventions/adaptive-clip-window-and-k-rules-2026-06-23.md``.
+    """
+    img = np.asarray(image, dtype=np.float32)
+    lab = np.asarray(cell_labels)
+
+    # ---- resolve the coarse window (always LoG-measured, fixed log_presmooth) ----
+    largest_px = measure_largest_particle_diameter(
+        img, lab, percentile=size_percentile,
+        presmooth_sigma_px=log_presmooth, max_sigma=max_sigma,
+    )
+    if largest_px <= 0:
+        raise NoParticlesFoundError(
+            "largest-particle sizing found no blobs; the image has no sizable "
+            "particle to run a coarse pass on"
+        )
+    coarse_window = _win(fill_factor * largest_px)
+
+    # Shared presmoothed buffer + per-cell σ — the noise floor uses these so its
+    # z-scores match what detect_adaptive_per_cell thresholds.
+    work = apply_gaussian_smoothing(img, presmooth_sigma_px)
+    sigma = per_cell_sigma(work, lab)
+
+    # Estimate the noise-symmetry floor PER CELL (matching the auto_extract coarse
+    # pass): each cell's k is set by its own tail asymmetry.
+    k_by_cell = noise_symmetry_floor_k_per_cell(
+        work, lab, sigma, coarse_window, fdr=fdr, k_floor=1.0,
+    )
+    coarse_k_mean = coarse_k_min = coarse_k_max = None
+    coarse_k_n = 0
+    if k_by_cell:
+        kvals = np.fromiter(k_by_cell.values(), dtype=float)
+        coarse_k_mean = float(kvals.mean())
+        coarse_k_min = float(kvals.min())
+        coarse_k_max = float(kvals.max())
+        coarse_k_n = int(kvals.size)
+        mask = detect_adaptive_per_cell(
+            img, lab, window_px=coarse_window, min_spot_px=1, k=k_by_cell,
+            presmooth_sigma_px=presmooth_sigma_px, fill_holes=fill_holes,
+        ).astype(bool)
+    else:
+        # No cell yielded a per-cell floor (every cell flat/σ-less) — the pass would
+        # add nothing, so return an empty mask (not a sizing failure).
+        mask = np.zeros(img.shape, dtype=bool)
+
+    mask = _filter_by_area(mask, int(min_spot_px))
+    out = mask.astype(np.uint8)
+    _, ncomp = label(mask)
+
+    passes = (
+        [(int(coarse_window), round(coarse_k_mean, 2))] if coarse_k_mean is not None else []
+    )
+    report = AutoExtractReport(
+        passes=passes,
+        fine_window=0,
+        largest_particle_px=float(largest_px),
+        second_pass_used=False,
+        presmooth_sigma_px=float(presmooth_sigma_px),
+        n_cells=len(sigma),
+        n_components=int(ncomp),
+        area_px=int(mask.sum()),
+        smallest_diameter_px=0.0,
+        smallest_source="n/a (largest-only single pass)",
+        coarse_k_mean=coarse_k_mean,
+        coarse_k_min=coarse_k_min,
+        coarse_k_max=coarse_k_max,
+        coarse_k_n=coarse_k_n,
+        largest_only=True,
         extra={"fdr": float(fdr)},
     )
     return out, report
