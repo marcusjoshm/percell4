@@ -621,10 +621,25 @@ class ViewerWindow(QObject):
                     else:
                         color_dict[lid] = list(vp.SELECTION_DIM_NONSELECTED)
             elif visible_ids:
-                # Filter only: show filtered, hide rest
+                # Filter only: show filtered in their original palette colors
+                # (so cells stay distinguishable), hide rest.
+                import numpy as np
+
                 color_dict[None] = list(vp.TRANSPARENT_RGBA)
-                for lid in visible_ids:
-                    color_dict[lid] = list(vp.FILTER_ONLY_VISIBLE_RGBA)
+                ids = list(visible_ids)
+                orig_cmap = self._original_colormaps.get(labels_layer.name)
+                colors = None
+                if orig_cmap is not None and hasattr(orig_cmap, "map"):
+                    try:
+                        colors = orig_cmap.map(np.asarray(ids, dtype=np.int64))
+                    except Exception:
+                        colors = None
+                for i, lid in enumerate(ids):
+                    color_dict[lid] = (
+                        list(colors[i])
+                        if colors is not None
+                        else list(vp.FILTER_ONLY_VISIBLE_RGBA)
+                    )
             elif highlight_ids:
                 # Selection only: highlight selected, dim rest
                 color_dict[None] = list(vp.TRANSPARENT_RGBA)

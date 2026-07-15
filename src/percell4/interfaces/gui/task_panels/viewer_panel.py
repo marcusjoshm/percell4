@@ -138,11 +138,20 @@ class ViewerPanel(QWidget):
 
     def _on_filter_state_changed(self) -> None:
         if self._data_model.is_filtered:
-            n_filtered = len(self._data_model.filtered_df)
-            n_total = len(self._data_model.df)
-            self._filter_status_label.setText(
-                f"Showing {n_filtered} of {n_total} cells"
-            )
+            if len(self._data_model.df) == 0:
+                # No measurements computed yet — the filter operates on
+                # segmentation labels, not the measurements table, so report
+                # the filter's own size rather than a misleading "0 of 0".
+                n = len(self._data_model.filtered_ids or ())
+                self._filter_status_label.setText(
+                    f"Showing {n} filtered cell{'s' if n != 1 else ''}"
+                )
+            else:
+                n_filtered = len(self._data_model.filtered_df)
+                n_total = len(self._data_model.df)
+                self._filter_status_label.setText(
+                    f"Showing {n_filtered} of {n_total} cells"
+                )
             self._filter_status_label.setStyleSheet(
                 f"color: {theme.ACCENT}; font-weight: bold;"
             )

@@ -35,6 +35,7 @@ class _FakeModel:
         self.is_filtered = False
         self.filtered_df: list = []
         self.df: list = []
+        self.filtered_ids: set | None = None
 
     def set_selection(self, ids) -> None:
         self.selection_calls.append(list(ids))
@@ -154,3 +155,32 @@ def test_filter_state_change_updates_label_and_button(qtbot) -> None:
     model.state_changed.emit(_Change(filter=True))
     assert clear_btn.isEnabled() is False
     assert panel._filter_status_label.text() == "No filter active"
+
+
+def test_filter_label_counts_filter_when_no_measurements(qtbot) -> None:
+    """With no measurements (empty df), the label reports the filter's own size."""
+    model = _FakeModel()
+    panel = _make(model=model)
+    qtbot.addWidget(panel)
+
+    model.is_filtered = True
+    model.df = []  # no measurements computed
+    model.filtered_ids = {1, 2, 3}
+    model.state_changed.emit(_Change(filter=True))
+
+    assert _button(panel, "Clear Filter").isEnabled() is True
+    assert panel._filter_status_label.text() == "Showing 3 filtered cells"
+
+
+def test_filter_label_singular_when_one_filtered_cell(qtbot) -> None:
+    """A single filtered cell uses the singular noun."""
+    model = _FakeModel()
+    panel = _make(model=model)
+    qtbot.addWidget(panel)
+
+    model.is_filtered = True
+    model.df = []
+    model.filtered_ids = {7}
+    model.state_changed.emit(_Change(filter=True))
+
+    assert panel._filter_status_label.text() == "Showing 1 filtered cell"
