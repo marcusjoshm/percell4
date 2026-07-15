@@ -51,12 +51,21 @@ from percell4.domain.measure.particle import (
 # consistent.
 _PER_CELL_METRICS = (
     "edge_skirt_ratio",     # sharpness: low = in-focus, high = out-of-focus
+    "laplacian_variance",   # sharpness: high = in-focus (var(Laplacian)/mean²)
+    "tenengrad",            # sharpness: high = in-focus (mean(Sobel grad²)/mean²)
     "area",                 # size (µm² when pixel_size_um given, else px²)
     "mean_intensity",
     "max_intensity",
     "integrated_intensity",
 )
 SEGMENT_METRICS = (*_PER_CELL_METRICS, "cnr")
+
+# Metrics measured through the shared per-particle sharpness helper
+# (identical values to particles.csv by construction). ``boundary_gradient`` is
+# computable but intentionally not offered in SEGMENT_METRICS.
+_SHARPNESS_METRICS = frozenset(
+    {"edge_skirt_ratio", "laplacian_variance", "tenengrad"}
+)
 
 
 def _is_valid(metric: str, value: float) -> bool:
@@ -160,7 +169,7 @@ def measure_metric_per_particle(
         crop = image[sl]
         label_view = global_labels[sl]
         grad = lap = None
-        if metric == "edge_skirt_ratio":
+        if metric in _SHARPNESS_METRICS:
             grad, lap = sharpness_buffers(crop)
 
         for pid, prop in enumerate(regionprops(particle_labels), start=1):
@@ -172,12 +181,12 @@ def measure_metric_per_particle(
 
             if metric == "area":
                 value = float(this_particle.sum()) * px_area
-            elif metric == "edge_skirt_ratio":
+            elif metric in _SHARPNESS_METRICS:
                 other = (particle_labels > 0) & ~this_particle
                 skirt, boundary = skirt_and_boundary(this_particle, cell_mask, other)
                 value = _sharpness_for_particle(
                     crop, grad, lap, this_particle, skirt, boundary
-                )["edge_skirt_ratio"]
+                )[metric]
             else:  # intensity family
                 try:
                     value = float(BUILTIN_METRICS[metric](crop, this_particle))

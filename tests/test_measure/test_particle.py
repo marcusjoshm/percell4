@@ -234,6 +234,8 @@ def test_sharpness_directionality_sharp_vs_blurred():
     assert oof["boundary_gradient"] < sharp["boundary_gradient"]
     # Out-of-focus: less high-freq content -> lower Laplacian variance.
     assert oof["laplacian_variance"] < sharp["laplacian_variance"]
+    # Out-of-focus: weaker edges -> lower Tenengrad response.
+    assert oof["tenengrad"] < sharp["tenengrad"]
 
 
 def test_sharpness_low_signal_is_finite_not_nan():

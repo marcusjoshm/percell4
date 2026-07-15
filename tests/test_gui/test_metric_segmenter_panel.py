@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from percell4.gui import metric_segmenter_panel as panel_module
 
@@ -139,6 +140,30 @@ def test_segment_opens_window(qtbot, monkeypatch):
     assert any("edge_skirt_ratio segments (preview)" == n for n in names)
 
 
+@pytest.mark.parametrize(
+    ("label", "key"),
+    [
+        ("Variance of Laplacian (focus)", "laplacian_variance"),
+        ("Tenengrad (focus)", "tenengrad"),
+    ],
+)
+def test_focus_metric_is_offered_and_runs(qtbot, monkeypatch, label, key):
+    """Each added focus metric is selectable and opens a preview window."""
+    panel, viewer_win, _repo, _model = _build(qtbot, monkeypatch)
+    labels = [panel._metric.itemText(i) for i in range(panel._metric.count())]
+    assert label in labels
+
+    idx = next(i for i, (_lbl, k) in enumerate(panel._choices) if k == key)
+    panel._metric.setCurrentIndex(idx)
+    assert panel._selected_metric() == key
+
+    panel._on_segment()
+    assert panel._window is not None
+    qtbot.addWidget(panel._window)
+    names = [getattr(layer, "name", "") for layer in viewer_win.viewer.layers]
+    assert any(f"{key} segments (preview)" == n for n in names)
+
+
 def test_metric_combo_change_is_not_silent(qtbot, monkeypatch):
     panel, _viewer_win, _repo, _model = _build(qtbot, monkeypatch)
     panel._metric.setCurrentIndex(1)  # -> "Area / size"
@@ -193,6 +218,8 @@ def test_no_session_write_from_non_save_widgets(qtbot, monkeypatch):
     panel._metric.setCurrentIndex(1)   # Area
     panel._metric.setCurrentIndex(0)   # back to edge-skirt
     panel._source.setCurrentIndex(0)
+    panel._restrict_cb.setChecked(True)   # Action: reads filter_ids, writes nothing
+    panel._restrict_cb.setChecked(False)
     panel._on_segment()                # measure + open window
     if panel._window is not None:
         qtbot.addWidget(panel._window)
@@ -201,6 +228,76 @@ def test_no_session_write_from_non_save_widgets(qtbot, monkeypatch):
 
     assert fired == []                 # no ACTIVE_MASK_CHANGED from any Action
     assert model.session.active_mask is None  # active mask untouched until Save
+
+
+def test_restrict_to_filtered_cells_masks_other_cells(qtbot, monkeypatch):
+    """A filter restricts the source mask to just the filtered cells."""
+    panel, _viewer_win, _repo, model = _build(qtbot, monkeypatch)
+    labels = np.zeros((10, 10), dtype=np.int32)
+    labels[0:5, :] = 1
+    labels[5:10, :] = 2
+    mask = np.ones((10, 10), dtype=np.uint8)
+
+    model.session.set_filter(frozenset({1}))
+    out, desc = panel._restrict_to_cells(mask, labels)
+
+    assert out is not None
+    assert (out[0:5, :] == 1).all()   # cell 1 kept
+    assert (out[5:10, :] == 0).all()  # cell 2 dropped
+    assert desc == "1 filtered cell"
+
+
+def test_restrict_no_filter_uses_whole_segmentation(qtbot, monkeypatch):
+    """No filter → every labelled cell is kept; out-of-cell pixels dropped."""
+    panel, _viewer_win, _repo, _model = _build(qtbot, monkeypatch)
+    labels = np.zeros((10, 10), dtype=np.int32)
+    labels[2:8, 2:8] = 1
+    mask = np.ones((10, 10), dtype=np.uint8)
+
+    out, desc = panel._restrict_to_cells(mask, labels)
+
+    assert out is not None
+    assert (out[labels > 0] == 1).all()
+    assert (out[labels == 0] == 0).all()
+    assert desc == "the active segmentation"
+
+
+def test_restrict_empty_returns_none(qtbot, monkeypatch):
+    """No pixels survive the restriction → (None, desc) so the caller can bail."""
+    panel, _viewer_win, _repo, _model = _build(qtbot, monkeypatch)
+    labels = np.zeros((10, 10), dtype=np.int32)  # no cells
+    mask = np.ones((10, 10), dtype=np.uint8)
+
+    out, _desc = panel._restrict_to_cells(mask, labels)
+    assert out is None
+
+
+def test_segment_with_restrict_notes_restriction(qtbot, monkeypatch):
+    """Checkbox on + filter → window opens on the filtered cell and the status
+    reports the restriction."""
+    panel, _viewer_win, _repo, model = _build(qtbot, monkeypatch)
+    panel._restrict_cb.setChecked(True)
+    model.session.set_filter(frozenset({1}))  # the fixture's only cell
+
+    panel._on_segment()
+
+    assert panel._window is not None
+    qtbot.addWidget(panel._window)
+    assert "restricted to 1 filtered cell" in panel._status.text()
+
+
+def test_segment_with_restrict_empty_filter_bails(qtbot, monkeypatch):
+    """Checkbox on + filter selecting a non-existent cell → no window, clear
+    status, and the button is re-enabled."""
+    panel, _viewer_win, _repo, model = _build(qtbot, monkeypatch)
+    panel._restrict_cb.setChecked(True)
+    model.session.set_filter(frozenset({999}))  # no such label
+
+    panel._on_segment()
+
+    assert panel._window is None
+    assert "No particles inside" in panel._status.text()
+    assert panel._segment_btn.isEnabled() is True
 
 
 def test_resolve_requires_channel(qtbot, monkeypatch):

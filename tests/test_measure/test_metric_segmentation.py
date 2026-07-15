@@ -51,6 +51,45 @@ def test_edge_skirt_parity_with_analyze_particles_detail():
     )
 
 
+def test_laplacian_variance_parity_with_analyze_particles_detail():
+    """The emitter's per-particle laplacian_variance equals the CSV path's values,
+    in the same per-cell iteration order — the metric is offered by reusing the
+    shared sharpness helper, so it must match particles.csv by construction."""
+    assert "laplacian_variance" in SEGMENT_METRICS
+    img, labels, mask = _two_cell_fixture()
+    df = analyze_particles_detail({"C0": img}, labels, mask, min_area=1)
+    records, _global_labels, excluded = measure_metric_per_particle(
+        img, mask, labels, "laplacian_variance", min_area=1
+    )
+    assert excluded == 0
+    assert len(records) == len(df)
+    np.testing.assert_allclose(
+        [r["value"] for r in records],
+        df["laplacian_variance"].to_numpy(),
+        rtol=1e-6,
+        equal_nan=True,
+    )
+
+
+def test_tenengrad_parity_with_analyze_particles_detail():
+    """The emitter's per-particle tenengrad equals the CSV path's values, in the
+    same per-cell iteration order (reuses the shared sharpness helper)."""
+    assert "tenengrad" in SEGMENT_METRICS
+    img, labels, mask = _two_cell_fixture()
+    df = analyze_particles_detail({"C0": img}, labels, mask, min_area=1)
+    records, _global_labels, excluded = measure_metric_per_particle(
+        img, mask, labels, "tenengrad", min_area=1
+    )
+    assert excluded == 0
+    assert len(records) == len(df)
+    np.testing.assert_allclose(
+        [r["value"] for r in records],
+        df["tenengrad"].to_numpy(),
+        rtol=1e-6,
+        equal_nan=True,
+    )
+
+
 def test_area_matches_per_cell_particle_pixel_counts():
     """Area is per-cell particle pixel count (× px_area), matching the CSV's
     per-cell substrate — a blob straddling two cells is two particles, not one
@@ -162,13 +201,14 @@ def test_intensity_metric_parity():
         )
 
 
-def test_segment_metrics_set_includes_cnr_excludes_weak():
-    """The offered set is the validated family + CNR; the two weak sharpness
-    metrics are excluded."""
+def test_segment_metrics_set_includes_focus_family_and_cnr():
+    """The offered set is the two focus axes (edge-skirt + Laplacian variance),
+    size/intensity, and CNR; the weak boundary_gradient axis is excluded."""
     assert "edge_skirt_ratio" in SEGMENT_METRICS and "area" in SEGMENT_METRICS
+    assert "laplacian_variance" in SEGMENT_METRICS
+    assert "tenengrad" in SEGMENT_METRICS
     assert "cnr" in SEGMENT_METRICS
     assert "boundary_gradient" not in SEGMENT_METRICS
-    assert "laplacian_variance" not in SEGMENT_METRICS
 
 
 def test_cnr_metric_matches_measure_cnr():

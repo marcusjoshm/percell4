@@ -48,6 +48,7 @@ _PARTICLE_SHARPNESS_METRICS = (
     "edge_skirt_ratio",   # raw skirt mean / peak — high = haze past the edge (out of focus)
     "boundary_gradient",  # mean edge gradient / peak — high = steep edge (in focus)
     "laplacian_variance", # var(Laplacian) / mean^2 — high = sharp high-freq content (in focus)
+    "tenengrad",          # mean(Sobel grad^2) / mean^2 — high = strong edges (in focus)
 )
 # Per-particle geometric-validity flag column (channel-agnostic). True when the
 # particle geometry permits the skirt/derivative measurement at all; lets the
@@ -189,10 +190,20 @@ def _sharpness_for_particle(
     else:
         laplacian_variance = float("nan")
 
+    # Tenengrad: mean squared Sobel gradient over the particle (``grad`` is the
+    # Sobel magnitude, so grad^2 is the Tenengrad response). Mean (not sum) makes
+    # it size-independent; ÷ mean^2 makes it intensity-scale invariant like the
+    # Laplacian variance. High = strong in-particle edges = in focus.
+    if this_particle.any() and mean > 0.0:
+        tenengrad = float((grad[this_particle] ** 2).mean()) / (mean * mean)
+    else:
+        tenengrad = float("nan")
+
     return {
         "edge_skirt_ratio": edge_skirt_ratio,
         "boundary_gradient": boundary_gradient,
         "laplacian_variance": laplacian_variance,
+        "tenengrad": tenengrad,
     }
 
 
@@ -480,7 +491,7 @@ def analyze_particles_detail(
         median_intensity, mode_intensity, sg_ratio),
         then one ``{channel}_<metric>`` column per channel × metric in
         :data:`_PARTICLE_SHARPNESS_METRICS` (edge_skirt_ratio,
-        boundary_gradient, laplacian_variance), and finally the
+        boundary_gradient, laplacian_variance, tenengrad), and finally the
         channel-agnostic :data:`_SHARPNESS_COMPUTABLE_COL` flag. The sharpness
         columns are appended last so existing column order is unchanged.
     """

@@ -63,7 +63,7 @@ def _run(tmp_path: Path) -> Path:
 
 
 def test_sharpness_columns_reach_particles_csv(tmp_path):
-    """The three per-channel sharpness columns + validity flag land in
+    """The per-channel sharpness columns + validity flag land in
     particles.csv end-to-end, with populated (non-all-NaN) values."""
     rf = _run(tmp_path)
     parts = pd.read_csv(rf / "particles.csv")

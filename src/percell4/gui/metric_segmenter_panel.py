@@ -15,8 +15,10 @@ particle substrate (matching ``particles.csv``); CNR uses the global substrate
 
 State ownership: this is a **Creator** — only the window's Save writes
 ``session.active_mask`` (via ``AcceptPunctaMask``); the metric picker, the
-source-mask combo, and the window's divider/axis controls are Actions that write
-no session field.
+source-mask combo, the "Restrict to active segmentation" checkbox (an Action
+that *reads* ``filter_ids`` / ``active_segmentation`` to confine the source mask
+to the filtered cells — or every cell when no filter is set), and the window's
+divider/axis controls are Actions that write no session field.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from typing import Any
 
 import numpy as np
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -39,10 +42,12 @@ from percell4.gui import theme
 from percell4.model import CellDataModel
 
 # Friendly picker labels -> emitter metric keys (a subset validated against
-# SEGMENT_METRICS at construction). The two weak sharpness metrics
-# (boundary_gradient / laplacian_variance) are intentionally not offered.
+# SEGMENT_METRICS at construction). The weak sharpness metric boundary_gradient
+# is intentionally not offered.
 _METRIC_CHOICES: list[tuple[str, str]] = [
     ("Edge-skirt ratio (focus)", "edge_skirt_ratio"),
+    ("Variance of Laplacian (focus)", "laplacian_variance"),
+    ("Tenengrad (focus)", "tenengrad"),
     ("Area / size", "area"),
     ("Mean intensity", "mean_intensity"),
     ("Max intensity", "max_intensity"),
@@ -101,6 +106,7 @@ class MetricSegmenterPanel(QWidget):
         self._measure_worker = None
         self._window = None
         self._pending_source: str | None = None
+        self._pending_restrict_note: str = ""
         # Guard: only offer metrics the emitter actually supports.
         self._choices = [(lbl, key) for lbl, key in _METRIC_CHOICES if key in SEGMENT_METRICS]
         self._build_ui()
@@ -131,7 +137,9 @@ class MetricSegmenterPanel(QWidget):
         self._metric.addItems([lbl for lbl, _ in self._choices])
         self._metric.setToolTip(
             "Metric to histogram + threshold. Edge-skirt ratio is the validated "
-            "focus axis (low = in-focus). Size/intensity/CNR also available."
+            "focus axis (low = in-focus); Variance of Laplacian and Tenengrad are "
+            "classic focus measures (high = in-focus). Size/intensity/CNR also "
+            "available."
         )
         # Wire the picker so a mid-session change is not a silent no-op: any open
         # window (in the previous metric's units) is closed so its stale divider
@@ -139,6 +147,14 @@ class MetricSegmenterPanel(QWidget):
         self._metric.currentIndexChanged.connect(self._on_metric_changed)
         metric_row.addWidget(self._metric)
         layout.addLayout(metric_row)
+
+        self._restrict_cb = QCheckBox("Restrict to active segmentation")
+        self._restrict_cb.setToolTip(
+            "Only measure particles inside the active segmentation's cells.\n"
+            "With a cell filter active, restricts further to the filtered "
+            "cells; with no filter, uses every cell in the segmentation."
+        )
+        layout.addWidget(self._restrict_cb)
 
         self._segment_btn = QPushButton("Segment by metric (interactive)")
         self._segment_btn.setStyleSheet(
@@ -253,6 +269,31 @@ class MetricSegmenterPanel(QWidget):
             return None
         return image, labels, feature_mask, source
 
+    def _restrict_to_cells(self, feature_mask, labels):
+        """Zero out source-mask pixels outside the allowed cells.
+
+        Allowed cells are the cell filter's ids when a filter is active, else
+        every labelled cell in the active segmentation. Returns
+        ``(restricted_mask, description)`` or ``(None, description)`` when the
+        restriction leaves no particles to segment. Rank-agnostic — works for a
+        single ``(H, W)`` frame and a ``(T, H, W)`` stack (the filter's global
+        label ids apply across every frame).
+        """
+        filtered = self.data_model.filtered_ids  # set[int] | None
+        lab = np.asarray(labels)
+        if filtered is not None:
+            allowed = np.isin(lab, list(filtered))
+            n = len(filtered)
+            desc = f"{n} filtered cell{'s' if n != 1 else ''}"
+        else:
+            allowed = lab > 0
+            desc = "the active segmentation"
+        fm = np.asarray(feature_mask)
+        restricted = np.where(allowed, fm, 0).astype(fm.dtype, copy=False)
+        if not restricted.any():
+            return None, desc
+        return restricted, desc
+
     # ── metric change ────────────────────────────────────────────
 
     def _on_metric_changed(self, _index: int) -> None:
@@ -278,13 +319,23 @@ class MetricSegmenterPanel(QWidget):
         metric = self._selected_metric()
         px = self._pixel_size_um(self._get_store())
 
+        restrict_note = ""
+        if self._restrict_cb.isChecked():
+            feature_mask, desc = self._restrict_to_cells(feature_mask, labels)
+            if feature_mask is None:
+                self._show_status(f"No particles inside {desc} to segment")
+                return
+            restrict_note = f", restricted to {desc}"
+        self._pending_restrict_note = restrict_note
+
         self._pending_source = source
         self._segment_btn.setEnabled(False)
         is_timelapse = np.asarray(image).ndim == 3
         worker_fn = run_metric_measure_stack if is_timelapse else run_metric_measure
         tl = f" across {np.asarray(image).shape[0]} timepoints" if is_timelapse else ""
         self._show_status(
-            f"Measuring {self._selected_metric_label()} for '{source}'{tl}..."
+            f"Measuring {self._selected_metric_label()} for "
+            f"'{source}'{tl}{restrict_note}..."
         )
 
         from percell4.gui.workers import Worker
@@ -343,5 +394,6 @@ class MetricSegmenterPanel(QWidget):
         self._window.destroyed.connect(lambda *_: self._refresh_masks())
         note = f", {excluded} excluded" if excluded else ""
         self._show_status(
-            f"{label} segmenter open for '{source}' ({len(records)} particles{note})"
+            f"{label} segmenter open for '{source}' "
+            f"({len(records)} particles{note}){self._pending_restrict_note}"
         )

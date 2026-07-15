@@ -2456,15 +2456,25 @@ widgets:
     keystroke: null
     notes: "Picks the per-particle metric. currentIndexChanged closes any open (stale-unit) window and sets a status note; writes no session field."
 
+  - id: metric_segmenter_panel.restrict_checkbox
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QCheckBox
+    handler: null
+    reads: [filter_ids, active_segmentation]
+    writes: []
+    keystroke: null
+    notes: "When checked, _on_segment confines the source mask to the active segmentation's cells before measuring — to the filtered cells when a cell filter is active, else every labelled cell. Read at segment time (no toggle handler); writes no session field."
+
   - id: metric_segmenter_panel.segment_button
     class: Action
     path: src/percell4/gui/metric_segmenter_panel.py
     widget_type: QPushButton
     handler: _on_segment
-    reads: [active_channel, active_segmentation]
+    reads: [active_channel, active_segmentation, filter_ids]
     writes: []
     keystroke: null
-    notes: "Measures the metric off-thread and opens the MetricSegmenterWindow. Reads active_channel/active_segmentation for the measurement inputs; writes NO session field (the window's Save is the sole Creator)."
+    notes: "Measures the metric off-thread and opens the MetricSegmenterWindow. Reads active_channel/active_segmentation for the measurement inputs, plus filter_ids when the Restrict checkbox is on; writes NO session field (the window's Save is the sole Creator)."
 
   - id: cnr_segmenter.save_button
     class: Creator
