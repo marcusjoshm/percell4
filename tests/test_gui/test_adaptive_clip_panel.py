@@ -687,3 +687,100 @@ def test_segment_no_foci_shows_no_window(qtbot, monkeypatch):
     panel._on_segment_cnr()
 
     assert panel._cnr_segmenter is None
+
+
+# ── U3: largest-only single-pass dispatch ────────────────────────────────────
+
+
+def _spy_domain(monkeypatch):
+    """Wrap the two domain entry points with call counters, delegating to the real ones."""
+    import percell4.domain.measure.auto_extraction as ae
+
+    calls = {"largest": 0, "auto": 0}
+    real_largest, real_auto = ae.extract_largest_only, ae.auto_extract
+
+    def spy_largest(*a, **k):
+        calls["largest"] += 1
+        return real_largest(*a, **k)
+
+    def spy_auto(*a, **k):
+        calls["auto"] += 1
+        return real_auto(*a, **k)
+
+    monkeypatch.setattr(ae, "extract_largest_only", spy_largest)
+    monkeypatch.setattr(ae, "auto_extract", spy_auto)
+    return calls
+
+
+def test_largest_only_dispatches_to_extract_largest_only(qtbot, monkeypatch):
+    """Checked -> the coarse-only domain call runs (and the two-pass one does not)."""
+    calls = _spy_domain(monkeypatch)
+    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
+    panel._settings._largest_only.setChecked(True)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert calls == {"largest": 1, "auto": 0}
+    assert "m" in repo.masks
+    viewer_win.add_mask.assert_called_once()
+
+
+def test_default_off_path_still_calls_auto_extract(qtbot, monkeypatch):
+    """Box unchecked (default) -> the two-pass path is untouched (regression guard)."""
+    calls = _spy_domain(monkeypatch)
+    panel, _model, repo, _viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert calls == {"largest": 0, "auto": 1}
+
+
+def test_largest_only_needs_segmentation(qtbot, monkeypatch):
+    """Largest-only is per-cell, so no active segmentation -> abort, nothing saved."""
+    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch)  # no segmentation
+    panel._settings._largest_only.setChecked(True)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert repo.masks == {}
+    viewer_win.add_mask.assert_not_called()
+
+
+def test_largest_only_no_smallest_backfill(qtbot, monkeypatch):
+    """No fine pass -> the smallest-Ø readout is not back-filled after the run."""
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
+    panel._settings._largest_only.setChecked(True)
+    filled: list = []
+    monkeypatch.setattr(panel._settings, "set_smallest_value", lambda v: filled.append(v))
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    assert filled == []
+    assert panel._pending_ae_auto is False
+
+
+def test_largest_only_prints_mode_to_terminal(qtbot, monkeypatch, capsys):
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
+    panel._settings._largest_only.setChecked(True)
+    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
+
+    panel._on_run()
+
+    out = capsys.readouterr().out.lower()
+    assert "largest particle only" in out
+
+
+def test_run_adaptive_auto_extract_largest_only_flag():
+    """The 2D worker body honours largest_only -> a largest-only report."""
+    img = _blob_image()
+    labels = _labels_one_cell()
+    mask, report = panel_module.run_adaptive_auto_extract(
+        img, labels, None, 1.0, 2, largest_only=True
+    )
+    assert report.largest_only is True
+    assert report.fine_window == 0
+    assert mask.shape == img.shape

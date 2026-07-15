@@ -28,18 +28,31 @@ logger = logging.getLogger(__name__)
 
 
 def run_adaptive_auto_extract(
-    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px
+    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px, largest_only=False
 ):
-    """Worker body for the two-pass auto-extraction routine (per-cell).
+    """Worker body for the auto-extraction routine (per-cell).
 
-    Runs :func:`percell4.domain.measure.auto_extraction.auto_extract`: a fine pass
-    at k=1 (window from ``smallest_particle_px`` — measured by LoG when it is
-    ``None``, else ``3 ×`` it) plus, when the LoG-measured largest particle exceeds
-    it, a coarse pass (window = 3 × largest, k = the noise-symmetry floor),
-    OR-unioned with hole-filling. ``min_spot_px`` filters the union. Returns
-    ``(mask uint8, report)`` where ``report`` is the :class:`AutoExtractReport`.
-    Pure (no Qt) so it is worker-safe.
+    Default (``largest_only=False``): the two-pass
+    :func:`percell4.domain.measure.auto_extraction.auto_extract` — a fine pass at
+    k=1 (window from ``smallest_particle_px`` — measured by LoG when it is ``None``,
+    else ``3 ×`` it) plus, when the LoG-measured largest particle exceeds it, a
+    coarse pass (window = 3 × largest, k = the noise-symmetry floor), OR-unioned
+    with hole-filling. ``largest_only=True``: the single coarse pass
+    (:func:`extract_largest_only`) sized to the largest particle, skipping the fine
+    pass — ``smallest_particle_px`` is ignored. ``min_spot_px`` filters the result.
+    Returns ``(mask uint8, report)`` where ``report`` is the
+    :class:`AutoExtractReport`. Pure (no Qt) so it is worker-safe.
     """
+    if largest_only:
+        from percell4.domain.measure.auto_extraction import extract_largest_only
+
+        return extract_largest_only(
+            image,
+            labels,
+            presmooth_sigma_px=presmooth_sigma_px,
+            min_spot_px=min_spot_px,
+        )
+
     from percell4.domain.measure.auto_extraction import auto_extract
 
     mask, report = auto_extract(
@@ -53,7 +66,7 @@ def run_adaptive_auto_extract(
 
 
 def run_adaptive_auto_extract_stack(
-    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px
+    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px, largest_only=False
 ):
     """Worker body for a time-lapse ``(T,H,W)`` channel: auto-extract each frame.
 
@@ -61,13 +74,14 @@ def run_adaptive_auto_extract_stack(
     frame independently — so every timepoint gets its OWN largest-particle sizing,
     coarse window and noise floor (the multi-time-point 'treat each frame as its own
     image' behaviour). Stacks the per-frame masks into ``(T,H,W)``. A frame with no
-    detectable particles in auto-detect mode (``smallest_particle_px is None``) yields
-    an empty plane rather than aborting the whole run (R9: the dissolved end of a
-    washout). Returns ``(mask (T,H,W) uint8, reports list[AutoExtractReport | None])``;
+    detectable particles yields an empty plane rather than aborting the whole run
+    (R9: the dissolved end of a washout) — this covers both the auto-detect-smallest
+    case (``smallest_particle_px is None``) and ``largest_only`` (no sizable
+    particle). Returns ``(mask (T,H,W) uint8, reports list[AutoExtractReport | None])``;
     a frame that degraded to empty has a ``None`` report. Pure (no Qt) so it is
     unit-testable and worker-safe.
     """
-    from percell4.domain.measure.auto_extraction import NoParticlesFoundError, auto_extract
+    from percell4.domain.measure.auto_extraction import NoParticlesFoundError
 
     image = np.asarray(image)
     labels = np.asarray(labels)
@@ -75,16 +89,17 @@ def run_adaptive_auto_extract_stack(
     reports: list = []
     for t in range(image.shape[0]):
         try:
-            mask_t, report_t = auto_extract(
+            mask_t, report_t = run_adaptive_auto_extract(
                 image[t],
                 labels[t],
-                smallest_particle_px=smallest_particle_px,
-                presmooth_sigma_px=presmooth_sigma_px,
-                min_spot_px=min_spot_px,
+                smallest_particle_px,
+                presmooth_sigma_px,
+                min_spot_px,
+                largest_only=largest_only,
             )
         except NoParticlesFoundError:
-            # Auto-detect found no particles to size this frame — a recoverable empty
-            # frame, not a failed run (R9). Only raised in auto-detect mode; genuine
+            # No particle to size this frame — a recoverable empty frame, not a failed
+            # run (R9). Raised by auto-detect-smallest and by largest_only; genuine
             # errors propagate to the worker's error signal.
             mask_t = np.zeros(labels[t].shape, dtype=np.uint8)
             report_t = None
@@ -360,6 +375,7 @@ class AdaptiveClipPanel(QWidget):
         """Print the Adaptive Local Clipping (auto-extraction) settings (debug)."""
         print(
             "\n===== Adaptive Local Clipping run =====\n"
+            f"  largest particle only      : {config.largest_only}\n"
             f"  gaussian_sigma             : {config.gaussian_sigma}\n"
             f"  smallest particle Ø        : {config.smallest_particle_value} "
             f"{config.smallest_particle_unit}\n"
@@ -427,9 +443,13 @@ class AdaptiveClipPanel(QWidget):
         from percell4.domain.measure.adaptive_clip import resolve_min_area_px
 
         pixel_size_um = self._pixel_size_um(store)
-        # Smallest particle: auto-detected (None) by default, or the manual
-        # optical-resolution override resolved to px (px as-is, or µm via pixel size).
-        if config.auto_extract_smallest_auto:
+        # Largest-only skips the fine pass entirely, so the smallest particle is
+        # irrelevant (the worker ignores it). Otherwise resolve the smallest: auto-
+        # detected (None) by default, or the manual optical-resolution override to px
+        # (px as-is, or µm via pixel size).
+        if config.largest_only:
+            smallest_px = None
+        elif config.auto_extract_smallest_auto:
             smallest_px = None
         else:
             if config.smallest_particle_unit == "um":
@@ -466,22 +486,31 @@ class AdaptiveClipPanel(QWidget):
             return
 
         self._pending_name = mask_name
-        # Remember whether to back-fill the smallest-Ø readout after the run.
-        self._pending_ae_auto = config.auto_extract_smallest_auto
+        # Back-fill the smallest-Ø readout only when the fine pass auto-detected it.
+        # Largest-only has no fine pass, so there is no smallest to surface.
+        self._pending_ae_auto = config.auto_extract_smallest_auto and not config.largest_only
         self._run_btn.setEnabled(False)
         self._settings.set_enabled(False)
-        smallest_note = (
-            "auto-detect (LoG)"
-            if smallest_px is None
-            else f"{smallest_px:.2f} px (from {config.smallest_particle_value:g} "
-            f"{config.smallest_particle_unit})"
-        )
-        print(
-            f"  [auto-extract] smallest particle: {smallest_note}; "
-            f"min particle {min_spot_px} px² (union filter)",
-            flush=True,
-        )
-        self._show_status(f"Detecting (auto extraction, smallest {smallest_note})...")
+        if config.largest_only:
+            print(
+                f"  [auto-extract] largest-only single pass (coarse); "
+                f"min particle {min_spot_px} px² filter",
+                flush=True,
+            )
+            self._show_status("Detecting (largest particle only, single pass)...")
+        else:
+            smallest_note = (
+                "auto-detect (LoG)"
+                if smallest_px is None
+                else f"{smallest_px:.2f} px (from {config.smallest_particle_value:g} "
+                f"{config.smallest_particle_unit})"
+            )
+            print(
+                f"  [auto-extract] smallest particle: {smallest_note}; "
+                f"min particle {min_spot_px} px² (union filter)",
+                flush=True,
+            )
+            self._show_status(f"Detecting (auto extraction, smallest {smallest_note})...")
 
         from percell4.gui.workers import Worker
 
@@ -497,13 +526,14 @@ class AdaptiveClipPanel(QWidget):
             smallest_px,
             config.gaussian_sigma,
             min_spot_px,
+            largest_only=config.largest_only,
         )
         self._worker.finished.connect(self._on_auto_extract_done)
         self._worker.error.connect(self._on_detect_error)
         self._worker.start()
 
     def _print_auto_extract_report(self, report) -> None:
-        """Print the two-pass auto-extraction passes/sizes to the terminal (debug)."""
+        """Print the auto-extraction passes/sizes to the terminal (debug)."""
         if report.coarse_k_mean is not None:
             coarse_k = (
                 f"coarse k (per-cell): mean {report.coarse_k_mean:.2f} "
@@ -512,6 +542,17 @@ class AdaptiveClipPanel(QWidget):
             )
         else:
             coarse_k = "coarse k (per-cell): n/a (single pass)"
+        if report.largest_only:
+            print(
+                f"  [auto-extract] largest-only single pass\n"
+                f"    passes {report.passes} "
+                f"(largest Ø {report.largest_particle_px} px)\n"
+                f"    {coarse_k}\n"
+                f"    presmooth σ {report.presmooth_sigma_px}; n_cells {report.n_cells}; "
+                f"components {report.n_components}; area {report.area_px} px",
+                flush=True,
+            )
+            return
         print(
             f"  [auto-extract] smallest: {report.smallest_source}\n"
             f"    passes {report.passes} "
