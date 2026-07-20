@@ -351,6 +351,20 @@ def _dataset_count_label(n: int) -> str:
     return f"{n} dataset" if n == 1 else f"{n} datasets"
 
 
+# Snapshot of prior mask picks, keyed by (signature, split_key) — split_key is
+# None for a remainder group, a frozenset of member names for a breakout split.
+_PriorSelections = dict[tuple[tuple[str, ...], frozenset[str] | None], set[str]]
+
+
+def _selected_texts(widget: QListWidget) -> list[str]:
+    """Texts of the currently-selected items in a QListWidget, in row order."""
+    return [
+        widget.item(i).text()
+        for i in range(widget.count())
+        if widget.item(i).isSelected()
+    ]
+
+
 class _MaskGroup:
     """One rendered group of datasets sharing an available-mask signature.
 
@@ -772,7 +786,7 @@ class WorkflowConfigDialog(QDialog):
         self._mask_breakouts: dict[tuple[str, ...], list[frozenset[str]]] = {}
         # Seed selection for a just-created split, consumed on the next refresh
         # so the new sub-group inherits its parent's current picks.
-        self._split_seeds: dict[tuple[tuple[str, ...], frozenset[str]], set[str]] = {}
+        self._split_seeds: _PriorSelections = {}
         box.toggled.connect(self._on_mask_reuse_toggled)
         return box
 
@@ -819,12 +833,8 @@ class WorkflowConfigDialog(QDialog):
         # across regroup; indices and display names shift when datasets are
         # added/removed. Then fold in any pending split seed so a just-created
         # sub-group inherits its parent's picks.
-        prior: dict[tuple[tuple[str, ...], frozenset[str] | None], set[str]] = {
-            (group.signature, group.split_key): {
-                group.list_widget.item(i).text()
-                for i in range(group.list_widget.count())
-                if group.list_widget.item(i).isSelected()
-            }
+        prior: _PriorSelections = {
+            (group.signature, group.split_key): set(_selected_texts(group.list_widget))
             for group in getattr(self, "_mask_groups", [])
             if group.has_masks and group.list_widget is not None
         }
@@ -839,6 +849,15 @@ class WorkflowConfigDialog(QDialog):
             (pd.display_name, self._dataset_masks(pd))
             for pd in self._pending_datasets
         )
+        # Prune breakout partitions for signatures no longer in the queue, so a
+        # remove-all-then-re-add doesn't resurrect a stale split (group_by_mask_
+        # signature only emits signatures that still have a present member).
+        live_sigs = {plan.signature for plan in plans}
+        self._mask_breakouts = {
+            sig: splits
+            for sig, splits in self._mask_breakouts.items()
+            if sig in live_sigs
+        }
         all_no_mask = bool(plans) and all(not plan.signature for plan in plans)
         for plan in plans:
             if not plan.signature:  # no-mask group — single non-selectable row
@@ -850,12 +869,12 @@ class WorkflowConfigDialog(QDialog):
                 )
                 continue
             # Subdivide this signature into remainder + breakout sub-groups.
-            for split_key, names in self._subgroups_for(
+            for split_key, names, prior_key in self._subgroups_for(
                 plan.signature, plan.member_names
             ):
                 members = [by_name[name] for name in names]
                 group = self._make_mask_group(
-                    plan.signature, members, split_key, prior
+                    plan.signature, members, split_key, prior, prior_key=prior_key
                 )
                 self._mask_groups.append(group)
                 form.addRow(
@@ -864,35 +883,40 @@ class WorkflowConfigDialog(QDialog):
 
     def _subgroups_for(
         self, signature: tuple[str, ...], member_names: list[str]
-    ) -> list[tuple[frozenset[str] | None, list[str]]]:
+    ) -> list[tuple[frozenset[str] | None, list[str], frozenset[str] | None]]:
         """Partition a signature's members into remainder + breakout sub-groups.
 
-        Returns ``(split_key, names)`` pairs: the remainder first
-        (``split_key=None``), then one entry per non-empty split. Reconciles the
-        stored breakout partition against the current membership — dropped
-        datasets fall out of their split, and new same-signature datasets land
-        in the remainder. Re-normalizes ``_mask_breakouts`` so emptied splits do
-        not linger.
+        Returns ``(split_key, names, prior_key)`` triples: the remainder first
+        (``split_key=None``), then one entry per non-empty split. ``prior_key``
+        is the split's pre-reconciliation frozenset (``None`` for the remainder),
+        so the caller can recover a snapshot stored under the larger key when a
+        split shrinks. Reconciles the stored partition against the current
+        membership — dropped datasets fall out of their split, new same-signature
+        datasets land in the remainder — and re-normalizes ``_mask_breakouts`` so
+        emptied splits do not linger.
         """
         stored = self._mask_breakouts.get(signature, [])
         present = set(member_names)
-        reconciled: list[frozenset[str]] = []
+        # (original stored split, reconciled-to-present split)
+        reconciled: list[tuple[frozenset[str], frozenset[str]]] = []
         for split in stored:
             keep = frozenset(n for n in split if n in present)
             if keep:
-                reconciled.append(keep)
+                reconciled.append((split, keep))
         if reconciled:
-            self._mask_breakouts[signature] = reconciled
+            self._mask_breakouts[signature] = [kept for _orig, kept in reconciled]
         else:
             self._mask_breakouts.pop(signature, None)
 
-        split_members = set().union(*reconciled) if reconciled else set()
+        split_members = (
+            set().union(*[kept for _orig, kept in reconciled]) if reconciled else set()
+        )
         remainder = [n for n in member_names if n not in split_members]
-        out: list[tuple[frozenset[str] | None, list[str]]] = []
+        out: list[tuple[frozenset[str] | None, list[str], frozenset[str] | None]] = []
         if remainder:
-            out.append((None, remainder))
-        for split in reconciled:
-            out.append((split, [n for n in member_names if n in split]))
+            out.append((None, remainder, None))
+        for original, kept in reconciled:
+            out.append((kept, [n for n in member_names if n in kept], original))
         return out
 
     def _make_mask_group(
@@ -900,9 +924,16 @@ class WorkflowConfigDialog(QDialog):
         signature: tuple[str, ...],
         members: list[_PendingDataset],
         split_key: frozenset[str] | None,
-        prior: dict[tuple[tuple[str, ...], frozenset[str] | None], set[str]],
+        prior: _PriorSelections,
+        *,
+        prior_key: frozenset[str] | None = None,
     ) -> _MaskGroup:
-        """Build a _MaskGroup + its shared mask list, restoring prior picks."""
+        """Build a _MaskGroup + its shared mask list, restoring prior picks.
+
+        Falls back to ``prior_key`` when the snapshot has no entry for the
+        current ``split_key`` — this migrates a selection when a split shrinks
+        (a member was removed), so the surviving members keep their masks.
+        """
         if not signature:  # no-mask group — no selectable list
             return _MaskGroup(
                 signature=signature,
@@ -911,13 +942,16 @@ class WorkflowConfigDialog(QDialog):
                 has_masks=False,
                 split_key=split_key,
             )
+        keep = prior.get((signature, split_key))
+        if keep is None and prior_key is not None and prior_key != split_key:
+            keep = prior.get((signature, prior_key))
+        keep = keep or set()
         lst = QListWidget()
         # MultiSelection: a plain click toggles an item on/off, so a previously
         # chosen mask unselects with one click — no Ctrl modifier required.
         lst.setSelectionMode(QAbstractItemView.MultiSelection)
         lst.setMaximumHeight(_MASK_LIST_MAX_H)
         lst.addItems(list(signature))
-        keep = prior.get((signature, split_key), set())
         for i in range(lst.count()):
             if lst.item(i).text() in keep:
                 lst.item(i).setSelected(True)
@@ -1068,22 +1102,13 @@ class WorkflowConfigDialog(QDialog):
         picks, then rebuilds. No-op unless at least one — but not all — members
         are checked (splitting all would leave an empty remainder).
         """
-        selected = frozenset(
-            members_list.item(i).text()
-            for i in range(members_list.count())
-            if members_list.item(i).isSelected()
-        )
+        selected = frozenset(_selected_texts(members_list))
         if not selected or len(selected) >= members_list.count():
             return
         remainder = self._find_mask_group(signature, None)
         seed: set[str] = set()
         if remainder is not None and remainder.list_widget is not None:
-            lw = remainder.list_widget
-            seed = {
-                lw.item(i).text()
-                for i in range(lw.count())
-                if lw.item(i).isSelected()
-            }
+            seed = set(_selected_texts(remainder.list_widget))
         self._mask_breakouts.setdefault(signature, []).append(selected)
         self._split_seeds[(signature, selected)] = seed
         self._refresh_mask_picker()
@@ -1118,12 +1143,7 @@ class WorkflowConfigDialog(QDialog):
         for group in getattr(self, "_mask_groups", []):
             if not group.has_masks or group.list_widget is None:
                 continue
-            lst = group.list_widget
-            chosen = [
-                lst.item(i).text()
-                for i in range(lst.count())
-                if lst.item(i).isSelected()
-            ]
+            chosen = _selected_texts(group.list_widget)
             if not chosen:
                 continue
             for pd in group.members:

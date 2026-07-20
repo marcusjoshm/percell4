@@ -378,3 +378,159 @@ def test_split_button_click_splits_group(dialog, tmp_path):
     g.split_btn.click()  # drive the wired button, not the handler directly
     assert {pd.display_name for pd in _group_for(dialog, "DS1").members} == {"DS1"}
     assert {pd.display_name for pd in _group_for(dialog, "DS2").members} == {"DS2"}
+
+
+def _remove_dataset(dialog, name):
+    """Remove the dataset named ``name`` via the real Remove-button path."""
+    tree = dialog._dataset_tree
+    for i in range(tree.topLevelItemCount()):
+        if tree.topLevelItem(i).text(0) == name:
+            tree.setCurrentItem(tree.topLevelItem(i))
+            break
+    dialog._on_remove_dataset()
+
+
+def test_merge_button_click_merges_group(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1"]) for n in ("DS1", "DS2")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.members_list, {"DS2"})
+    dialog._split_selected(g.signature, g.members_list)
+    gs = _group_for(dialog, "DS2")
+    assert gs.merge_btn is not None
+    gs.merge_btn.click()  # drive the wired merge button, not the handler directly
+    selectable = [x for x in dialog._mask_groups if x.has_masks]
+    assert len(selectable) == 1
+    assert {pd.display_name for pd in selectable[0].members} == {"DS1", "DS2"}
+
+
+def test_split_noop_when_nothing_selected(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1"]) for n in ("DS1", "DS2")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    dialog._split_selected(g.signature, g.members_list)  # nothing checked
+    assert dialog._mask_breakouts == {}
+    assert len([x for x in dialog._mask_groups if x.has_masks]) == 1
+
+
+def test_split_rejected_when_all_members_selected(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1"]) for n in ("DS1", "DS2")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.members_list, {"DS1", "DS2"})  # all -> would empty remainder
+    dialog._split_selected(g.signature, g.members_list)
+    assert dialog._mask_breakouts == {}
+    assert len([x for x in dialog._mask_groups if x.has_masks]) == 1
+
+
+def test_split_subgroup_cannot_be_split_further(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1"]) for n in ("DS1", "DS2", "DS3", "DS4")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.members_list, {"DS3", "DS4"})
+    dialog._split_selected(g.signature, g.members_list)  # split {DS3, DS4}
+    gs = _group_for(dialog, "DS3")
+    assert gs.split_key == frozenset({"DS3", "DS4"})
+    assert len(gs.members) == 2
+    # A breakout sub-group offers no further split.
+    assert gs.split_btn is None
+
+
+def test_two_simultaneous_splits_from_one_signature(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1", "m2"]) for n in ("DS1", "DS2", "DS3", "DS4")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.members_list, {"DS4"})
+    dialog._split_selected(g.signature, g.members_list)  # split {DS4}
+    g2 = _group_for(dialog, "DS1")  # remainder {DS1, DS2, DS3}
+    _select(g2.members_list, {"DS3"})
+    dialog._split_selected(g2.signature, g2.members_list)  # split {DS3}
+
+    selectable = [x for x in dialog._mask_groups if x.has_masks]
+    assert len(selectable) == 3  # remainder {DS1,DS2} + split {DS3} + split {DS4}
+    # Independent selections per sub-group all fan out per dataset.
+    _select(_group_for(dialog, "DS1").list_widget, {"m1"})  # remainder
+    _set_only(_group_for(dialog, "DS3").list_widget, "m2")
+    _set_only(_group_for(dialog, "DS4").list_widget, "m1")
+    assert dialog.existing_mask_selections == {
+        "DS1": ["m1"],
+        "DS2": ["m1"],
+        "DS3": ["m2"],
+        "DS4": ["m1"],
+    }
+
+
+def _set_only(list_widget, keep_text):
+    """Select exactly the item whose text == keep_text; deselect the rest."""
+    for i in range(list_widget.count()):
+        it = list_widget.item(i)
+        it.setSelected(it.text() == keep_text)
+
+
+def test_breakout_dropped_when_split_member_removed(dialog, tmp_path):
+    # A single-member split whose member is removed empties and is pruned.
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1"]) for n in ("DS1", "DS2", "DS3")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.members_list, {"DS3"})
+    dialog._split_selected(g.signature, g.members_list)
+    assert _group_for(dialog, "DS3").split_key == frozenset({"DS3"})
+    _remove_dataset(dialog, "DS3")
+    selectable = [x for x in dialog._mask_groups if x.has_masks]
+    assert len(selectable) == 1
+    assert selectable[0].split_key is None
+    assert {pd.display_name for pd in selectable[0].members} == {"DS1", "DS2"}
+    assert dialog._mask_breakouts == {}
+
+
+def test_split_shrink_preserves_surviving_member_selection(dialog, tmp_path):
+    # Removing ONE member of a multi-member split must not drop the survivors'
+    # selection (split_key shrinks {DS2,DS3} -> {DS2}). Regression for the
+    # split-key-shrink snapshot-miss bug.
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1", "m2"]) for n in ("DS1", "DS2", "DS3")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.list_widget, {"m1"})  # remainder selection
+    _select(g.members_list, {"DS2", "DS3"})
+    dialog._split_selected(g.signature, g.members_list)  # split {DS2, DS3}
+    gs = _group_for(dialog, "DS2")
+    assert gs.split_key == frozenset({"DS2", "DS3"})
+    _set_only(gs.list_widget, "m2")  # split selection = m2
+    assert dialog.existing_mask_selections == {
+        "DS1": ["m1"],
+        "DS2": ["m2"],
+        "DS3": ["m2"],
+    }
+    # Remove DS3 -> split shrinks to {DS2}; DS2 must KEEP its m2 pick.
+    _remove_dataset(dialog, "DS3")
+    assert _group_for(dialog, "DS2").split_key == frozenset({"DS2"})
+    assert dialog.existing_mask_selections == {"DS1": ["m1"], "DS2": ["m2"]}
+
+
+def test_stale_breakout_not_resurrected_after_remove_all(dialog, tmp_path):
+    # Remove ALL datasets of a split signature, then re-add the same files: the
+    # stale split must not resurrect. Regression for the un-pruned _mask_breakouts.
+    p1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1", "m2"])
+    p2 = _make_h5(tmp_path, "DS2", ["GFP"], ["m1", "m2"])
+    dialog._add_h5_paths([p1, p2])
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.members_list, {"DS2"})
+    dialog._split_selected(g.signature, g.members_list)
+    assert _group_for(dialog, "DS2").split_key is not None
+    _remove_dataset(dialog, "DS1")
+    _remove_dataset(dialog, "DS2")
+    assert dialog._mask_breakouts == {}  # pruned, not lingering
+    # Re-add the same files -> one group, no resurrected split.
+    dialog._add_h5_paths([p1, p2])
+    selectable = [x for x in dialog._mask_groups if x.has_masks]
+    assert len(selectable) == 1
+    assert selectable[0].split_key is None
+    assert {pd.display_name for pd in selectable[0].members} == {"DS1", "DS2"}
