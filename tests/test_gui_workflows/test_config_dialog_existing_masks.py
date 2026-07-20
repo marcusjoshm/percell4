@@ -284,3 +284,97 @@ def test_selection_signal_fans_to_all_members_and_enables_start(dialog, tmp_path
     g.list_widget.item(0).setSelected(True)
     assert dialog.existing_mask_selections == {"DS1": ["m1"], "DS2": ["m1"]}
     assert dialog._start_btn.isEnabled()
+
+
+# ── Breakout / per-group override (plan U4) ──────────────────────────────
+
+
+def test_split_creates_independent_subgroup_and_fans_out(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1", "m2"]) for n in ("DS1", "DS2", "DS3")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.list_widget, {"m1"})  # group selection = m1
+    # Split DS3 into its own sub-group.
+    _select(g.members_list, {"DS3"})
+    dialog._split_selected(g.signature, g.members_list)
+
+    gr = _group_for(dialog, "DS1")
+    gs = _group_for(dialog, "DS3")
+    assert gr is not gs
+    assert {pd.display_name for pd in gr.members} == {"DS1", "DS2"}
+    assert {pd.display_name for pd in gs.members} == {"DS3"}
+    assert gs.split_key == frozenset({"DS3"})
+    # Split seeded from the remainder selection (m1); one entry per dataset.
+    assert dialog.existing_mask_selections == {
+        "DS1": ["m1"],
+        "DS2": ["m1"],
+        "DS3": ["m1"],
+    }
+    # Give the split an independent selection (m2 only).
+    for i in range(gs.list_widget.count()):
+        it = gs.list_widget.item(i)
+        it.setSelected(it.text() == "m2")
+    assert dialog.existing_mask_selections == {
+        "DS1": ["m1"],
+        "DS2": ["m1"],
+        "DS3": ["m2"],
+    }
+
+
+def test_merge_back_returns_members_to_remainder(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1", "m2"]) for n in ("DS1", "DS2")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.members_list, {"DS2"})
+    dialog._split_selected(g.signature, g.members_list)
+    gs = _group_for(dialog, "DS2")
+    assert gs.split_key is not None
+    # Merge the split back.
+    dialog._merge_split(gs.signature, gs.split_key)
+    selectable = [x for x in dialog._mask_groups if x.has_masks]
+    assert len(selectable) == 1
+    assert {pd.display_name for pd in selectable[0].members} == {"DS1", "DS2"}
+    assert selectable[0].split_key is None
+
+
+def test_split_preserved_when_same_signature_dataset_added(dialog, tmp_path):
+    p1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1", "m2"])
+    p2 = _make_h5(tmp_path, "DS2", ["GFP"], ["m1", "m2"])
+    p3 = _make_h5(tmp_path, "DS3", ["GFP"], ["m1", "m2"])
+    dialog._add_h5_paths([p1, p2])
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    _select(g.list_widget, {"m1"})  # remainder selection
+    _select(g.members_list, {"DS2"})
+    dialog._split_selected(g.signature, g.members_list)
+    gs = _group_for(dialog, "DS2")
+    for i in range(gs.list_widget.count()):
+        it = gs.list_widget.item(i)
+        it.setSelected(it.text() == "m2")  # split selection
+
+    # Adding a same-signature dataset rebuilds; it joins the remainder and
+    # both sub-groups keep their selections.
+    dialog._add_h5_paths([p3])
+    assert {pd.display_name for pd in _group_for(dialog, "DS1").members} == {"DS1", "DS3"}
+    assert {pd.display_name for pd in _group_for(dialog, "DS2").members} == {"DS2"}
+    assert dialog.existing_mask_selections == {
+        "DS1": ["m1"],
+        "DS3": ["m1"],
+        "DS2": ["m2"],
+    }
+
+
+def test_split_button_click_splits_group(dialog, tmp_path):
+    paths = [_make_h5(tmp_path, n, ["GFP"], ["m1"]) for n in ("DS1", "DS2")]
+    dialog._add_h5_paths(paths)
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    assert g.split_btn is not None
+    # Expand to reveal the member list + split button, select DS2, click.
+    g.toggle_btn.setChecked(True)
+    _select(g.members_list, {"DS2"})
+    g.split_btn.click()  # drive the wired button, not the handler directly
+    assert {pd.display_name for pd in _group_for(dialog, "DS1").members} == {"DS1"}
+    assert {pd.display_name for pd in _group_for(dialog, "DS2").members} == {"DS2"}

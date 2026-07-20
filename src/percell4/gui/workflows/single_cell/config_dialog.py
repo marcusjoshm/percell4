@@ -361,6 +361,12 @@ class _MaskGroup:
     unchecked — so ``isEnabled()`` can't distinguish "no masks here" from
     "mask-reuse mode off". ``toggle_btn`` / ``members_list`` are the collapsible
     member-name affordance, present only for multi-member groups.
+
+    ``split_key`` identifies a breakout sub-group (U4): ``None`` for the
+    default/remainder group, or the ``frozenset`` of member display names split
+    off. Two ``_MaskGroup`` rows can share a ``signature`` but carry a different
+    ``split_key`` and hold independent selections. ``split_btn`` / ``merge_btn``
+    are the breakout controls.
     """
 
     __slots__ = (
@@ -370,6 +376,9 @@ class _MaskGroup:
         "has_masks",
         "toggle_btn",
         "members_list",
+        "split_key",
+        "split_btn",
+        "merge_btn",
     )
 
     def __init__(
@@ -379,15 +388,21 @@ class _MaskGroup:
         members: list[_PendingDataset],
         list_widget: QListWidget | None,
         has_masks: bool,
+        split_key: frozenset[str] | None = None,
         toggle_btn: QToolButton | None = None,
         members_list: QListWidget | None = None,
+        split_btn: QPushButton | None = None,
+        merge_btn: QPushButton | None = None,
     ) -> None:
         self.signature = signature
         self.members = members
         self.list_widget = list_widget
         self.has_masks = has_masks
+        self.split_key = split_key
         self.toggle_btn = toggle_btn
         self.members_list = members_list
+        self.split_btn = split_btn
+        self.merge_btn = merge_btn
 
 
 # ── Dialog ──────────────────────────────────────────────────────────────
@@ -751,6 +766,13 @@ class WorkflowConfigDialog(QDialog):
         # One row per _MaskGroup (datasets sharing an available-mask signature).
         # Rebuilt by _refresh_mask_picker whenever the queue changes.
         self._mask_groups: list[_MaskGroup] = []
+        # Breakout state (U4): per signature, the list of split-off member sets
+        # (the remainder is implicit — every member not in any split). Empty
+        # until the user splits a group.
+        self._mask_breakouts: dict[tuple[str, ...], list[frozenset[str]]] = {}
+        # Seed selection for a just-created split, consumed on the next refresh
+        # so the new sub-group inherits its parent's current picks.
+        self._split_seeds: dict[tuple[tuple[str, ...], frozenset[str]], set[str]] = {}
         box.toggled.connect(self._on_mask_reuse_toggled)
         return box
 
@@ -785,17 +807,20 @@ class WorkflowConfigDialog(QDialog):
 
         Datasets exposing an identical set of available ``/masks`` layers are
         collapsed into one shared multi-select list (``group_by_mask_signature``);
-        the no-mask group is rendered last and is non-selectable. Prior
-        selections are preserved by signature so a queue refresh (or re-open)
-        doesn't silently drop the user's picks.
+        the no-mask group is rendered last and is non-selectable. A signature
+        may be further partitioned into breakout sub-groups (U4). Prior
+        selections are preserved by (signature, split_key) so a queue refresh
+        (or re-open) doesn't silently drop the user's picks.
         """
         form = getattr(self, "_mask_form", None)
         if form is None:
             return
-        # Snapshot prior selections keyed by signature (stable across regroup;
-        # indices and display names shift when datasets are added/removed).
-        prior: dict[tuple[str, ...], set[str]] = {
-            group.signature: {
+        # Snapshot prior selections keyed by (signature, split_key) — stable
+        # across regroup; indices and display names shift when datasets are
+        # added/removed. Then fold in any pending split seed so a just-created
+        # sub-group inherits its parent's picks.
+        prior: dict[tuple[tuple[str, ...], frozenset[str] | None], set[str]] = {
+            (group.signature, group.split_key): {
                 group.list_widget.item(i).text()
                 for i in range(group.list_widget.count())
                 if group.list_widget.item(i).isSelected()
@@ -803,6 +828,8 @@ class WorkflowConfigDialog(QDialog):
             for group in getattr(self, "_mask_groups", [])
             if group.has_masks and group.list_widget is not None
         }
+        prior.update(getattr(self, "_split_seeds", {}))
+        self._split_seeds = {}
         while form.rowCount():
             form.removeRow(0)
         self._mask_groups = []
@@ -814,16 +841,66 @@ class WorkflowConfigDialog(QDialog):
         )
         all_no_mask = bool(plans) and all(not plan.signature for plan in plans)
         for plan in plans:
-            members = [by_name[name] for name in plan.member_names]
-            group = self._make_mask_group(plan.signature, members, prior)
-            self._mask_groups.append(group)
-            form.addRow(self._build_mask_group_row(group, all_no_mask=all_no_mask))
+            if not plan.signature:  # no-mask group — single non-selectable row
+                members = [by_name[name] for name in plan.member_names]
+                group = self._make_mask_group(plan.signature, members, None, prior)
+                self._mask_groups.append(group)
+                form.addRow(
+                    self._build_mask_group_row(group, all_no_mask=all_no_mask)
+                )
+                continue
+            # Subdivide this signature into remainder + breakout sub-groups.
+            for split_key, names in self._subgroups_for(
+                plan.signature, plan.member_names
+            ):
+                members = [by_name[name] for name in names]
+                group = self._make_mask_group(
+                    plan.signature, members, split_key, prior
+                )
+                self._mask_groups.append(group)
+                form.addRow(
+                    self._build_mask_group_row(group, all_no_mask=all_no_mask)
+                )
+
+    def _subgroups_for(
+        self, signature: tuple[str, ...], member_names: list[str]
+    ) -> list[tuple[frozenset[str] | None, list[str]]]:
+        """Partition a signature's members into remainder + breakout sub-groups.
+
+        Returns ``(split_key, names)`` pairs: the remainder first
+        (``split_key=None``), then one entry per non-empty split. Reconciles the
+        stored breakout partition against the current membership — dropped
+        datasets fall out of their split, and new same-signature datasets land
+        in the remainder. Re-normalizes ``_mask_breakouts`` so emptied splits do
+        not linger.
+        """
+        stored = self._mask_breakouts.get(signature, [])
+        present = set(member_names)
+        reconciled: list[frozenset[str]] = []
+        for split in stored:
+            keep = frozenset(n for n in split if n in present)
+            if keep:
+                reconciled.append(keep)
+        if reconciled:
+            self._mask_breakouts[signature] = reconciled
+        else:
+            self._mask_breakouts.pop(signature, None)
+
+        split_members = set().union(*reconciled) if reconciled else set()
+        remainder = [n for n in member_names if n not in split_members]
+        out: list[tuple[frozenset[str] | None, list[str]]] = []
+        if remainder:
+            out.append((None, remainder))
+        for split in reconciled:
+            out.append((split, [n for n in member_names if n in split]))
+        return out
 
     def _make_mask_group(
         self,
         signature: tuple[str, ...],
         members: list[_PendingDataset],
-        prior: dict[tuple[str, ...], set[str]],
+        split_key: frozenset[str] | None,
+        prior: dict[tuple[tuple[str, ...], frozenset[str] | None], set[str]],
     ) -> _MaskGroup:
         """Build a _MaskGroup + its shared mask list, restoring prior picks."""
         if not signature:  # no-mask group — no selectable list
@@ -832,6 +909,7 @@ class WorkflowConfigDialog(QDialog):
                 members=members,
                 list_widget=None,
                 has_masks=False,
+                split_key=split_key,
             )
         lst = QListWidget()
         # MultiSelection: a plain click toggles an item on/off, so a previously
@@ -839,7 +917,7 @@ class WorkflowConfigDialog(QDialog):
         lst.setSelectionMode(QAbstractItemView.MultiSelection)
         lst.setMaximumHeight(_MASK_LIST_MAX_H)
         lst.addItems(list(signature))
-        keep = prior.get(signature, set())
+        keep = prior.get((signature, split_key), set())
         for i in range(lst.count()):
             if lst.item(i).text() in keep:
                 lst.item(i).setSelected(True)
@@ -850,6 +928,7 @@ class WorkflowConfigDialog(QDialog):
             members=members,
             list_widget=lst,
             has_masks=True,
+            split_key=split_key,
         )
 
     def _build_mask_group_row(
@@ -858,9 +937,11 @@ class WorkflowConfigDialog(QDialog):
         """Container for one group row: header, optional member list, mask list.
 
         A singleton group shows the member name inline; a multi-member group
-        shows a collapse toggle that reveals the member names. The no-mask
-        group renders its header (and, when it is the only group, an inline
-        explanation) with no selectable list.
+        shows a collapse toggle that reveals the member names. The remainder of
+        a multi-member group offers a "Split selected" control; a breakout
+        sub-group offers "Merge back" (U4). The no-mask group renders its header
+        (and, when it is the only group, an inline explanation) with no
+        selectable list.
         """
         container = QWidget()
         v = QVBoxLayout(container)
@@ -879,19 +960,37 @@ class WorkflowConfigDialog(QDialog):
                 v.addWidget(msg)
             return container
 
-        self._add_group_header(group, v)
+        is_split = group.split_key is not None
+        # Only the remainder of a multi-member group can be split further.
+        splittable = not is_split and len(group.members) > 1
+        self._add_group_header(group, v, splittable=splittable)
+        if is_split:
+            merge_btn = QPushButton("Merge back into group")
+            merge_btn.clicked.connect(
+                lambda _checked=False, sig=group.signature, key=group.split_key: (
+                    self._merge_split(sig, key)
+                )
+            )
+            group.merge_btn = merge_btn
+            v.addWidget(merge_btn)
         v.addWidget(group.list_widget)
         return container
 
     def _add_group_header(
-        self, group: _MaskGroup, layout: QVBoxLayout, *, suffix: str = ""
+        self,
+        group: _MaskGroup,
+        layout: QVBoxLayout,
+        *,
+        suffix: str = "",
+        splittable: bool = False,
     ) -> None:
-        """Add a group header to ``layout``.
+        """Add a group header (and optional member list / split control).
 
         Singleton groups show the sole member's name inline (a collapse toggle
-        would save no space and hide the only identity). Multi-member groups
-        get a checkable QToolButton that reveals a capped, scrollable list of
-        member names.
+        would save no space and hide the only identity). Multi-member groups get
+        a checkable QToolButton that reveals a capped, scrollable member list.
+        When ``splittable``, that member list is selectable and a "Split
+        selected into new group" button appears with it (U4 breakout).
         """
         n = len(group.members)
         if n == 1:
@@ -911,7 +1010,11 @@ class WorkflowConfigDialog(QDialog):
 
         members_list = QListWidget()
         members_list.addItems([pd.display_name for pd in group.members])
-        members_list.setSelectionMode(QAbstractItemView.NoSelection)
+        members_list.setSelectionMode(
+            QAbstractItemView.MultiSelection
+            if splittable
+            else QAbstractItemView.NoSelection
+        )
         members_list.setMaximumHeight(_MEMBER_LIST_MAX_H)
         members_list.setVisible(False)
         members_list.setStyleSheet("color: #aaa;")
@@ -930,6 +1033,75 @@ class WorkflowConfigDialog(QDialog):
         group.members_list = members_list
         layout.addWidget(toggle)
         layout.addWidget(members_list)
+
+        if splittable:
+            split_btn = QPushButton("Split selected into new group")
+            split_btn.setToolTip(
+                "Move the checked datasets into their own group so they can "
+                "measure a different set of masks."
+            )
+            split_btn.setVisible(False)
+            toggle.toggled.connect(split_btn.setVisible)
+            split_btn.clicked.connect(
+                lambda _checked=False, sig=group.signature, mlw=members_list: (
+                    self._split_selected(sig, mlw)
+                )
+            )
+            group.split_btn = split_btn
+            layout.addWidget(split_btn)
+
+    def _find_mask_group(
+        self, signature: tuple[str, ...], split_key: frozenset[str] | None
+    ) -> _MaskGroup | None:
+        """Locate the live _MaskGroup for a (signature, split_key), or None."""
+        for group in getattr(self, "_mask_groups", []):
+            if group.signature == signature and group.split_key == split_key:
+                return group
+        return None
+
+    def _split_selected(
+        self, signature: tuple[str, ...], members_list: QListWidget
+    ) -> None:
+        """Split the checked remainder members into a new breakout sub-group.
+
+        Seeds the new sub-group's mask selection from the remainder's current
+        picks, then rebuilds. No-op unless at least one — but not all — members
+        are checked (splitting all would leave an empty remainder).
+        """
+        selected = frozenset(
+            members_list.item(i).text()
+            for i in range(members_list.count())
+            if members_list.item(i).isSelected()
+        )
+        if not selected or len(selected) >= members_list.count():
+            return
+        remainder = self._find_mask_group(signature, None)
+        seed: set[str] = set()
+        if remainder is not None and remainder.list_widget is not None:
+            lw = remainder.list_widget
+            seed = {
+                lw.item(i).text()
+                for i in range(lw.count())
+                if lw.item(i).isSelected()
+            }
+        self._mask_breakouts.setdefault(signature, []).append(selected)
+        self._split_seeds[(signature, selected)] = seed
+        self._refresh_mask_picker()
+        self._update_start_enabled()
+
+    def _merge_split(
+        self, signature: tuple[str, ...], split_key: frozenset[str]
+    ) -> None:
+        """Merge a breakout sub-group back into its signature's remainder."""
+        splits = [
+            s for s in self._mask_breakouts.get(signature, []) if s != split_key
+        ]
+        if splits:
+            self._mask_breakouts[signature] = splits
+        else:
+            self._mask_breakouts.pop(signature, None)
+        self._refresh_mask_picker()
+        self._update_start_enabled()
 
     @property
     def existing_mask_selections(self) -> dict[str, list[str]]:
