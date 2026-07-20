@@ -32,7 +32,6 @@ from typing import Any
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
-    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -46,12 +45,12 @@ from qtpy.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -70,7 +69,7 @@ from percell4.workflows.csv_columns import (
     DEFAULT_CSV_PARTICLE_PER_CHANNEL,
     build_selected_csv_columns,
 )
-from percell4.workflows.mask_grouping import group_by_mask_signature
+from percell4.workflows.masks import intersect_masks
 from percell4.workflows.models import (
     AdaptiveClipSettings,
     AutoExtractSettings,
@@ -337,86 +336,51 @@ class _PendingDataset:
         )
 
 
-# ── Grouped mask picker ──────────────────────────────────────────────────
+# ── Two-pane mask group builder ──────────────────────────────────────────
 
-# Keep the shared mask list compact; it scrolls if a group has many masks.
-_MASK_LIST_MAX_H = 90
-# Cap the expanded member-name list so a large group can't grow an unbounded
-# wall of names; the QListWidget scrolls past this height.
-_MEMBER_LIST_MAX_H = 120
+# Keep each checklist compact; it scrolls if it has many rows.
+_MASK_PANE_MAX_H = 160
 
 
-def _dataset_count_label(n: int) -> str:
-    """"1 dataset" / "N datasets" — proper singular/plural."""
-    return f"{n} dataset" if n == 1 else f"{n} datasets"
-
-
-# Snapshot of prior mask picks, keyed by (signature, split_key) — split_key is
-# None for a remainder group, a frozenset of member names for a breakout split.
-_PriorSelections = dict[tuple[tuple[str, ...], frozenset[str] | None], set[str]]
-
-
-def _selected_texts(widget: QListWidget) -> list[str]:
-    """Texts of the currently-selected items in a QListWidget, in row order."""
+def _checked_texts(list_widget: QListWidget) -> list[str]:
+    """Texts of the checked items in a checkable QListWidget, in row order."""
     return [
-        widget.item(i).text()
-        for i in range(widget.count())
-        if widget.item(i).isSelected()
+        list_widget.item(i).text()
+        for i in range(list_widget.count())
+        if list_widget.item(i).checkState() == Qt.Checked
     ]
 
 
-class _MaskGroup:
-    """One rendered group of datasets sharing an available-mask signature.
+def _set_all_checked(list_widget: QListWidget, checked: bool) -> None:
+    """Check or uncheck every item in a checkable QListWidget."""
+    state = Qt.Checked if checked else Qt.Unchecked
+    for i in range(list_widget.count()):
+        list_widget.item(i).setCheckState(state)
 
-    ``members`` are the datasets in this (sub-)group; ``list_widget`` is the
-    single shared mask multi-select they all use (``None`` for the no-mask
-    group). ``has_masks`` is tracked explicitly rather than via widget-enabled
-    state, because a checkable QGroupBox disables ALL its children when
-    unchecked — so ``isEnabled()`` can't distinguish "no masks here" from
-    "mask-reuse mode off". ``toggle_btn`` / ``members_list`` are the collapsible
-    member-name affordance, present only for multi-member groups.
 
-    ``split_key`` identifies a breakout sub-group (U4): ``None`` for the
-    default/remainder group, or the ``frozenset`` of member display names split
-    off. Two ``_MaskGroup`` rows can share a ``signature`` but carry a different
-    ``split_key`` and hold independent selections. ``split_btn`` / ``merge_btn``
-    are the breakout controls.
+class _MaskGroupPanel:
+    """One two-pane group: a Datasets checklist driving a Masks checklist.
+
+    ``ds_list`` holds every mask-bearing dataset (checkable); ``mask_list`` holds
+    the intersection of the checked datasets' available masks (checkable).
+    ``remove_btn`` is ``None`` for the first (non-removable) panel. ``container``
+    is the widget added to the groups layout.
     """
 
-    __slots__ = (
-        "signature",
-        "members",
-        "list_widget",
-        "has_masks",
-        "toggle_btn",
-        "members_list",
-        "split_key",
-        "split_btn",
-        "merge_btn",
-    )
+    __slots__ = ("container", "ds_list", "mask_list", "remove_btn")
 
     def __init__(
         self,
         *,
-        signature: tuple[str, ...],
-        members: list[_PendingDataset],
-        list_widget: QListWidget | None,
-        has_masks: bool,
-        split_key: frozenset[str] | None = None,
-        toggle_btn: QToolButton | None = None,
-        members_list: QListWidget | None = None,
-        split_btn: QPushButton | None = None,
-        merge_btn: QPushButton | None = None,
+        container: QWidget,
+        ds_list: QListWidget,
+        mask_list: QListWidget,
+        remove_btn: QPushButton | None,
     ) -> None:
-        self.signature = signature
-        self.members = members
-        self.list_widget = list_widget
-        self.has_masks = has_masks
-        self.split_key = split_key
-        self.toggle_btn = toggle_btn
-        self.members_list = members_list
-        self.split_btn = split_btn
-        self.merge_btn = merge_btn
+        self.container = container
+        self.ds_list = ds_list
+        self.mask_list = mask_list
+        self.remove_btn = remove_btn
 
 
 # ── Dialog ──────────────────────────────────────────────────────────────
@@ -747,55 +711,72 @@ class WorkflowConfigDialog(QDialog):
     def _build_mask_selection_group(self) -> QGroupBox:
         """Checkable group to reuse existing /masks instead of thresholding.
 
-        When checked, the run skips the Threshold Rounds step entirely and
-        measures the selected masks (either/or per run). Datasets exposing an
-        identical set of ``/masks`` layers are grouped into one shared picker
-        (``group_by_mask_signature``); a subset of a group can be split off with
-        its own selection. This is a pre-run config control (dialog-local state
-        only); it never touches the live session.
+        When checked, the run skips the Threshold Rounds step and measures the
+        masks you assign per dataset via a two-pane group builder: check datasets
+        on the left, and the right pane lists the masks common to them; check the
+        masks to measure. Add a group to give a subset of datasets extra masks —
+        a dataset's final selection is the UNION of the masks across every group
+        it is checked in. Pre-run config control (dialog-local state only); it
+        never touches the live session.
         """
         box = QGroupBox("Use existing masks (skip thresholding rounds)")
         box.setCheckable(True)
         box.setChecked(False)
         box.setToolTip(
             "When checked, the workflow does NOT compute threshold rounds. "
-            "Instead it measures the mask layer(s) you select per dataset, "
-            "running per-cell measurement + particle analysis + export on "
-            "them. Uncheck to configure Threshold Rounds as usual."
+            "Instead it measures the mask layer(s) you assign per dataset via "
+            "the two-pane group builder below, running per-cell measurement + "
+            "particle analysis + export on them. Uncheck to configure Threshold "
+            "Rounds as usual."
         )
         self._mask_selection_group = box
         outer = QVBoxLayout(box)
         note = QLabel(
-            "Datasets that expose the same available mask layers are grouped: "
-            "pick masks once per group and they apply to every member. Expand a "
-            "group to see its datasets. The Threshold Rounds section is hidden "
+            "Check datasets on the left; the right pane lists the masks common "
+            "to them. Check the masks to measure. Add a group to give a subset "
+            "of datasets extra masks — each dataset measures the union of masks "
+            "across the groups it is in. The Threshold Rounds section is hidden "
             "while this is on."
         )
         note.setWordWrap(True)
         outer.addWidget(note)
-        self._mask_form_host = QWidget()
-        self._mask_form = QFormLayout(self._mask_form_host)
-        self._mask_form.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._mask_form_host)
-        # One row per _MaskGroup (datasets sharing an available-mask signature).
-        # Rebuilt by _refresh_mask_picker whenever the queue changes.
-        self._mask_groups: list[_MaskGroup] = []
-        # Breakout state (U4): per signature, the list of split-off member sets
-        # (the remainder is implicit — every member not in any split). Empty
-        # until the user splits a group.
-        self._mask_breakouts: dict[tuple[str, ...], list[frozenset[str]]] = {}
-        # Seed selection for a just-created split, consumed on the next refresh
-        # so the new sub-group inherits its parent's current picks.
-        self._split_seeds: _PriorSelections = {}
+
+        # Datasets with no /masks can't be assigned any and are omitted; a note
+        # reports how many were hidden.
+        self._mask_excluded_note = QLabel("")
+        self._mask_excluded_note.setStyleSheet("color: #888;")
+        self._mask_excluded_note.setWordWrap(True)
+        outer.addWidget(self._mask_excluded_note)
+
+        # Host for the stacked group panels + an Add-group button below them.
+        self._mask_groups_host = QWidget()
+        self._mask_groups_layout = QVBoxLayout(self._mask_groups_host)
+        self._mask_groups_layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._mask_groups_host)
+
+        add_row = QHBoxLayout()
+        self._add_mask_group_btn = QPushButton("Add group")
+        self._add_mask_group_btn.setToolTip(
+            "Add another datasets/masks group so a subset of datasets can "
+            "measure extra masks (e.g. masks unique to a few datasets)."
+        )
+        self._add_mask_group_btn.clicked.connect(self._on_add_mask_group)
+        add_row.addWidget(self._add_mask_group_btn)
+        add_row.addStretch()
+        outer.addLayout(add_row)
+
+        # Cache of display_name -> available masks, refreshed with the queue so a
+        # checkbox toggle doesn't re-open every .h5.
+        self._masks_by_name: dict[str, list[str]] = {}
+        self._mask_group_panels: list[_MaskGroupPanel] = []
         box.toggled.connect(self._on_mask_reuse_toggled)
         return box
 
     def _on_mask_reuse_toggled(self, checked: bool) -> None:
         """Hide the Threshold Rounds group when reusing existing masks.
 
-        Mask selections in the per-dataset lists are preserved across
-        toggles (the list widgets are not rebuilt here), so toggling is
-        non-destructive.
+        Mask assignments in the group panels are preserved across toggles (the
+        panels are not rebuilt here), so toggling is non-destructive.
         """
         box = getattr(self, "_rounds_group_box", None)
         if box is not None:
@@ -817,338 +798,225 @@ class WorkflowConfigDialog(QDialog):
             return []
 
     def _refresh_mask_picker(self) -> None:
-        """Rebuild the grouped mask picker from the current queue.
+        """Rebuild the mask-group panels' contents from the current queue.
 
-        Datasets exposing an identical set of available ``/masks`` layers are
-        collapsed into one shared multi-select list (``group_by_mask_signature``);
-        the no-mask group is rendered last and is non-selectable. A signature
-        may be further partitioned into breakout sub-groups (U4). Prior
-        selections are preserved by (signature, split_key) so a queue refresh
-        (or re-open) doesn't silently drop the user's picks.
+        Datasets that expose no ``/masks`` are omitted (they can't be assigned a
+        mask). Each panel's dataset checklist is repopulated preserving prior
+        checks by name; its mask checklist is then recomputed from the
+        intersection of the checked datasets' masks, preserving prior mask checks.
+        At least one group always exists.
         """
-        form = getattr(self, "_mask_form", None)
-        if form is None:
+        host = getattr(self, "_mask_groups_host", None)
+        if host is None:
             return
-        # Snapshot prior selections keyed by (signature, split_key) — stable
-        # across regroup; indices and display names shift when datasets are
-        # added/removed. Then fold in any pending split seed so a just-created
-        # sub-group inherits its parent's picks.
-        prior: _PriorSelections = {
-            (group.signature, group.split_key): set(_selected_texts(group.list_widget))
-            for group in getattr(self, "_mask_groups", [])
-            if group.has_masks and group.list_widget is not None
+        # Cache available masks once per refresh so a checkbox toggle doesn't
+        # re-open every .h5.
+        self._masks_by_name = {
+            pd.display_name: self._dataset_masks(pd) for pd in self._pending_datasets
         }
-        prior.update(getattr(self, "_split_seeds", {}))
-        self._split_seeds = {}
-        while form.rowCount():
-            form.removeRow(0)
-        self._mask_groups = []
-
-        by_name = {pd.display_name: pd for pd in self._pending_datasets}
-        plans = group_by_mask_signature(
-            (pd.display_name, self._dataset_masks(pd))
-            for pd in self._pending_datasets
-        )
-        # Prune breakout partitions for signatures no longer in the queue, so a
-        # remove-all-then-re-add doesn't resurrect a stale split (group_by_mask_
-        # signature only emits signatures that still have a present member).
-        live_sigs = {plan.signature for plan in plans}
-        self._mask_breakouts = {
-            sig: splits
-            for sig, splits in self._mask_breakouts.items()
-            if sig in live_sigs
-        }
-        all_no_mask = bool(plans) and all(not plan.signature for plan in plans)
-        for plan in plans:
-            if not plan.signature:  # no-mask group — single non-selectable row
-                members = [by_name[name] for name in plan.member_names]
-                group = self._make_mask_group(plan.signature, members, None, prior)
-                self._mask_groups.append(group)
-                form.addRow(
-                    self._build_mask_group_row(group, all_no_mask=all_no_mask)
-                )
-                continue
-            # Subdivide this signature into remainder + breakout sub-groups.
-            for split_key, names, prior_key in self._subgroups_for(
-                plan.signature, plan.member_names
-            ):
-                members = [by_name[name] for name in names]
-                group = self._make_mask_group(
-                    plan.signature, members, split_key, prior, prior_key=prior_key
-                )
-                self._mask_groups.append(group)
-                form.addRow(
-                    self._build_mask_group_row(group, all_no_mask=all_no_mask)
-                )
-
-    def _subgroups_for(
-        self, signature: tuple[str, ...], member_names: list[str]
-    ) -> list[tuple[frozenset[str] | None, list[str], frozenset[str] | None]]:
-        """Partition a signature's members into remainder + breakout sub-groups.
-
-        Returns ``(split_key, names, prior_key)`` triples: the remainder first
-        (``split_key=None``), then one entry per non-empty split. ``prior_key``
-        is the split's pre-reconciliation frozenset (``None`` for the remainder),
-        so the caller can recover a snapshot stored under the larger key when a
-        split shrinks. Reconciles the stored partition against the current
-        membership — dropped datasets fall out of their split, new same-signature
-        datasets land in the remainder — and re-normalizes ``_mask_breakouts`` so
-        emptied splits do not linger.
-        """
-        stored = self._mask_breakouts.get(signature, [])
-        present = set(member_names)
-        # (original stored split, reconciled-to-present split)
-        reconciled: list[tuple[frozenset[str], frozenset[str]]] = []
-        for split in stored:
-            keep = frozenset(n for n in split if n in present)
-            if keep:
-                reconciled.append((split, keep))
-        if reconciled:
-            self._mask_breakouts[signature] = [kept for _orig, kept in reconciled]
-        else:
-            self._mask_breakouts.pop(signature, None)
-
-        split_members = (
-            set().union(*[kept for _orig, kept in reconciled]) if reconciled else set()
-        )
-        remainder = [n for n in member_names if n not in split_members]
-        out: list[tuple[frozenset[str] | None, list[str], frozenset[str] | None]] = []
-        if remainder:
-            out.append((None, remainder, None))
-        for original, kept in reconciled:
-            out.append((kept, [n for n in member_names if n in kept], original))
-        return out
-
-    def _make_mask_group(
-        self,
-        signature: tuple[str, ...],
-        members: list[_PendingDataset],
-        split_key: frozenset[str] | None,
-        prior: _PriorSelections,
-        *,
-        prior_key: frozenset[str] | None = None,
-    ) -> _MaskGroup:
-        """Build a _MaskGroup + its shared mask list, restoring prior picks.
-
-        Falls back to ``prior_key`` when the snapshot has no entry for the
-        current ``split_key`` — this migrates a selection when a split shrinks
-        (a member was removed), so the surviving members keep their masks.
-        """
-        if not signature:  # no-mask group — no selectable list
-            return _MaskGroup(
-                signature=signature,
-                members=members,
-                list_widget=None,
-                has_masks=False,
-                split_key=split_key,
-            )
-        keep = prior.get((signature, split_key))
-        if keep is None and prior_key is not None and prior_key != split_key:
-            keep = prior.get((signature, prior_key))
-        keep = keep or set()
-        lst = QListWidget()
-        # MultiSelection: a plain click toggles an item on/off, so a previously
-        # chosen mask unselects with one click — no Ctrl modifier required.
-        lst.setSelectionMode(QAbstractItemView.MultiSelection)
-        lst.setMaximumHeight(_MASK_LIST_MAX_H)
-        lst.addItems(list(signature))
-        for i in range(lst.count()):
-            if lst.item(i).text() in keep:
-                lst.item(i).setSelected(True)
-        # Toggling a mask's selection changes whether Start may fire.
-        lst.itemSelectionChanged.connect(self._update_start_enabled)
-        return _MaskGroup(
-            signature=signature,
-            members=members,
-            list_widget=lst,
-            has_masks=True,
-            split_key=split_key,
+        mask_ds_names = [name for name, masks in self._masks_by_name.items() if masks]
+        n_excluded = len(self._pending_datasets) - len(mask_ds_names)
+        self._mask_excluded_note.setText(
+            f"{n_excluded} dataset(s) have no existing masks and are not shown."
+            if n_excluded
+            else ""
         )
 
-    def _build_mask_group_row(
-        self, group: _MaskGroup, *, all_no_mask: bool
-    ) -> QWidget:
-        """Container for one group row: header, optional member list, mask list.
-
-        A singleton group shows the member name inline; a multi-member group
-        shows a collapse toggle that reveals the member names. The remainder of
-        a multi-member group offers a "Split selected" control; a breakout
-        sub-group offers "Merge back" (U4). The no-mask group renders its header
-        (and, when it is the only group, an inline explanation) with no
-        selectable list.
-        """
-        container = QWidget()
-        v = QVBoxLayout(container)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(2)
-
-        if not group.has_masks:
-            self._add_group_header(group, v, suffix=" — no masks available")
-            if all_no_mask:
-                msg = QLabel(
-                    "No masks available in the loaded datasets — add datasets "
-                    "that already contain /masks, or use Threshold Rounds instead."
-                )
-                msg.setWordWrap(True)
-                msg.setStyleSheet("color: #888; font-style: italic;")
-                v.addWidget(msg)
-            return container
-
-        is_split = group.split_key is not None
-        # Only the remainder of a multi-member group can be split further.
-        splittable = not is_split and len(group.members) > 1
-        self._add_group_header(group, v, splittable=splittable)
-        if is_split:
-            merge_btn = QPushButton("Merge back into group")
-            merge_btn.clicked.connect(
-                lambda _checked=False, sig=group.signature, key=group.split_key: (
-                    self._merge_split(sig, key)
-                )
-            )
-            group.merge_btn = merge_btn
-            v.addWidget(merge_btn)
-        v.addWidget(group.list_widget)
-        return container
-
-    def _add_group_header(
-        self,
-        group: _MaskGroup,
-        layout: QVBoxLayout,
-        *,
-        suffix: str = "",
-        splittable: bool = False,
-    ) -> None:
-        """Add a group header (and optional member list / split control).
-
-        Singleton groups show the sole member's name inline (a collapse toggle
-        would save no space and hide the only identity). Multi-member groups get
-        a checkable QToolButton that reveals a capped, scrollable member list.
-        When ``splittable``, that member list is selectable and a "Split
-        selected into new group" button appears with it (U4 breakout).
-        """
-        n = len(group.members)
-        if n == 1:
-            label = QLabel(group.members[0].display_name + suffix)
-            if suffix:
-                label.setStyleSheet("color: #888;")
-            layout.addWidget(label)
-            return
-
-        toggle = QToolButton()
-        toggle.setCheckable(True)
-        toggle.setChecked(False)
-        toggle.setArrowType(Qt.RightArrow)
-        toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        toggle.setText(_dataset_count_label(n) + suffix)
-        toggle.setStyleSheet("QToolButton { border: none; }")
-
-        members_list = QListWidget()
-        members_list.addItems([pd.display_name for pd in group.members])
-        members_list.setSelectionMode(
-            QAbstractItemView.MultiSelection
-            if splittable
-            else QAbstractItemView.NoSelection
-        )
-        members_list.setMaximumHeight(_MEMBER_LIST_MAX_H)
-        members_list.setVisible(False)
-        members_list.setStyleSheet("color: #aaa;")
-
-        # Direct slot (no reference-capturing lambda): the toggle owns the list,
-        # and both are destroyed together on the next rebuild.
-        toggle.toggled.connect(members_list.setVisible)
-        # Arrow flip captures only the toggle itself (destroyed with this row),
-        # so no stale cross-object reference survives a refresh.
-        toggle.toggled.connect(
-            lambda checked, t=toggle: t.setArrowType(
-                Qt.DownArrow if checked else Qt.RightArrow
-            )
-        )
-        group.toggle_btn = toggle
-        group.members_list = members_list
-        layout.addWidget(toggle)
-        layout.addWidget(members_list)
-
-        if splittable:
-            split_btn = QPushButton("Split selected into new group")
-            split_btn.setToolTip(
-                "Move the checked datasets into their own group so they can "
-                "measure a different set of masks."
-            )
-            split_btn.setVisible(False)
-            toggle.toggled.connect(split_btn.setVisible)
-            split_btn.clicked.connect(
-                lambda _checked=False, sig=group.signature, mlw=members_list: (
-                    self._split_selected(sig, mlw)
-                )
-            )
-            group.split_btn = split_btn
-            layout.addWidget(split_btn)
-
-    def _find_mask_group(
-        self, signature: tuple[str, ...], split_key: frozenset[str] | None
-    ) -> _MaskGroup | None:
-        """Locate the live _MaskGroup for a (signature, split_key), or None."""
-        for group in getattr(self, "_mask_groups", []):
-            if group.signature == signature and group.split_key == split_key:
-                return group
-        return None
-
-    def _split_selected(
-        self, signature: tuple[str, ...], members_list: QListWidget
-    ) -> None:
-        """Split the checked remainder members into a new breakout sub-group.
-
-        Seeds the new sub-group's mask selection from the remainder's current
-        picks, then rebuilds. No-op unless at least one — but not all — members
-        are checked (splitting all would leave an empty remainder).
-        """
-        selected = frozenset(_selected_texts(members_list))
-        if not selected or len(selected) >= members_list.count():
-            return
-        remainder = self._find_mask_group(signature, None)
-        seed: set[str] = set()
-        if remainder is not None and remainder.list_widget is not None:
-            seed = set(_selected_texts(remainder.list_widget))
-        self._mask_breakouts.setdefault(signature, []).append(selected)
-        self._split_seeds[(signature, selected)] = seed
-        self._refresh_mask_picker()
+        if not self._mask_group_panels:
+            self._append_mask_group()
+        for i, panel in enumerate(self._mask_group_panels):
+            # The first panel auto-includes newly-added datasets (group 1 stays
+            # the whole batch, and the common masks appear immediately); added
+            # subset-groups start new datasets unchecked.
+            self._repopulate_panel_datasets(panel, mask_ds_names, check_new=(i == 0))
+            self._recompute_panel_masks(panel)
         self._update_start_enabled()
 
-    def _merge_split(
-        self, signature: tuple[str, ...], split_key: frozenset[str]
+    def _append_mask_group(self) -> _MaskGroupPanel:
+        """Build a group panel, add it to the layout, and register it."""
+        removable = bool(self._mask_group_panels)  # first panel is not removable
+        panel = self._build_mask_group_panel(removable=removable)
+        self._mask_group_panels.append(panel)
+        self._mask_groups_layout.addWidget(panel.container)
+        return panel
+
+    def _on_add_mask_group(self) -> None:
+        """Add-group button handler: append an empty group and populate it."""
+        panel = self._append_mask_group()
+        mask_ds_names = [name for name, masks in self._masks_by_name.items() if masks]
+        self._repopulate_panel_datasets(panel, mask_ds_names, check_new=False)
+        self._recompute_panel_masks(panel)
+        self._update_start_enabled()
+
+    def _build_mask_group_panel(self, *, removable: bool) -> _MaskGroupPanel:
+        """Build one two-pane group panel (Datasets | Masks) widget tree."""
+        container = QGroupBox()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(8, 8, 8, 8)
+
+        lists_row = QHBoxLayout()
+
+        # Left: datasets checklist + Select All / Deselect All.
+        ds_box = QGroupBox("Datasets")
+        ds_layout = QVBoxLayout(ds_box)
+        ds_btn_row = QHBoxLayout()
+        ds_all = QPushButton("Select All")
+        ds_none = QPushButton("Deselect All")
+        ds_btn_row.addWidget(ds_all)
+        ds_btn_row.addWidget(ds_none)
+        ds_btn_row.addStretch()
+        ds_layout.addLayout(ds_btn_row)
+        ds_list = QListWidget()
+        ds_list.setMaximumHeight(_MASK_PANE_MAX_H)
+        ds_layout.addWidget(ds_list)
+        lists_row.addWidget(ds_box, 3)
+
+        # Right: masks checklist (intersection of the checked datasets).
+        mask_box = QGroupBox("Masks (common to checked datasets)")
+        mask_layout = QVBoxLayout(mask_box)
+        mask_btn_row = QHBoxLayout()
+        mask_all = QPushButton("Select All")
+        mask_none = QPushButton("Deselect All")
+        mask_btn_row.addWidget(mask_all)
+        mask_btn_row.addWidget(mask_none)
+        mask_btn_row.addStretch()
+        mask_layout.addLayout(mask_btn_row)
+        mask_list = QListWidget()
+        mask_list.setMaximumHeight(_MASK_PANE_MAX_H)
+        mask_layout.addWidget(mask_list)
+        lists_row.addWidget(mask_box, 2)
+
+        v.addLayout(lists_row)
+
+        remove_btn: QPushButton | None = None
+        if removable:
+            rm_row = QHBoxLayout()
+            rm_row.addStretch()
+            remove_btn = QPushButton("Remove group")
+            rm_row.addWidget(remove_btn)
+            v.addLayout(rm_row)
+
+        panel = _MaskGroupPanel(
+            container=container,
+            ds_list=ds_list,
+            mask_list=mask_list,
+            remove_btn=remove_btn,
+        )
+
+        # Wire user-edit signals (qt-wire-user-edit-signals). Panels persist
+        # across queue refreshes, so capturing `panel` by value is stable.
+        ds_list.itemChanged.connect(
+            lambda _item, p=panel: self._recompute_panel_masks(p)
+        )
+        mask_list.itemChanged.connect(self._update_start_enabled)
+        ds_all.clicked.connect(
+            lambda _=False, p=panel: self._select_all_datasets(p, True)
+        )
+        ds_none.clicked.connect(
+            lambda _=False, p=panel: self._select_all_datasets(p, False)
+        )
+        mask_all.clicked.connect(
+            lambda _=False, p=panel: self._select_all_masks(p, True)
+        )
+        mask_none.clicked.connect(
+            lambda _=False, p=panel: self._select_all_masks(p, False)
+        )
+        if remove_btn is not None:
+            remove_btn.clicked.connect(
+                lambda _=False, p=panel: self._remove_mask_group(p)
+            )
+        return panel
+
+    def _repopulate_panel_datasets(
+        self,
+        panel: _MaskGroupPanel,
+        mask_ds_names: list[str],
+        *,
+        check_new: bool,
     ) -> None:
-        """Merge a breakout sub-group back into its signature's remainder."""
-        splits = [
-            s for s in self._mask_breakouts.get(signature, []) if s != split_key
-        ]
-        if splits:
-            self._mask_breakouts[signature] = splits
-        else:
-            self._mask_breakouts.pop(signature, None)
-        self._refresh_mask_picker()
+        """Rebuild a panel's dataset checklist.
+
+        Datasets already in the list keep their check state; a dataset newly
+        added to the queue is checked only when ``check_new`` — the first panel
+        auto-includes new datasets so "group 1" stays the whole batch, while
+        added subset-groups leave new datasets unchecked.
+        """
+        prior_checked = set(_checked_texts(panel.ds_list))
+        prior_all = {
+            panel.ds_list.item(i).text() for i in range(panel.ds_list.count())
+        }
+        panel.ds_list.blockSignals(True)
+        panel.ds_list.clear()
+        for name in mask_ds_names:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            checked = name in prior_checked if name in prior_all else check_new
+            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            panel.ds_list.addItem(item)
+        panel.ds_list.blockSignals(False)
+
+    def _recompute_panel_masks(self, panel: _MaskGroupPanel) -> None:
+        """Recompute a panel's mask checklist from its checked datasets.
+
+        The masks are the intersection of the checked datasets' available masks;
+        prior mask checks are preserved by name (a mask that is no longer common
+        to the checked datasets falls out).
+        """
+        checked_ds = _checked_texts(panel.ds_list)
+        common = intersect_masks(self._masks_by_name.get(n, []) for n in checked_ds)
+        prior = set(_checked_texts(panel.mask_list))
+        panel.mask_list.blockSignals(True)
+        panel.mask_list.clear()
+        for mask in common:
+            item = QListWidgetItem(mask)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if mask in prior else Qt.Unchecked)
+            panel.mask_list.addItem(item)
+        panel.mask_list.blockSignals(False)
+        self._update_start_enabled()
+
+    def _select_all_datasets(self, panel: _MaskGroupPanel, checked: bool) -> None:
+        """Check/uncheck every dataset in a panel, then recompute its masks once."""
+        panel.ds_list.blockSignals(True)
+        _set_all_checked(panel.ds_list, checked)
+        panel.ds_list.blockSignals(False)
+        self._recompute_panel_masks(panel)
+
+    def _select_all_masks(self, panel: _MaskGroupPanel, checked: bool) -> None:
+        """Check/uncheck every mask in a panel, then re-gate Start once."""
+        panel.mask_list.blockSignals(True)
+        _set_all_checked(panel.mask_list, checked)
+        panel.mask_list.blockSignals(False)
+        self._update_start_enabled()
+
+    def _remove_mask_group(self, panel: _MaskGroupPanel) -> None:
+        """Remove a group panel (the first, non-removable panel has no button)."""
+        if panel not in self._mask_group_panels:
+            return
+        self._mask_group_panels.remove(panel)
+        self._mask_groups_layout.removeWidget(panel.container)
+        panel.container.deleteLater()
         self._update_start_enabled()
 
     @property
     def existing_mask_selections(self) -> dict[str, list[str]]:
-        """Per-dataset selected mask names (only datasets with a selection).
+        """Per-dataset selected mask names — the UNION across all groups.
 
-        Fans each group's shared selection out to one entry per member, keyed
-        by the dataset's display name. No-mask groups and empty selections are
-        omitted, so a value is never an empty list. Independent of the outer
-        group's checked state — the caller gates on ``use_existing_masks``
-        separately — so selections survive a non-destructive toggle (Qt
-        disables the lists but keeps the selection model).
+        Each group contributes its checked masks to every dataset it has checked;
+        a dataset's value is the union across the groups it is in. Datasets or
+        groups with no checked masks are omitted, so a value is never an empty
+        list. Keys are dataset display names. Independent of the outer group's
+        checked state (the caller gates on ``use_existing_masks``), so selections
+        survive a non-destructive toggle.
         """
-        selections: dict[str, list[str]] = {}
-        for group in getattr(self, "_mask_groups", []):
-            if not group.has_masks or group.list_widget is None:
+        acc: dict[str, set[str]] = {}
+        for panel in getattr(self, "_mask_group_panels", []):
+            masks = _checked_texts(panel.mask_list)
+            if not masks:
                 continue
-            chosen = _selected_texts(group.list_widget)
-            if not chosen:
-                continue
-            for pd in group.members:
-                selections[pd.display_name] = list(chosen)
-        return selections
+            for ds_name in _checked_texts(panel.ds_list):
+                acc.setdefault(ds_name, set()).update(masks)
+        return {name: sorted(masks) for name, masks in acc.items() if masks}
 
     def _build_rounds_group(self) -> QGroupBox:
         box = QGroupBox("Thresholding Rounds (ordered)")
