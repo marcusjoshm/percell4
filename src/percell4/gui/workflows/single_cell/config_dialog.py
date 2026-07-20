@@ -85,7 +85,6 @@ from percell4.workflows.models import (
     WorkflowConfig,
     WorkflowDatasetEntry,
 )
-from percell4.workflows.phases import pick_existing_segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +94,6 @@ logger = logging.getLogger(__name__)
 _QSETTINGS_ORG = "LeeLabPerCell4"
 _QSETTINGS_APP = "PerCell4"
 _QSETTINGS_OUTPUT_KEY = "single_cell_threshold_workflow/output_parent"
-
-# Shown (disabled) in the segmentation picker for datasets with no labels yet.
-_NO_SEGMENTATION_LABEL = "None — Cellpose will segment"
 
 # Always-on identity columns prepended to the CSV column picker.
 _ALWAYS_ON_COLUMNS = ("dataset", "cell_id", "label")
@@ -358,6 +354,12 @@ def _set_all_checked(list_widget: QListWidget, checked: bool) -> None:
         list_widget.item(i).setCheckState(state)
 
 
+def _single_checked(list_widget: QListWidget) -> str | None:
+    """The text of the one checked item in a single-select list, or None."""
+    checked = _checked_texts(list_widget)
+    return checked[0] if checked else None
+
+
 class _MaskGroupPanel:
     """One two-pane group: a Datasets checklist driving a Masks checklist.
 
@@ -380,6 +382,29 @@ class _MaskGroupPanel:
         self.container = container
         self.ds_list = ds_list
         self.mask_list = mask_list
+        self.remove_btn = remove_btn
+
+
+class _SegGroupPanel:
+    """One two-pane group: a Datasets checklist and a single-select Segmentation
+    list (the segmentation layer common to the checked datasets that they should
+    use). Unlike the mask panel, the right list is pick-one (exclusive checks).
+    ``remove_btn`` is ``None`` for the first (non-removable) panel.
+    """
+
+    __slots__ = ("container", "ds_list", "seg_list", "remove_btn")
+
+    def __init__(
+        self,
+        *,
+        container: QWidget,
+        ds_list: QListWidget,
+        seg_list: QListWidget,
+        remove_btn: QPushButton | None,
+    ) -> None:
+        self.container = container
+        self.ds_list = ds_list
+        self.seg_list = seg_list
         self.remove_btn = remove_btn
 
 
@@ -616,9 +641,11 @@ class WorkflowConfigDialog(QDialog):
         outer = QVBoxLayout(box)
         note = QLabel(
             "Datasets that already have a segmentation skip Cellpose and start "
-            "at thresholding. Choose which segmentation layer each one's "
-            "thresholding rounds and measurement should use (tracked layers "
-            "are preferred by default). Datasets with no segmentation will be "
+            "at thresholding. Check datasets on the left; the right pane lists "
+            "the segmentation layers common to them — pick the one they should "
+            "use. Leave a group with nothing picked to use each dataset's "
+            "default (tracked layers preferred). Add a group to override the "
+            "segmentation for a subset. Datasets with no segmentation will be "
             "segmented by Cellpose."
         )
         note.setWordWrap(True)
@@ -644,13 +671,34 @@ class WorkflowConfigDialog(QDialog):
         )
         outer.addWidget(self._run_seg_qc)
 
-        # Rebuilt by _refresh_segmentation_picker whenever the dataset queue
-        # changes. Each row: dataset name -> combo of its /labels resources.
-        self._seg_form_host = QWidget()
-        self._seg_form = QFormLayout(self._seg_form_host)
-        self._seg_form.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._seg_form_host)
-        self._seg_combos: list[tuple[_PendingDataset, QComboBox]] = []
+        # Datasets with no /labels can't have their segmentation overridden and
+        # are omitted; a note reports how many will be Cellpose-segmented.
+        self._seg_excluded_note = QLabel("")
+        self._seg_excluded_note.setStyleSheet("color: #888;")
+        self._seg_excluded_note.setWordWrap(True)
+        outer.addWidget(self._seg_excluded_note)
+
+        # Host for the stacked group panels + an Add-group button below them.
+        self._seg_groups_host = QWidget()
+        self._seg_groups_layout = QVBoxLayout(self._seg_groups_host)
+        self._seg_groups_layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._seg_groups_host)
+
+        add_row = QHBoxLayout()
+        self._add_seg_group_btn = QPushButton("Add group")
+        self._add_seg_group_btn.setToolTip(
+            "Add another datasets/segmentation group to override the "
+            "segmentation for a subset of datasets (later groups win)."
+        )
+        self._add_seg_group_btn.clicked.connect(self._on_add_seg_group)
+        add_row.addWidget(self._add_seg_group_btn)
+        add_row.addStretch()
+        outer.addLayout(add_row)
+
+        # Cache of display_name -> available segmentations, refreshed with the
+        # queue so a checkbox toggle doesn't re-open every .h5.
+        self._segs_by_name: dict[str, list[str]] = {}
+        self._seg_group_panels: list[_SegGroupPanel] = []
         return box
 
     def _dataset_segmentations(self, pd: _PendingDataset) -> list[str]:
@@ -668,42 +716,215 @@ class WorkflowConfigDialog(QDialog):
             return []
 
     def _refresh_segmentation_picker(self) -> None:
-        """Rebuild the per-dataset segmentation combos from the current queue."""
-        form = getattr(self, "_seg_form", None)
-        if form is None:
+        """Rebuild the segmentation group panels' contents from the queue.
+
+        Datasets with no ``/labels`` are omitted (Cellpose will segment them).
+        Each panel's dataset checklist is repopulated preserving prior checks;
+        its segmentation list is then recomputed from the intersection of the
+        checked datasets' layers, preserving the prior single pick. At least one
+        group always exists.
+        """
+        host = getattr(self, "_seg_groups_host", None)
+        if host is None:
             return
-        while form.rowCount():
-            form.removeRow(0)
-        self._seg_combos = []
-        for pd in self._pending_datasets:
-            labels = self._dataset_segmentations(pd)
-            combo = QComboBox()
-            if labels:
-                combo.addItems(labels)
-                default = pick_existing_segmentation(labels)
-                if default in labels:
-                    combo.setCurrentText(default)
-            else:
-                combo.addItem(_NO_SEGMENTATION_LABEL)
-                combo.setEnabled(False)  # nothing to choose; Cellpose will run
-            self._seg_combos.append((pd, combo))
-            form.addRow(pd.display_name, combo)
+        self._segs_by_name = {
+            pd.display_name: self._dataset_segmentations(pd)
+            for pd in self._pending_datasets
+        }
+        seg_ds_names = [name for name, segs in self._segs_by_name.items() if segs]
+        n_excluded = len(self._pending_datasets) - len(seg_ds_names)
+        self._seg_excluded_note.setText(
+            f"{n_excluded} dataset(s) have no existing segmentation and will be "
+            "segmented by Cellpose."
+            if n_excluded
+            else ""
+        )
+
+        if not self._seg_group_panels:
+            self._append_seg_group()
+        for i, panel in enumerate(self._seg_group_panels):
+            self._repopulate_seg_panel_datasets(
+                panel, seg_ds_names, check_new=(i == 0)
+            )
+            self._recompute_panel_segs(panel)
+
+    def _append_seg_group(self) -> _SegGroupPanel:
+        """Build a segmentation group panel, add it to the layout, register it."""
+        removable = bool(self._seg_group_panels)
+        panel = self._build_seg_group_panel(removable=removable)
+        self._seg_group_panels.append(panel)
+        self._seg_groups_layout.addWidget(panel.container)
+        return panel
+
+    def _on_add_seg_group(self) -> None:
+        """Add-group button handler: append an empty group and populate it."""
+        panel = self._append_seg_group()
+        seg_ds_names = [name for name, segs in self._segs_by_name.items() if segs]
+        self._repopulate_seg_panel_datasets(panel, seg_ds_names, check_new=False)
+        self._recompute_panel_segs(panel)
+
+    def _build_seg_group_panel(self, *, removable: bool) -> _SegGroupPanel:
+        """Build one two-pane segmentation group panel (Datasets | Segmentation).
+
+        Mirrors ``_build_mask_group_panel`` but the right list is single-pick
+        (exclusive checks, no Select All) since a dataset has one segmentation.
+        """
+        container = QGroupBox()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(8, 8, 8, 8)
+
+        lists_row = QHBoxLayout()
+
+        # Left: datasets checklist + Select All / Deselect All.
+        ds_box = QGroupBox("Datasets")
+        ds_layout = QVBoxLayout(ds_box)
+        ds_btn_row = QHBoxLayout()
+        ds_all = QPushButton("Select All")
+        ds_none = QPushButton("Deselect All")
+        ds_btn_row.addWidget(ds_all)
+        ds_btn_row.addWidget(ds_none)
+        ds_btn_row.addStretch()
+        ds_layout.addLayout(ds_btn_row)
+        ds_list = QListWidget()
+        ds_list.setMaximumHeight(_MASK_PANE_MAX_H)
+        ds_layout.addWidget(ds_list)
+        lists_row.addWidget(ds_box, 3)
+
+        # Right: single-pick segmentation list (intersection of checked datasets).
+        seg_box = QGroupBox("Segmentation (pick one; common to checked datasets)")
+        seg_layout = QVBoxLayout(seg_box)
+        seg_list = QListWidget()
+        seg_list.setMaximumHeight(_MASK_PANE_MAX_H)
+        seg_layout.addWidget(seg_list)
+        lists_row.addWidget(seg_box, 2)
+
+        v.addLayout(lists_row)
+
+        remove_btn: QPushButton | None = None
+        if removable:
+            rm_row = QHBoxLayout()
+            rm_row.addStretch()
+            remove_btn = QPushButton("Remove group")
+            rm_row.addWidget(remove_btn)
+            v.addLayout(rm_row)
+
+        panel = _SegGroupPanel(
+            container=container,
+            ds_list=ds_list,
+            seg_list=seg_list,
+            remove_btn=remove_btn,
+        )
+
+        # Wire user-edit signals (qt-wire-user-edit-signals). Panels persist
+        # across refreshes, so capturing `panel` by value is stable.
+        ds_list.itemChanged.connect(
+            lambda _item, p=panel: self._recompute_panel_segs(p)
+        )
+        seg_list.itemChanged.connect(
+            lambda item, p=panel: self._on_seg_item_checked(p, item)
+        )
+        ds_all.clicked.connect(
+            lambda _=False, p=panel: self._select_all_seg_datasets(p, True)
+        )
+        ds_none.clicked.connect(
+            lambda _=False, p=panel: self._select_all_seg_datasets(p, False)
+        )
+        if remove_btn is not None:
+            remove_btn.clicked.connect(
+                lambda _=False, p=panel: self._remove_seg_group(p)
+            )
+        return panel
+
+    def _repopulate_seg_panel_datasets(
+        self,
+        panel: _SegGroupPanel,
+        seg_ds_names: list[str],
+        *,
+        check_new: bool,
+    ) -> None:
+        """Rebuild a seg panel's dataset checklist (see _repopulate_panel_datasets)."""
+        prior_checked = set(_checked_texts(panel.ds_list))
+        prior_all = {
+            panel.ds_list.item(i).text() for i in range(panel.ds_list.count())
+        }
+        panel.ds_list.blockSignals(True)
+        panel.ds_list.clear()
+        for name in seg_ds_names:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            checked = name in prior_checked if name in prior_all else check_new
+            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            panel.ds_list.addItem(item)
+        panel.ds_list.blockSignals(False)
+
+    def _recompute_panel_segs(self, panel: _SegGroupPanel) -> None:
+        """Recompute a seg panel's single-pick list from its checked datasets.
+
+        Options are the intersection of the checked datasets' segmentation layers
+        (reusing ``intersect_masks`` — a generic sorted set-intersection). The
+        prior pick is preserved when still available; a group with nothing picked
+        lets the runner auto-detect each dataset's preferred (tracked) layer.
+        """
+        checked_ds = _checked_texts(panel.ds_list)
+        common = intersect_masks(self._segs_by_name.get(n, []) for n in checked_ds)
+        prior = _single_checked(panel.seg_list)
+        panel.seg_list.blockSignals(True)
+        panel.seg_list.clear()
+        for name in common:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if name == prior else Qt.Unchecked)
+            panel.seg_list.addItem(item)
+        panel.seg_list.blockSignals(False)
+
+    def _on_seg_item_checked(
+        self, panel: _SegGroupPanel, item: QListWidgetItem
+    ) -> None:
+        """Enforce single-pick: checking one segmentation unchecks the others."""
+        if item.checkState() != Qt.Checked:
+            return
+        panel.seg_list.blockSignals(True)
+        for i in range(panel.seg_list.count()):
+            other = panel.seg_list.item(i)
+            if other is not item and other.checkState() == Qt.Checked:
+                other.setCheckState(Qt.Unchecked)
+        panel.seg_list.blockSignals(False)
+
+    def _select_all_seg_datasets(
+        self, panel: _SegGroupPanel, checked: bool
+    ) -> None:
+        """Check/uncheck every dataset in a seg panel, then recompute its list."""
+        panel.ds_list.blockSignals(True)
+        _set_all_checked(panel.ds_list, checked)
+        panel.ds_list.blockSignals(False)
+        self._recompute_panel_segs(panel)
+
+    def _remove_seg_group(self, panel: _SegGroupPanel) -> None:
+        """Remove a segmentation group panel (first panel is not removable)."""
+        if panel not in self._seg_group_panels:
+            return
+        self._seg_group_panels.remove(panel)
+        self._seg_groups_layout.removeWidget(panel.container)
+        panel.container.deleteLater()
 
     @property
     def segmentation_overrides(self) -> dict[str, str]:
-        """Per-dataset chosen segmentation, for datasets that already have one.
+        """Per-dataset chosen segmentation — later groups override earlier ones.
 
-        Keyed by the dataset's (final) display name; passed to
-        ``SingleCellThresholdingRunner(segmentation_overrides=...)``. Datasets
-        with no segmentation (Cellpose will run) are omitted.
+        Keyed by the dataset's display name; passed to
+        ``SingleCellThresholdingRunner(segmentation_overrides=...)``. Each group
+        with a picked segmentation assigns it to its checked datasets, and a
+        later group wins. Datasets left unpicked are omitted, so the runner falls
+        back to its own auto-detection (the tracked/preferred layer). Datasets
+        with no segmentation on disk are never shown here (Cellpose will run).
         """
         overrides: dict[str, str] = {}
-        for pd, combo in getattr(self, "_seg_combos", []):
-            if not combo.isEnabled():
+        for panel in getattr(self, "_seg_group_panels", []):
+            seg = _single_checked(panel.seg_list)
+            if seg is None:
                 continue
-            choice = combo.currentText()
-            if choice and choice != _NO_SEGMENTATION_LABEL:
-                overrides[pd.display_name] = choice
+            for ds_name in _checked_texts(panel.ds_list):
+                overrides[ds_name] = seg
         return overrides
 
     # ── Existing-mask reuse ───────────────────────────────────
