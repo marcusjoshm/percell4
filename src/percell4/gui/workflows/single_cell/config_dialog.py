@@ -51,6 +51,7 @@ from qtpy.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -69,6 +70,7 @@ from percell4.workflows.csv_columns import (
     DEFAULT_CSV_PARTICLE_PER_CHANNEL,
     build_selected_csv_columns,
 )
+from percell4.workflows.mask_grouping import group_by_mask_signature
 from percell4.workflows.models import (
     AdaptiveClipSettings,
     AutoExtractSettings,
@@ -333,6 +335,59 @@ class _PendingDataset:
             channel_names=list(self.channel_names),
             compress_plan=self.compress_plan,
         )
+
+
+# ── Grouped mask picker ──────────────────────────────────────────────────
+
+# Keep the shared mask list compact; it scrolls if a group has many masks.
+_MASK_LIST_MAX_H = 90
+# Cap the expanded member-name list so a large group can't grow an unbounded
+# wall of names; the QListWidget scrolls past this height.
+_MEMBER_LIST_MAX_H = 120
+
+
+def _dataset_count_label(n: int) -> str:
+    """"1 dataset" / "N datasets" — proper singular/plural."""
+    return f"{n} dataset" if n == 1 else f"{n} datasets"
+
+
+class _MaskGroup:
+    """One rendered group of datasets sharing an available-mask signature.
+
+    ``members`` are the datasets in this (sub-)group; ``list_widget`` is the
+    single shared mask multi-select they all use (``None`` for the no-mask
+    group). ``has_masks`` is tracked explicitly rather than via widget-enabled
+    state, because a checkable QGroupBox disables ALL its children when
+    unchecked — so ``isEnabled()`` can't distinguish "no masks here" from
+    "mask-reuse mode off". ``toggle_btn`` / ``members_list`` are the collapsible
+    member-name affordance, present only for multi-member groups.
+    """
+
+    __slots__ = (
+        "signature",
+        "members",
+        "list_widget",
+        "has_masks",
+        "toggle_btn",
+        "members_list",
+    )
+
+    def __init__(
+        self,
+        *,
+        signature: tuple[str, ...],
+        members: list[_PendingDataset],
+        list_widget: QListWidget | None,
+        has_masks: bool,
+        toggle_btn: QToolButton | None = None,
+        members_list: QListWidget | None = None,
+    ) -> None:
+        self.signature = signature
+        self.members = members
+        self.list_widget = list_widget
+        self.has_masks = has_masks
+        self.toggle_btn = toggle_btn
+        self.members_list = members_list
 
 
 # ── Dialog ──────────────────────────────────────────────────────────────
@@ -664,10 +719,11 @@ class WorkflowConfigDialog(QDialog):
         """Checkable group to reuse existing /masks instead of thresholding.
 
         When checked, the run skips the Threshold Rounds step entirely and
-        measures the selected masks (either/or per run). Mirrors the
-        segmentation-selection group: a per-dataset picker populated from
-        each dataset's ``/masks`` layers. This is a pre-run config control
-        (dialog-local state only); it never touches the live session.
+        measures the selected masks (either/or per run). Datasets exposing an
+        identical set of ``/masks`` layers are grouped into one shared picker
+        (``group_by_mask_signature``); a subset of a group can be split off with
+        its own selection. This is a pre-run config control (dialog-local state
+        only); it never touches the live session.
         """
         box = QGroupBox("Use existing masks (skip thresholding rounds)")
         box.setCheckable(True)
@@ -681,8 +737,10 @@ class WorkflowConfigDialog(QDialog):
         self._mask_selection_group = box
         outer = QVBoxLayout(box)
         note = QLabel(
-            "Select one or more existing mask layers per dataset. The "
-            "Threshold Rounds section is hidden while this is on."
+            "Datasets that expose the same available mask layers are grouped: "
+            "pick masks once per group and they apply to every member. Expand a "
+            "group to see its datasets. The Threshold Rounds section is hidden "
+            "while this is on."
         )
         note.setWordWrap(True)
         outer.addWidget(note)
@@ -690,12 +748,9 @@ class WorkflowConfigDialog(QDialog):
         self._mask_form = QFormLayout(self._mask_form_host)
         self._mask_form.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._mask_form_host)
-        # Each row: (dataset, multi-select list of its /masks, has_masks).
-        # ``has_masks`` is tracked explicitly rather than via the widget's
-        # enabled state, because a checkable QGroupBox disables ALL its
-        # children when unchecked — so isEnabled() can't distinguish
-        # "no masks here" from "mask-reuse mode is currently off".
-        self._mask_lists: list[tuple[_PendingDataset, QListWidget, bool]] = []
+        # One row per _MaskGroup (datasets sharing an available-mask signature).
+        # Rebuilt by _refresh_mask_picker whenever the queue changes.
+        self._mask_groups: list[_MaskGroup] = []
         box.toggled.connect(self._on_mask_reuse_toggled)
         return box
 
@@ -726,66 +781,181 @@ class WorkflowConfigDialog(QDialog):
             return []
 
     def _refresh_mask_picker(self) -> None:
-        """Rebuild the per-dataset mask multi-select lists from the queue.
+        """Rebuild the grouped mask picker from the current queue.
 
-        Preserves any still-valid prior selections so a dataset-queue
-        refresh (or a re-open) doesn't silently drop the user's picks.
+        Datasets exposing an identical set of available ``/masks`` layers are
+        collapsed into one shared multi-select list (``group_by_mask_signature``);
+        the no-mask group is rendered last and is non-selectable. Prior
+        selections are preserved by signature so a queue refresh (or re-open)
+        doesn't silently drop the user's picks.
         """
         form = getattr(self, "_mask_form", None)
         if form is None:
             return
-        prior = {
-            pd.display_name: {
-                lw.item(i).text() for i in range(lw.count()) if lw.item(i).isSelected()
+        # Snapshot prior selections keyed by signature (stable across regroup;
+        # indices and display names shift when datasets are added/removed).
+        prior: dict[tuple[str, ...], set[str]] = {
+            group.signature: {
+                group.list_widget.item(i).text()
+                for i in range(group.list_widget.count())
+                if group.list_widget.item(i).isSelected()
             }
-            for pd, lw, has in getattr(self, "_mask_lists", [])
-            if has
+            for group in getattr(self, "_mask_groups", [])
+            if group.has_masks and group.list_widget is not None
         }
         while form.rowCount():
             form.removeRow(0)
-        self._mask_lists = []
-        for pd in self._pending_datasets:
-            masks = self._dataset_masks(pd)
-            lst = QListWidget()
-            # MultiSelection (not ExtendedSelection): a plain click toggles
-            # an item on/off, so a user can unselect a previously chosen mask
-            # with one click — no Ctrl modifier required.
-            lst.setSelectionMode(QAbstractItemView.MultiSelection)
-            # Keep the row compact; the list scrolls if a dataset has many.
-            lst.setMaximumHeight(90)
-            if masks:
-                lst.addItems(masks)
-                keep = prior.get(pd.display_name, set())
-                for i in range(lst.count()):
-                    if lst.item(i).text() in keep:
-                        lst.item(i).setSelected(True)
-                # Toggling a mask's selection changes whether Start may fire.
-                lst.itemSelectionChanged.connect(self._update_start_enabled)
-            else:
-                lst.addItem("No masks found")
-                lst.item(0).setFlags(lst.item(0).flags() & ~Qt.ItemIsSelectable)
-            self._mask_lists.append((pd, lst, bool(masks)))
-            form.addRow(pd.display_name, lst)
+        self._mask_groups = []
+
+        by_name = {pd.display_name: pd for pd in self._pending_datasets}
+        plans = group_by_mask_signature(
+            (pd.display_name, self._dataset_masks(pd))
+            for pd in self._pending_datasets
+        )
+        all_no_mask = bool(plans) and all(not plan.signature for plan in plans)
+        for plan in plans:
+            members = [by_name[name] for name in plan.member_names]
+            group = self._make_mask_group(plan.signature, members, prior)
+            self._mask_groups.append(group)
+            form.addRow(self._build_mask_group_row(group, all_no_mask=all_no_mask))
+
+    def _make_mask_group(
+        self,
+        signature: tuple[str, ...],
+        members: list[_PendingDataset],
+        prior: dict[tuple[str, ...], set[str]],
+    ) -> _MaskGroup:
+        """Build a _MaskGroup + its shared mask list, restoring prior picks."""
+        if not signature:  # no-mask group — no selectable list
+            return _MaskGroup(
+                signature=signature,
+                members=members,
+                list_widget=None,
+                has_masks=False,
+            )
+        lst = QListWidget()
+        # MultiSelection: a plain click toggles an item on/off, so a previously
+        # chosen mask unselects with one click — no Ctrl modifier required.
+        lst.setSelectionMode(QAbstractItemView.MultiSelection)
+        lst.setMaximumHeight(_MASK_LIST_MAX_H)
+        lst.addItems(list(signature))
+        keep = prior.get(signature, set())
+        for i in range(lst.count()):
+            if lst.item(i).text() in keep:
+                lst.item(i).setSelected(True)
+        # Toggling a mask's selection changes whether Start may fire.
+        lst.itemSelectionChanged.connect(self._update_start_enabled)
+        return _MaskGroup(
+            signature=signature,
+            members=members,
+            list_widget=lst,
+            has_masks=True,
+        )
+
+    def _build_mask_group_row(
+        self, group: _MaskGroup, *, all_no_mask: bool
+    ) -> QWidget:
+        """Container for one group row: header, optional member list, mask list.
+
+        A singleton group shows the member name inline; a multi-member group
+        shows a collapse toggle that reveals the member names. The no-mask
+        group renders its header (and, when it is the only group, an inline
+        explanation) with no selectable list.
+        """
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+
+        if not group.has_masks:
+            self._add_group_header(group, v, suffix=" — no masks available")
+            if all_no_mask:
+                msg = QLabel(
+                    "No masks available in the loaded datasets — add datasets "
+                    "that already contain /masks, or use Threshold Rounds instead."
+                )
+                msg.setWordWrap(True)
+                msg.setStyleSheet("color: #888; font-style: italic;")
+                v.addWidget(msg)
+            return container
+
+        self._add_group_header(group, v)
+        v.addWidget(group.list_widget)
+        return container
+
+    def _add_group_header(
+        self, group: _MaskGroup, layout: QVBoxLayout, *, suffix: str = ""
+    ) -> None:
+        """Add a group header to ``layout``.
+
+        Singleton groups show the sole member's name inline (a collapse toggle
+        would save no space and hide the only identity). Multi-member groups
+        get a checkable QToolButton that reveals a capped, scrollable list of
+        member names.
+        """
+        n = len(group.members)
+        if n == 1:
+            label = QLabel(group.members[0].display_name + suffix)
+            if suffix:
+                label.setStyleSheet("color: #888;")
+            layout.addWidget(label)
+            return
+
+        toggle = QToolButton()
+        toggle.setCheckable(True)
+        toggle.setChecked(False)
+        toggle.setArrowType(Qt.RightArrow)
+        toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        toggle.setText(_dataset_count_label(n) + suffix)
+        toggle.setStyleSheet("QToolButton { border: none; }")
+
+        members_list = QListWidget()
+        members_list.addItems([pd.display_name for pd in group.members])
+        members_list.setSelectionMode(QAbstractItemView.NoSelection)
+        members_list.setMaximumHeight(_MEMBER_LIST_MAX_H)
+        members_list.setVisible(False)
+        members_list.setStyleSheet("color: #aaa;")
+
+        # Direct slot (no reference-capturing lambda): the toggle owns the list,
+        # and both are destroyed together on the next rebuild.
+        toggle.toggled.connect(members_list.setVisible)
+        # Arrow flip captures only the toggle itself (destroyed with this row),
+        # so no stale cross-object reference survives a refresh.
+        toggle.toggled.connect(
+            lambda checked, t=toggle: t.setArrowType(
+                Qt.DownArrow if checked else Qt.RightArrow
+            )
+        )
+        group.toggle_btn = toggle
+        group.members_list = members_list
+        layout.addWidget(toggle)
+        layout.addWidget(members_list)
 
     @property
     def existing_mask_selections(self) -> dict[str, list[str]]:
         """Per-dataset selected mask names (only datasets with a selection).
 
-        Keyed by the dataset's display name. Empty when nothing is
-        selected. Independent of the group's checked state — the caller
-        gates on ``use_existing_masks`` separately — so selections survive
-        a non-destructive toggle (Qt disables the lists but keeps the
-        selection model).
+        Fans each group's shared selection out to one entry per member, keyed
+        by the dataset's display name. No-mask groups and empty selections are
+        omitted, so a value is never an empty list. Independent of the outer
+        group's checked state — the caller gates on ``use_existing_masks``
+        separately — so selections survive a non-destructive toggle (Qt
+        disables the lists but keeps the selection model).
         """
         selections: dict[str, list[str]] = {}
-        for pd, lst, has in getattr(self, "_mask_lists", []):
-            if not has:
+        for group in getattr(self, "_mask_groups", []):
+            if not group.has_masks or group.list_widget is None:
                 continue
+            lst = group.list_widget
             chosen = [
-                lst.item(i).text() for i in range(lst.count()) if lst.item(i).isSelected()
+                lst.item(i).text()
+                for i in range(lst.count())
+                if lst.item(i).isSelected()
             ]
-            if chosen:
-                selections[pd.display_name] = chosen
+            if not chosen:
+                continue
+            for pd in group.members:
+                selections[pd.display_name] = list(chosen)
         return selections
 
     def _build_rounds_group(self) -> QGroupBox:

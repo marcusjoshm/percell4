@@ -1,4 +1,10 @@
-"""Tests for the existing-mask reuse UI in WorkflowConfigDialog (plan U3)."""
+"""Tests for the grouped existing-mask reuse UI in WorkflowConfigDialog.
+
+Datasets sharing an identical set of available ``/masks`` layers collapse
+into one shared picker; the ``existing_mask_selections`` property fans a
+group's selection out to one dict entry per member (plan U2). A subset of a
+group can be split into its own sub-group (plan U4, covered separately).
+"""
 
 from __future__ import annotations
 
@@ -40,19 +46,33 @@ def _select(list_widget, names):
             list_widget.item(i).setSelected(True)
 
 
-def test_mask_picker_lists_masks_and_handles_empty(dialog, tmp_path):
+def _group_for(dialog, name):
+    """Return the _MaskGroup whose members include ``name``."""
+    for g in dialog._mask_groups:
+        if any(pd.display_name == name for pd in g.members):
+            return g
+    raise KeyError(name)
+
+
+def _lw_for(dialog, name):
+    """Return the shared mask list widget for the group containing ``name``."""
+    return _group_for(dialog, name).list_widget
+
+
+def test_mask_picker_groups_masks_and_handles_empty(dialog, tmp_path):
     ds1 = _make_h5(tmp_path, "DS1", ["GFP", "RFP"], ["pbody", "grouped"])
     ds2 = _make_h5(tmp_path, "DS2", ["GFP", "RFP"], [])  # no masks
     dialog._add_h5_paths([ds1, ds2])
 
-    has_by_name = {pd.display_name: has for pd, lw, has in dialog._mask_lists}
-    lw_by_name = {pd.display_name: lw for pd, lw, has in dialog._mask_lists}
-    items1 = {lw_by_name["DS1"].item(i).text() for i in range(lw_by_name["DS1"].count())}
+    g1 = _group_for(dialog, "DS1")
+    assert g1.has_masks is True
+    items1 = {g1.list_widget.item(i).text() for i in range(g1.list_widget.count())}
     assert items1 == {"pbody", "grouped"}
-    assert has_by_name["DS1"] is True
-    # Dataset with no masks shows a non-selectable "No masks found" row.
-    assert lw_by_name["DS2"].item(0).text() == "No masks found"
-    assert has_by_name["DS2"] is False
+    # Dataset with no masks lands in a separate, non-selectable group.
+    g2 = _group_for(dialog, "DS2")
+    assert g2.has_masks is False
+    assert g2.list_widget is None
+    assert g2 is not g1
 
 
 def test_toggle_hides_rounds_group(dialog, tmp_path):
@@ -69,8 +89,7 @@ def test_existing_mask_selections_property(dialog, tmp_path):
     ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["pbody", "grouped"])
     dialog._add_h5_paths([ds1])
     dialog._mask_selection_group.setChecked(True)  # enable the picker
-    lw = {pd.display_name: lw for pd, lw, _ in dialog._mask_lists}["DS1"]
-    _select(lw, {"pbody"})
+    _select(_lw_for(dialog, "DS1"), {"pbody"})
     assert dialog.existing_mask_selections == {"DS1": ["pbody"]}
 
 
@@ -79,8 +98,7 @@ def test_build_config_existing_masks(dialog, tmp_path):
     dialog._add_h5_paths([ds1])
     dialog._output_edit.setText(str(tmp_path / "out"))
     dialog._mask_selection_group.setChecked(True)
-    lw = {pd.display_name: lw for pd, lw, _ in dialog._mask_lists}["DS1"]
-    _select(lw, {"pbody"})
+    _select(_lw_for(dialog, "DS1"), {"pbody"})
 
     cfg = dialog._try_build_config()
     assert cfg is not None
@@ -125,8 +143,7 @@ def test_start_enabled_in_mask_reuse_mode_without_rounds(dialog, tmp_path):
     dialog._mask_selection_group.setChecked(True)
     assert not dialog._start_btn.isEnabled()
     # Selecting a mask flips Start on without any thresholding round.
-    lw = {pd.display_name: lw for pd, lw, _ in dialog._mask_lists}["DS1"]
-    _select(lw, {"pbody"})
+    _select(_lw_for(dialog, "DS1"), {"pbody"})
     assert dialog._start_btn.isEnabled()
     assert dialog._rounds_table.rowCount() == 0
     # Toggling back to rounds mode (no rounds) disables Start again.
@@ -139,7 +156,7 @@ def test_mask_can_be_unselected_with_a_click(dialog, tmp_path):
     ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["pbody", "grouped"])
     dialog._add_h5_paths([ds1])
     dialog._mask_selection_group.setChecked(True)
-    lw = {pd.display_name: lw for pd, lw, _ in dialog._mask_lists}["DS1"]
+    lw = _lw_for(dialog, "DS1")
     _select(lw, {"pbody"})
     assert dialog.existing_mask_selections == {"DS1": ["pbody"]}
     # Toggling the same item off clears the selection — no datasets remain,
@@ -155,9 +172,115 @@ def test_mask_selections_preserved_across_toggle(dialog, tmp_path):
     ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["pbody", "grouped"])
     dialog._add_h5_paths([ds1])
     dialog._mask_selection_group.setChecked(True)
-    lw = {pd.display_name: lw for pd, lw, _ in dialog._mask_lists}["DS1"]
-    _select(lw, {"grouped"})
+    _select(_lw_for(dialog, "DS1"), {"grouped"})
     # Toggling the group off and on does not rebuild the lists / drop picks.
     dialog._mask_selection_group.setChecked(False)
     dialog._mask_selection_group.setChecked(True)
     assert dialog.existing_mask_selections == {"DS1": ["grouped"]}
+
+
+# ── Grouping-specific behavior (plan U2) ─────────────────────────────────
+
+
+def test_identical_masks_share_one_group_and_fan_out(dialog, tmp_path):
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1", "m2"])
+    ds2 = _make_h5(tmp_path, "DS2", ["GFP"], ["m1", "m2"])
+    dialog._add_h5_paths([ds1, ds2])
+    # Both datasets collapse into one shared, selectable group.
+    selectable = [g for g in dialog._mask_groups if g.has_masks]
+    assert len(selectable) == 1
+    g = selectable[0]
+    assert {pd.display_name for pd in g.members} == {"DS1", "DS2"}
+    dialog._mask_selection_group.setChecked(True)
+    _select(g.list_widget, {"m1", "m2"})
+    # Fan-out: one entry per member, identical lists, keyed by display_name.
+    assert dialog.existing_mask_selections == {
+        "DS1": ["m1", "m2"],
+        "DS2": ["m1", "m2"],
+    }
+
+
+def test_different_masks_are_separate_groups(dialog, tmp_path):
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1", "m2"])
+    ds2 = _make_h5(tmp_path, "DS2", ["GFP"], ["m1"])
+    dialog._add_h5_paths([ds1, ds2])
+    dialog._mask_selection_group.setChecked(True)
+    g1 = _group_for(dialog, "DS1")
+    g2 = _group_for(dialog, "DS2")
+    assert g1 is not g2
+    _select(g1.list_widget, {"m2"})
+    # Selecting in one group leaves the other untouched.
+    assert dialog.existing_mask_selections == {"DS1": ["m2"]}
+
+
+def test_selection_preserved_across_refresh(dialog, tmp_path):
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1", "m2"])
+    ds2 = _make_h5(tmp_path, "DS2", ["GFP"], ["m1", "m2"])
+    dialog._add_h5_paths([ds1])
+    dialog._mask_selection_group.setChecked(True)
+    _select(_lw_for(dialog, "DS1"), {"m1"})
+    # Adding a same-signature dataset rebuilds the picker.
+    dialog._add_h5_paths([ds2])
+    g = _group_for(dialog, "DS1")
+    assert {pd.display_name for pd in g.members} == {"DS1", "DS2"}
+    # Selection survives the rebuild (keyed by signature) and fans to both.
+    assert dialog.existing_mask_selections == {"DS1": ["m1"], "DS2": ["m1"]}
+
+
+def test_no_mask_group_renders_last(dialog, tmp_path):
+    # No-mask dataset added FIRST; its group must still sort last.
+    dsn = _make_h5(tmp_path, "DSN", ["GFP"], [])
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1"])
+    dialog._add_h5_paths([dsn, ds1])
+    assert dialog._mask_groups[0].has_masks is True
+    assert dialog._mask_groups[-1].has_masks is False
+
+
+def test_singleton_group_has_no_collapse_toggle(dialog, tmp_path):
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1"])
+    dialog._add_h5_paths([ds1])
+    g = _group_for(dialog, "DS1")
+    # A one-member group shows its name inline — no collapse toggle.
+    assert g.toggle_btn is None
+
+
+def test_multi_member_group_collapse_reveals_members(dialog, tmp_path):
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1"])
+    ds2 = _make_h5(tmp_path, "DS2", ["GFP"], ["m1"])
+    dialog._add_h5_paths([ds1, ds2])
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    assert g.toggle_btn is not None
+    assert g.members_list is not None
+    # Collapsed by default; the toggle reveals the member names.
+    assert not g.members_list.isVisibleTo(dialog)
+    g.toggle_btn.setChecked(True)
+    assert g.members_list.isVisibleTo(dialog)
+    names = {g.members_list.item(i).text() for i in range(g.members_list.count())}
+    assert names == {"DS1", "DS2"}
+
+
+def test_all_no_mask_has_nothing_selectable_and_gates_start(dialog, tmp_path):
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], [])
+    ds2 = _make_h5(tmp_path, "DS2", ["GFP"], [])
+    dialog._add_h5_paths([ds1, ds2])
+    dialog._mask_selection_group.setChecked(True)
+    # One no-mask group, nothing to pick, Start stays gated.
+    assert len(dialog._mask_groups) == 1
+    assert dialog._mask_groups[0].has_masks is False
+    assert dialog.existing_mask_selections == {}
+    assert not dialog._start_btn.isEnabled()
+
+
+def test_selection_signal_fans_to_all_members_and_enables_start(dialog, tmp_path):
+    ds1 = _make_h5(tmp_path, "DS1", ["GFP"], ["m1"])
+    ds2 = _make_h5(tmp_path, "DS2", ["GFP"], ["m1"])
+    dialog._add_h5_paths([ds1, ds2])
+    dialog._mask_selection_group.setChecked(True)
+    g = _group_for(dialog, "DS1")
+    assert not dialog._start_btn.isEnabled()
+    # Drive the item selection signal (not a direct property write) — this
+    # proves the itemSelectionChanged wire fans out and re-gates Start.
+    g.list_widget.item(0).setSelected(True)
+    assert dialog.existing_mask_selections == {"DS1": ["m1"], "DS2": ["m1"]}
+    assert dialog._start_btn.isEnabled()
