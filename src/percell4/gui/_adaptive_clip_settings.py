@@ -53,6 +53,13 @@ class AdaptiveClipConfig:
     smallest_particle_unit: str
     auto_extract_smallest_auto: bool
     largest_only: bool = False
+    # Coarse-pass tuning knobs (defaults match the eye-validated constants in
+    # auto_extraction.py — FILL_FACTOR and FDR). ``fill_factor`` is the
+    # window-to-particle ratio (window = fill_factor × particle Ø, both passes);
+    # ``fdr`` is the target false-positive rate the per-cell noise-symmetry floor
+    # raises k to reject.
+    fill_factor: float = 3.0
+    fdr: float = 0.1
 
 
 class AdaptiveClipSettingsWidget(QWidget):
@@ -145,6 +152,48 @@ class AdaptiveClipSettingsWidget(QWidget):
         sig_row.addWidget(self._sigma)
         layout.addLayout(sig_row)
 
+        # ── Coarse window / largest-Ø ratio (fill factor) ──
+        # coarse window = fill_factor × largest particle Ø (the no-hole floor).
+        # Tunes ONLY the coarse (large-particle) pass; the fine pass stays pinned
+        # at the fixed FILL_FACTOR (3×). Default 3.0 == FILL_FACTOR.
+        ff_row = QHBoxLayout()
+        ff_row.addWidget(QLabel("Coarse window / largest Ø (×):"))
+        self._fill_factor = QDoubleSpinBox()
+        self._fill_factor.setRange(1.0, 12.0)
+        self._fill_factor.setDecimals(1)
+        self._fill_factor.setSingleStep(0.5)
+        self._fill_factor.setValue(3.0)
+        self._fill_factor.setToolTip(
+            "The coarse-pass local-background window as a multiple of the LARGEST "
+            "particle diameter (coarse window = this × largest Ø). Bigger = smoother "
+            "background = fills larger particles but admits more diffuse structure. "
+            "Tunes only the coarse pass; the fine (small-particle) window stays "
+            "pinned at 3×. Default 3."
+        )
+        ff_row.addWidget(self._fill_factor)
+        layout.addLayout(ff_row)
+
+        # ── Coarse-k false-positive rate (FDR) ──
+        # The per-cell noise-symmetry floor raises k until the estimated
+        # false-positive rate (negative tail / positive tail) drops to this.
+        # Default 0.10 == FDR in auto_extraction.py. Lower = stricter (higher k).
+        fdr_row = QHBoxLayout()
+        fdr_row.addWidget(QLabel("Coarse-k false-pos. rate:"))
+        self._fdr = QDoubleSpinBox()
+        self._fdr.setRange(0.01, 0.90)
+        self._fdr.setDecimals(2)
+        self._fdr.setSingleStep(0.05)
+        self._fdr.setValue(0.1)
+        self._fdr.setToolTip(
+            "Target false-positive rate for the coarse pass. k is raised per cell "
+            "until the estimated false-positive rate (band-pass noise is symmetric, "
+            "so the negative tail estimates false positives in the positive tail) "
+            "drops to this. Lower = stricter = higher k = fewer detections. "
+            "Default 0.10."
+        )
+        fdr_row.addWidget(self._fdr)
+        layout.addLayout(fdr_row)
+
         # ── Particle-size filter (value + unit) ──
         size_row = QHBoxLayout()
         size_row.addWidget(QLabel("Min particle size:"))
@@ -166,6 +215,8 @@ class AdaptiveClipSettingsWidget(QWidget):
         # Signal-to-signal forwarding: Qt drops the extra arg the child signals
         # carry (value / index / bool), so config_changed (0-arg) re-emits cleanly.
         self._sigma.valueChanged.connect(self.config_changed)
+        self._fill_factor.valueChanged.connect(self.config_changed)
+        self._fdr.valueChanged.connect(self.config_changed)
         self._min_size.valueChanged.connect(self.config_changed)
         self._unit.currentIndexChanged.connect(self.config_changed)
         self._smallest.valueChanged.connect(self.config_changed)
@@ -209,6 +260,8 @@ class AdaptiveClipSettingsWidget(QWidget):
             smallest_particle_unit=_WINDOW_UNIT_CODES[self._smallest_unit.currentText()],
             auto_extract_smallest_auto=self._ae_smallest_auto.isChecked(),
             largest_only=self._largest_only.isChecked(),
+            fill_factor=float(self._fill_factor.value()),
+            fdr=float(self._fdr.value()),
         )
 
     def set_smallest_value(self, diameter_px: float) -> None:
@@ -230,6 +283,8 @@ class AdaptiveClipSettingsWidget(QWidget):
             self._smallest,
             self._smallest_unit,
             self._sigma,
+            self._fill_factor,
+            self._fdr,
             self._min_size,
             self._unit,
         ):

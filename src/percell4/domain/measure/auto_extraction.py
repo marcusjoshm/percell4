@@ -1,11 +1,12 @@
 """Fully-automated two-pass total feature extraction for Adaptive Local Clipping.
 
 The parameter-light front-end to total foci extraction. Both windows follow one
-rule — ``window = fill_factor × particle diameter`` (the no-hole floor) — applied
-to the *smallest* particle for the fine pass and the *largest* for the coarse
-pass:
+rule — ``window = factor × particle diameter`` (the no-hole floor) — applied to
+the *smallest* particle for the fine pass and the *largest* for the coarse pass.
+The fine pass always uses the fixed :data:`FILL_FACTOR` (3×); the ``fill_factor``
+parameter tunes only the coarse pass:
 
-    Pass 1 (fine)   : window = fill_factor × smallest particle Ø (you supply),
+    Pass 1 (fine)   : window = FILL_FACTOR × smallest particle Ø (you supply),
                       k = 1                       -> catches the small particles
     Pass 2 (coarse) : window = fill_factor × largest particle Ø (measured by LoG),
                       k = noise-symmetry floor    -> fills the large particles
@@ -371,10 +372,13 @@ def auto_extract(
     ``smallest_particle_px=None`` (default) to autodetect the fine window from the
     smallest particle (LoG p5 @ ``min_sigma_small``, used *directly* as the window
     since the LoG size of a small particle already ≈ 3× its true diameter); supply
-    a true diameter to set the fine window ``= fill_factor × smallest`` instead.
-    The largest particle is always measured by LoG (``size_percentile``) and sets
-    the coarse window ``= fill_factor × largest`` at ``k =`` the noise-symmetry
-    floor. The coarse pass runs only when its window exceeds the fine window; the
+    a true diameter to set the fine window ``= FILL_FACTOR × smallest`` instead.
+    The fine window always uses the fixed :data:`FILL_FACTOR` (3×) — ``fill_factor``
+    tunes only the coarse pass, so widening the coarse window to fill larger
+    particles never disturbs the small-particle detection. The largest particle is
+    always measured by LoG (``size_percentile``) and sets the coarse window
+    ``= fill_factor × largest`` at ``k =`` the noise-symmetry floor. The coarse pass
+    runs only when its window exceeds the fine window; the
     passes are OR-unioned (with per-pass hole-filling), and ``min_spot_px`` filters
     the union once at the end. Detection is per-cell (the per-cell σ is the basis
     of the method). LoG **sizing** uses the fixed ``log_presmooth`` (decoupled from
@@ -390,8 +394,11 @@ def auto_extract(
     lab = np.asarray(cell_labels)
 
     # ---- resolve the FINE window ----
+    # The fine window is pinned to the eye-validated FILL_FACTOR (3×); the
+    # `fill_factor` parameter tunes only the COARSE pass (large-particle fill), so
+    # widening the coarse window never disturbs the small-particle detection.
     if smallest_particle_px is not None:
-        fine_window = _win(fill_factor * float(smallest_particle_px))
+        fine_window = _win(FILL_FACTOR * float(smallest_particle_px))
         smallest_diameter_px = float(smallest_particle_px)
         smallest_source = f"supplied Ø {float(smallest_particle_px):g} px"
     else:
@@ -404,13 +411,13 @@ def auto_extract(
                 "smallest-particle autodetection found no blobs; supply a smallest "
                 "particle Ø (turn off Auto-detect smallest) instead"
             )
-        # The fine window follows the same no-hole rule as the coarse pass and the
-        # manual path: window = fill_factor × the measured smallest diameter.
-        fine_window = _win(fill_factor * d_small)
+        # The fine window follows the no-hole rule at the fixed FILL_FACTOR:
+        # window = 3 × the measured smallest diameter.
+        fine_window = _win(FILL_FACTOR * d_small)
         smallest_diameter_px = float(d_small)
         smallest_source = (
             f"auto LoG p{SMALL_PERCENTILE:g} @ min_sigma={min_sigma_small:g} "
-            f"({d_small:.1f} px → window {fill_factor:g}×{d_small:.1f}={fine_window})"
+            f"({d_small:.1f} px → window {FILL_FACTOR:g}×{d_small:.1f}={fine_window})"
         )
 
     # Shared presmoothed buffer + per-cell σ — the noise floor uses these so its

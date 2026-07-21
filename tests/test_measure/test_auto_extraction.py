@@ -197,12 +197,27 @@ def test_auto_extract_autodetects_smallest_by_default():
 
 
 def test_auto_extract_supplied_smallest_uses_fill_factor():
-    """A supplied true Ø sets the fine window to fill_factor × it."""
+    """A supplied true Ø sets the fine window to FILL_FACTOR × it."""
     img, labels = _wide_range_image()
     _, report = auto_extract(img, labels, smallest_particle_px=3.0)
     assert report.fine_window == 9          # 3 × 3
     assert report.smallest_source.startswith("supplied")
     assert report.smallest_diameter_px == 3.0
+
+
+def test_auto_extract_fill_factor_is_coarse_only():
+    """A custom fill_factor widens the COARSE window but leaves the fine window at 3×."""
+    img, labels = _wide_range_image()
+    _, base = auto_extract(img, labels, smallest_particle_px=3.0)
+    _, wide = auto_extract(img, labels, smallest_particle_px=3.0, fill_factor=6.0)
+    # Fine window is pinned to FILL_FACTOR (3×3=9) regardless of fill_factor.
+    assert base.fine_window == 9
+    assert wide.fine_window == 9
+    # The coarse window follows the custom factor (only meaningful when a coarse
+    # pass ran — the wide-range fixture has a large disc, so it does).
+    assert wide.second_pass_used is True
+    assert wide.passes[-1][0] == max(3, round(6.0 * wide.largest_particle_px))
+    assert wide.passes[-1][0] > base.passes[-1][0]
 
 
 def test_auto_extract_raises_when_no_smallest_blobs():

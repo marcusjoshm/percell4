@@ -28,7 +28,14 @@ logger = logging.getLogger(__name__)
 
 
 def run_adaptive_auto_extract(
-    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px, largest_only=False
+    image,
+    labels,
+    smallest_particle_px,
+    presmooth_sigma_px,
+    min_spot_px,
+    largest_only=False,
+    fill_factor=3.0,
+    fdr=0.1,
 ):
     """Worker body for the auto-extraction routine (per-cell).
 
@@ -51,6 +58,8 @@ def run_adaptive_auto_extract(
             labels,
             presmooth_sigma_px=presmooth_sigma_px,
             min_spot_px=min_spot_px,
+            fill_factor=fill_factor,
+            fdr=fdr,
         )
 
     from percell4.domain.measure.auto_extraction import auto_extract
@@ -61,12 +70,21 @@ def run_adaptive_auto_extract(
         smallest_particle_px=smallest_particle_px,
         presmooth_sigma_px=presmooth_sigma_px,
         min_spot_px=min_spot_px,
+        fill_factor=fill_factor,
+        fdr=fdr,
     )
     return mask, report
 
 
 def run_adaptive_auto_extract_stack(
-    image, labels, smallest_particle_px, presmooth_sigma_px, min_spot_px, largest_only=False
+    image,
+    labels,
+    smallest_particle_px,
+    presmooth_sigma_px,
+    min_spot_px,
+    largest_only=False,
+    fill_factor=3.0,
+    fdr=0.1,
 ):
     """Worker body for a time-lapse ``(T,H,W)`` channel: auto-extract each frame.
 
@@ -96,6 +114,8 @@ def run_adaptive_auto_extract_stack(
                 presmooth_sigma_px,
                 min_spot_px,
                 largest_only=largest_only,
+                fill_factor=fill_factor,
+                fdr=fdr,
             )
         except NoParticlesFoundError:
             # No particle to size this frame — a recoverable empty frame, not a failed
@@ -380,6 +400,8 @@ class AdaptiveClipPanel(QWidget):
             f"  smallest particle Ø        : {config.smallest_particle_value} "
             f"{config.smallest_particle_unit}\n"
             f"  auto-detect smallest (LoG) : {config.auto_extract_smallest_auto}\n"
+            f"  window / particle Ø (×)    : {config.fill_factor}\n"
+            f"  coarse-k false-pos rate    : {config.fdr}\n"
             f"  min particle size          : {config.min_size_value} {config.min_size_unit}",
             flush=True,
         )
@@ -527,6 +549,8 @@ class AdaptiveClipPanel(QWidget):
             config.gaussian_sigma,
             min_spot_px,
             largest_only=config.largest_only,
+            fill_factor=config.fill_factor,
+            fdr=config.fdr,
         )
         self._worker.finished.connect(self._on_auto_extract_done)
         self._worker.error.connect(self._on_detect_error)
