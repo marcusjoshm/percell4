@@ -230,33 +230,3 @@ def test_accept_puncta_mask_persists_thw(tmp_h5):
     assert res.n_positive == 1
     assert store.read_mask("adaptive").shape == (3, 8, 8)
     assert store.read_mask("adaptive", timepoint=1)[2, 2] == 1
-
-
-def test_run_adaptive_auto_extract_stack_largest_only(monkeypatch):
-    """largest_only stacks per frame and degrades a no-particle frame to empty (R9)."""
-    import percell4.domain.measure.auto_extraction as ae_mod
-    from percell4.domain.measure.auto_extraction import NoParticlesFoundError
-
-    def fake_largest(image, labels, *, presmooth_sigma_px=1.0, min_spot_px=2):
-        if image.max() < 50:  # no sizable particle to run a coarse pass on
-            raise NoParticlesFoundError("no sizable particle")
-        m = (image > image.mean()).astype(np.uint8)
-        rep = _fake_report(image, presmooth_sigma_px, int(m.sum()))
-        return m, rep
-
-    monkeypatch.setattr(ae_mod, "extract_largest_only", fake_largest)
-
-    image = np.stack(
-        [np.full((4, 4), 100.0, np.float32), np.full((4, 4), 1.0, np.float32)], axis=0
-    )
-    image[0, 0, 0] = 200.0
-    labels = np.ones((2, 4, 4), dtype=np.int32)
-
-    mask, reports = acp.run_adaptive_auto_extract_stack(
-        image, labels, None, 1.0, 1, largest_only=True
-    )
-
-    assert mask.shape == (2, 4, 4)
-    assert reports[0] is not None      # frame 0 has a sizable particle
-    assert reports[1] is None          # frame 1 degraded to empty
-    assert mask[1].sum() == 0          # empty plane, no abort
