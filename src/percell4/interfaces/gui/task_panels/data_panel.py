@@ -325,8 +325,13 @@ class DataPanel(QWidget):
                 if native_shape is not None
                 else "Native: (unknown)"
             )
+            # Names the two distinct binning values so neither reads as the
+            # other: the import-time value is explicitly "Imported at", and the
+            # live session value matches the Session window's "Pixel Binning:"
+            # Selector label.
             bin_line = (
-                f"Creation bin: {creation_bin}  |  View bin: {active_bin}"
+                f"Imported at binning: {creation_bin}  |  "
+                f"Pixel binning: {active_bin}"
             )
             pixel_size_lines = _format_pixel_size_lines(
                 pixel_size_um, active_bin,
