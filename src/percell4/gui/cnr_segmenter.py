@@ -10,7 +10,8 @@ counts live as they are dragged. On **Save**, each non-empty CNR segment is
 written as its own ``{0,1}`` binary mask (``<base>_seg1 … <base>_segN``) via the
 Creator path (:class:`~percell4.application.use_cases.accept_puncta_mask.AcceptPunctaMask`).
 
-Sibling to the automatic "Classify Mask by CNR" (discover/guided/forced) — this
+Sibling to the automatic "Classify Mask by CNR" modes (CNR threshold /
+Auto Two Groups) — this
 one gives the user direct control. Both consume :func:`measure_cnr`. The window
 does only fast lookup-table work; the heavy CNR measurement runs off-thread in
 the panel before the window opens.

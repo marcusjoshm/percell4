@@ -1,13 +1,18 @@
 """Settings widget for the Adaptive Local Clipping module.
 
-A reusable form for the single auto-extraction (two-pass) detection mode: an
-"Auto-detect smallest (LoG)" toggle, the smallest-particle Ø (the manual
-optical-resolution override when auto-detect is off), the Gaussian σ presmooth,
-and the min-particle-size filter. Snapshots into a frozen
-:class:`AdaptiveClipConfig`. Owns only Action-shaped per-run knobs —
-channel / segmentation remain Session-owned Selectors. Mirrors
+A reusable form for the auto-extraction (two-pass) detection mode: the
+smallest-particle diameter (the optical-resolution limit the fine window is
+sized from), the Gaussian σ presmooth, and the minimum particle area filter.
+Snapshots into a frozen :class:`AdaptiveClipConfig`. Owns only Action-shaped
+per-run knobs — channel / segmentation remain Session-owned Selectors. Mirrors
 ``gui/_grouped_threshold_settings.py`` (frozen ``current_config()`` +
 aggregated ``config_changed`` signal).
+
+The coarse-pass window ratio and false-positive rate are the eye-validated
+module constants ``FILL_FACTOR`` and ``FDR`` in
+``percell4.domain.measure.auto_extraction`` and are deliberately not exposed:
+the validated configuration is the default, and a user-set value would drift
+from it silently.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ from dataclasses import dataclass
 
 from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -39,11 +43,9 @@ class AdaptiveClipConfig:
     """Immutable snapshot of the adaptive-clip (auto-extraction) settings widget.
 
     ``smallest_particle_value`` + ``smallest_particle_unit`` (``"px"`` / ``"um"``)
-    are the optical-resolution Ø the auto-extraction run uses when
-    ``auto_extract_smallest_auto`` is False; when True the smallest particle / fine
-    window is measured from the image (LoG) and the field becomes a readout.
-    ``min_size_unit`` is the internal code (``"px"`` / ``"um2"``) for the union
-    size filter.
+    are the optical-resolution Ø the auto-extraction run sizes its fine window
+    from (fine window = 3 × this). ``min_size_unit`` is the internal code
+    (``"px"`` / ``"um2"``) for the union size filter.
     """
 
     gaussian_sigma: float
@@ -51,26 +53,13 @@ class AdaptiveClipConfig:
     min_size_unit: str
     smallest_particle_value: float
     smallest_particle_unit: str
-    auto_extract_smallest_auto: bool
-    largest_only: bool = False
-    # Coarse-pass tuning knobs (defaults match the eye-validated constants in
-    # auto_extraction.py — FILL_FACTOR and FDR). ``fill_factor`` is the
-    # window-to-particle ratio (window = fill_factor × particle Ø, both passes);
-    # ``fdr`` is the target false-positive rate the per-cell noise-symmetry floor
-    # raises k to reject.
-    fill_factor: float = 3.0
-    fdr: float = 0.1
 
 
 class AdaptiveClipSettingsWidget(QWidget):
     """Auto-extraction (two-pass) settings form as one reusable widget.
 
     Emits :attr:`config_changed` whenever any child widget's user-edit signal
-    fires. The "Auto-detect smallest (LoG)" checkbox is the mode's one toggle:
-    when on (default) the smallest particle / fine window is measured from the
-    image per run (the smallest-Ø field is a disabled readout); when off, the
-    field is the manual optical-resolution override. Gaussian σ and the
-    min-particle-size filter are always live.
+    fires. Every control is always live — the form has no modes.
     """
 
     config_changed = Signal()
@@ -85,58 +74,28 @@ class AdaptiveClipSettingsWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # ── Largest particle only (single pass) ──
-        # When on, the run does ONE coarse pass sized to the largest particle and
-        # skips the fine/small-window pass entirely, so the smallest-particle
-        # controls below are meaningless and are disabled.
-        self._largest_only = QCheckBox("Largest particle only (single pass)")
-        self._largest_only.setChecked(False)
-        self._largest_only.setToolTip(
-            "Run a single coarse pass sized to the largest particle (measured by "
-            "Laplacian-of-Gaussian), skipping the fine/small-window pass. Use it "
-            "when only the large features matter and the fine pass would only add "
-            "small-scale junk. The smallest-particle settings are ignored in this mode."
-        )
-        self._largest_only.toggled.connect(self._on_largest_only_toggled)
-        layout.addWidget(self._largest_only)
-
-        # ── Auto-detect smallest particle (LoG) ──
-        # When on (default), the fine window is measured from the image each run
-        # (the smallest-Ø field becomes a readout). When off, the field is the
-        # manual optical-resolution override (a true diameter, ×3 → fine window).
-        self._ae_smallest_auto = QCheckBox("Auto-detect smallest (LoG)")
-        self._ae_smallest_auto.setChecked(True)
-        self._ae_smallest_auto.setToolTip(
-            "When on, the smallest particle (fine window) is measured from the "
-            "current image by a Laplacian-of-Gaussian each run, so it adapts per "
-            "dataset. Turn off to enter your optical resolution limit in the field "
-            "below."
-        )
-        self._ae_smallest_auto.toggled.connect(self._on_ae_smallest_auto_toggled)
-        layout.addWidget(self._ae_smallest_auto)
-
-        # ── Smallest particle Ø (value + px/µm unit) ──
-        # When Auto-detect is off this is the manual optical-resolution override
-        # (fine window = 3 × this); when on it is a readout the run fills. px, or
-        # µm via the dataset pixel size.
+        # ── Smallest particle diameter (value + px/µm unit) ──
+        # The optical-resolution limit the fine pass is sized from (fine window
+        # = 3 × this). px, or µm via the dataset pixel size.
         sp_row = QHBoxLayout()
-        sp_row.addWidget(QLabel("Smallest particle Ø:"))
+        sp_row.addWidget(QLabel("Smallest Particle Diameter:"))
         self._smallest = QDoubleSpinBox()
         self._smallest.setRange(0.02, 1000.0)
         self._smallest.setDecimals(2)
         self._smallest.setSingleStep(1.0)
-        self._smallest.setValue(3.0)
+        self._smallest.setValue(2.0)
         self._smallest.setToolTip(
-            "The smallest particle diameter to resolve — your optical resolution "
-            "limit (it cannot be measured reliably, so you supply it). The fine "
-            "window is 3× this; the largest particle is measured automatically (LoG)."
+            "The diameter of the smallest particle you want to detect — your "
+            "optical resolution limit. Detection looks for particles in a "
+            "neighbourhood three times this wide; the largest particle is "
+            "measured from the image automatically."
         )
         sp_row.addWidget(self._smallest)
         self._smallest_unit = QComboBox()
         self._smallest_unit.addItems(list(_WINDOW_UNIT_LABELS))
         self._smallest_unit.setToolTip(
-            "Smallest-particle unit. px is a pixel diameter; µm converts to pixels "
-            "via the dataset pixel size (needs a known µm/px)."
+            "Unit for the diameter above. px is a pixel diameter; µm converts "
+            "to pixels using the dataset's pixel size (needs a known µm/px)."
         )
         sp_row.addWidget(self._smallest_unit)
         layout.addLayout(sp_row)
@@ -149,104 +108,42 @@ class AdaptiveClipSettingsWidget(QWidget):
         self._sigma.setSingleStep(0.5)
         self._sigma.setValue(1.0)
         self._sigma.setSpecialValueText("None")
+        self._sigma.setToolTip(
+            "Smooth the image by this much before detecting, to keep single-pixel "
+            "noise from registering as particles. Set to None to skip smoothing."
+        )
         sig_row.addWidget(self._sigma)
         layout.addLayout(sig_row)
 
-        # ── Coarse window / largest-Ø ratio (fill factor) ──
-        # coarse window = fill_factor × largest particle Ø (the no-hole floor).
-        # Tunes ONLY the coarse (large-particle) pass; the fine pass stays pinned
-        # at the fixed FILL_FACTOR (3×). Default 3.0 == FILL_FACTOR.
-        ff_row = QHBoxLayout()
-        ff_row.addWidget(QLabel("Coarse window / largest Ø (×):"))
-        self._fill_factor = QDoubleSpinBox()
-        self._fill_factor.setRange(1.0, 12.0)
-        self._fill_factor.setDecimals(1)
-        self._fill_factor.setSingleStep(0.5)
-        self._fill_factor.setValue(3.0)
-        self._fill_factor.setToolTip(
-            "The coarse-pass local-background window as a multiple of the LARGEST "
-            "particle diameter (coarse window = this × largest Ø). Bigger = smoother "
-            "background = fills larger particles but admits more diffuse structure. "
-            "Tunes only the coarse pass; the fine (small-particle) window stays "
-            "pinned at 3×. Default 3."
-        )
-        ff_row.addWidget(self._fill_factor)
-        layout.addLayout(ff_row)
-
-        # ── Coarse-k false-positive rate (FDR) ──
-        # The per-cell noise-symmetry floor raises k until the estimated
-        # false-positive rate (negative tail / positive tail) drops to this.
-        # Default 0.10 == FDR in auto_extraction.py. Lower = stricter (higher k).
-        fdr_row = QHBoxLayout()
-        fdr_row.addWidget(QLabel("Coarse-k false-pos. rate:"))
-        self._fdr = QDoubleSpinBox()
-        self._fdr.setRange(0.01, 0.90)
-        self._fdr.setDecimals(2)
-        self._fdr.setSingleStep(0.05)
-        self._fdr.setValue(0.1)
-        self._fdr.setToolTip(
-            "Target false-positive rate for the coarse pass. k is raised per cell "
-            "until the estimated false-positive rate (band-pass noise is symmetric, "
-            "so the negative tail estimates false positives in the positive tail) "
-            "drops to this. Lower = stricter = higher k = fewer detections. "
-            "Default 0.10."
-        )
-        fdr_row.addWidget(self._fdr)
-        layout.addLayout(fdr_row)
-
-        # ── Particle-size filter (value + unit) ──
+        # ── Minimum particle area filter (value + unit) ──
         size_row = QHBoxLayout()
-        size_row.addWidget(QLabel("Min particle size:"))
+        size_row.addWidget(QLabel("Min. Particle Area:"))
         self._min_size = QDoubleSpinBox()
         self._min_size.setRange(0.0, 1_000_000.0)
         self._min_size.setDecimals(2)
         self._min_size.setValue(3.0)
+        self._min_size.setToolTip(
+            "Discard detected particles smaller than this area. Applied once, "
+            "to the finished detection."
+        )
         size_row.addWidget(self._min_size)
         self._unit = QComboBox()
         self._unit.addItems(list(_UNIT_LABELS))
+        self._unit.setToolTip(
+            "Unit for the area above. µm² converts to pixels using the dataset's "
+            "pixel size (needs a known µm/px)."
+        )
         size_row.addWidget(self._unit)
         layout.addLayout(size_row)
 
-        # Initial gating: auto-detect on by default -> the smallest-Ø field is a
-        # disabled readout.
-        self._apply_mode_gating()
-
     def _connect_change_signals(self) -> None:
         # Signal-to-signal forwarding: Qt drops the extra arg the child signals
-        # carry (value / index / bool), so config_changed (0-arg) re-emits cleanly.
+        # carry (value / index), so config_changed (0-arg) re-emits cleanly.
         self._sigma.valueChanged.connect(self.config_changed)
-        self._fill_factor.valueChanged.connect(self.config_changed)
-        self._fdr.valueChanged.connect(self.config_changed)
         self._min_size.valueChanged.connect(self.config_changed)
         self._unit.currentIndexChanged.connect(self.config_changed)
         self._smallest.valueChanged.connect(self.config_changed)
         self._smallest_unit.currentIndexChanged.connect(self.config_changed)
-        self._ae_smallest_auto.toggled.connect(self.config_changed)
-        self._largest_only.toggled.connect(self.config_changed)
-
-    # ── Slots ─────────────────────────────────────────────────────
-
-    def _on_ae_smallest_auto_toggled(self, _checked: bool) -> None:
-        self._apply_mode_gating()  # toggles the smallest-Ø field
-
-    def _on_largest_only_toggled(self, _checked: bool) -> None:
-        self._apply_mode_gating()  # disables the smallest-particle controls when on
-
-    def _apply_mode_gating(self) -> None:
-        """Enable/disable the smallest-particle controls for the current mode.
-
-        In largest-only mode there is no fine pass, so the whole smallest-particle
-        group — the auto-detect toggle, the smallest-Ø field, and its unit — is
-        disabled. Otherwise the auto-detect toggle is live and the smallest-Ø field
-        + unit are the manual optical-resolution override, live only when
-        "Auto-detect smallest" is off. Gaussian σ and the min-particle-size filter
-        are always live.
-        """
-        largest_only = self._largest_only.isChecked()
-        self._ae_smallest_auto.setEnabled(not largest_only)
-        manual_smallest = (not largest_only) and (not self._ae_smallest_auto.isChecked())
-        self._smallest.setEnabled(manual_smallest)
-        self._smallest_unit.setEnabled(manual_smallest)
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -258,37 +155,15 @@ class AdaptiveClipSettingsWidget(QWidget):
             min_size_unit=_UNIT_CODES[self._unit.currentText()],
             smallest_particle_value=float(self._smallest.value()),
             smallest_particle_unit=_WINDOW_UNIT_CODES[self._smallest_unit.currentText()],
-            auto_extract_smallest_auto=self._ae_smallest_auto.isChecked(),
-            largest_only=self._largest_only.isChecked(),
-            fill_factor=float(self._fill_factor.value()),
-            fdr=float(self._fdr.value()),
         )
 
-    def set_smallest_value(self, diameter_px: float) -> None:
-        """Display the auto-detected smallest Ø (px) in the readout spinbox.
-
-        Used by the host to surface the LoG-measured smallest particle after an
-        auto-extraction run so the user sees the value adapt per dataset. Always a
-        pixel diameter, so the unit is forced to px. The field is a readout while
-        Auto-detect is on, so there is no feedback loop.
-        """
-        self._smallest_unit.setCurrentText("px")
-        self._smallest.setValue(float(diameter_px))
-
     def set_enabled(self, enabled: bool) -> None:
-        """Lock/unlock all widgets during a run (preserves the auto-detect gating)."""
+        """Lock/unlock all widgets during a run."""
         for widget in (
-            self._largest_only,
-            self._ae_smallest_auto,
             self._smallest,
             self._smallest_unit,
             self._sigma,
-            self._fill_factor,
-            self._fdr,
             self._min_size,
             self._unit,
         ):
             widget.setEnabled(enabled)
-        if enabled:
-            # Re-apply the mode gating on top of the unlock.
-            self._apply_mode_gating()

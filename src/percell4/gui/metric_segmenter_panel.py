@@ -3,7 +3,7 @@
 Splits a saved mask's particles into two populations (``<base>_low`` /
 ``<base>_high``) by a user-selected per-particle metric — edge-skirt ratio,
 size, intensity, or CNR — with a live histogram + draggable threshold. A
-generalization of "Segment by CNR (interactive)": the histogram window is the
+generalization of the CNR panel's Interactive mode: the histogram window is the
 shared :class:`~percell4.gui.cnr_segmenter.MetricSegmenterWindow`; the metric is
 measured off-thread by :func:`run_metric_measure` (or ``_stack`` for a
 ``(T,H,W)`` channel) via
@@ -11,7 +11,7 @@ measured off-thread by :func:`run_metric_measure` (or ``_stack`` for a
 
 Substrate: the sharpness/size/intensity metrics are measured over the per-cell
 particle substrate (matching ``particles.csv``); CNR uses the global substrate
-(same as the standalone CNR button). See the emitter module for details.
+(same as the CNR panel's Interactive mode). See the emitter module for details.
 
 State ownership: this is a **Creator** — only the window's Save writes
 ``session.active_mask`` (via ``AcceptPunctaMask``); the metric picker, the

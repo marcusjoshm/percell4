@@ -116,20 +116,22 @@ class SessionWindow(QMainWindow):
         self._seg_combo.currentTextChanged.connect(self._on_seg_combo_changed)
         row.addWidget(self._seg_combo)
 
-        # View-bin selector. The canonical (and only) Selector for
+        # Pixel-binning selector. The canonical (and only) Selector for
         # session.active_bin. DataPanel mirrors the value display but
         # never writes it (consolidate-canonical-state).
         row.addSpacing(6)
-        row.addWidget(QLabel("View bin (k):"))
+        row.addWidget(QLabel("Pixel Binning:"))
         self._bin_spin = QSpinBox()
         self._bin_spin.setRange(1, 16)
         self._bin_spin.setValue(1)
         self._bin_spin.setMinimumWidth(60)
         self._bin_spin.setToolTip(
-            "Session-level view bin: every store read downsamples by "
-            "k×k at this setting (sum for intensity/decay, mean for "
-            "phasor, majority-vote for masks, mode for labels). "
-            "Native (k=1) storage is unchanged. Resets to 1 on dataset switch."
+            "Combine each N×N block of pixels into one when reading this "
+            "dataset (summed for intensity and decay, averaged for phasor, "
+            "majority vote for masks and labels).\n\n"
+            "This affects what you view and measure only — the stored image "
+            "and the binning it was imported at are never changed. Set it to "
+            "1 for no binning. Resets to 1 when you switch datasets."
         )
         self._bin_spin.valueChanged.connect(self._on_bin_spin_changed)
         row.addWidget(self._bin_spin)

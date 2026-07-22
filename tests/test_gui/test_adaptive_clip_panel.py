@@ -188,11 +188,13 @@ def test_run_prints_all_settings_to_terminal(qtbot, monkeypatch, capsys):
     assert "Adaptive Local Clipping run" in out
     for field in (
         "gaussian_sigma",
-        "smallest particle",
-        "auto-detect smallest",
-        "min particle size",
+        "smallest particle diameter",
+        "min particle area",
     ):
         assert field in out
+    # The dev-only knobs no longer appear in the dump.
+    for gone in ("largest particle only", "auto-detect smallest", "false-pos"):
+        assert gone not in out
     assert "2.5" in out  # the gaussian σ value flows into the dump
 
 
@@ -291,6 +293,11 @@ def test_run_cnr_classification_empty_mask_returns_no_masks():
 # ── U6/U7: panel classify wiring, pre-flight, Creator save ───────────────────
 
 
+def _select_mode(panel, label: str) -> None:
+    """Pick a CNR mode by its user-facing dropdown label."""
+    panel._cnr_settings._mode.setCurrentText(label)
+
+
 def _select_source_mask(panel, name):
     """Populate the CNR source combo from the store and pick ``name``."""
     panel._refresh_cnr_masks()
@@ -322,7 +329,7 @@ def test_classify_timelapse_dispatches_stack_and_saves_THW(qtbot, monkeypatch):
     viewer_win.viewer.layers[0].data = np.stack([_blob_image(), _blob_image()], axis=0)
     store.read_mask.return_value = np.ones((2, 120, 120), dtype=np.uint8)
     _select_source_mask(panel, "adaptive")
-    panel._cnr_settings._mode.setCurrentText("Guided (CNR threshold)")
+    panel._cnr_settings._mode.setCurrentText("CNR threshold")
     panel._cnr_settings._threshold.setValue(5.0)
 
     low = np.zeros((2, 120, 120), dtype=np.uint8)
@@ -378,7 +385,8 @@ def test_segment_cnr_timelapse_pools_and_opens_window(qtbot, monkeypatch):
 
     monkeypatch.setattr(panel_module, "run_cnr_measure_stack", _stub)
 
-    panel._on_segment_cnr()
+    _select_mode(panel, "Interactive")
+    panel._on_classify()
 
     assert panel._measure_worker._fn is panel_module.run_cnr_measure_stack
     assert captured["shape"] == (2, 120, 120)  # the (T,H,W) channel reached the pooler
@@ -396,7 +404,7 @@ def test_classify_reads_source_mask_and_passes_mode(qtbot, monkeypatch):
     fmask[40:60, 40:60] = 1
     store.read_mask.return_value = fmask
     _select_source_mask(panel, "adaptive")
-    panel._cnr_settings._mode.setCurrentText("Guided (CNR threshold)")
+    panel._cnr_settings._mode.setCurrentText("CNR threshold")
     panel._cnr_settings._threshold.setValue(7.5)
 
     captured = {}
@@ -519,13 +527,8 @@ def _select_auto_extract(panel) -> None:
     """Auto extraction (two-pass) is the only detection mode — no selection needed."""
 
 
-def _manual_smallest(panel) -> None:
-    """Turn off Auto-detect so the smallest-Ø field is the manual override."""
-    panel._settings._ae_smallest_auto.setChecked(False)
-
-
 def test_auto_extract_run_uses_auto_extract_and_saves(qtbot, monkeypatch):
-    # Default: smallest auto-detected (LoG) on the blob fixture.
+    # Default: the form's 2 px smallest diameter is supplied to the worker.
     panel, model, repo, viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
     _select_auto_extract(panel)
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
@@ -533,30 +536,16 @@ def test_auto_extract_run_uses_auto_extract_and_saves(qtbot, monkeypatch):
     panel._on_run()
 
     assert panel._worker._fn is panel_module.run_adaptive_auto_extract
-    assert panel._worker._args[2] is None  # auto-detect -> None passed to worker
+    assert panel._worker._args[2] == 2.0  # the form default, in px
     assert "ax" in repo.masks
     assert set(np.unique(repo.masks["ax"])).issubset({0, 1})
     viewer_win.add_mask.assert_called_once()
     assert model.session.active_mask == "ax"
 
 
-def test_auto_extract_auto_backfills_smallest_readout(qtbot, monkeypatch):
-    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
-    _select_auto_extract(panel)
-    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
-
-    panel._on_run()
-
-    # After an auto run the smallest-Ø readout shows the adapted (LoG) value.
-    cfg = panel._settings.current_config()
-    assert cfg.smallest_particle_unit == "px"
-    assert cfg.smallest_particle_value > 0.0
-
-
 def test_auto_extract_manual_passes_smallest_px_to_worker(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
     _select_auto_extract(panel)
-    _manual_smallest(panel)
     panel._settings._smallest.setValue(4.0)  # px
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
 
@@ -569,7 +558,6 @@ def test_auto_extract_manual_passes_smallest_px_to_worker(qtbot, monkeypatch):
 def test_auto_extract_manual_um_converts_to_px(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, pixel_size_um=0.5, segmentation="cells")
     _select_auto_extract(panel)
-    _manual_smallest(panel)
     panel._settings._smallest.setValue(2.0)
     panel._settings._smallest_unit.setCurrentText("µm")
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
@@ -583,7 +571,6 @@ def test_auto_extract_manual_um_converts_to_px(qtbot, monkeypatch):
 def test_auto_extract_manual_um_without_pixel_size_aborts(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")  # no pixel size
     _select_auto_extract(panel)
-    _manual_smallest(panel)
     panel._settings._smallest_unit.setCurrentText("µm")
     monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "ax")
 
@@ -642,14 +629,16 @@ def test_auto_extract_prints_report(qtbot, monkeypatch, capsys):
 def test_segment_without_segmentation_aborts(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, existing=["adaptive"])  # no segmentation
     _select_source_mask(panel, "adaptive")
-    panel._on_segment_cnr()
+    _select_mode(panel, "Interactive")
+    panel._on_classify()
     assert panel._measure_worker is None
     assert panel._cnr_segmenter is None
 
 
 def test_segment_without_source_mask_aborts(qtbot, monkeypatch):
     panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")  # no masks exist
-    panel._on_segment_cnr()
+    _select_mode(panel, "Interactive")
+    panel._on_classify()
     assert panel._measure_worker is None
 
 
@@ -665,7 +654,8 @@ def test_segment_dispatches_measure_and_opens_window(qtbot, monkeypatch):
     records = [{"label": 1, "cnr": 3.0}, {"label": 2, "cnr": 30.0}]
     monkeypatch.setattr(panel_module, "run_cnr_measure", lambda *a, **k: (records, comp))
 
-    panel._on_segment_cnr()
+    _select_mode(panel, "Interactive")
+    panel._on_classify()
 
     store.read_mask.assert_called_once_with("adaptive")
     from percell4.gui.cnr_segmenter import CnrSegmenterWindow
@@ -684,103 +674,115 @@ def test_segment_no_foci_shows_no_window(qtbot, monkeypatch):
     records = [{"label": 1, "cnr": float("nan")}]
     monkeypatch.setattr(panel_module, "run_cnr_measure", lambda *a, **k: (records, comp))
 
-    panel._on_segment_cnr()
+    _select_mode(panel, "Interactive")
+    panel._on_classify()
 
     assert panel._cnr_segmenter is None
 
 
-# ── U3: largest-only single-pass dispatch ────────────────────────────────────
+
+# ── U5: mode dispatch, mode guard, lock symmetry ─────────────────────────────
 
 
-def _spy_domain(monkeypatch):
-    """Wrap the two domain entry points with call counters, delegating to the real ones."""
-    import percell4.domain.measure.auto_extraction as ae
+def test_interactive_mode_does_not_prompt_or_classify(qtbot, monkeypatch):
+    """Interactive routes to the measure worker, not the classify worker, and
+    asks for no resource name (the segmenter window owns naming)."""
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    store = panel._get_store()
+    store.read_mask.return_value = np.ones((120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+    _select_mode(panel, "Interactive")
 
-    calls = {"largest": 0, "auto": 0}
-    real_largest, real_auto = ae.extract_largest_only, ae.auto_extract
-
-    def spy_largest(*a, **k):
-        calls["largest"] += 1
-        return real_largest(*a, **k)
-
-    def spy_auto(*a, **k):
-        calls["auto"] += 1
-        return real_auto(*a, **k)
-
-    monkeypatch.setattr(ae, "extract_largest_only", spy_largest)
-    monkeypatch.setattr(ae, "auto_extract", spy_auto)
-    return calls
-
-
-def test_largest_only_dispatches_to_extract_largest_only(qtbot, monkeypatch):
-    """Checked -> the coarse-only domain call runs (and the two-pass one does not)."""
-    calls = _spy_domain(monkeypatch)
-    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
-    panel._settings._largest_only.setChecked(True)
-    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
-
-    panel._on_run()
-
-    assert calls == {"largest": 1, "auto": 0}
-    assert "m" in repo.masks
-    viewer_win.add_mask.assert_called_once()
-
-
-def test_default_off_path_still_calls_auto_extract(qtbot, monkeypatch):
-    """Box unchecked (default) -> the two-pass path is untouched (regression guard)."""
-    calls = _spy_domain(monkeypatch)
-    panel, _model, repo, _viewer_win = _build(qtbot, monkeypatch, segmentation="cells")
-    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
-
-    panel._on_run()
-
-    assert calls == {"largest": 0, "auto": 1}
-
-
-def test_largest_only_needs_segmentation(qtbot, monkeypatch):
-    """Largest-only is per-cell, so no active segmentation -> abort, nothing saved."""
-    panel, _model, repo, viewer_win = _build(qtbot, monkeypatch)  # no segmentation
-    panel._settings._largest_only.setChecked(True)
-    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
-
-    panel._on_run()
-
-    assert repo.masks == {}
-    viewer_win.add_mask.assert_not_called()
-
-
-def test_largest_only_no_smallest_backfill(qtbot, monkeypatch):
-    """No fine pass -> the smallest-Ø readout is not back-filled after the run."""
-    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
-    panel._settings._largest_only.setChecked(True)
-    filled: list = []
-    monkeypatch.setattr(panel._settings, "set_smallest_value", lambda v: filled.append(v))
-    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
-
-    panel._on_run()
-
-    assert filled == []
-    assert panel._pending_ae_auto is False
-
-
-def test_largest_only_prints_mode_to_terminal(qtbot, monkeypatch, capsys):
-    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
-    panel._settings._largest_only.setChecked(True)
-    monkeypatch.setattr(panel_module, "prompt_for_resource_name", lambda *a, **kw: "m")
-
-    panel._on_run()
-
-    out = capsys.readouterr().out.lower()
-    assert "largest particle only" in out
-
-
-def test_run_adaptive_auto_extract_largest_only_flag():
-    """The 2D worker body honours largest_only -> a largest-only report."""
-    img = _blob_image()
-    labels = _labels_one_cell()
-    mask, report = panel_module.run_adaptive_auto_extract(
-        img, labels, None, 1.0, 2, largest_only=True
+    prompted = []
+    monkeypatch.setattr(
+        panel_module, "prompt_for_resource_name",
+        lambda *a, **kw: prompted.append(1) or "x",
     )
-    assert report.largest_only is True
-    assert report.fine_window == 0
-    assert mask.shape == img.shape
+    comp = np.zeros((120, 120), dtype=np.int32)
+    comp[10:20, 10:20] = 1
+    monkeypatch.setattr(
+        panel_module, "run_cnr_measure",
+        lambda *a, **k: ([{"label": 1, "cnr": 5.0}], comp),
+    )
+
+    panel._on_classify()
+
+    assert prompted == []                      # no name prompt in Interactive
+    assert panel._cnr_worker is None           # classify worker never started
+    assert panel._measure_worker is not None   # measure worker did
+    panel._cnr_segmenter.close()
+
+
+def test_interactive_mode_locks_all_four_widgets(qtbot, monkeypatch):
+    """The interactive path locks exactly what _unlock_after_classify re-enables,
+    so a finishing measure worker can never re-enable Run mid-detection."""
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    store = panel._get_store()
+    store.read_mask.return_value = np.ones((120, 120), dtype=np.uint8)
+    _select_source_mask(panel, "adaptive")
+    _select_mode(panel, "Interactive")
+
+    seen = {}
+    comp = np.zeros((120, 120), dtype=np.int32)
+    comp[10:20, 10:20] = 1
+
+    def _capture_lock(*a, **k):
+        # Snapshot the lock state at the moment the worker would start.
+        seen["classify"] = panel._classify_btn.isEnabled()
+        seen["run"] = panel._run_btn.isEnabled()
+        return [{"label": 1, "cnr": 5.0}], comp
+
+    monkeypatch.setattr(panel_module, "run_cnr_measure", _capture_lock)
+
+    panel._on_classify()
+
+    assert seen == {"classify": False, "run": False}   # all locked during the run
+    assert panel._classify_btn.isEnabled()             # and released after
+    assert panel._run_btn.isEnabled()
+    panel._cnr_segmenter.close()
+
+
+def test_measure_error_unlocks_the_panel(qtbot, monkeypatch):
+    """A measure-worker failure must not leave the panel deadlocked."""
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    panel._lock_for_cnr()
+    assert not panel._classify_btn.isEnabled()
+
+    panel._on_measure_error(
+        type("E", (), {"exc_type": "ValueError", "message": "boom"})()
+    )
+
+    assert panel._classify_btn.isEnabled()
+    assert panel._run_btn.isEnabled()
+
+
+def test_interactive_mode_never_reaches_the_classifier(qtbot):
+    """A routing slip must raise, not silently persist a discover-mode result."""
+    img = np.zeros((8, 8), dtype=np.float32)
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    labels = np.ones((8, 8), dtype=np.int32)
+    for fn in (panel_module.run_cnr_classification,
+               panel_module.run_cnr_classification_stack):
+        with pytest.raises(ValueError, match="unknown CNR classification mode"):
+            fn(img, mask, labels, mode="interactive", threshold=8.0)
+
+
+def test_mode_labels_drop_discover(qtbot, monkeypatch):
+    """Discover is gone from the dropdown and from the label->code map."""
+    from percell4.gui._cnr_classify_settings import _MODE_CODES, _MODE_LABELS
+
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells")
+    items = [panel._cnr_settings._mode.itemText(i)
+             for i in range(panel._cnr_settings._mode.count())]
+    assert items == ["CNR threshold", "Auto Two Groups", "Interactive"]
+    assert "discover" not in _MODE_CODES.values()
+    assert not any("Discover" in label for label in _MODE_LABELS)
+
+
+def test_classify_tooltip_tracks_mode(qtbot, monkeypatch):
+    """The button label is fixed, so the tooltip carries what the click will do."""
+    panel, *_ = _build(qtbot, monkeypatch, segmentation="cells", existing=["adaptive"])
+    _select_mode(panel, "Interactive")
+    assert "saved" in panel._classify_btn.toolTip().lower()
+    _select_mode(panel, "CNR threshold")
+    assert "threshold" in panel._classify_btn.toolTip().lower()
