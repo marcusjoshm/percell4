@@ -54,9 +54,20 @@ def test_workflow_config_dialog_wraps_content_in_one_scroll_area(qtbot):
     dlg = WorkflowConfigDialog()
     qtbot.addWidget(dlg)
 
-    scrolls = _scroll_areas(dlg)
-    assert len(scrolls) == 1
-    assert scrolls[0].widget().findChildren(QGroupBox)
+    # The dialog is wrapped in ONE outer scroll (wrap_in_scroll). The Thresholding
+    # Rounds card list adds its own nested scroll inside that content, so count only
+    # the outermost (non-nested) scroll area for this migration's invariant.
+    def _is_nested(sa: QScrollArea) -> bool:
+        p = sa.parentWidget()
+        while p is not None:
+            if isinstance(p, QScrollArea):
+                return True
+            p = p.parentWidget()
+        return False
+
+    outer = [s for s in _scroll_areas(dlg) if not _is_nested(s)]
+    assert len(outer) == 1
+    assert outer[0].widget().findChildren(QGroupBox)
 
 
 # ── U5: add_layer_dialog ─────────────────────────────────────────────

@@ -11,6 +11,13 @@ list.
 
 ### Changed
 
+- **The workflow config dialog's Thresholding Rounds editor is now a card list.**
+  Each round is a full-width card showing only the fields for its selected method
+  (Grouped Otsu, or Adaptive Local Thresholding), with per-card move/remove
+  controls — replacing the wide multi-method table where every method's columns
+  showed at once. The **Adaptive σ-clipping (single-window)** method is no longer
+  offered in the dialog; it remains available in the batch CLI
+  (`percell4-batch-threshold`), and saved configs that use it still run.
 - **Detection defaults changed — read this before comparing new results to old.**
   Three defaults moved as part of the interface cleanup below. Runs where you set
   the values explicitly are unaffected; runs left on the defaults will differ.

@@ -24,13 +24,11 @@ run is NOT started here — the caller (launcher Start button) owns that.
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from qtpy.QtCore import QSettings, Qt
-from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -48,9 +46,8 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -60,6 +57,10 @@ from qtpy.QtWidgets import (
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.gui._cellpose_settings_form import CellposeSettingsForm
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui.workflows.single_cell.round_card import (
+    METHOD_AUTO_EXTRACT,
+    RoundCard,
+)
 from percell4.store import DatasetStore
 from percell4.workflows.channels import ChannelSource, intersect_channels
 from percell4.workflows.csv_columns import (
@@ -71,7 +72,6 @@ from percell4.workflows.csv_columns import (
 )
 from percell4.workflows.masks import intersect_masks
 from percell4.workflows.models import (
-    AdaptiveClipSettings,
     AutoExtractSettings,
     CellposeSettings,
     CnrClassifySettings,
@@ -133,66 +133,9 @@ _PARTICLE_PER_CHANNEL_METRICS = (
     "particle_sg_ratio",
 )
 
-# Matches the `_ROUND_NAME_RE` in `workflows/models.py`. Duplicated here so
-# we can live-validate the cell while the user types — reconstructing the
-# ThresholdingRound dataclass on every keystroke just to catch a typo
-# would be heavy-handed.
-_ROUND_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{0,39}$")
-
-# Rounds table column indexes
-_ROUND_COL_NAME = 0
-_ROUND_COL_CHANNEL = 1
-_ROUND_COL_METRIC = 2
-_ROUND_COL_METHOD = 3
-_ROUND_COL_ALGO = 4
-_ROUND_COL_GMM_MAX = 5
-_ROUND_COL_KMEANS_K = 6
-_ROUND_COL_SIGMA = 7
-_ROUND_COL_DMIN = 8
-_ROUND_COL_K = 9
-_ROUND_COL_GLOBAL = 10
-_ROUND_COL_SIZE_UNIT = 11
-_ROUND_COL_CNR_ON = 12
-_ROUND_COL_CNR_THR = 13
-_ROUND_COL_CNR_FORCED = 14
-_ROUND_COL_MIN_SIZE = 15
-_ROUND_COL_MIN_SIZE_UNIT = 16
-_ROUND_COL_COUNT = 17
-_ROUND_COL_HEADERS = (
-    "Name",
-    "Channel",
-    "Metric",
-    "Method",
-    "Algorithm",
-    "GMM max",
-    "K-means K",
-    "σ",
-    "d_min",
-    "k",
-    "global",
-    "Unit",
-    "CNR split",
-    "CNR thr",
-    "GMM 2-pop",
-    "Min size",
-    "Min unit",
-)
-
-# Method dropdown labels. "Grouped Otsu" is the default (the legacy per-group path).
-# The two per-cell ALC methods are named to match the Analysis-panel terminology so
-# a user reproducing a single-dataset GUI run picks the SAME detector in batch:
-#   - "Adaptive Local Clipping (two-pass)" is the two-pass auto-extractor — the exact
-#     algorithm the GUI "Adaptive Local Clipping" panel runs (its only mode). Carries
-#     an AutoExtractSettings sentinel.
-#   - "Adaptive σ-clipping (single-window)" is the older single-window detector, which
-#     has NO GUI panel counterpart. Carries an AdaptiveClipSettings sentinel. Kept for
-#     configs/users that want it, but clearly distinguished so it is not mistaken for
-#     the GUI's "Adaptive Local Clipping".
-# The constants' VALUES are display text only; routing and serialization key off the
-# sentinel dataclass, so relabeling here does not touch saved run_config.json files.
-_METHOD_GROUPED = "Grouped Otsu"
-_METHOD_ADAPTIVE = "Adaptive σ-clipping (single-window)"
-_METHOD_AUTO_EXTRACT = "Adaptive Local Clipping (two-pass)"
+# The rounds editor is a vertical list of RoundCard widgets (see round_card.py),
+# not a table. Method labels and the value-dict contract live on the card;
+# METHOD_GROUPED / METHOD_AUTO_EXTRACT are imported for the ThresholdingRound build.
 
 
 # ── Internal per-dataset record ──────────────────────────────────────────
@@ -418,7 +361,7 @@ class WorkflowConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Single-cell thresholding analysis workflow")
         self.setModal(True)
-        self.resize(960, 720)
+        self.resize(960, 860)
         cap_to_screen(self)
 
         # State
@@ -441,6 +384,7 @@ class WorkflowConfigDialog(QDialog):
 
         self._build_ui()
         self._refresh_dataset_tree()
+        self._refresh_round_channels()
         self._refresh_column_picker()
         self._update_start_enabled()
 
@@ -1243,64 +1187,33 @@ class WorkflowConfigDialog(QDialog):
         box = QGroupBox("Thresholding Rounds (ordered)")
         outer = QVBoxLayout(box)
 
-        self._rounds_table = QTableWidget(0, _ROUND_COL_COUNT)
-        self._rounds_table.setHorizontalHeaderLabels(_ROUND_COL_HEADERS)
-        # Interactive column resizing — the user can drag column borders.
-        # Seed sensible initial widths so the embedded combos/spinboxes
-        # aren't cramped on first open; the last column stretches to fill.
-        header = self._rounds_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(True)
-        _initial_round_col_widths = {
-            _ROUND_COL_NAME: 110,
-            _ROUND_COL_CHANNEL: 150,
-            _ROUND_COL_METRIC: 190,
-            _ROUND_COL_METHOD: 170,
-            _ROUND_COL_ALGO: 110,
-            _ROUND_COL_GMM_MAX: 100,
-            _ROUND_COL_KMEANS_K: 100,
-            _ROUND_COL_SIGMA: 90,
-            _ROUND_COL_DMIN: 100,
-            _ROUND_COL_K: 70,
-            _ROUND_COL_GLOBAL: 60,
-            _ROUND_COL_SIZE_UNIT: 70,
-            _ROUND_COL_CNR_ON: 80,
-            _ROUND_COL_CNR_THR: 80,
-            _ROUND_COL_CNR_FORCED: 90,
-            _ROUND_COL_MIN_SIZE: 90,
-            _ROUND_COL_MIN_SIZE_UNIT: 70,
-        }
-        for col, width in _initial_round_col_widths.items():
-            self._rounds_table.setColumnWidth(col, width)
-        self._rounds_table.verticalHeader().setVisible(False)
-        self._rounds_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._rounds_table.setSelectionMode(QTableWidget.SingleSelection)
-        # Taller default so several rounds are visible without scrolling.
-        self._rounds_table.setMinimumHeight(200)
-        self._rounds_table.itemChanged.connect(self._on_round_item_changed)
-        outer.addWidget(self._rounds_table, stretch=1)
+        # Ordered source of truth: one RoundCard per round, in display order.
+        self._round_cards: list[RoundCard] = []
+
+        # Cards live in a scroll area so many rounds never force the dialog wider
+        # or taller than the screen — the group box scrolls internally instead.
+        self._rounds_scroll = QScrollArea()
+        self._rounds_scroll.setWidgetResizable(True)
+        # Tall enough to show ~2 full rounds before scrolling.
+        self._rounds_scroll.setMinimumHeight(380)
+        self._rounds_container = QWidget()
+        self._rounds_layout = QVBoxLayout(self._rounds_container)
+        self._rounds_layout.setContentsMargins(0, 0, 0, 0)
+        self._rounds_layout.setSpacing(8)
+        self._rounds_layout.setAlignment(Qt.AlignTop)
+        # Empty-state placeholder shown when no rounds exist.
+        self._rounds_empty_label = QLabel(
+            "No rounds yet \u2014 click Add Round to begin."
+        )
+        self._rounds_empty_label.setStyleSheet("color: gray; font-style: italic;")
+        self._rounds_layout.addWidget(self._rounds_empty_label)
+        self._rounds_scroll.setWidget(self._rounds_container)
+        outer.addWidget(self._rounds_scroll, stretch=1)
 
         btn_row = QHBoxLayout()
         btn_add = QPushButton("Add Round")
         btn_add.clicked.connect(self._on_add_round)
         btn_row.addWidget(btn_add)
-
-        btn_remove = QPushButton("Remove Round")
-        btn_remove.clicked.connect(self._on_remove_round)
-        btn_row.addWidget(btn_remove)
-
-        btn_up = QPushButton("↑")
-        btn_up.setFixedWidth(32)
-        btn_up.setToolTip("Move selected round up")
-        btn_up.clicked.connect(self._on_round_up)
-        btn_row.addWidget(btn_up)
-
-        btn_down = QPushButton("↓")
-        btn_down.setFixedWidth(32)
-        btn_down.setToolTip("Move selected round down")
-        btn_down.clicked.connect(self._on_round_down)
-        btn_row.addWidget(btn_down)
-
         btn_row.addStretch()
         outer.addLayout(btn_row)
 
@@ -1600,6 +1513,7 @@ class WorkflowConfigDialog(QDialog):
             if 0 <= idx < len(self._pending_datasets):
                 self._pending_datasets.pop(idx)
         self._refresh_dataset_tree()
+        self._refresh_round_channels()
         self._refresh_column_picker()
         self._update_start_enabled()
 
@@ -1642,6 +1556,7 @@ class WorkflowConfigDialog(QDialog):
                 skipped.append(f"{path.name} (duplicate)")
 
         self._refresh_dataset_tree()
+        self._refresh_round_channels()
         self._refresh_column_picker()
         self._update_start_enabled()
         return added, skipped
@@ -1732,6 +1647,7 @@ class WorkflowConfigDialog(QDialog):
                 skipped.append(f"{display_name} (duplicate)")
 
         self._refresh_dataset_tree()
+        self._refresh_round_channels()
         self._refresh_column_picker()
         self._update_start_enabled()
         self._toast_add_result(added, skipped)
@@ -1786,510 +1702,78 @@ class WorkflowConfigDialog(QDialog):
 
     # ── Rounds table ──────────────────────────────────────────
 
+    # ── Rounds (card list) ────────────────────────────────────
+
     def _on_add_round(self) -> None:
-        intersected = self._current_intersection()
-        row = self._rounds_table.rowCount()
-        self._rounds_table.insertRow(row)
+        card = self._make_round_card(len(self._round_cards))
+        self._round_cards.append(card)
+        self._rounds_layout.addWidget(card)
+        self._refresh_round_state()
+        # Give the new card visible feedback: scroll it into view.
+        self._rounds_scroll.ensureWidgetVisible(card)
 
-        # Name column — plain editable text cell with live regex validation.
-        name_item = QTableWidgetItem(f"round_{row + 1}")
-        self._rounds_table.setItem(row, _ROUND_COL_NAME, name_item)
+    def _make_round_card(self, index: int) -> RoundCard:
+        card = RoundCard(index, self._current_intersection())
+        card.name_changed.connect(self._refresh_column_picker)
+        card.channel_changed.connect(self._refresh_column_picker)
+        card.method_changed.connect(self._refresh_column_picker)
+        card.move_up_requested.connect(self._on_card_move_up)
+        card.move_down_requested.connect(self._on_card_move_down)
+        card.remove_requested.connect(self._on_card_remove)
+        return card
 
-        # Channel combo populated from the current intersection. If no
-        # intersection yet, leave a hint placeholder.
-        channel_combo = QComboBox()
-        if intersected:
-            channel_combo.addItems(intersected)
-        else:
-            channel_combo.addItem("(add datasets first)")
-            channel_combo.setEnabled(False)
-        channel_combo.currentTextChanged.connect(self._refresh_column_picker_async)
-        self._rounds_table.setCellWidget(row, _ROUND_COL_CHANNEL, channel_combo)
+    def _on_card_remove(self, card: RoundCard) -> None:
+        if card not in self._round_cards:
+            return
+        self._round_cards.remove(card)
+        self._rounds_layout.removeWidget(card)
+        card.deleteLater()
+        self._refresh_round_state()
 
-        # Metric combo
-        metric_combo = QComboBox()
-        metric_combo.addItems(sorted(BUILTIN_METRICS.keys()))
-        metric_combo.setCurrentText("median_intensity")
-        self._rounds_table.setCellWidget(row, _ROUND_COL_METRIC, metric_combo)
+    def _on_card_move_up(self, card: RoundCard) -> None:
+        i = self._round_cards.index(card)
+        if i > 0:
+            self._reorder_cards(i, i - 1)
 
-        # Method combo — Grouped Otsu vs per-cell Adaptive sigma clipping.
-        # Selecting Adaptive greys the grouping columns (GMM/K-means) and enables
-        # the d_min/k columns; Grouped Otsu does the inverse.
-        method_combo = QComboBox()
-        method_combo.addItems([_METHOD_GROUPED, _METHOD_ADAPTIVE, _METHOD_AUTO_EXTRACT])
-        method_combo.setToolTip(
-            "Grouped Otsu: per-intensity-group Otsu (uses Algorithm/GMM/K-means).\n"
-            "Adaptive Local Clipping (two-pass): the SAME detector the GUI 'Adaptive\n"
-            "Local Clipping' panel runs — a per-cell two-pass extractor driven by the\n"
-            "smallest particle Ø (d_min; 0 = auto-detect). Pick this to reproduce a\n"
-            "single-dataset GUI run in batch; the Min size column = the panel's Min\n"
-            "particle size.\n"
-            "Adaptive σ-clipping (single-window): an older per-cell single-window\n"
-            "detector (d_min + per-cell noise floor). It has NO GUI panel — do not use\n"
-            "it to match a GUI result.\n"
-            "Both per-cell methods use σ as the detector presmooth and ignore grouping;\n"
-            "µm units need a pixel size."
+    def _on_card_move_down(self, card: RoundCard) -> None:
+        i = self._round_cards.index(card)
+        if i < len(self._round_cards) - 1:
+            self._reorder_cards(i, i + 1)
+
+    def _reorder_cards(self, a: int, b: int) -> None:
+        """Swap two cards in the list and re-lay-out. Widget state rides along
+        with the card object, so every field is preserved by construction."""
+        self._round_cards[a], self._round_cards[b] = (
+            self._round_cards[b],
+            self._round_cards[a],
         )
-        method_combo.currentTextChanged.connect(
-            lambda _text, r=row: self._on_method_changed(r)
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_METHOD, method_combo)
+        # Re-insert every card in the new order (Qt keeps only one parent slot).
+        for card in self._round_cards:
+            self._rounds_layout.removeWidget(card)
+        for card in self._round_cards:
+            self._rounds_layout.addWidget(card)
+        self._refresh_round_state()
 
-        # Algorithm combo — toggles which of gmm_max / kmeans_k is enabled.
-        algo_combo = QComboBox()
-        algo_combo.addItems(
-            [ThresholdAlgorithm.GMM.value, ThresholdAlgorithm.KMEANS.value]
-        )
-        algo_combo.currentTextChanged.connect(
-            lambda _text, r=row: self._update_algo_columns_enabled(r)
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_ALGO, algo_combo)
-
-        # GMM max components
-        gmm_spin = QSpinBox()
-        gmm_spin.setRange(2, 20)
-        gmm_spin.setValue(10)
-        self._rounds_table.setCellWidget(row, _ROUND_COL_GMM_MAX, gmm_spin)
-
-        # KMeans k
-        kmeans_spin = QSpinBox()
-        kmeans_spin.setRange(2, 20)
-        kmeans_spin.setValue(3)
-        self._rounds_table.setCellWidget(row, _ROUND_COL_KMEANS_K, kmeans_spin)
-
-        # σ — pre-threshold smoothing for grouped Otsu; the per-cell DETECTOR
-        # presmooth (Gaussian blur) for both ALC methods. For ALC it is seeded to
-        # the validated 1.0 on entering the method (see _on_method_changed) so it is
-        # never silently 0 (which collapses detection).
-        sigma_spin = QDoubleSpinBox()
-        sigma_spin.setRange(0.0, 20.0)
-        sigma_spin.setSingleStep(0.1)
-        sigma_spin.setValue(0.0)
-        sigma_spin.setToolTip(
-            "Grouped Otsu: pre-threshold Gaussian smoothing.\n"
-            "Adaptive / Auto-extraction: the detector's per-cell presmooth (Gaussian "
-            "blur σ, px). Seeded to the validated 1.0 when you pick an ALC method."
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_SIGMA, sigma_spin)
-
-        # d_min — the smallest particle diameter, in the Unit column's unit. Drives
-        # the single-window adaptive detector and the auto-extraction fine pass. For
-        # auto-extraction, 0 = auto-detect the smallest particle (the "auto window").
-        # The per-method minimum (set in _update_method_columns_enabled) keeps
-        # adaptive > 0 while allowing 0 for auto-extraction.
-        dmin_spin = QDoubleSpinBox()
-        dmin_spin.setRange(0.02, 10000.0)
-        dmin_spin.setDecimals(3)
-        dmin_spin.setSingleStep(0.05)
-        dmin_spin.setValue(0.40)
-        dmin_spin.setToolTip(
-            "Smallest particle diameter to detect, in the Unit column's unit (µm uses "
-            "the dataset pixel size; px is used directly — for datasets without a "
-            "pixel size). Auto-extraction only: 0 = auto-detect the smallest particle."
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_DMIN, dmin_spin)
-
-        # k — adaptive sigma multiplier (greyed for auto-extraction, which fixes the
-        # fine-pass k at 1 and derives the coarse-pass k automatically).
-        k_spin = QDoubleSpinBox()
-        k_spin.setRange(0.0, 20.0)
-        k_spin.setSingleStep(0.25)
-        k_spin.setValue(1.0)
-        self._rounds_table.setCellWidget(row, _ROUND_COL_K, k_spin)
-
-        # global — threshold every cell against ONE pooled σ (1.4826·MAD over all
-        # cell pixels) at the same k, instead of each cell's own per-cell σ.
-        # Adaptive sigma clipping only (auto-extraction derives its floor per cell).
-        global_check = QCheckBox()
-        global_check.setToolTip(
-            "Global σ: threshold every cell against one shared noise floor "
-            "(1.4826·MAD pooled over all cell pixels) at the same k, instead of "
-            "each cell's own per-cell σ. Adaptive sigma clipping only."
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_GLOBAL, global_check)
-
-        # Unit — px or µm for d_min. µm resolves via the dataset pixel size; px is
-        # used directly (for datasets that lack a pixel size). Switching units does
-        # NOT auto-convert the value.
-        unit_combo = QComboBox()
-        unit_combo.addItem("µm", userData="um")
-        unit_combo.addItem("px", userData="px")
-        unit_combo.setCurrentIndex(0)  # µm — the historical default
-        unit_combo.setToolTip(
-            "Unit for d_min. µm resolves to pixels per dataset using each dataset's "
-            "pixel size; px applies the value directly — pick px for datasets that "
-            "have no pixel size metadata."
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_SIZE_UNIT, unit_combo)
-
-        # CNR split (guided) — opt-in subpopulation classification of the produced
-        # feature mask; valid only on per-cell (ALC) rounds.
-        cnr_check = QCheckBox()
-        cnr_check.setToolTip(
-            "Split the produced foci into 1–2 populations by contrast-to-noise "
-            "ratio at the CNR threshold (guided). Writes <round>_low / <round>_high "
-            "masks + a /classification/<round> table. ALC rounds only; single-"
-            "timepoint datasets only."
-        )
-        cnr_check.stateChanged.connect(
-            lambda _state, r=row: self._update_cnr_columns_enabled(r)
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_ON, cnr_check)
-
-        # CNR threshold — the guided split value; enabled only when CNR split is on.
-        cnr_thr_spin = QDoubleSpinBox()
-        cnr_thr_spin.setRange(0.01, 1000.0)
-        cnr_thr_spin.setDecimals(2)
-        cnr_thr_spin.setSingleStep(0.5)
-        cnr_thr_spin.setValue(5.0)
-        self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_THR, cnr_thr_spin)
-
-        # GMM 2-pop — forced always-2 subpopulation classification. When checked it
-        # OVERRIDES the CNR threshold: the split is placed by a data-driven GMM
-        # two-group boundary regardless of the CNR thr value (which is then greyed).
-        cnr_forced_check = QCheckBox()
-        cnr_forced_check.setToolTip(
-            "Forced always-2 subpopulation classification (GMM two-group split). "
-            "OVERRIDES the CNR threshold: the boundary is placed by a data-driven "
-            "GaussianMixture two-group fit instead of the guided CNR value. Enabled "
-            "only when CNR split is on."
-        )
-        cnr_forced_check.stateChanged.connect(
-            lambda _state, r=row: self._update_cnr_columns_enabled(r)
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_CNR_FORCED, cnr_forced_check)
-
-        # Min size — a method-agnostic post-mask size filter applied to every
-        # method's produced mask: connected components below this area are dropped
-        # before the mask is written. 0 keeps every particle. The unit (px² / µm²)
-        # is set by the adjacent Min unit combo; µm² needs a dataset pixel size.
-        min_size_spin = QDoubleSpinBox()
-        min_size_spin.setRange(0.0, 1_000_000.0)
-        min_size_spin.setDecimals(2)
-        min_size_spin.setSingleStep(1.0)
-        min_size_spin.setValue(0.0)
-        min_size_spin.setToolTip(
-            "Minimum particle size: drop connected components below this area from "
-            "the round's mask (any method). 0 = keep every particle. The unit is set "
-            "by the Min unit column; µm² resolves via the dataset pixel size."
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_MIN_SIZE, min_size_spin)
-
-        # Min unit — px² or µm² for the Min size value. µm² resolves to a per-dataset
-        # pixel threshold; px² applies the value directly. Switching units does NOT
-        # auto-convert the value (mirrors the d_min Unit column).
-        min_unit_combo = QComboBox()
-        min_unit_combo.addItem("px²", userData="px")
-        min_unit_combo.addItem("µm²", userData="um2")
-        min_unit_combo.setCurrentIndex(0)  # px² — no pixel size required
-        min_unit_combo.setToolTip(
-            "Unit for Min size. px² applies the value directly; µm² resolves to "
-            "pixels per dataset using each dataset's pixel size — pick px² for "
-            "datasets that have no pixel size metadata."
-        )
-        self._rounds_table.setCellWidget(row, _ROUND_COL_MIN_SIZE_UNIT, min_unit_combo)
-
-        self._update_method_columns_enabled(row)
+    def _refresh_round_state(self) -> None:
+        """Renumber headers, gate the boundary move buttons, toggle the empty-state
+        placeholder, and refresh the downstream column picker + Start gate."""
+        n = len(self._round_cards)
+        self._rounds_empty_label.setVisible(n == 0)
+        for i, card in enumerate(self._round_cards):
+            card.set_index(i)
+            card.set_move_enabled(up=i > 0, down=i < n - 1)
         self._refresh_column_picker()
         self._update_start_enabled()
 
-    def _on_remove_round(self) -> None:
-        row = self._rounds_table.currentRow()
-        if row < 0:
-            return
-        self._rounds_table.removeRow(row)
-        self._refresh_column_picker()
-        self._update_start_enabled()
+    def _round_dicts(self) -> list[dict[str, Any]]:
+        return [card.to_dict() for card in self._round_cards]
 
-    def _on_round_up(self) -> None:
-        row = self._rounds_table.currentRow()
-        if row <= 0:
-            return
-        self._swap_rounds(row, row - 1)
-        self._rounds_table.setCurrentCell(row - 1, 0)
-
-    def _on_round_down(self) -> None:
-        row = self._rounds_table.currentRow()
-        if row < 0 or row >= self._rounds_table.rowCount() - 1:
-            return
-        self._swap_rounds(row, row + 1)
-        self._rounds_table.setCurrentCell(row + 1, 0)
-
-    def _swap_rounds(self, a: int, b: int) -> None:
-        """Swap rows a and b in the rounds table.
-
-        QTableWidget has no first-class row swap; the cleanest approach
-        is to copy the round data to/from a list of dicts, swap in Python,
-        then repopulate.
-        """
-        rounds_data = [self._read_round_row(i) for i in range(self._rounds_table.rowCount())]
-        rounds_data[a], rounds_data[b] = rounds_data[b], rounds_data[a]
-        # Rebuild the table.
-        self._rounds_table.blockSignals(True)
-        while self._rounds_table.rowCount():
-            self._rounds_table.removeRow(0)
-        for data in rounds_data:
-            self._rounds_table.blockSignals(False)
-            self._on_add_round()
-            self._rounds_table.blockSignals(True)
-            row = self._rounds_table.rowCount() - 1
-            self._write_round_row(row, data)
-        self._rounds_table.blockSignals(False)
-        self._refresh_column_picker()
-
-    def _read_round_row(self, row: int) -> dict[str, Any]:
-        name_item = self._rounds_table.item(row, _ROUND_COL_NAME)
-        return {
-            "name": name_item.text() if name_item else "",
-            "channel": self._rounds_table.cellWidget(
-                row, _ROUND_COL_CHANNEL
-            ).currentText(),
-            "metric": self._rounds_table.cellWidget(
-                row, _ROUND_COL_METRIC
-            ).currentText(),
-            "algorithm": self._rounds_table.cellWidget(
-                row, _ROUND_COL_ALGO
-            ).currentText(),
-            "method": self._rounds_table.cellWidget(
-                row, _ROUND_COL_METHOD
-            ).currentText(),
-            "gmm_max": self._rounds_table.cellWidget(
-                row, _ROUND_COL_GMM_MAX
-            ).value(),
-            "kmeans_k": self._rounds_table.cellWidget(
-                row, _ROUND_COL_KMEANS_K
-            ).value(),
-            "sigma": self._rounds_table.cellWidget(
-                row, _ROUND_COL_SIGMA
-            ).value(),
-            "d_min_um": self._rounds_table.cellWidget(
-                row, _ROUND_COL_DMIN
-            ).value(),
-            "k": self._rounds_table.cellWidget(
-                row, _ROUND_COL_K
-            ).value(),
-            "global_sigma": self._rounds_table.cellWidget(
-                row, _ROUND_COL_GLOBAL
-            ).isChecked(),
-            "size_unit": self._rounds_table.cellWidget(
-                row, _ROUND_COL_SIZE_UNIT
-            ).currentData(),
-            "cnr_classify": self._rounds_table.cellWidget(
-                row, _ROUND_COL_CNR_ON
-            ).isChecked(),
-            "cnr_threshold": self._rounds_table.cellWidget(
-                row, _ROUND_COL_CNR_THR
-            ).value(),
-            "cnr_forced": self._rounds_table.cellWidget(
-                row, _ROUND_COL_CNR_FORCED
-            ).isChecked(),
-            "min_particle_size": self._rounds_table.cellWidget(
-                row, _ROUND_COL_MIN_SIZE
-            ).value(),
-            "min_particle_size_unit": self._rounds_table.cellWidget(
-                row, _ROUND_COL_MIN_SIZE_UNIT
-            ).currentData(),
-        }
-
-    def _write_round_row(self, row: int, data: dict[str, Any]) -> None:
-        name_item = QTableWidgetItem(data["name"])
-        self._rounds_table.setItem(row, _ROUND_COL_NAME, name_item)
-        ch_combo = self._rounds_table.cellWidget(row, _ROUND_COL_CHANNEL)
-        idx = ch_combo.findText(data["channel"])
-        if idx >= 0:
-            ch_combo.setCurrentIndex(idx)
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_METRIC
-        ).setCurrentText(data["metric"])
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_ALGO
-        ).setCurrentText(data["algorithm"])
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_METHOD
-        ).setCurrentText(data.get("method", _METHOD_GROUPED))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_GMM_MAX
-        ).setValue(int(data["gmm_max"]))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_KMEANS_K
-        ).setValue(int(data["kmeans_k"]))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_SIGMA
-        ).setValue(float(data["sigma"]))
-        dmin_w = self._rounds_table.cellWidget(row, _ROUND_COL_DMIN)
-        # Set the per-method floor BEFORE the value so a 0 (auto-detect, valid only
-        # for auto-extraction) is not clamped up to the adaptive minimum.
-        dmin_w.setMinimum(self._dmin_minimum_for(data.get("method", _METHOD_GROUPED)))
-        dmin_w.setValue(float(data.get("d_min_um", 0.40)))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_K
-        ).setValue(float(data.get("k", 1.0)))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_GLOBAL
-        ).setChecked(bool(data.get("global_sigma", False)))
-        unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
-        unit_idx = unit_combo.findData(data.get("size_unit", "um"))
-        unit_combo.setCurrentIndex(unit_idx if unit_idx >= 0 else 0)
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_CNR_ON
-        ).setChecked(bool(data.get("cnr_classify", False)))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_CNR_THR
-        ).setValue(float(data.get("cnr_threshold", 5.0)))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_CNR_FORCED
-        ).setChecked(bool(data.get("cnr_forced", False)))
-        self._rounds_table.cellWidget(
-            row, _ROUND_COL_MIN_SIZE
-        ).setValue(float(data.get("min_particle_size", 0.0)))
-        min_unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_MIN_SIZE_UNIT)
-        min_unit_idx = min_unit_combo.findData(data.get("min_particle_size_unit", "px"))
-        min_unit_combo.setCurrentIndex(min_unit_idx if min_unit_idx >= 0 else 0)
-        self._update_method_columns_enabled(row)
-
-    def _is_adaptive_row(self, row: int) -> bool:
-        method_combo = self._rounds_table.cellWidget(row, _ROUND_COL_METHOD)
-        return method_combo is not None and method_combo.currentText() == _METHOD_ADAPTIVE
-
-    def _is_auto_extract_row(self, row: int) -> bool:
-        method_combo = self._rounds_table.cellWidget(row, _ROUND_COL_METHOD)
-        return (
-            method_combo is not None
-            and method_combo.currentText() == _METHOD_AUTO_EXTRACT
-        )
-
-    def _is_alc_row(self, row: int) -> bool:
-        """Per-cell Adaptive Local Clipping row (single-window OR two-pass) — the
-        rows that may opt into guided CNR subpopulation classification."""
-        return self._is_adaptive_row(row) or self._is_auto_extract_row(row)
-
-    @staticmethod
-    def _dmin_minimum_for(method: str) -> float:
-        """The d_min spinbox floor for a method: auto-extraction allows 0 (= auto-
-        detect the smallest particle); adaptive requires a positive diameter."""
-        return 0.0 if method == _METHOD_AUTO_EXTRACT else 0.02
-
-    def _on_method_changed(self, row: int) -> None:
-        """User changed the row's Method. Seed the ALC presmooth default (σ = 1.0)
-        when entering an ALC method from σ = 0, so the detector presmooth is the
-        validated value rather than the grouped-Otsu 0 (which collapses detection),
-        then re-gate the columns. Programmatic writes call
-        ``_update_method_columns_enabled`` directly and skip this seeding, preserving
-        a saved σ."""
-        if self._is_alc_row(row):
-            sigma = self._rounds_table.cellWidget(row, _ROUND_COL_SIGMA)
-            if sigma is not None and sigma.value() == 0.0:
-                sigma.setValue(1.0)
-        self._update_method_columns_enabled(row)
-
-    def _update_algo_columns_enabled(self, row: int) -> None:
-        """Grey GMM-max / K-means-K per the Algorithm combo — but only when the
-        round is a Grouped Otsu round. Per-cell (adaptive / auto-extraction) rounds
-        keep both greyed (they ignore intensity grouping). Values are retained
-        either way, so switching back restores prior input."""
-        algo_combo = self._rounds_table.cellWidget(row, _ROUND_COL_ALGO)
-        if algo_combo is None:
-            return
-        is_alc = self._is_alc_row(row)
-        is_gmm = algo_combo.currentText() == ThresholdAlgorithm.GMM.value
-        gmm_spin = self._rounds_table.cellWidget(row, _ROUND_COL_GMM_MAX)
-        kmeans_spin = self._rounds_table.cellWidget(row, _ROUND_COL_KMEANS_K)
-        if gmm_spin is not None:
-            gmm_spin.setEnabled(not is_alc and is_gmm)
-        if kmeans_spin is not None:
-            kmeans_spin.setEnabled(not is_alc and not is_gmm)
-
-    def _update_method_columns_enabled(self, row: int) -> None:
-        """Gate columns by the Method combo. Both ALC methods enable d_min + Unit
-        and use σ as the detector presmooth; adaptive also enables k (auto-extraction
-        derives its k automatically). Both grey Algorithm + grouping; Grouped Otsu
-        inverts. CNR-split controls are enabled only on per-cell (ALC) rows. Values
-        are retained when greyed so toggling Method back restores prior input."""
-        adaptive = self._is_adaptive_row(row)
-        auto_extract = self._is_auto_extract_row(row)
-        is_alc = adaptive or auto_extract
-        algo_combo = self._rounds_table.cellWidget(row, _ROUND_COL_ALGO)
-        if algo_combo is not None:
-            algo_combo.setEnabled(not is_alc)
-        # d_min is the smallest-particle knob for BOTH ALC methods; its floor varies
-        # by method (auto-extraction allows 0 = auto-detect).
-        dmin = self._rounds_table.cellWidget(row, _ROUND_COL_DMIN)
-        if dmin is not None:
-            method = (
-                _METHOD_AUTO_EXTRACT if auto_extract
-                else (_METHOD_ADAPTIVE if adaptive else _METHOD_GROUPED)
-            )
-            new_min = self._dmin_minimum_for(method)
-            if dmin.minimum() != new_min:
-                dmin.setMinimum(new_min)
-            dmin.setEnabled(is_alc)
-        # k is the adaptive sigma multiplier only (auto-extraction's k is automatic).
-        k = self._rounds_table.cellWidget(row, _ROUND_COL_K)
-        if k is not None:
-            k.setEnabled(adaptive)
-        # global σ is the k companion — adaptive only (auto-extraction derives its
-        # noise floor per cell). Clear a stale check when leaving adaptive so a
-        # greyed toggle can't silently ride along.
-        global_check = self._rounds_table.cellWidget(row, _ROUND_COL_GLOBAL)
-        if global_check is not None:
-            if not adaptive and global_check.isChecked():
-                global_check.setChecked(False)
-            global_check.setEnabled(adaptive)
-        # The Unit applies to d_min on any per-cell ALC row; greyed for Grouped Otsu.
-        unit_combo = self._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
-        if unit_combo is not None:
-            unit_combo.setEnabled(is_alc)
-        # σ is live everywhere: pre-threshold smoothing for Grouped Otsu, and the
-        # detector presmooth (Gaussian blur) for both ALC methods.
-        sigma = self._rounds_table.cellWidget(row, _ROUND_COL_SIGMA)
-        if sigma is not None:
-            sigma.setEnabled(True)
-        # GMM/K-means enablement depends on both Method and Algorithm.
-        self._update_algo_columns_enabled(row)
-        # CNR-split controls are valid only on per-cell ALC rows.
-        self._update_cnr_columns_enabled(row)
-
-    def _update_cnr_columns_enabled(self, row: int) -> None:
-        """The CNR-split checkbox is enabled only on per-cell (ALC) rows; the CNR
-        threshold and the GMM 2-pop override are enabled only when the checkbox is
-        on. The GMM 2-pop override, when checked, greys the CNR threshold (it is
-        overridden by the forced two-group split). On a non-ALC row the split
-        checkbox is unchecked and disabled so a meaningless split can't be set."""
-        is_alc = self._is_alc_row(row)
-        check = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_ON)
-        thr = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_THR)
-        forced = self._rounds_table.cellWidget(row, _ROUND_COL_CNR_FORCED)
-        if check is not None:
-            if not is_alc and check.isChecked():
-                check.setChecked(False)  # clear a stale split on a non-ALC row
-            check.setEnabled(is_alc)
-        checked = check is not None and check.isChecked()
-        # The GMM 2-pop override is meaningful only when the CNR split is on; clear a
-        # stale check when the split is off so a greyed override can't ride along.
-        if forced is not None:
-            if not (is_alc and checked) and forced.isChecked():
-                forced.setChecked(False)
-            forced.setEnabled(is_alc and checked)
-        is_forced = forced is not None and forced.isChecked()
-        # The threshold drives guided mode only; forced mode overrides it, so grey it.
-        if thr is not None:
-            thr.setEnabled(is_alc and checked and not is_forced)
-
-    def _on_round_item_changed(self, item: QTableWidgetItem) -> None:
-        """Live-validate the Name column against the round-name regex."""
-        if item.column() != _ROUND_COL_NAME:
-            return
-        text = item.text()
-        if _ROUND_NAME_RE.match(text):
-            item.setBackground(QColor(0, 0, 0, 0))  # reset
-            item.setToolTip("")
-        else:
-            item.setBackground(QColor("#5b2a2a"))  # dark red
-            item.setToolTip(
-                f"Round name must match {_ROUND_NAME_RE.pattern} "
-                "(letters/digits/_/-, max 40 chars, non-numeric start)"
-            )
-        self._refresh_column_picker()
+    def _refresh_round_channels(self) -> None:
+        """Repopulate every card's Channel combo from the current intersection,
+        preserving each card's pick. Called when the dataset set changes."""
+        channels = self._current_intersection()
+        for card in self._round_cards:
+            card.set_channels(channels)
 
     # ── Channel intersection + column picker ──────────────────
 
@@ -2366,7 +1850,7 @@ class WorkflowConfigDialog(QDialog):
         n_met = len(self._selected_csv_metrics)
         n_ppc = len(self._selected_csv_particle_per_cell)
         n_ppch = len(self._selected_csv_particle_per_channel)
-        round_names = self._round_names_from_table()
+        round_names = self._round_names_from_cards()
         if n_ch == 0 and n_met == 0 and n_ppc == 0 and n_ppch == 0:
             self._csv_summary_label.setText(
                 "No channels or metrics selected yet. "
@@ -2390,7 +1874,7 @@ class WorkflowConfigDialog(QDialog):
         n_met = len(self._selected_csv_metrics)
         n_ppc = len(self._selected_csv_particle_per_cell)
         n_ppch = len(self._selected_csv_particle_per_channel)
-        round_names = self._round_names_from_table()
+        round_names = self._round_names_from_cards()
         n_rounds = len(round_names)
         # identity (3) + core (7) + ch×met + group_per_round + ch×met×round×2 (in/out)
         # + per-cell particle cols (round × ppc) + per-channel particle cols (round × ch × ppch)
@@ -2598,13 +2082,13 @@ class WorkflowConfigDialog(QDialog):
         }
         self._update_csv_summary()
 
-    def _round_names_from_table(self) -> list[str]:
-        names: list[str] = []
-        for row in range(self._rounds_table.rowCount()):
-            item = self._rounds_table.item(row, _ROUND_COL_NAME)
-            if item is not None and _ROUND_NAME_RE.match(item.text()):
-                names.append(item.text())
-        return names
+    def _round_names_from_cards(self) -> list[str]:
+        """Valid round names, in order — for the CSV column picker."""
+        return [
+            card.to_dict()["name"]
+            for card in self._round_cards
+            if card.name_is_valid()
+        ]
 
     # ── Output folder ─────────────────────────────────────────
 
@@ -2625,7 +2109,7 @@ class WorkflowConfigDialog(QDialog):
             # "at least one dataset has a mask selected" instead of rounds.
             has_work = bool(self.existing_mask_selections)
         else:
-            has_work = self._rounds_table.rowCount() > 0
+            has_work = len(self._round_cards) > 0
         self._start_btn.setEnabled(has_datasets and has_work)
 
     def _on_start_clicked(self) -> None:
@@ -2649,7 +2133,7 @@ class WorkflowConfigDialog(QDialog):
             return None
 
         use_existing_masks = self._mask_selection_group.isChecked()
-        if not use_existing_masks and self._rounds_table.rowCount() == 0:
+        if not use_existing_masks and len(self._round_cards) == 0:
             self._warn(
                 "Add at least one thresholding round, or enable "
                 "'Use existing masks (skip thresholding rounds)'."
@@ -2694,7 +2178,7 @@ class WorkflowConfigDialog(QDialog):
         else:
             # Build rounds and validate each round's channel is in the intersection.
             try:
-                rounds = self._rounds_from_table(intersected)
+                rounds = self._rounds_from_cards(intersected)
             except ValueError as e:
                 self._warn(str(e))
                 return None
@@ -2905,59 +2389,45 @@ class WorkflowConfigDialog(QDialog):
         box.exec_()
         return None
 
-    def _rounds_from_table(
+    def _rounds_from_cards(
         self, intersected: list[str]
     ) -> list[ThresholdingRound]:
-        """Build a list of :class:`ThresholdingRound` from the table rows.
+        """Build a list of :class:`ThresholdingRound` from the round cards.
 
-        Raises ``ValueError`` (caught upstream) on any per-row validation
-        failure; the message is prefixed with the row number so the user
-        can find it.
+        Raises ``ValueError`` (caught upstream) on any per-round validation
+        failure; the message is prefixed with the round number so the user
+        can find it. Only two methods exist — Grouped Otsu and Adaptive Local
+        Clipping (two-pass); a card only ever sets ``auto_extract`` (ALC) or
+        neither (Grouped Otsu), never ``adaptive_clip``.
         """
         rounds: list[ThresholdingRound] = []
-        for row in range(self._rounds_table.rowCount()):
-            data = self._read_round_row(row)
+        for i, data in enumerate(self._round_dicts()):
             if data["channel"] not in intersected:
                 raise ValueError(
-                    f"Round {row + 1} ({data['name']!r}) references channel "
+                    f"Round {i + 1} ({data['name']!r}) references channel "
                     f"{data['channel']!r}, which is not in the intersection "
                     f"{intersected}."
                 )
             try:
                 algo = ThresholdAlgorithm(data["algorithm"])
             except ValueError as e:
-                raise ValueError(f"Round {row + 1}: {e}") from e
-            # Each method carries exactly one settings sentinel; only the selected
-            # method's sentinel is built, so a row reconfigured from another method
-            # does not trip the mutual-exclusion check.
+                raise ValueError(f"Round {i + 1}: {e}") from e
             method = data.get("method")
             size_unit = data.get("size_unit", "um")
             sigma = float(data["sigma"])  # σ is the detector presmooth for ALC rounds
-            d_min = float(data["d_min_um"])  # the merged size column serves both ALC methods
-            adaptive = None
+            d_min = float(data["d_min_um"])
             auto_extract = None
-            if method == _METHOD_ADAPTIVE:
-                adaptive = AdaptiveClipSettings(
-                    d_min_um=d_min,
-                    k=float(data["k"]),
-                    presmooth_sigma_px=sigma,
-                    d_min_unit=size_unit,
-                    global_sigma=bool(data.get("global_sigma", False)),
-                )
-            elif method == _METHOD_AUTO_EXTRACT:
+            if method == METHOD_AUTO_EXTRACT:
                 # 0 (the auto-extraction floor) means auto-detect the smallest → None.
                 auto_extract = AutoExtractSettings(
                     smallest_particle_um=(d_min if d_min > 0 else None),
                     presmooth_sigma_px=sigma,
                     smallest_particle_unit=size_unit,
                 )
-            # Guided CNR split is opt-in and valid only on per-cell ALC rounds; the
-            # dialog disables the checkbox elsewhere, but guard the build too.
+            # Guided CNR split is opt-in and valid only on the per-cell ALC round;
+            # the card disables the checkbox on Grouped Otsu, but guard the build too.
             cnr_classify = None
-            if data.get("cnr_classify") and method in (
-                _METHOD_ADAPTIVE,
-                _METHOD_AUTO_EXTRACT,
-            ):
+            if data.get("cnr_classify") and method == METHOD_AUTO_EXTRACT:
                 # GMM 2-pop overrides the guided threshold with a forced two-group split.
                 cnr_classify = CnrClassifySettings(
                     threshold=float(data["cnr_threshold"]),
@@ -2974,7 +2444,7 @@ class WorkflowConfigDialog(QDialog):
                         gmm_max_components=int(data["gmm_max"]),
                         kmeans_n_clusters=int(data["kmeans_k"]),
                         gaussian_sigma=float(data["sigma"]),
-                        adaptive_clip=adaptive,
+                        adaptive_clip=None,
                         auto_extract=auto_extract,
                         cnr_classify=cnr_classify,
                         min_particle_size=float(data.get("min_particle_size", 0.0)),
@@ -2982,7 +2452,7 @@ class WorkflowConfigDialog(QDialog):
                     )
                 )
             except ValueError as e:
-                raise ValueError(f"Round {row + 1}: {e}") from e
+                raise ValueError(f"Round {i + 1}: {e}") from e
         return rounds
 
     def _datasets_without_pixel_size(self, kept_datasets: list[Any]) -> list[str]:
