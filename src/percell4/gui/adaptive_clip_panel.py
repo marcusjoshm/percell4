@@ -111,8 +111,10 @@ def run_adaptive_auto_extract_stack(
 def run_cnr_classification(image, feature_mask, labels, *, mode, threshold):
     """Worker body for CNR subpopulation classification (per-cell, pure).
 
-    Maps the GUI ``mode`` to :func:`classify_by_cnr`: ``"discover"`` → defaults,
-    ``"guided"`` → ``threshold=…``, ``"forced"`` → ``n_populations=2``. Splits the
+    Maps the ``mode`` to :func:`classify_by_cnr`: ``"guided"`` → ``threshold=…``,
+    ``"forced"`` → ``n_populations=2``, ``"discover"`` → defaults. The mapping is
+    total: any other value (notably the GUI-only ``"interactive"``) raises, so a
+    routing slip can never silently persist a discover-mode result. Splits the
     result's ``labels_image`` (0=bg / 1=low-CNR / 2=high-CNR) into one ``{0,1}``
     ``uint8`` mask per population and returns
     ``(pop_masks: list[(suffix, mask)], components: list[dict], report: dict)``.
@@ -125,8 +127,10 @@ def run_cnr_classification(image, feature_mask, labels, *, mode, threshold):
         res = classify_by_cnr(image, feature_mask, labels, threshold=float(threshold))
     elif mode == "forced":
         res = classify_by_cnr(image, feature_mask, labels, n_populations=2)
-    else:  # discover
+    elif mode == "discover":
         res = classify_by_cnr(image, feature_mask, labels)
+    else:
+        raise ValueError(f"unknown CNR classification mode {mode!r}")
 
     lab = np.asarray(res.labels_image)
     if res.n_subpopulations >= 2:
@@ -157,6 +161,8 @@ def run_cnr_classification_stack(image, feature_mask, labels, *, mode, threshold
     """
     from percell4.domain.measure.cnr_classification import classify_by_cnr_stack
 
+    if mode not in ("guided", "forced", "discover"):
+        raise ValueError(f"unknown CNR classification mode {mode!r}")
     thr = float(threshold) if (mode == "guided" and threshold is not None) else None
     res = classify_by_cnr_stack(image, feature_mask, labels, mode=mode, threshold=thr)
     n_frames = len(res.per_frame)
@@ -305,16 +311,33 @@ class AdaptiveClipPanel(QWidget):
         )
         self._classify_btn.clicked.connect(self._on_classify)
         layout.addWidget(self._classify_btn)
-
-        self._segment_btn = QPushButton("Segment by CNR (interactive)")
-        self._segment_btn.setToolTip(
-            "Open a CNR histogram with draggable dividers and a live napari "
-            "preview; save any number of CNR segments as masks."
-        )
-        self._segment_btn.clicked.connect(self._on_segment_cnr)
-        layout.addWidget(self._segment_btn)
+        # The label is fixed, but what the click DOES depends on the mode, so the
+        # tooltip tracks it (Interactive opens a window and saves nothing yet).
+        self._cnr_settings.config_changed.connect(self._update_classify_tooltip)
+        self._update_classify_tooltip()
 
         layout.addStretch()
+
+    def _update_classify_tooltip(self) -> None:
+        """Keep the green button's tooltip in step with the selected mode."""
+        mode = self._cnr_settings.current_config().mode
+        if mode == "interactive":
+            tip = (
+                "Opens a histogram of every particle's contrast with draggable "
+                "dividers and a live preview. Nothing is saved until you save "
+                "from that window."
+            )
+        elif mode == "forced":
+            tip = (
+                "Splits the source mask into exactly two populations and saves "
+                "them as new masks."
+            )
+        else:
+            tip = (
+                "Splits the source mask at the CNR threshold above and saves the "
+                "populations as new masks."
+            )
+        self._classify_btn.setToolTip(tip)
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
         """Refresh the CNR source-mask list when the panel becomes visible."""
@@ -672,11 +695,33 @@ class AdaptiveClipPanel(QWidget):
             return None
         return image, labels, feature_mask, cfg
 
+    def _lock_for_cnr(self) -> None:
+        """Disable exactly the four widgets :meth:`_unlock_after_classify` enables.
+
+        Both CNR paths (classify and interactive) use this, so the lock and unlock
+        sets are symmetric. An asymmetric pair would let a finishing measure worker
+        re-enable Run mid-detection, after which a second run would reassign
+        ``self._worker`` while the first QThread is still alive.
+        """
+        self._classify_btn.setEnabled(False)
+        self._run_btn.setEnabled(False)
+        self._settings.set_enabled(False)
+        self._cnr_settings.set_enabled(False)
+
     def _on_classify(self) -> None:
+        """Green-button handler for all three CNR modes.
+
+        The pre-flight is shared and runs exactly once per click; the mode then
+        selects between the classifier (prompt → worker → save) and the
+        interactive histogram segmenter (no prompt, saves from its own window).
+        """
         resolved = self._resolve_cnr_inputs(allow_timelapse=True)
         if resolved is None:
             return
         image, labels, feature_mask, cfg = resolved
+        if cfg.mode == "interactive":
+            self._start_cnr_segmenter(image, labels, feature_mask, cfg)
+            return
         store = self._get_store()
 
         existing = store.list_masks() if hasattr(store, "list_masks") else []
@@ -691,10 +736,7 @@ class AdaptiveClipPanel(QWidget):
             return
 
         self._pending_classify_base = base_name
-        self._classify_btn.setEnabled(False)
-        self._run_btn.setEnabled(False)
-        self._settings.set_enabled(False)
-        self._cnr_settings.set_enabled(False)
+        self._lock_for_cnr()
         self._print_cnr_settings_debug(cfg)
         self._show_status(
             f"Classifying '{cfg.source_mask}' by CNR ({cfg.mode})..."
@@ -786,21 +828,16 @@ class AdaptiveClipPanel(QWidget):
 
     # ── Interactive CNR segmenter (Action) ────────────────────────
 
-    def _on_segment_cnr(self) -> None:
-        """Open the interactive CNR histogram segmenter for the selected mask.
+    def _start_cnr_segmenter(self, image, labels, feature_mask, cfg) -> None:
+        """Interactive-mode path: measure per-focus CNR, then open the segmenter.
 
-        Shares the CNR source-mask selector + pre-flight with the auto classifier;
-        measures per-focus CNR off-thread, then opens :class:`CnrSegmenterWindow`. For a
-        time-lapse ``(T,H,W)`` channel the foci of ALL timepoints are pooled into one
-        histogram and the divider threshold(s) apply to every frame equally.
+        Takes the inputs already resolved by :meth:`_on_classify`'s shared
+        pre-flight, so the validation runs exactly once per click. For a time-lapse
+        ``(T,H,W)`` channel the foci of ALL timepoints are pooled into one histogram
+        and the divider threshold(s) apply to every frame equally.
         """
-        resolved = self._resolve_cnr_inputs(allow_timelapse=True)
-        if resolved is None:
-            return
-        image, labels, feature_mask, cfg = resolved
-
         self._pending_segment_source = cfg.source_mask
-        self._segment_btn.setEnabled(False)
+        self._lock_for_cnr()
         # Time-lapse: pool foci across frames (one histogram); single-frame: the 2D
         # worker. Both return (records, component_labels) for the shape-agnostic window.
         is_timelapse = np.asarray(image).ndim == 3
@@ -816,12 +853,12 @@ class AdaptiveClipPanel(QWidget):
         self._measure_worker.start()
 
     def _on_measure_error(self, err) -> None:
-        self._segment_btn.setEnabled(True)
+        self._unlock_after_classify()
         self._show_status(f"CNR measurement error: {err.exc_type}: {err.message}")
 
     def _on_measure_done(self, result) -> None:
         records, component_labels = result
-        self._segment_btn.setEnabled(True)
+        self._unlock_after_classify()
         valid = [r for r in records if np.isfinite(r.get("cnr", float("nan"))) and r["cnr"] > 0]
         if not valid:
             self._show_status("No foci with a measurable CNR to segment")

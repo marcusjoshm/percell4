@@ -27,12 +27,15 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-# Mode dropdown labels -> internal codes consumed by run_cnr_classification.
-_MODE_LABELS = ("Discover (auto gap)", "Guided (CNR threshold)", "Forced (always 2)")
+# Mode dropdown labels -> internal codes consumed by the panel's dispatch.
+# "interactive" is a GUI-only routing value: it selects the histogram segmenter
+# and must never reach run_cnr_classification (which would treat an unknown mode
+# as discover). The panel's worker bodies raise on it defensively.
+_MODE_LABELS = ("CNR threshold", "Auto Two Groups", "Interactive")
 _MODE_CODES = {
-    "Discover (auto gap)": "discover",
-    "Guided (CNR threshold)": "guided",
-    "Forced (always 2)": "forced",
+    "CNR threshold": "guided",
+    "Auto Two Groups": "forced",
+    "Interactive": "interactive",
 }
 
 
@@ -42,8 +45,10 @@ class CnrClassifyConfig:
 
     ``source_mask`` is the ``/masks/<name>`` to classify (empty string when none
     is selected — the host treats that as a pre-flight failure). ``mode`` is one
-    of ``"discover"`` / ``"guided"`` / ``"forced"``. ``threshold`` is the raw CNR
-    split value used only in guided mode (ignored otherwise).
+    of ``"guided"`` / ``"forced"`` / ``"interactive"``; the first two are
+    classifier modes, while ``"interactive"`` routes the host to the histogram
+    segmenter instead. ``threshold`` is the raw CNR split value used only in
+    guided mode (ignored otherwise).
     """
 
     source_mask: str
@@ -55,8 +60,8 @@ class CnrClassifySettingsWidget(QWidget):
     """Source-mask + mode + (guided) threshold form as one reusable widget.
 
     Emits :attr:`config_changed` whenever a child widget's user-edit signal
-    fires. Selecting the Guided mode enables the CNR-threshold spinbox; Discover
-    and Forced disable it (it is unused there).
+    fires. Selecting "CNR threshold" enables the threshold spinbox; the other two
+    modes disable it (it is unused there).
     """
 
     config_changed = Signal()
@@ -89,9 +94,13 @@ class CnrClassifySettingsWidget(QWidget):
         self._mode = QComboBox()
         self._mode.addItems(list(_MODE_LABELS))
         self._mode.setToolTip(
-            "Discover splits only on a statistically significant CNR gap "
-            "(conservative). Guided splits at the CNR threshold you supply (for "
-            "known overlapping populations). Forced always splits into two."
+            "How to split the source mask into populations.\n\n"
+            "CNR threshold — split at the contrast value you set below, for "
+            "populations you already know overlap.\n"
+            "Auto Two Groups — always split into exactly two, letting the data "
+            "place the boundary.\n"
+            "Interactive — open a histogram of every particle's contrast and "
+            "place the boundaries yourself, with a live preview."
         )
         mode_row.addWidget(self._mode)
         layout.addLayout(mode_row)
@@ -105,9 +114,10 @@ class CnrClassifySettingsWidget(QWidget):
         self._threshold.setSingleStep(0.5)
         self._threshold.setValue(8.0)
         self._threshold.setToolTip(
-            "Guided mode only: foci with CNR at or above this split into the "
-            "higher population. A starting value is printed by a Discover run "
-            "(the candidate threshold)."
+            "CNR threshold mode only: particles at or above this contrast go "
+            "into the higher population. To find a starting value, run "
+            "Interactive mode and read it off the histogram — every run also "
+            "prints a suggested threshold to the terminal."
         )
         thr_row.addWidget(self._threshold)
         layout.addLayout(thr_row)
@@ -129,7 +139,7 @@ class CnrClassifySettingsWidget(QWidget):
         return _MODE_CODES[self._mode.currentText()]
 
     def _apply_mode_gating(self) -> None:
-        """The CNR threshold is live only in Guided mode."""
+        """The CNR threshold is live only in "CNR threshold" (guided) mode."""
         self._threshold.setEnabled(self._mode_code() == "guided")
 
     # ── Public API ────────────────────────────────────────────────
