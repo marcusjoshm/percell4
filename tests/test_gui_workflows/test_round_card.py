@@ -22,7 +22,7 @@ def test_default_is_grouped_otsu(qtbot):
     assert d["algorithm"] == "gmm"
     assert d["gmm_max"] == 10
     assert d["kmeans_k"] == 3
-    assert d["min_particle_size"] == 0.0
+    assert d["min_particle_size"] == 3.0
     assert d["min_particle_size_unit"] == "px"
     # The σ-clipping-only keys never appear.
     assert "k" not in d
@@ -144,6 +144,24 @@ def test_algorithm_gates_gmm_vs_kmeans(qtbot):
     c._algorithm.setCurrentText("kmeans")
     assert not c._gmm_max.isEnabled()
     assert c._kmeans_k.isEnabled()
+
+
+def test_smallest_diameter_defaults_to_two_px(qtbot):
+    c = _card(qtbot)
+    d = c.to_dict()
+    assert d["d_min_um"] == 2.0
+    assert d["size_unit"] == "px"
+
+
+def test_metric_shown_only_for_grouped_otsu(qtbot):
+    c = _card(qtbot)
+    # Grouped Otsu (default): metric row visible.
+    assert c._metric_row.isVisibleTo(c)
+    # Adaptive Local Thresholding: metric row hidden (metric is grouping-only).
+    c._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    assert c._metric_row.isHidden()
+    c._method.setCurrentText(METHOD_GROUPED)
+    assert c._metric_row.isVisibleTo(c)
 
 
 def test_auto_extract_allows_zero_dmin(qtbot):

@@ -361,7 +361,7 @@ class WorkflowConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Single-cell thresholding analysis workflow")
         self.setModal(True)
-        self.resize(960, 720)
+        self.resize(960, 860)
         cap_to_screen(self)
 
         # State
@@ -1194,7 +1194,8 @@ class WorkflowConfigDialog(QDialog):
         # or taller than the screen — the group box scrolls internally instead.
         self._rounds_scroll = QScrollArea()
         self._rounds_scroll.setWidgetResizable(True)
-        self._rounds_scroll.setMinimumHeight(220)
+        # Tall enough to show ~2 full rounds before scrolling.
+        self._rounds_scroll.setMinimumHeight(380)
         self._rounds_container = QWidget()
         self._rounds_layout = QVBoxLayout(self._rounds_container)
         self._rounds_layout.setContentsMargins(0, 0, 0, 0)

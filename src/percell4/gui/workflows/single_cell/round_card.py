@@ -51,7 +51,7 @@ from percell4.workflows.models import ThresholdAlgorithm
 # The VALUES are display text only; routing/serialisation key off the sentinel
 # dataclass the dialog builds, so relabeling here does not touch run_config.json.
 METHOD_GROUPED = "Grouped Otsu"
-METHOD_AUTO_EXTRACT = "Adaptive Local Clipping (two-pass)"
+METHOD_AUTO_EXTRACT = "Adaptive Local Thresholding"
 
 # Round-name validation: letters/digits/_/-, non-numeric start, max 40 chars.
 ROUND_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{0,39}$")
@@ -96,20 +96,20 @@ class RoundCard(QFrame):
         self._header_label.setStyleSheet("font-weight: bold;")
         header.addWidget(self._header_label)
         header.addStretch()
-        self._up_btn = QPushButton("▲")
-        self._up_btn.setFixedWidth(28)
+        self._up_btn = QPushButton("↑")
+        self._up_btn.setFixedWidth(30)
         self._up_btn.setToolTip("Move this round up")
-        self._down_btn = QPushButton("▼")
-        self._down_btn.setFixedWidth(28)
+        self._down_btn = QPushButton("↓")
+        self._down_btn.setFixedWidth(30)
         self._down_btn.setToolTip("Move this round down")
-        self._remove_btn = QPushButton("✕")
-        self._remove_btn.setFixedWidth(28)
+        self._remove_btn = QPushButton("×")
+        self._remove_btn.setFixedWidth(30)
         self._remove_btn.setToolTip("Remove this round")
         for b in (self._up_btn, self._down_btn, self._remove_btn):
             header.addWidget(b)
         outer.addLayout(header)
 
-        # ── Shared identity row: Name / Channel / Metric ──
+        # ── Shared identity row: Name / Channel ──
         ident = QGridLayout()
         ident.setHorizontalSpacing(8)
         ident.addWidget(QLabel("Name:"), 0, 0)
@@ -127,14 +127,8 @@ class RoundCard(QFrame):
             self._channel.addItem("(add datasets first)")
             self._channel.setEnabled(False)
         ident.addWidget(self._channel, 0, 3)
-        ident.addWidget(QLabel("Metric:"), 0, 4)
-        self._metric = QComboBox()
-        self._metric.addItems(sorted(BUILTIN_METRICS.keys()))
-        self._metric.setCurrentText("median_intensity")
-        ident.addWidget(self._metric, 0, 5)
         ident.setColumnStretch(1, 1)
         ident.setColumnStretch(3, 1)
-        ident.setColumnStretch(5, 1)
         outer.addLayout(ident)
 
         # ── Method row ──
@@ -155,6 +149,25 @@ class RoundCard(QFrame):
         method_row.addWidget(self._method)
         method_row.addStretch()
         outer.addLayout(method_row)
+
+        # ── Metric (Grouped Otsu only) ──
+        # The per-cell ALC method thresholds each cell independently and ignores
+        # intensity grouping, so Metric is meaningful only for Grouped Otsu; it is
+        # shown/hidden with the method.
+        self._metric_row = QFrame()
+        metric_layout = QHBoxLayout(self._metric_row)
+        metric_layout.setContentsMargins(0, 0, 0, 0)
+        metric_layout.addWidget(QLabel("Metric:"))
+        self._metric = QComboBox()
+        self._metric.addItems(sorted(BUILTIN_METRICS.keys()))
+        self._metric.setCurrentText("median_intensity")
+        self._metric.setToolTip(
+            "The per-cell metric to group cells by before per-group Otsu. "
+            "Grouped Otsu only."
+        )
+        metric_layout.addWidget(self._metric)
+        metric_layout.addStretch()
+        outer.addWidget(self._metric_row)
 
         # ── Grouped Otsu sub-group ──
         self._grouped_box = QFrame()
@@ -191,7 +204,7 @@ class RoundCard(QFrame):
         self._d_min.setRange(0.0, 10000.0)  # floor set per-method by _apply_dmin_floor
         self._d_min.setDecimals(3)
         self._d_min.setSingleStep(0.05)
-        self._d_min.setValue(0.40)
+        self._d_min.setValue(2.0)
         self._d_min.setToolTip(
             "Smallest particle diameter to detect, in the unit at right (µm uses "
             "the dataset pixel size; px is used directly). 0 = auto-detect the "
@@ -201,7 +214,7 @@ class RoundCard(QFrame):
         self._size_unit = QComboBox()
         self._size_unit.addItem("µm", userData="um")
         self._size_unit.addItem("px", userData="px")
-        self._size_unit.setCurrentIndex(0)  # µm — the historical default
+        self._size_unit.setCurrentText("px")  # default: 2 px smallest particle
         self._size_unit.setToolTip(
             "Unit for the diameter. µm resolves to pixels per dataset via each "
             "dataset's pixel size; px applies the value directly — pick px for "
@@ -258,7 +271,7 @@ class RoundCard(QFrame):
         self._min_size.setRange(0.0, 1_000_000.0)
         self._min_size.setDecimals(2)
         self._min_size.setSingleStep(1.0)
-        self._min_size.setValue(0.0)
+        self._min_size.setValue(3.0)
         self._min_size.setToolTip(
             "Drop connected components below this area from the round's mask "
             "(any method). 0 = keep every particle. The unit is set at right; "
@@ -314,6 +327,7 @@ class RoundCard(QFrame):
         """Show only the selected method's sub-group; the other is hidden but keeps
         its values. σ and Min. Particle Area are always visible (shared)."""
         alc = self.is_alc()
+        self._metric_row.setVisible(not alc)
         self._grouped_box.setVisible(not alc)
         self._alc_box.setVisible(alc)
         self._apply_dmin_floor()

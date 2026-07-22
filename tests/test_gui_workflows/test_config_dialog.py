@@ -281,9 +281,9 @@ def test_method_default_builds_legacy_round(dialog, h5_ds1):
 
 
 def test_gui_matching_method_builds_auto_extract_round(dialog, h5_ds1):
-    """The Adaptive Local Clipping method builds an AutoExtractSettings round — the
-    same detector the GUI panel runs — never an adaptive_clip sentinel."""
-    assert "Adaptive Local Clipping" in METHOD_AUTO_EXTRACT
+    """The Adaptive Local Thresholding method builds an AutoExtractSettings round —
+    the same detector the GUI panel runs — never an adaptive_clip sentinel."""
+    assert METHOD_AUTO_EXTRACT == "Adaptive Local Thresholding"
 
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
@@ -329,12 +329,12 @@ def test_min_particle_size_builds_into_round(dialog, h5_ds1):
     assert rounds[0].min_particle_size_unit == "um2"
 
 
-def test_min_particle_size_defaults_to_no_filter(dialog, h5_ds1):
-    """A fresh row builds a round with no size filter (0 px)."""
+def test_min_particle_size_defaults_to_three_px(dialog, h5_ds1):
+    """A fresh round defaults to a 3 px² minimum particle area."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     rounds = dialog._rounds_from_cards(dialog._current_intersection())
-    assert rounds[0].min_particle_size == 0.0
+    assert rounds[0].min_particle_size == 3.0
     assert rounds[0].min_particle_size_unit == "px"
 
 
@@ -555,12 +555,14 @@ def _set_unit(dialog, row, code):
     combo.setCurrentIndex(combo.findData(code))
 
 
-def test_size_unit_defaults_to_um(dialog, h5_ds1):
+def test_smallest_defaults_to_two_px(dialog, h5_ds1):
+    """R: the Smallest Particle Diameter defaults to 2 px (value + unit)."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
     rounds = dialog._rounds_from_cards(dialog._current_intersection())
-    assert rounds[0].auto_extract.smallest_particle_unit == "um"
+    assert rounds[0].auto_extract.smallest_particle_um == 2.0
+    assert rounds[0].auto_extract.smallest_particle_unit == "px"
 
 
 def test_size_unit_shown_only_on_alc_rows(dialog, h5_ds1):
