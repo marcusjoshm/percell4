@@ -408,8 +408,8 @@ def auto_extract(
         )
         if d_small <= 0:
             raise NoParticlesFoundError(
-                "smallest-particle autodetection found no blobs; supply a smallest "
-                "particle Ø (turn off Auto-detect smallest) instead"
+                "smallest-particle autodetection found no blobs; supply a "
+                "smallest particle diameter instead"
             )
         # The fine window follows the no-hole rule at the fixed FILL_FACTOR:
         # window = 3 × the measured smallest diameter.

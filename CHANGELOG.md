@@ -9,6 +9,41 @@ list.
 
 ## Unreleased
 
+### Changed
+
+- **Detection defaults changed — read this before comparing new results to old.**
+  Three defaults moved as part of the interface cleanup below. Runs where you set
+  the values explicitly are unaffected; runs left on the defaults will differ.
+  - Adaptive Local Clipping no longer estimates the smallest particle from the
+    image. Previously the default run measured it per dataset (Laplacian-of-
+    Gaussian); now it always uses the Smallest Particle Diameter you supply.
+  - That field's default is **2 px** (was 3 px), so the default detection
+    neighbourhood is 6 px wide rather than sized from the estimate.
+  - The default CNR classification mode is now **CNR threshold** at 8.0, which
+    always splits the mask in two. The previous default (Discover) split only
+    when it found a statistically significant gap.
+- **Interface cleanup: controls that existed for development are gone.**
+  - "Pixel Binning:" replaces "View bin (k):" in the Session window, and the
+    Data panel now reads "Imported at binning: N | Pixel binning: N". Tooltips
+    reworded to drop the internal `k` vocabulary.
+  - Adaptive Local Clipping drops "Largest particle only (single pass)",
+    "Auto-detect smallest (LoG)", "Coarse window / largest Ø (×)", and
+    "Coarse-k false-pos. rate". The last two are pinned to the eye-validated
+    constants they defaulted to, so removing them changes nothing on its own.
+    "Smallest particle Ø" is now "Smallest Particle Diameter" and
+    "Min particle size" is now "Min. Particle Area".
+  - CNR Subpopulation Classification drops the "Discover (auto gap)" mode and
+    the separate "Segment by CNR (interactive)" button. The remaining modes read
+    "CNR threshold" and "Auto Two Groups", and a new "Interactive" mode launches
+    the histogram segmenter from the same green "Classify Mask by CNR" button.
+  - The pre-cleanup interface is preserved on the `dev-features` branch.
+
+### Fixed
+
+- **Adaptive Local Clipping time-lapse tests were failing.** The commit that
+  added the coarse fill-factor and FDR controls passed two new arguments the
+  test doubles did not accept; removing those controls makes them match again.
+
 ### Added
 
 - **Cellpose 4.2 models are now selectable.** The Segment tab, workflow dialog,
