@@ -9,6 +9,16 @@ list.
 
 ## Unreleased
 
+### Changed
+
+- **The workflow config dialog's Thresholding Rounds editor is now a card list.**
+  Each round is a full-width card showing only the fields for its selected method
+  (Grouped Otsu, or Adaptive Local Clipping two-pass), with per-card move/remove
+  controls — replacing the wide multi-method table where every method's columns
+  showed at once. The **Adaptive σ-clipping (single-window)** method is no longer
+  offered in the dialog; it remains available in the batch CLI
+  (`percell4-batch-threshold`), and saved configs that use it still run.
+
 ### Added
 
 - **Cellpose 4.2 models are now selectable.** The Segment tab, workflow dialog,
