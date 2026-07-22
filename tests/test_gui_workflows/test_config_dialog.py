@@ -16,25 +16,12 @@ import pytest
 from qtpy.QtWidgets import QMessageBox
 
 from percell4.gui.workflows.single_cell.config_dialog import (
-    _METHOD_ADAPTIVE,
-    _METHOD_AUTO_EXTRACT,
-    _METHOD_GROUPED,
-    _ROUND_COL_ALGO,
-    _ROUND_COL_CNR_FORCED,
-    _ROUND_COL_CNR_ON,
-    _ROUND_COL_CNR_THR,
-    _ROUND_COL_DMIN,
-    _ROUND_COL_GLOBAL,
-    _ROUND_COL_GMM_MAX,
-    _ROUND_COL_K,
-    _ROUND_COL_KMEANS_K,
-    _ROUND_COL_METHOD,
-    _ROUND_COL_MIN_SIZE,
-    _ROUND_COL_MIN_SIZE_UNIT,
-    _ROUND_COL_SIGMA,
-    _ROUND_COL_SIZE_UNIT,
     WorkflowConfigDialog,
     _PendingDataset,
+)
+from percell4.gui.workflows.single_cell.round_card import (
+    METHOD_AUTO_EXTRACT,
+    METHOD_GROUPED,
 )
 from percell4.store import DatasetStore
 from percell4.workflows.models import (
@@ -85,7 +72,7 @@ def h5_ds3_outlier(tmp_path) -> Path:
 def test_dialog_initial_state(dialog):
     assert dialog.windowTitle() == "Single-cell thresholding analysis workflow"
     assert dialog._pending_datasets == []
-    assert dialog._rounds_table.rowCount() == 0
+    assert len(dialog._round_cards) == 0
     # Start disabled with empty state
     assert dialog._start_btn.isEnabled() is False
     assert dialog.workflow_config is None
@@ -207,8 +194,8 @@ def test_cellpose_default_config_unchanged_by_extraction(dialog):
 def test_add_round_populates_row(dialog, h5_ds1, h5_ds2):
     dialog._add_h5_paths([h5_ds1, h5_ds2])
     dialog._on_add_round()
-    assert dialog._rounds_table.rowCount() == 1
-    data = dialog._read_round_row(0)
+    assert len(dialog._round_cards) == 1
+    data = dialog._round_cards[0].to_dict()
     assert data["name"] == "round_1"
     assert data["channel"] in ("GFP", "RFP")  # from intersection
     assert data["metric"] == "median_intensity"
@@ -219,7 +206,7 @@ def test_add_round_populates_row(dialog, h5_ds1, h5_ds2):
 
 def test_add_round_with_no_datasets_shows_placeholder(dialog):
     dialog._on_add_round()
-    ch_combo = dialog._rounds_table.cellWidget(0, 1)
+    ch_combo = dialog._round_cards[0]._channel
     assert ch_combo.isEnabled() is False
     assert ch_combo.currentText() == "(add datasets first)"
 
@@ -228,39 +215,37 @@ def test_remove_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._on_add_round()
-    assert dialog._rounds_table.rowCount() == 2
-    dialog._rounds_table.setCurrentCell(0, 0)
-    dialog._on_remove_round()
-    assert dialog._rounds_table.rowCount() == 1
+    assert len(dialog._round_cards) == 2
+    dialog._on_card_remove(dialog._round_cards[0])
+    assert len(dialog._round_cards) == 1
 
 
 def test_round_name_invalid_regex_colors_red(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    name_item = dialog._rounds_table.item(0, 0)
-    # Trigger the regex validator via the itemChanged signal
-    name_item.setText("has space")
-    # The background color should be non-default (red-ish) — we just
-    # verify the tooltip got set, which happens in the same handler.
-    assert "must match" in name_item.toolTip()
+    name = dialog._round_cards[0]._name
+    name.setText("has space")
+    assert "must match" in name.toolTip()
+    assert not dialog._round_cards[0].name_is_valid()
 
 
 def test_round_name_valid_regex_clears_tooltip(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    name_item = dialog._rounds_table.item(0, 0)
-    name_item.setText("has space")
-    assert name_item.toolTip() != ""
-    name_item.setText("ok_name")
-    assert name_item.toolTip() == ""
+    name = dialog._round_cards[0]._name
+    name.setText("has space")
+    assert "must match" in name.toolTip()
+    name.setText("ok_name")
+    assert "must match" not in name.toolTip()
+    assert dialog._round_cards[0].name_is_valid()
 
 
 def test_algo_toggles_enabled_spinboxes(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    algo_combo = dialog._rounds_table.cellWidget(0, _ROUND_COL_ALGO)
-    gmm_spin = dialog._rounds_table.cellWidget(0, _ROUND_COL_GMM_MAX)
-    kmeans_spin = dialog._rounds_table.cellWidget(0, _ROUND_COL_KMEANS_K)
+    algo_combo = dialog._round_cards[0]._algorithm
+    gmm_spin = dialog._round_cards[0]._gmm_max
+    kmeans_spin = dialog._round_cards[0]._kmeans_k
 
     # Default: GMM → gmm_max enabled, kmeans_k disabled
     assert gmm_spin.isEnabled() is True
@@ -291,102 +276,44 @@ def _make_h5_with_pixel_size(tmp_path, name, channels, pixel_size_um=0.12):
 def test_method_default_builds_legacy_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].adaptive_clip is None
 
 
-def test_adaptive_method_builds_adaptive_round(dialog, h5_ds1):
-    dialog._add_h5_paths([h5_ds1])
-    dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.40)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_K).setValue(1.5)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
-    assert rounds[0].adaptive_clip is not None
-    assert rounds[0].adaptive_clip.d_min_um == 0.40
-    assert rounds[0].adaptive_clip.k == 1.5
-    # The other two method sentinels stay clear (no mutual-exclusion trip).
-    assert rounds[0].puncta is None
-    assert rounds[0].iterative_otsu is None
-
-
 def test_gui_matching_method_builds_auto_extract_round(dialog, h5_ds1):
-    """The method a user maps from the GUI 'Adaptive Local Clipping' panel builds an
-    AutoExtractSettings round — the same detector the GUI runs — not the single-window
-    AdaptiveClipSettings. Guards the naming trap (batch != GUI thresholding)."""
-    # The GUI-matching label is the two-pass method; its name references the GUI panel.
-    assert "Adaptive Local Clipping" in _METHOD_AUTO_EXTRACT
-    assert "single-window" in _METHOD_ADAPTIVE  # the orphan is clearly marked
+    """The Adaptive Local Clipping method builds an AutoExtractSettings round — the
+    same detector the GUI panel runs — never an adaptive_clip sentinel."""
+    assert "Adaptive Local Clipping" in METHOD_AUTO_EXTRACT
 
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(2.0)
-    unit = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIZE_UNIT)
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(2.0)
+    unit = dialog._round_cards[0]._size_unit
     unit.setCurrentIndex(unit.findData("px"))
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].auto_extract is not None  # the GUI's two-pass detector
-    assert rounds[0].adaptive_clip is None  # NOT the single-window detector
+    assert rounds[0].adaptive_clip is None  # cards never build the single-window one
 
 
 def test_method_switch_toggles_columns_and_retains_values(dialog, h5_ds1):
+    """Switching Method shows one sub-group and hides the other, retaining values."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    gmm = dialog._rounds_table.cellWidget(0, _ROUND_COL_GMM_MAX)
-    dmin = dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN)
-    gmm.setValue(7)  # user input on the grouping side
+    card = dialog._round_cards[0]
+    method = card._method
+    gmm = card._gmm_max
+    gmm.setValue(7)
 
-    method.setCurrentText(_METHOD_ADAPTIVE)
-    assert dmin.isEnabled() is True
-    assert gmm.isEnabled() is False  # grouping greyed under adaptive
-    assert gmm.value() == 7  # value retained while greyed
+    method.setCurrentText(METHOD_AUTO_EXTRACT)
+    assert card._alc_box.isVisibleTo(card)
+    assert card._grouped_box.isHidden()
+    assert gmm.value() == 7
 
-    method.setCurrentText(_METHOD_GROUPED)
-    assert dmin.isEnabled() is False
-    assert gmm.value() == 7  # still retained
-
-
-def test_adaptive_dmin_minimum_is_positive(dialog, h5_ds1):
-    """d_min can never be set to <= 0, so the AdaptiveClipSettings invariant
-    cannot be violated from the UI."""
-    dialog._add_h5_paths([h5_ds1])
-    dialog._on_add_round()
-    dmin = dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN)
-    assert dmin.minimum() > 0
-    dmin.setValue(0.0)  # clamped to the minimum
-    assert dmin.value() > 0
-
-
-def test_adaptive_global_sigma_checkbox_builds_round(dialog, h5_ds1):
-    """Ticking 'global' on an adaptive row builds a global-σ AdaptiveClipSettings."""
-    dialog._add_h5_paths([h5_ds1])
-    dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
-    glob = dialog._rounds_table.cellWidget(0, _ROUND_COL_GLOBAL)
-    assert glob.isEnabled() is True  # enabled on adaptive rows
-    glob.setChecked(True)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
-    assert rounds[0].adaptive_clip is not None
-    assert rounds[0].adaptive_clip.global_sigma is True
-
-
-def test_global_sigma_defaults_off_and_disabled_off_adaptive(dialog, h5_ds1):
-    """The global checkbox is off by default, and disabled + cleared on non-adaptive
-    rows so a stale tick can never ride along into a non-adaptive method."""
-    dialog._add_h5_paths([h5_ds1])
-    dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    glob = dialog._rounds_table.cellWidget(0, _ROUND_COL_GLOBAL)
-    assert glob.isChecked() is False
-    assert glob.isEnabled() is False  # Grouped Otsu default: disabled
-
-    method.setCurrentText(_METHOD_ADAPTIVE)
-    glob.setChecked(True)
-    # Auto-extraction derives its floor per cell → global is cleared + disabled.
-    method.setCurrentText(_METHOD_AUTO_EXTRACT)
-    assert glob.isEnabled() is False
-    assert glob.isChecked() is False
+    method.setCurrentText(METHOD_GROUPED)
+    assert card._grouped_box.isVisibleTo(card)
+    assert card._alc_box.isHidden()
+    assert gmm.value() == 7
 
 
 def test_min_particle_size_builds_into_round(dialog, h5_ds1):
@@ -394,10 +321,10 @@ def test_min_particle_size_builds_into_round(dialog, h5_ds1):
     the size filter — on any method (here the default Grouped Otsu)."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE).setValue(25.0)
-    unit = dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE_UNIT)
+    dialog._round_cards[0]._min_size.setValue(25.0)
+    unit = dialog._round_cards[0]._min_size_unit
     unit.setCurrentIndex(unit.findData("um2"))
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].min_particle_size == 25.0
     assert rounds[0].min_particle_size_unit == "um2"
 
@@ -406,7 +333,7 @@ def test_min_particle_size_defaults_to_no_filter(dialog, h5_ds1):
     """A fresh row builds a round with no size filter (0 px)."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].min_particle_size == 0.0
     assert rounds[0].min_particle_size_unit == "px"
 
@@ -416,11 +343,11 @@ def test_min_particle_size_survives_row_reorder(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE).setValue(12.0)
-    u0 = dialog._rounds_table.cellWidget(0, _ROUND_COL_MIN_SIZE_UNIT)
+    dialog._round_cards[0]._min_size.setValue(12.0)
+    u0 = dialog._round_cards[0]._min_size_unit
     u0.setCurrentIndex(u0.findData("um2"))
-    dialog._swap_rounds(0, 1)  # the row's data moves to index 1
-    moved = dialog._read_round_row(1)
+    dialog._reorder_cards(0, 1)  # the row's data moves to index 1
+    moved = dialog._round_cards[1].to_dict()
     assert moved["min_particle_size"] == 12.0
     assert moved["min_particle_size_unit"] == "um2"
 
@@ -439,9 +366,9 @@ def test_datasets_without_pixel_size_flags_missing(dialog, tmp_path):
 def test_auto_extract_method_builds_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(0.36)
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].auto_extract is not None
     assert rounds[0].auto_extract.smallest_particle_um == 0.36
     # The other method sentinels stay clear (no mutual-exclusion trip).
@@ -453,53 +380,45 @@ def test_auto_extract_method_builds_round(dialog, h5_ds1):
 def test_auto_extract_smallest_zero_means_autodetect(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.0)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(0.0)
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].auto_extract is not None
     assert rounds[0].auto_extract.smallest_particle_um is None  # 0 → auto-detect
 
 
-def test_auto_extract_enables_dmin_and_sigma_disables_k(dialog, h5_ds1):
+def test_auto_extract_enables_dmin_and_sigma(dialog, h5_ds1):
+    """Auto-extract shows d_min + σ (both live) and allows d_min=0 (auto-detect)."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    dmin = dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN)
-    k = dialog._rounds_table.cellWidget(0, _ROUND_COL_K)
-    sigma = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIGMA)
-    method.setCurrentText(_METHOD_AUTO_EXTRACT)
-    assert dmin.isEnabled() is True  # d_min serves auto-extraction too
-    assert sigma.isEnabled() is True  # σ controls the detector presmooth
-    assert k.isEnabled() is False  # k is automatic for two-pass
-    assert sigma.value() == 1.0  # entering an ALC method seeds presmooth σ=1.0
-    assert dmin.minimum() == 0.0  # auto-extraction allows d_min=0 (auto-detect)
+    card = dialog._round_cards[0]
+    card._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    assert card._d_min.isEnabled() is True
+    assert card._sigma.isEnabled() is True
+    assert card._sigma.value() == 1.0
+    assert card._d_min.minimum() == 0.0
 
 
 def test_alc_sigma_seeded_to_one_on_entry_and_wired_to_presmooth(dialog, h5_ds1):
-    """Entering an ALC method seeds σ=1.0 (from the grouped-Otsu 0), and σ then
-    controls the detector presmooth for both methods."""
+    """Entering the ALC method seeds σ=1.0 (from the grouped-Otsu 0); σ then controls
+    the detector presmooth."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    sigma = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIGMA)
-    assert sigma.value() == 0.0  # grouped-Otsu default
-    method.setCurrentText(_METHOD_ADAPTIVE)
-    assert sigma.value() == 1.0  # seeded
-    sigma.setValue(2.0)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
-    assert rounds[0].adaptive_clip.presmooth_sigma_px == 2.0
-
-    method.setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
-    assert rounds[0].auto_extract.presmooth_sigma_px == 2.0  # σ carried over, still wired
+    card = dialog._round_cards[0]
+    assert card._sigma.value() == 0.0
+    card._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    assert card._sigma.value() == 1.0
+    card._sigma.setValue(2.0)
+    card._d_min.setValue(0.36)
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
+    assert rounds[0].auto_extract.presmooth_sigma_px == 2.0
 
 
 def test_grouped_sigma_not_seeded(dialog, h5_ds1):
     """A Grouped-Otsu row keeps σ=0 (the seeding fires only for ALC methods)."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    sigma = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIGMA)
+    sigma = dialog._round_cards[0]._sigma
     assert sigma.value() == 0.0
     assert sigma.isEnabled() is True  # σ is live for grouped (pre-threshold smoothing)
 
@@ -507,23 +426,19 @@ def test_grouped_sigma_not_seeded(dialog, h5_ds1):
 def test_cnr_checkbox_enabled_only_on_alc_rows(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
-    # Grouped Otsu (default): CNR disabled.
-    assert cnr.isEnabled() is False
-    method.setCurrentText(_METHOD_ADAPTIVE)
-    assert cnr.isEnabled() is True
-    method.setCurrentText(_METHOD_AUTO_EXTRACT)
-    assert cnr.isEnabled() is True
+    card = dialog._round_cards[0]
+    assert card._cnr_on.isEnabled() is False  # Grouped Otsu (default)
+    card._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    assert card._cnr_on.isEnabled() is True
 
 
 def test_cnr_threshold_gated_by_checkbox(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
-    thr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR)
-    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    method = dialog._round_cards[0]._method
+    cnr = dialog._round_cards[0]._cnr_on
+    thr = dialog._round_cards[0]._cnr_threshold
+    method.setCurrentText(METHOD_AUTO_EXTRACT)
     assert thr.isEnabled() is False  # off until the box is checked
     cnr.setChecked(True)
     assert thr.isEnabled() is True
@@ -534,11 +449,11 @@ def test_cnr_threshold_gated_by_checkbox(dialog, h5_ds1):
 def test_cnr_builds_settings_on_alc_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR).setValue(7.0)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(0.36)
+    dialog._round_cards[0]._cnr_on.setChecked(True)
+    dialog._round_cards[0]._cnr_threshold.setValue(7.0)
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].cnr_classify is not None
     assert rounds[0].cnr_classify.threshold == 7.0
 
@@ -547,10 +462,10 @@ def test_cnr_forced_gated_by_split_checkbox(dialog, h5_ds1):
     """GMM 2-pop is enabled only when CNR split is on, on an ALC row."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
-    forced = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED)
-    method.setCurrentText(_METHOD_AUTO_EXTRACT)
+    method = dialog._round_cards[0]._method
+    cnr = dialog._round_cards[0]._cnr_on
+    forced = dialog._round_cards[0]._cnr_forced
+    method.setCurrentText(METHOD_AUTO_EXTRACT)
     assert forced.isEnabled() is False  # off until CNR split is checked
     cnr.setChecked(True)
     assert forced.isEnabled() is True
@@ -562,10 +477,10 @@ def test_cnr_forced_overrides_and_greys_threshold(dialog, h5_ds1):
     """Checking GMM 2-pop greys the CNR threshold (it is overridden)."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
-    thr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR)
-    forced = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED)
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    cnr = dialog._round_cards[0]._cnr_on
+    thr = dialog._round_cards[0]._cnr_threshold
+    forced = dialog._round_cards[0]._cnr_forced
     cnr.setChecked(True)
     assert thr.isEnabled() is True
     forced.setChecked(True)
@@ -577,11 +492,11 @@ def test_cnr_forced_overrides_and_greys_threshold(dialog, h5_ds1):
 def test_cnr_forced_builds_forced_settings(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED).setChecked(True)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(0.36)
+    dialog._round_cards[0]._cnr_on.setChecked(True)
+    dialog._round_cards[0]._cnr_forced.setChecked(True)
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].cnr_classify is not None
     assert rounds[0].cnr_classify.forced is True
 
@@ -589,28 +504,23 @@ def test_cnr_forced_builds_forced_settings(dialog, h5_ds1):
 def test_cnr_forced_cleared_when_split_unchecked(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
-    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
-    forced = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED)
-    cnr.setChecked(True)
-    forced.setChecked(True)
-    # Unchecking CNR split clears the forced override so it cannot ride along greyed.
-    cnr.setChecked(False)
-    assert forced.isChecked() is False
+    card = dialog._round_cards[0]
+    card._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    card._cnr_on.setChecked(True)
+    card._cnr_forced.setChecked(True)
+    card._cnr_on.setChecked(False)
+    assert card._cnr_forced.isChecked() is False
 
 
 def test_cnr_cleared_when_switching_to_grouped(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    cnr = dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON)
-    method.setCurrentText(_METHOD_ADAPTIVE)
-    cnr.setChecked(True)
-    # Switching back to a non-ALC method unchecks CNR so a meaningless split
-    # cannot survive in the config.
-    method.setCurrentText(_METHOD_GROUPED)
-    assert cnr.isChecked() is False
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    card = dialog._round_cards[0]
+    card._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    card._cnr_on.setChecked(True)
+    card._method.setCurrentText(METHOD_GROUPED)
+    assert card._cnr_on.isChecked() is False
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].cnr_classify is None
 
 
@@ -619,70 +529,57 @@ def test_round_row_swap_preserves_auto_extract_and_cnr(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(0.36)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_ON).setChecked(True)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_THR).setValue(7.0)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_CNR_FORCED).setChecked(True)
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(0.36)
+    dialog._round_cards[0]._cnr_on.setChecked(True)
+    dialog._round_cards[0]._cnr_threshold.setValue(7.0)
+    dialog._round_cards[0]._cnr_forced.setChecked(True)
 
-    dialog._swap_rounds(0, 1)
+    dialog._reorder_cards(0, 1)
 
     assert (
-        dialog._rounds_table.cellWidget(1, _ROUND_COL_METHOD).currentText()
-        == _METHOD_AUTO_EXTRACT
+        dialog._round_cards[1]._method.currentText()
+        == METHOD_AUTO_EXTRACT
     )
-    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_DMIN).value() == 0.36
-    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_ON).isChecked() is True
-    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_THR).value() == 7.0
-    assert dialog._rounds_table.cellWidget(1, _ROUND_COL_CNR_FORCED).isChecked() is True
+    assert dialog._round_cards[1]._d_min.value() == 0.36
+    assert dialog._round_cards[1]._cnr_on.isChecked() is True
+    assert dialog._round_cards[1]._cnr_threshold.value() == 7.0
+    assert dialog._round_cards[1]._cnr_forced.isChecked() is True
 
 
 # ── d_min / Smallest px-µm Unit column (U10) ────────────────────────────
 
 
 def _set_unit(dialog, row, code):
-    combo = dialog._rounds_table.cellWidget(row, _ROUND_COL_SIZE_UNIT)
+    combo = dialog._round_cards[row]._size_unit
     combo.setCurrentIndex(combo.findData(code))
 
 
 def test_size_unit_defaults_to_um(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
-    assert rounds[0].adaptive_clip.d_min_unit == "um"
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
+    assert rounds[0].auto_extract.smallest_particle_unit == "um"
 
 
-def test_size_unit_enabled_only_on_alc_rows(dialog, h5_ds1):
+def test_size_unit_shown_only_on_alc_rows(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    method = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    unit = dialog._rounds_table.cellWidget(0, _ROUND_COL_SIZE_UNIT)
-    assert unit.isEnabled() is False  # Grouped Otsu
-    method.setCurrentText(_METHOD_ADAPTIVE)
-    assert unit.isEnabled() is True
-    method.setCurrentText(_METHOD_AUTO_EXTRACT)
-    assert unit.isEnabled() is True
-
-
-def test_adaptive_px_unit_builds_round(dialog, h5_ds1):
-    dialog._add_h5_paths([h5_ds1])
-    dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(3.0)
-    _set_unit(dialog, 0, "px")
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
-    assert rounds[0].adaptive_clip.d_min_um == 3.0
-    assert rounds[0].adaptive_clip.d_min_unit == "px"
+    card = dialog._round_cards[0]
+    assert card._alc_box.isHidden()  # Grouped Otsu: ALC fields (unit) hidden
+    card._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    assert card._alc_box.isVisibleTo(card)
+    assert card._size_unit.isEnabled() is True
 
 
 def test_auto_extract_px_unit_builds_round(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(3.0)
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(3.0)
     _set_unit(dialog, 0, "px")
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
     assert rounds[0].auto_extract.smallest_particle_um == 3.0
     assert rounds[0].auto_extract.smallest_particle_unit == "px"
 
@@ -693,8 +590,8 @@ def test_px_unit_round_not_flagged_by_pixel_size_preflight(dialog, tmp_path):
     no_ps = _make_h5_with_pixel_size(tmp_path, "NoPS", ["GFP"], pixel_size_um=None)
     dialog._add_h5_paths([no_ps])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_AUTO_EXTRACT)
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_DMIN).setValue(3.0)
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(3.0)
     _set_unit(dialog, 0, "px")
     dialog._output_edit.setText(str(tmp_path / "runs"))
     cfg = dialog._try_build_config()
@@ -703,17 +600,18 @@ def test_px_unit_round_not_flagged_by_pixel_size_preflight(dialog, tmp_path):
 
 
 def test_um_unit_round_flagged_by_pixel_size_preflight(dialog, tmp_path, monkeypatch):
-    """A µm-unit adaptive round on a dataset with NO pixel size IS blocked."""
+    """A µm-unit auto-extract round on a dataset with NO pixel size IS blocked."""
     no_ps = _make_h5_with_pixel_size(tmp_path, "NoPS", ["GFP"], pixel_size_um=None)
     dialog._add_h5_paths([no_ps])
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    dialog._round_cards[0]._d_min.setValue(0.4)
     _set_unit(dialog, 0, "um")
     dialog._output_edit.setText(str(tmp_path / "runs"))
     warnings = []
     monkeypatch.setattr(dialog, "_warn", lambda msg, *a, **k: warnings.append(msg))
     cfg = dialog._try_build_config()
-    assert cfg is None  # blocked
+    assert cfg is None
     assert any("pixel size" in w for w in warnings)
 
 
@@ -721,29 +619,28 @@ def test_size_unit_survives_row_swap(dialog, h5_ds1):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._on_add_round()
-    dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
+    dialog._round_cards[0]._method.setCurrentText(METHOD_AUTO_EXTRACT)
     _set_unit(dialog, 0, "px")
-    dialog._swap_rounds(0, 1)
-    moved = dialog._rounds_table.cellWidget(1, _ROUND_COL_SIZE_UNIT)
+    dialog._reorder_cards(0, 1)
+    moved = dialog._round_cards[1]._size_unit
     assert moved.currentData() == "px"
 
 
-def test_size_unit_survives_method_toggle_grey_and_swap(dialog, h5_ds1):
-    """Unit=px set on an adaptive row survives toggling to Grouped Otsu (which greys
-    the Unit combo), a row swap, and toggling back to adaptive."""
+def test_size_unit_survives_method_toggle_and_swap(dialog, h5_ds1):
+    """Unit=px on an ALC card survives toggling to Grouped Otsu (hides the ALC group),
+    a reorder, and toggling back to ALC."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     dialog._on_add_round()
-    method0 = dialog._rounds_table.cellWidget(0, _ROUND_COL_METHOD)
-    method0.setCurrentText(_METHOD_ADAPTIVE)
+    method0 = dialog._round_cards[0]._method
+    method0.setCurrentText(METHOD_AUTO_EXTRACT)
     _set_unit(dialog, 0, "px")
-    method0.setCurrentText(_METHOD_GROUPED)  # greys the Unit combo, value retained
-    dialog._swap_rounds(0, 1)
-    # Row 1 now holds the former row-0 config; toggle it back to adaptive.
-    dialog._rounds_table.cellWidget(1, _ROUND_COL_METHOD).setCurrentText(_METHOD_ADAPTIVE)
-    rounds = dialog._rounds_from_table(dialog._current_intersection())
-    assert rounds[1].adaptive_clip is not None
-    assert rounds[1].adaptive_clip.d_min_unit == "px"
+    method0.setCurrentText(METHOD_GROUPED)
+    dialog._reorder_cards(0, 1)
+    dialog._round_cards[1]._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    rounds = dialog._rounds_from_cards(dialog._current_intersection())
+    assert rounds[1].auto_extract is not None
+    assert rounds[1].auto_extract.smallest_particle_unit == "px"
 
 
 # ── Column picker ───────────────────────────────────────────────────────
@@ -888,7 +785,7 @@ def test_accept_with_outlier_dataset_prompts_user(
 def test_accept_with_invalid_round_name_warns(dialog, h5_ds1, tmp_path):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    name_item = dialog._rounds_table.item(0, 0)
+    name_item = dialog._round_cards[0]._name
     name_item.setText("has space")
     dialog._output_edit.setText(str(tmp_path / "runs"))
 
@@ -1079,7 +976,7 @@ def test_dilute_name_collision_with_round_name_warns(
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     # Set the round's name to something specific.
-    round_name_item = dialog._rounds_table.item(0, 0)
+    round_name_item = dialog._round_cards[0]._name
     round_name_item.setText("puncta_bright")
     dialog._output_edit.setText(str(tmp_path / "runs"))
 
@@ -1103,7 +1000,7 @@ def test_particle_metrics_round_trip_into_csv_columns(dialog, h5_ds1, tmp_path):
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
     # Set a meaningful round name we can spot in the output.
-    dialog._rounds_table.item(0, 0).setText("puncta")
+    dialog._round_cards[0]._name.setText("puncta")
     dialog._output_edit.setText(str(tmp_path / "runs"))
 
     # Pre-select one channel + one whole-cell metric so the picker has
@@ -1121,7 +1018,7 @@ def test_particle_metrics_round_trip_into_csv_columns(dialog, h5_ds1, tmp_path):
     }
 
     intersected = ["GFP", "RFP", "DAPI"]
-    rounds = dialog._rounds_from_table(intersected)
+    rounds = dialog._rounds_from_cards(intersected)
     cols = dialog._build_selected_csv_columns(intersected, rounds)
 
     # Per-cell particle column: <round>_<metric>
@@ -1162,7 +1059,7 @@ def test_particle_metrics_not_added_when_unselected(dialog, h5_ds1, tmp_path):
     dialog._selected_csv_particle_per_channel = set()
 
     intersected = ["GFP", "RFP", "DAPI"]
-    rounds = dialog._rounds_from_table(intersected)
+    rounds = dialog._rounds_from_cards(intersected)
     cols = dialog._build_selected_csv_columns(intersected, rounds)
     assert not any("particle" in c for c in cols)
 
@@ -1195,7 +1092,7 @@ def test_picker_emits_area_um2_siblings(dialog, h5_ds1, tmp_path):
     produced it."""
     dialog._add_h5_paths([h5_ds1])
     dialog._on_add_round()
-    dialog._rounds_table.item(0, 0).setText("puncta")
+    dialog._round_cards[0]._name.setText("puncta")
     dialog._output_edit.setText(str(tmp_path / "runs"))
 
     dialog._selected_csv_channels = {"GFP"}
@@ -1209,7 +1106,7 @@ def test_picker_emits_area_um2_siblings(dialog, h5_ds1, tmp_path):
     }
 
     intersected = ["GFP", "RFP", "DAPI"]
-    rounds = dialog._rounds_from_table(intersected)
+    rounds = dialog._rounds_from_cards(intersected)
     cols = dialog._build_selected_csv_columns(intersected, rounds)
 
     # Core cell area + sibling
@@ -1271,3 +1168,80 @@ def test_run_seg_qc_checkbox_unchecked_flows_to_config(
     cfg = dialog.workflow_config
     assert cfg is not None
     assert cfg.run_seg_qc_on_existing is False
+
+
+# ── Card list: reorder / remove / empty-state / boundary (U4) ────────────
+
+
+def test_reorder_moves_round_and_preserves_all_fields(dialog, h5_ds1):
+    """▼ on the first card swaps order and preserves every field of both rounds."""
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._on_add_round()
+    c0 = dialog._round_cards[0]
+    c0._name.setText("first")
+    c0._method.setCurrentText(METHOD_AUTO_EXTRACT)
+    c0._d_min.setValue(0.5)
+    dialog._round_cards[1]._name.setText("second")
+
+    dialog._on_card_move_down(c0)  # first ↓
+
+    names = [c.to_dict()["name"] for c in dialog._round_cards]
+    assert names == ["second", "first"]
+    moved = dialog._round_cards[1].to_dict()
+    assert moved["name"] == "first"
+    assert moved["method"] == METHOD_AUTO_EXTRACT
+    assert moved["d_min_um"] == 0.5
+
+
+def test_remove_middle_card(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    for _ in range(3):
+        dialog._on_add_round()
+    for i, nm in enumerate(("a", "b", "c")):
+        dialog._round_cards[i]._name.setText(nm)
+    dialog._on_card_remove(dialog._round_cards[1])  # remove "b"
+    assert [c.to_dict()["name"] for c in dialog._round_cards] == ["a", "c"]
+
+
+def test_boundary_move_buttons_disabled(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    dialog._on_add_round()
+    dialog._on_add_round()
+    first, last = dialog._round_cards[0], dialog._round_cards[1]
+    assert first._up_btn.isEnabled() is False   # top card: ▲ disabled
+    assert first._down_btn.isEnabled() is True
+    assert last._down_btn.isEnabled() is False  # bottom card: ▼ disabled
+    assert last._up_btn.isEnabled() is True
+
+
+def test_empty_state_and_zero_round_start_gate(dialog, h5_ds1):
+    dialog._add_h5_paths([h5_ds1])
+    # No rounds yet: placeholder visible, Start disabled.
+    assert dialog._rounds_empty_label.isVisibleTo(dialog._rounds_container)
+    assert dialog._start_btn.isEnabled() is False
+    dialog._on_add_round()
+    assert dialog._rounds_empty_label.isHidden()
+    assert dialog._start_btn.isEnabled() is True
+    # Remove the last card: placeholder returns, Start disabled again.
+    dialog._on_card_remove(dialog._round_cards[0])
+    assert dialog._rounds_empty_label.isVisibleTo(dialog._rounds_container)
+    assert dialog._start_btn.isEnabled() is False
+
+
+def test_grouped_otsu_um2_min_size_flagged_by_preflight(dialog, tmp_path, monkeypatch):
+    """R7 regression guard: a Grouped Otsu round with a µm² Min. Particle Area on a
+    dataset lacking a pixel size is blocked — the µm²-Min-size pre-flight fires for
+    ANY method, not just ALC."""
+    no_ps = _make_h5_with_pixel_size(tmp_path, "NoPS", ["GFP"], pixel_size_um=None)
+    dialog._add_h5_paths([no_ps])
+    dialog._on_add_round()  # default method = Grouped Otsu
+    card = dialog._round_cards[0]
+    card._min_size.setValue(10.0)
+    card._min_size_unit.setCurrentIndex(card._min_size_unit.findData("um2"))
+    dialog._output_edit.setText(str(tmp_path / "runs"))
+    warnings = []
+    monkeypatch.setattr(dialog, "_warn", lambda msg, *a, **k: warnings.append(msg))
+    cfg = dialog._try_build_config()
+    assert cfg is None  # blocked despite being a Grouped Otsu round
+    assert any("pixel size" in w for w in warnings)

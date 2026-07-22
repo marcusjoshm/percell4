@@ -337,8 +337,20 @@ class RoundCard(QFrame):
         self._kmeans_k.setEnabled(not is_gmm)
 
     def _apply_cnr_enabled(self) -> None:
-        """CNR threshold live only when CNR split is on and GMM 2-pop is off; GMM
-        2-pop live only when CNR split is on. Mirrors the table's gating."""
+        """CNR split is valid only on the per-cell ALC method; the threshold and GMM
+        2-pop follow the split checkbox. On Grouped Otsu the whole CNR group is
+        cleared and disabled so a meaningless split can never ride along into the
+        config (the group is also hidden). Mirrors the old table gating."""
+        if not self.is_alc():
+            if self._cnr_on.isChecked():
+                self._cnr_on.setChecked(False)
+            if self._cnr_forced.isChecked():
+                self._cnr_forced.setChecked(False)
+            self._cnr_on.setEnabled(False)
+            self._cnr_forced.setEnabled(False)
+            self._cnr_threshold.setEnabled(False)
+            return
+        self._cnr_on.setEnabled(True)
         checked = self._cnr_on.isChecked()
         if not checked and self._cnr_forced.isChecked():
             self._cnr_forced.setChecked(False)
