@@ -34,6 +34,17 @@ def test_min_area_unit_defaults_to_px(dialog):
     assert dialog._particle_min_area_unit.currentData() == "px"
 
 
+def test_min_area_unit_display_text_is_squared(dialog):
+    """The pixel unit is a pixel-count AREA, so it must read ``px²`` (not
+    ``px``) to be unambiguous — while the underlying code stays ``px`` so
+    downstream conversion is untouched."""
+    combo = dialog._particle_min_area_unit
+    labels = [combo.itemText(i) for i in range(combo.count())]
+    assert labels == ["px²", "µm²"]
+    codes = [combo.itemData(i) for i in range(combo.count())]
+    assert codes == ["px", "um2"]
+
+
 # ── Step re-tuning on unit change ─────────────────────────────────────
 
 
