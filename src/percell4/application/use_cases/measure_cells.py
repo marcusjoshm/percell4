@@ -198,7 +198,13 @@ class MeasureCells:
         if view_bin > 1:
             scale = view_bin * view_bin
             for col in list(df.columns):
-                if col == "area_pixels" or col.endswith("_area"):
+                # Pixel-count area columns produced by the measurer: the
+                # whole-cell column is named exactly ``area`` and per-ROI
+                # columns are ``<roi>_area``. (An earlier ``area_pixels``
+                # guard matched neither, silently leaving whole-cell area
+                # unscaled at view_bin>1.) µm² columns are added downstream,
+                # never here, so ``endswith("_area")`` cannot match them.
+                if col == "area" or col.endswith("_area"):
                     df[col] = df[col] * scale
 
         df["bin_at_measure"] = int(view_bin)
