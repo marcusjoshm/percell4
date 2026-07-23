@@ -49,6 +49,41 @@ def empty_labels_array(shape, n_timepoints: int) -> np.ndarray:
     return np.zeros(tuple(shape), dtype=np.int32)
 
 
+def diameter_circle_bbox(shape, diameter: float, margin: float):
+    """Bounding-box vertices for the Cellpose diameter reference circle.
+
+    Returns the four corners of the circle's bounding box in napari image
+    coordinates ``(y, x)``, ordered top-left → top-right → bottom-right →
+    bottom-left, as a float array suitable for a ``shape_type="ellipse"``
+    Shapes layer. Pure (no Qt, no napari). ``shape`` is ``(H, W)``.
+
+    Returns ``None`` when ``diameter <= 0`` so callers have a single branch
+    for "draw nothing" — 0 is the Cellpose auto-detect sentinel, and there is
+    no meaningful size to show for it.
+
+    napari's y axis increases downward, so the bottom-left corner is large-y
+    / small-x. The centre is clamped to stay at least one radius from the top
+    and left edges; when ``diameter`` exceeds an image dimension the disc is
+    pinned flush to that axis' origin and spills past the far edge, which is
+    itself the answer the user is looking for.
+    """
+    if diameter <= 0:
+        return None
+
+    height, width = float(shape[0]), float(shape[1])
+    radius = diameter / 2.0
+
+    center_y = min(max(height - radius - margin, radius), max(radius, height - radius))
+    center_x = min(max(radius + margin, radius), max(radius, width - radius))
+
+    top, bottom = center_y - radius, center_y + radius
+    left, right = center_x - radius, center_x + radius
+    return np.array(
+        [[top, left], [top, right], [bottom, right], [bottom, left]],
+        dtype=float,
+    )
+
+
 class SegmentationPanel(QWidget):
     """Panel for cell segmentation with multiple methods.
 
