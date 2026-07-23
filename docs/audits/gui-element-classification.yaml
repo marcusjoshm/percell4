@@ -1,13 +1,26 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
-last_updated: 2026-05-13
+last_updated: 2026-07-23
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 205
+total_widgets: 206
 counts:
   selector: 16
   creator: 17
-  action: 172
+  action: 173
+# 2026-07-23 update (feat/cellpose-diameter-reference-circle U3):
+#   +1 widget: segmentation_panel.cellpose_diameter_circle_checkbox => ACTION.
+#   Toggles a magenta `_diameter_reference` Shapes layer sized to the Cellpose
+#   Diameter (px) field. It adds a napari layer but writes no session field and
+#   no dataset resource — a transient display overlay, never persisted to the
+#   .h5 — so it is an Action, not a Creator. Notable interaction: the handler
+#   captures and restores viewer.layers.selection.active around the add,
+#   because napari activates every newly added layer and would otherwise pull
+#   selection off the user's Labels layer (which also disarms the `M`
+#   multi-select keystroke bound on Labels keymaps). That restore keeps the
+#   widget's contract exhaustive — it leaves layer selection exactly as it
+#   found it.
+#   No new Action writers of session fields.
 # 2026-05-21 update (feat/time-lapse-tracking-lineage U4, U10):
 #   Adds a sixth session selection field, active_timepoint, and two new
 #   classified GUI elements:
@@ -1006,6 +1019,29 @@ widgets:
       Operand for Run Cellpose. Feeds SegmentCells.finalize(edge_margin=...) →
       filter_edge_cells; only effective when 'Remove edge cells' is ticked.
       0 = strict border-touching cells only.
+
+  - id: segmentation_panel.cellpose_diameter_circle_checkbox
+    class: Action
+    path: src/percell4/gui/segmentation_panel.py
+    lines: "186-206, 700-780"
+    widget_type: QCheckBox
+    handler: _on_diameter_circle_toggled / _sync_diameter_circle
+    reads: [active_channel]
+    writes: []
+    keystroke: null
+    notes: >-
+      Toggles the `_diameter_reference` napari Shapes layer — a magenta disc at
+      the image's bottom-left whose diameter equals the Cellpose Diameter (px)
+      field, for sizing that value against real cells. Action, not Creator: it
+      adds a napari layer but writes no session selection field and no dataset
+      resource; the overlay is transient and never persisted to the .h5. Reads
+      active_channel only indirectly, via _get_image_shape, to size the circle.
+      Three triggers converge on the idempotent remove-before-add
+      _sync_diameter_circle: this checkbox, CellposeSettingsForm.diameter_changed,
+      and the state_changed.data branch (deferred one tick, same reason as
+      _wire_paint_autosave). Diameter (px) == 0 is auto-detect and draws
+      nothing. The handler restores viewer.layers.selection.active around the
+      add so the overlay cannot steal the active Labels layer.
 
   - id: segmentation_panel.run_cellpose_button
     class: Creator
