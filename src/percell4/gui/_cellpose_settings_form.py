@@ -103,7 +103,7 @@ class CellposeSettingsForm(QWidget):
         self._min_size = QSpinBox()
         self._min_size.setRange(0, 100000)
         self._min_size.setValue(initial.min_size)
-        form.addRow("Min cell size (px):", self._min_size)
+        form.addRow("Min cell size (px²):", self._min_size)
 
         # ImageJ-style Enhance Contrast applied to the segmentation
         # channel before Cellpose runs. Same operation the seg-QC

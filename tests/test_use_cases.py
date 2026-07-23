@@ -303,8 +303,9 @@ class TestMeasureCells:
     def test_view_bin_scales_pixel_area_by_k_squared(
         self, session, sample_labels, sample_image
     ):
-        """area_pixels at view_bin=3 reports k**2=9 times the binned count
-        so the value is comparable to a k=1 measurement (k=1-equivalent units)."""
+        """The whole-cell ``area`` column at view_bin=3 reports k**2=9 times
+        the binned count so the value is comparable to a k=1 measurement
+        (k=1-equivalent units)."""
         repo = FakeRepo()
         repo.channel_images = {"GFP": sample_image}
         repo.labels = {"cellpose": sample_labels}
@@ -318,12 +319,21 @@ class TestMeasureCells:
         # bin dispatch), so the count is identical; only the scaling
         # post-step differs.
         df_k3 = uc.execute(metrics=["area"], view_bin=3)
-        if "area_pixels" in df_k1.columns:
-            # Each row's area_pixels at k=3 equals 9x the k=1 value.
-            np.testing.assert_allclose(
-                df_k3["area_pixels"].values,
-                df_k1["area_pixels"].values * 9,
-            )
+        # The whole-cell column is named exactly ``area`` (not ``area_pixels``);
+        # each row's area at k=3 equals 9x the k=1 value.
+        assert "area" in df_k1.columns
+        np.testing.assert_allclose(
+            df_k3["area"].values,
+            df_k1["area"].values * 9,
+        )
+
+        # Non-area geometry columns (a length, not an area) must NOT be
+        # scaled by k**2 -- guard against the predicate over-matching.
+        for col in ("bbox_w", "bbox_h", "centroid_x", "centroid_y"):
+            if col in df_k1.columns:
+                np.testing.assert_allclose(
+                    df_k3[col].values, df_k1[col].values
+                )
 
 
 # ── AcceptThreshold ──────────────────────────────────────────

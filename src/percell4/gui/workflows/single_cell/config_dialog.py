@@ -1269,17 +1269,18 @@ class WorkflowConfigDialog(QDialog):
             "Minimum particle area. Connected components smaller than "
             "this are dropped. 0 = keep every component (including "
             "single-pixel hits). The unit follows the selector to the "
-            "right — µm² mode is converted to pixels per dataset using "
+            "right — px² is a pixel-count area (e.g. 9 = 9 total pixels, "
+            "not 9×9); µm² mode is converted to pixels per dataset using "
             "that dataset's pixel size."
         )
 
         self._particle_min_area_unit = QComboBox()
-        self._particle_min_area_unit.addItem("px", userData="px")
+        self._particle_min_area_unit.addItem("px²", userData="px")
         self._particle_min_area_unit.addItem("µm²", userData="um2")
         self._particle_min_area_unit.setCurrentIndex(0)
         self._particle_min_area_unit.setToolTip(
-            "Unit for Min particle area. px applies a uniform pixel "
-            "threshold to every dataset. µm² resolves to a per-dataset "
+            "Unit for Min particle area. px² applies a uniform pixel-count "
+            "area threshold to every dataset. µm² resolves to a per-dataset "
             "pixel threshold using each dataset's TIFF pixel size — "
             "datasets without a known pixel size will fail their "
             "particle phase explicitly rather than silently default."
