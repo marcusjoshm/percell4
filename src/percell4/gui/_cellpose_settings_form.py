@@ -22,6 +22,7 @@ Keep them in lockstep.
 
 from __future__ import annotations
 
+from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -42,9 +43,18 @@ __all__ = ["CELLPOSE_MODELS", "CellposeSettingsForm"]
 class CellposeSettingsForm(QWidget):
     """Editor for the eight :class:`CellposeSettings` fields.
 
-    No ``changed`` signal: both consumers read the widgets pull-style at
-    run/accept time, so there is no live derived-state subscriber to notify.
+    Settings are read pull-style: both consumers call :meth:`settings` at
+    run/accept time rather than tracking edits. The one exception is
+    :attr:`diameter_changed`, which exists solely so the Segment tab can
+    resize its live diameter-reference overlay as the user types. The other
+    seven fields have no live subscriber and therefore no signal — add one
+    only when something actually needs to react.
     """
+
+    #: Emitted with the new Diameter (px) value on every edit, including
+    #: programmatic ``setValue`` calls. ``0.0`` (auto-detect) is emitted like
+    #: any other value; interpreting it is the consumer's job.
+    diameter_changed = Signal(float)
 
     def __init__(
         self,
@@ -68,6 +78,10 @@ class CellposeSettingsForm(QWidget):
         self._diameter.setSingleStep(1.0)
         self._diameter.setValue(initial.diameter)
         self._diameter.setToolTip("0 = auto-detect")
+        # Wired at construction, not at first use: a widget built interactive
+        # whose user-edit signal is never connected is a repeat bug shape in
+        # this codebase (docs/solutions/conventions/qt-wire-user-edit-signals).
+        self._diameter.valueChanged.connect(self.diameter_changed)
         form.addRow("Diameter (px):", self._diameter)
 
         self._gpu = QCheckBox("Use GPU")

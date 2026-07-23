@@ -49,6 +49,41 @@ def empty_labels_array(shape, n_timepoints: int) -> np.ndarray:
     return np.zeros(tuple(shape), dtype=np.int32)
 
 
+def diameter_circle_bbox(shape, diameter: float, margin: float):
+    """Bounding-box vertices for the Cellpose diameter reference circle.
+
+    Returns the four corners of the circle's bounding box in napari image
+    coordinates ``(y, x)``, ordered top-left → top-right → bottom-right →
+    bottom-left, as a float array suitable for a ``shape_type="ellipse"``
+    Shapes layer. Pure (no Qt, no napari). ``shape`` is ``(H, W)``.
+
+    Returns ``None`` when ``diameter <= 0`` so callers have a single branch
+    for "draw nothing" — 0 is the Cellpose auto-detect sentinel, and there is
+    no meaningful size to show for it.
+
+    napari's y axis increases downward, so the bottom-left corner is large-y
+    / small-x. The centre is clamped to stay at least one radius from the top
+    and left edges; when ``diameter`` exceeds an image dimension the disc is
+    pinned flush to that axis' origin and spills past the far edge, which is
+    itself the answer the user is looking for.
+    """
+    if diameter <= 0:
+        return None
+
+    height, width = float(shape[0]), float(shape[1])
+    radius = diameter / 2.0
+
+    center_y = min(max(height - radius - margin, radius), max(radius, height - radius))
+    center_x = min(max(radius + margin, radius), max(radius, width - radius))
+
+    top, bottom = center_y - radius, center_y + radius
+    left, right = center_x - radius, center_x + radius
+    return np.array(
+        [[top, left], [top, right], [bottom, right], [bottom, left]],
+        dtype=float,
+    )
+
+
 class SegmentationPanel(QWidget):
     """Panel for cell segmentation with multiple methods.
 
@@ -99,6 +134,12 @@ class SegmentationPanel(QWidget):
             # ``layers.events.inserted`` events for layers added later in
             # the same call.
             QTimer.singleShot(0, self._wire_paint_autosave)
+            # Rebuild (or clear) the diameter reference circle against the new
+            # dataset's shape. Same deferral, same reason as above — the
+            # viewer's layers do not exist yet at this point. Runs whether or
+            # not the box is ticked so a circle from the previous dataset
+            # cannot survive the switch.
+            QTimer.singleShot(0, self._sync_diameter_circle)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -147,6 +188,29 @@ class SegmentationPanel(QWidget):
         )
         margin_row.addWidget(self._cp_edge_margin)
         cp_layout.addLayout(margin_row)
+
+        # Display-only overlay toggle — writes no session field and no dataset
+        # resource, so it is an Action (see docs/audits/
+        # gui-element-classification.yaml). Off by default.
+        self._cp_show_diameter_circle = QCheckBox("Show diameter reference circle")
+        self._cp_show_diameter_circle.setChecked(False)
+        self._cp_show_diameter_circle.setStyleSheet(
+            f"QCheckBox {{ color: {theme.TEXT}; }}"
+        )
+        self._cp_show_diameter_circle.setToolTip(
+            "Draw a magenta circle in the viewer whose diameter equals the\n"
+            "Diameter (px) value above, so you can size that value against\n"
+            "real cells. The default 300 px suits one pixel size; datasets\n"
+            "acquired at another objective or binning need a different value.\n"
+            "The circle sits at the image's bottom-left and resizes as you\n"
+            "type. Diameter (px) = 0 is auto-detect, so no circle is drawn.\n"
+            "Display only — it is never saved and never affects segmentation."
+        )
+        self._cp_show_diameter_circle.toggled.connect(
+            self._on_diameter_circle_toggled
+        )
+        self._cp_form.diameter_changed.connect(self._on_diameter_value_changed)
+        cp_layout.addWidget(self._cp_show_diameter_circle)
 
         btn_run_cp = QPushButton("Run Cellpose")
         btn_run_cp.clicked.connect(self._on_run_cellpose)
@@ -617,6 +681,118 @@ class SegmentationPanel(QWidget):
             f"Tracked: {result.n_tracks} tracks, {result.n_divisions} divisions. "
             f"Saved as '{result.seg_name}'."
         )
+
+    # ── Diameter reference circle ─────────────────────────────
+
+    def _on_diameter_circle_toggled(self, _checked: bool) -> None:
+        """Checkbox trigger — the only path that talks back to the user."""
+        self._sync_diameter_circle(announce=True)
+
+    def _on_diameter_value_changed(self, _diameter: float) -> None:
+        """Diameter (px) trigger. Silent when the overlay is off."""
+        if not self._cp_show_diameter_circle.isChecked():
+            return
+        self._sync_diameter_circle()
+
+    @staticmethod
+    def _active_layer(viewer):
+        """The viewer's active layer, or None if it has no selection model."""
+        selection = getattr(getattr(viewer, "layers", None), "selection", None)
+        return getattr(selection, "active", None)
+
+    @staticmethod
+    def _restore_active_layer(viewer, layer) -> None:
+        """Re-activate ``layer`` if it is still present. Best-effort."""
+        if layer is None:
+            return
+        selection = getattr(getattr(viewer, "layers", None), "selection", None)
+        if selection is None or layer not in list(viewer.layers):
+            return
+        try:
+            selection.active = layer
+        except Exception:  # noqa: BLE001 - display-only; never break the toggle
+            logger.debug("could not restore active layer after circle add")
+
+    def _remove_diameter_circle(self, viewer) -> bool:
+        """Drop the reference-circle layer if present. Returns whether it was."""
+        removed = False
+        for layer in list(viewer.layers):
+            if getattr(layer, "name", None) == vp.DIAMETER_CIRCLE_LAYER_NAME:
+                viewer.layers.remove(layer)
+                removed = True
+        return removed
+
+    def _sync_diameter_circle(self, *, announce: bool = False) -> None:
+        """Bring the reference-circle layer in line with the current state.
+
+        The single convergence point for all three triggers (checkbox,
+        Diameter (px) edit, dataset load). Idempotent and remove-before-add,
+        which is what keeps repeated toggles from stacking layers and keeps a
+        stale circle from surviving a dataset switch.
+
+        ``announce`` is set only by the explicit user toggle — a dataset load
+        must not spam the status bar on every open.
+        """
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        viewer = getattr(viewer_win, "viewer", None) if viewer_win else None
+        if viewer is None:
+            if announce:
+                self._show_status("Open a dataset in the viewer first")
+            return
+
+        self._remove_diameter_circle(viewer)
+
+        if not self._cp_show_diameter_circle.isChecked():
+            return
+
+        shape = self._get_image_shape()
+        if shape is None:
+            if announce:
+                self._show_status("Load an image first")
+            return
+
+        diameter = self._cp_form.settings().diameter
+        bbox = diameter_circle_bbox(shape, diameter, vp.DIAMETER_CIRCLE_MARGIN_PX)
+        if bbox is None:
+            # Diameter (px) == 0 means auto-detect; there is no size to show.
+            # The checkbox stays ticked so the circle returns on the next
+            # nonzero value.
+            if announce:
+                self._show_status(
+                    "Diameter (px) is 0 (auto-detect) — nothing to draw. "
+                    "Enter a diameter to see the reference circle."
+                )
+            return
+
+        # napari makes every newly added layer the active one, which would
+        # yank selection off the Labels layer the user is painting — and with
+        # it the `M` multi-select keystroke, which binds on Labels keymaps.
+        # Capture and restore around the add. `editable = False` does not
+        # prevent this on its own.
+        previous_active = self._active_layer(viewer)
+
+        viewer.add_shapes(
+            [bbox],
+            shape_type="ellipse",
+            name=vp.DIAMETER_CIRCLE_LAYER_NAME,
+            face_color=[list(vp.DIAMETER_CIRCLE_FACE_COLOR)],
+            edge_color=[list(vp.DIAMETER_CIRCLE_EDGE_COLOR)],
+            edge_width=vp.DIAMETER_CIRCLE_EDGE_WIDTH,
+            blending=vp.DIAMETER_CIRCLE_BLENDING,
+            **vp._optional_kwargs(opacity=vp.DIAMETER_CIRCLE_OPACITY),
+        )
+        # A reference ruler the user can reshape is a ruler that lies.
+        for layer in viewer.layers:
+            if getattr(layer, "name", None) == vp.DIAMETER_CIRCLE_LAYER_NAME:
+                layer.editable = False
+                break
+
+        self._restore_active_layer(viewer, previous_active)
+
+        if announce:
+            self._show_status(
+                f"Diameter reference circle: {diameter:g} px across."
+            )
 
     # ── Load ROIs ─────────────────────────────────────────────
 

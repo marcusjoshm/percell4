@@ -9,6 +9,20 @@ list.
 
 ## Unreleased
 
+### Added
+
+- **A diameter reference circle for Cellpose, in the Segment tab.** Tick
+  **Show diameter reference circle** under Cellpose and a magenta disc appears
+  at the bottom-left of the image, exactly as many pixels across as the
+  **Diameter (px)** field says. Resize the field and the disc follows, so you
+  can size the value against real cells instead of running Cellpose to find out
+  it was wrong. This matters because the 300 px default is only right for the
+  pixel size it was tuned against — datasets acquired at a different objective
+  or camera binning need a different value, and there was previously no way to
+  judge that by eye. Setting **Diameter (px)** to 0 means auto-detect, so no
+  circle is drawn. The circle is display-only: it is never saved to the `.h5`,
+  never affects segmentation, and cannot be dragged or reshaped.
+
 ### Changed
 
 - **The workflow config dialog's Thresholding Rounds editor is now a card list.**

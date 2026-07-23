@@ -75,6 +75,64 @@ def test_saturation_and_sigma_suffixes_and_precision(qtbot) -> None:
     assert form._blur_sigma.maximum() == 20.0
 
 
+def test_diameter_changed_emits_on_edit(qtbot) -> None:
+    """U1/R3: every Diameter (px) edit reaches a subscriber."""
+    form = CellposeSettingsForm()
+    qtbot.addWidget(form)
+    seen: list[float] = []
+    form.diameter_changed.connect(seen.append)
+
+    form._diameter.setValue(120.0)
+
+    assert seen == [120.0]
+
+
+def test_diameter_changed_deduplicates_repeat_values(qtbot) -> None:
+    """Setting the same value twice emits once — Qt suppresses no-op sets.
+
+    The overlay consumer relies on this to avoid rebuilding its napari layer
+    on every keystroke that lands on the value already shown.
+    """
+    form = CellposeSettingsForm()
+    qtbot.addWidget(form)
+    seen: list[float] = []
+    form.diameter_changed.connect(seen.append)
+
+    form._diameter.setValue(120.0)
+    form._diameter.setValue(120.0)
+
+    assert seen == [120.0]
+
+
+def test_diameter_changed_emits_zero(qtbot) -> None:
+    """0.0 (auto-detect) is emitted like any other value.
+
+    The form does not interpret it; deciding that 0 means 'draw nothing' is
+    the consumer's call.
+    """
+    form = CellposeSettingsForm(initial=CellposeSettings(diameter=300.0))
+    qtbot.addWidget(form)
+    seen: list[float] = []
+    form.diameter_changed.connect(seen.append)
+
+    form._diameter.setValue(0.0)
+
+    assert seen == [0.0]
+
+
+def test_diameter_changed_does_not_replace_pull_style_read(qtbot) -> None:
+    """The signal is additive: settings() still reflects the spinbox."""
+    form = CellposeSettingsForm()
+    qtbot.addWidget(form)
+    emitted: list[float] = []
+    form.diameter_changed.connect(emitted.append)
+
+    form._diameter.setValue(75.0)
+
+    assert emitted == [75.0]
+    assert form.settings().diameter == 75.0
+
+
 def test_zero_boundaries_accepted(qtbot) -> None:
     """saturation_pct == 0 and blur_sigma == 0 are accepted boundaries."""
     form = CellposeSettingsForm(
