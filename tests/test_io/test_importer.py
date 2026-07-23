@@ -154,6 +154,107 @@ def test_import_with_custom_tokens(tmp_path):
     assert n_ch == 2
 
 
+# ---------------------------------------------------------------------------
+# Tokenless name-token import (U4): verbatim channel names + resource routing
+# ---------------------------------------------------------------------------
+
+
+def _create_named_tiff_dir(tmp_path, prefix="Exp_A", channels=("cells", "DNA", "G3BP1", "SG_mask")):
+    """Create name-suffixed TIFFs (no chXX token) for one dataset."""
+    src = tmp_path / "raw"
+    src.mkdir()
+    for i, ch in enumerate(channels):
+        name = f"{prefix}_{ch}.tif"
+        tifffile.imwrite(str(src / name), np.full((32, 32), (i + 1) * 40, dtype=np.uint16))
+    return src
+
+
+def test_import_name_tokens_stored_verbatim(tmp_path):
+    """Auto import of name-suffixed TIFFs stores names verbatim (no 'ch' prefix)."""
+    from percell4.domain.io.discovery import discover_tokenless
+
+    src = _create_named_tiff_dir(tmp_path)
+    datasets, token_config = discover_tokenless(src)
+    assert len(datasets) == 1
+    ds = datasets[0]
+
+    h5_path = tmp_path / "Exp_A.h5"
+    import_dataset(src, h5_path, token_config=token_config, files=list(ds.files))
+
+    store = DatasetStore(h5_path)
+    assert set(store.metadata["channel_names"]) == {"cells", "DNA", "G3BP1", "SG_mask"}
+    assert not any(n.startswith("ch") for n in store.metadata["channel_names"])
+
+
+def test_import_manual_assignment_routes_mask_and_segmentation(tmp_path):
+    """A name token assigned Mask/Segmentation lands in /masks and /labels."""
+    from percell4.domain.io.discovery import discover_tokenless
+    from percell4.domain.io.models import LayerAssignment, LayerType
+
+    src = _create_named_tiff_dir(tmp_path)
+    datasets, token_config = discover_tokenless(src)
+    ds = datasets[0]
+
+    assignments = {
+        "SG_mask": LayerAssignment(layer_type=LayerType.MASK, name="SG_mask"),
+        "cells": LayerAssignment(layer_type=LayerType.SEGMENTATION, name="cells"),
+        "DNA": LayerAssignment(layer_type=LayerType.CHANNEL, name="DNA"),
+        "G3BP1": LayerAssignment(layer_type=LayerType.CHANNEL, name="G3BP1"),
+    }
+    h5_path = tmp_path / "Exp_A.h5"
+    import_dataset(
+        src, h5_path, token_config=token_config, files=list(ds.files),
+        layer_assignments=assignments,
+    )
+
+    store = DatasetStore(h5_path)
+    # Mask → /masks/SG_mask, binarized uint8.
+    assert "SG_mask" in store.list_masks()
+    mask = store.read_mask("SG_mask")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    # Segmentation → /labels/cells, int32.
+    assert "cells" in store.list_labels()
+    assert store.read_labels("cells").dtype == np.int32
+    # Remaining name tokens stay intensity channels, verbatim.
+    assert set(store.metadata["channel_names"]) == {"DNA", "G3BP1"}
+
+
+def test_import_manual_rename_channel(tmp_path):
+    """Renaming a name-token channel stores the new name, not the token."""
+    from percell4.domain.io.discovery import discover_tokenless
+    from percell4.domain.io.models import LayerAssignment, LayerType
+
+    src = _create_named_tiff_dir(tmp_path, channels=("DNA", "G3BP1"))
+    datasets, token_config = discover_tokenless(src)
+    ds = datasets[0]
+
+    assignments = {
+        "DNA": LayerAssignment(layer_type=LayerType.CHANNEL, name="GFP"),
+        "G3BP1": LayerAssignment(layer_type=LayerType.CHANNEL, name="G3BP1"),
+    }
+    h5_path = tmp_path / "Exp_A.h5"
+    import_dataset(
+        src, h5_path, token_config=token_config, files=list(ds.files),
+        layer_assignments=assignments,
+    )
+
+    store = DatasetStore(h5_path)
+    names = set(store.metadata["channel_names"])
+    assert "GFP" in names
+    assert "DNA" not in names and "chDNA" not in names
+
+
+def test_import_numeric_tokens_channel_names_unchanged(tmp_path):
+    """R8 regression: numeric chXX imports keep their exact channel names."""
+    src = _create_tiff_dir(tmp_path, n_channels=2)
+    h5_path = tmp_path / "output.h5"
+    import_dataset(src, h5_path)
+
+    store = DatasetStore(h5_path)
+    assert store.metadata["channel_names"] == ["ch00", "ch01"]
+
+
 def test_import_empty_dir_raises(tmp_path):
     """Import from empty directory raises ValueError."""
     src = tmp_path / "empty"

@@ -35,6 +35,7 @@ from percell4.domain.io.models import (
     TokenConfig,
     ZeroPadOffsetRule,
 )
+from percell4.domain.io.naming import channel_display_name
 from percell4.domain.io.scanner import FileScanner
 from percell4.domain.io.timepoints import (
     count_timepoints,
@@ -289,7 +290,10 @@ def import_dataset(
 
     for ch_key in sorted(channel_groups.keys()):
         files = channel_groups[ch_key]
-        default_name = f"ch{ch_key}" if ch_key else "ch0"
+        # Canonical name: "chXX" for a numeric token, the name verbatim for a
+        # tokenless name token ("DNA", "SG_mask"). One helper shared with every
+        # consumer so the stored /metadata.channel_names never diverges.
+        default_name = channel_display_name(ch_key)
 
         # Route to correct layer type based on assignment.
         assignment = layer_assignments.get(ch_key) if layer_assignments else None
@@ -588,7 +592,7 @@ def import_dataset(
         tcspc_channel_groups = _group_by_channel(tcspc_result)
 
         for ch_key in sorted(tcspc_channel_groups.keys()):
-            ch_name = f"ch{ch_key}" if ch_key else "ch0"
+            ch_name = channel_display_name(ch_key)
             files = tcspc_channel_groups[ch_key]
             # Load and stitch TCSPC tiles
             decay = _load_and_stitch(files, tile_config)
@@ -689,7 +693,7 @@ def import_dataset(
         _bin_needs_early_store = True
 
         for ch_key in sorted(bin_by_channel.keys()):
-            ch_name = f"ch{ch_key}" if ch_key else "ch0"
+            ch_name = channel_display_name(ch_key)
             tile_bins = bin_by_channel[ch_key]
 
             # Read first tile to get dimensions
