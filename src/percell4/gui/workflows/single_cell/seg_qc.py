@@ -375,7 +375,7 @@ class SegmentationQCController(QObject):
         layout.addLayout(margin_row)
 
         min_row = QHBoxLayout()
-        min_row.addWidget(QLabel("Min area (px):"))
+        min_row.addWidget(QLabel("Min area (px²):"))
         self._cleanup_min_area = QSpinBox()
         self._cleanup_min_area.setRange(0, 10000)
         self._cleanup_min_area.setValue(0)
@@ -512,7 +512,7 @@ class SegmentationQCController(QObject):
 
         # Min cell size
         min_row = QHBoxLayout()
-        min_row.addWidget(QLabel("Min cell size (px):"))
+        min_row.addWidget(QLabel("Min cell size (px²):"))
         self._rerun_min_size = QSpinBox()
         self._rerun_min_size.setRange(0, 10000)
         self._rerun_min_size.setValue(int(cfg.min_size))

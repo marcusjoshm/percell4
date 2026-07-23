@@ -124,7 +124,7 @@ class AnalysisPanel(QWidget):
         ))
 
         min_area_row = QHBoxLayout()
-        min_area_row.addWidget(QLabel("Min particle area (px):"))
+        min_area_row.addWidget(QLabel("Min particle area (px²):"))
         self._particle_min_area = QSpinBox()
         self._particle_min_area.setRange(1, 10000)
         self._particle_min_area.setValue(1)
@@ -681,7 +681,7 @@ class AnalysisPanel(QWidget):
         mask_name = self.data_model.session.active_mask or "unknown"
         self._particle_result_label.setText(
             f"{result.total_particles} particles in {result.n_cells} cells\n"
-            f"mask: {mask_name} | min area: {min_area} px"
+            f"mask: {mask_name} | min area: {min_area} px²"
         )
         self._particle_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self._show_status(

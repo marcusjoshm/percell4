@@ -295,7 +295,7 @@ class SegmentationPanel(QWidget):
         edit_layout.addLayout(margin_row)
 
         min_area_row = QHBoxLayout()
-        min_area_row.addWidget(QLabel("Min cell area (px):"))
+        min_area_row.addWidget(QLabel("Min cell area (px²):"))
         self._cleanup_min_area = QSpinBox()
         self._cleanup_min_area.setRange(0, 10000)
         self._cleanup_min_area.setValue(0)

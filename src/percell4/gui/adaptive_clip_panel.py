@@ -547,7 +547,7 @@ class AdaptiveClipPanel(QWidget):
             f"second pass {report.second_pass_used})\n"
             f"    {coarse_k}\n"
             f"    presmooth σ {report.presmooth_sigma_px}; n_cells {report.n_cells}; "
-            f"components {report.n_components}; area {report.area_px} px",
+            f"components {report.n_components}; area {report.area_px} px²",
             flush=True,
         )
 
