@@ -71,3 +71,68 @@ def test_none_override_treated_as_missing():
 def test_empty_token_list_returns_empty():
     """No selected channels → no derived names. Doesn't crash."""
     assert _derive_tiff_pending_channel_names([], {}) == []
+
+
+def test_name_tokens_fall_back_to_verbatim_names():
+    """Tokenless name tokens with no override stay verbatim — no 'ch' prefix."""
+    names = _derive_tiff_pending_channel_names(["DNA", "G3BP1", "SG_mask"], {})
+    assert names == ["DNA", "G3BP1", "SG_mask"]
+
+
+def test_name_token_override_still_wins():
+    override = {"DNA": SimpleNamespace(name="GFP")}
+    names = _derive_tiff_pending_channel_names(["DNA", "G3BP1"], override)
+    assert names == ["GFP", "G3BP1"]
+
+
+def test_producer_consumer_contract_name_tokens(tmp_path):
+    """The consumer's derived names equal what the importer actually stored in
+    /metadata.channel_names — the byte-for-byte producer/consumer contract."""
+    import numpy as np
+    import tifffile
+
+    from percell4.adapters.importer import import_dataset
+    from percell4.domain.io.discovery import discover_tokenless
+    from percell4.store import DatasetStore
+
+    src = tmp_path / "raw"
+    src.mkdir()
+    for i, ch in enumerate(("cells", "DNA", "G3BP1", "SG_mask")):
+        tifffile.imwrite(
+            str(src / f"Exp_A_{ch}.tif"),
+            np.full((16, 16), (i + 1) * 30, dtype=np.uint16),
+        )
+
+    datasets, token_config = discover_tokenless(src)
+    ds = datasets[0]
+    h5_path = tmp_path / "Exp_A.h5"
+    import_dataset(src, h5_path, token_config=token_config, files=list(ds.files))
+
+    stored = DatasetStore(h5_path).metadata["channel_names"]
+    # Consumer is fed the same token ids (in the importer's sorted order),
+    # unrenamed. It must reproduce the stored names exactly.
+    derived = _derive_tiff_pending_channel_names(sorted(ds.scan_result.channels), {})
+    assert derived == list(stored)
+
+
+def test_producer_consumer_contract_numeric_tokens(tmp_path):
+    """R8: the contract also holds byte-for-byte for numeric chXX tokens."""
+    import numpy as np
+    import tifffile
+
+    from percell4.adapters.importer import import_dataset
+    from percell4.store import DatasetStore
+
+    src = tmp_path / "raw"
+    src.mkdir()
+    for ch in range(2):
+        tifffile.imwrite(
+            str(src / f"img_ch{ch:02d}.tif"),
+            np.full((16, 16), ch * 20, dtype=np.uint16),
+        )
+    h5_path = tmp_path / "out.h5"
+    import_dataset(src, h5_path)
+
+    stored = DatasetStore(h5_path).metadata["channel_names"]
+    derived = _derive_tiff_pending_channel_names(["00", "01"], {})
+    assert derived == list(stored) == ["ch00", "ch01"]

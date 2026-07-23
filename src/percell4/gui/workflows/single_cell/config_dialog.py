@@ -54,6 +54,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.domain.io.naming import channel_display_name
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.gui._cellpose_settings_form import CellposeSettingsForm
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
@@ -148,23 +149,24 @@ def _derive_tiff_pending_channel_names(
     """Resolve workflow-side channel names for a tiff_pending dataset.
 
     ``selected_token_ids`` carries the raw token IDs from the compress
-    dialog (``"00"``, ``"01"``, …). ``layer_assignments`` may map a
-    token to a ``LayerAssignment`` with a user-chosen display name.
+    dialog — numeric (``"00"``, ``"01"``, …) for the ``chXX`` convention or a
+    channel name (``"DNA"``, ``"SG_mask"``) for a tokenless import.
+    ``layer_assignments`` may map a token to a ``LayerAssignment`` with a
+    user-chosen display name.
 
-    When the user did not rename a channel, fall back to the
-    ``ch``-prefixed token (``f"ch{ch_id}"``) — this matches what
-    ``import_dataset`` actually writes to the HDF5's
-    ``/metadata.channel_names`` (see
-    ``src/percell4/adapters/importer.py`` default ``f"ch{ch_key}"``).
-    Bare-token fallback used to produce a silent mismatch (workflow
-    config: ``"02"`` vs HDF5: ``"ch02"``) that wrecked
-    ``threshold_compute`` after a long segmentation pass.
+    When the user did not rename a channel, fall back to
+    :func:`channel_display_name` — the single shared helper the importer
+    (producer) also uses to write ``/metadata.channel_names``. This keeps the
+    workflow side and the HDF5 side byte-for-byte in sync for both numeric
+    (``"02"`` → ``"ch02"``) and name (``"DNA"`` → ``"DNA"``) tokens. A bare-token
+    fallback used to produce a silent mismatch (workflow config ``"02"`` vs HDF5
+    ``"ch02"``) that wrecked ``threshold_compute`` after a long segmentation pass.
     """
     out: list[str] = []
     for ch_id in selected_token_ids:
         override = layer_assignments.get(ch_id)
         name = getattr(override, "name", "") if override is not None else ""
-        out.append(name or f"ch{ch_id}")
+        out.append(name or channel_display_name(ch_id))
     return out
 
 

@@ -137,6 +137,7 @@ class DiscoveryMode(StrEnum):
 
     SUBDIRECTORY = "subdirectory"
     FLAT = "flat"
+    TOKENLESS = "tokenless"
 
 
 class CompressMode(StrEnum):

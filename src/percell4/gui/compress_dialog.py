@@ -41,7 +41,11 @@ from percell4.domain.io.models import (
     TileConfig,
     TokenConfig,
 )
+from percell4.domain.io.naming import channel_display_name
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+
+# Index of the "Tokenless (by name)" entry in the Discovery combo.
+_TOKENLESS_INDEX = 2
 
 
 class CompressDialog(QDialog):
@@ -66,6 +70,10 @@ class CompressDialog(QDialog):
         self._all_z_slices: list[str] = []
         self._all_timepoints: list[str] = []
         self._discovery_generation = 0
+        # In Tokenless mode, discovery synthesizes a channel regex from the
+        # derived names; cache it so _current_token_config threads the identical
+        # regex into import_dataset (discovery <-> importer parity).
+        self._tokenless_token_config: TokenConfig | None = None
 
         # Manual mode state: per-channel config (shared across datasets)
         self._channel_configs: dict[str, _ChannelConfig] = {}
@@ -118,11 +126,17 @@ class CompressDialog(QDialog):
         options_row = QHBoxLayout()
         options_row.addWidget(QLabel("Discovery:"))
         self._discovery_combo = QComboBox()
-        self._discovery_combo.addItems(["Subdirectory", "Flat Directory"])
+        self._discovery_combo.addItems(
+            ["Subdirectory", "Flat Directory", "Tokenless (by name)"]
+        )
         self._discovery_combo.setToolTip(
             "Subdirectory: each child folder = one dataset.\n"
             "Flat Directory: groups files by stripping token patterns\n"
-            "(channel, tile, etc.) from filenames."
+            "(channel, tile, etc.) from filenames.\n"
+            "Tokenless (by name): no chXX token needed — the shared leading\n"
+            "prefix becomes the .h5 name and the trailing name becomes the\n"
+            "channel (e.g. ..._DNA, ..._SG_mask). Use Manual mode to rename\n"
+            "a mis-derived channel or assign it as mask / segmentation."
         )
         self._discovery_combo.currentIndexChanged.connect(
             self._on_discovery_mode_changed
@@ -455,7 +469,7 @@ class CompressDialog(QDialog):
                 if cfg.checkbox.isChecked():
                     layer_assignments[ch_id] = LayerAssignment(
                         layer_type=LayerType(cfg.type_combo.currentText().lower()),
-                        name=cfg.name_edit.text().strip() or f"ch{ch_id}",
+                        name=cfg.name_edit.text().strip() or channel_display_name(ch_id),
                     )
 
         tile_config = None
@@ -495,7 +509,7 @@ class CompressDialog(QDialog):
         if self._flim_group.isChecked():
             channel_calibrations: dict[str, dict[str, float]] = {}
             for ch_id, cal in self._channel_calibrations.items():
-                ch_name = f"ch{ch_id}" if ch_id else "ch0"
+                ch_name = channel_display_name(ch_id)
                 channel_calibrations[ch_name] = {
                     "phase": cal.phase_spin.value(),
                     "modulation": cal.mod_spin.value(),
@@ -565,6 +579,9 @@ class CompressDialog(QDialog):
             self._output_edit.setText(path)
 
     def _on_discovery_mode_changed(self, index: int) -> None:
+        # Tokenless mode derives the channel regex itself — the free-text token
+        # patterns are irrelevant, so hide that group to avoid confusion.
+        self._token_group.setVisible(index != _TOKENLESS_INDEX)
         if self._source_edit.text().strip():
             self._run_discovery()
 
@@ -640,6 +657,13 @@ class CompressDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _current_token_config(self) -> TokenConfig:
+        # Tokenless mode: return the regex synthesized from the derived channel
+        # names so both discovery and import_dataset run the identical pattern.
+        if (
+            self._discovery_combo.currentIndex() == _TOKENLESS_INDEX
+            and self._tokenless_token_config is not None
+        ):
+            return self._tokenless_token_config
         return TokenConfig(
             channel=self._tok_channel.text().strip() or None,
             timepoint=self._tok_timepoint.text().strip() or None,
@@ -656,20 +680,43 @@ class CompressDialog(QDialog):
         gen = self._discovery_generation
 
         root = Path(source)
-        token_config = self._current_token_config()
         output_dir = None
         if self._output_edit.text().strip():
             output_dir = Path(self._output_edit.text().strip())
 
-        from percell4.domain.io.discovery import discover_by_subdirectory, discover_flat
+        from percell4.domain.io.discovery import (
+            discover_by_subdirectory,
+            discover_flat,
+            discover_tokenless,
+        )
 
+        mode_idx = self._discovery_combo.currentIndex()
         try:
-            if self._discovery_combo.currentIndex() == 0:
+            if mode_idx == _TOKENLESS_INDEX:
+                # Derives its own channel regex from the filenames; cache it so
+                # _current_token_config threads the identical pattern to import.
+                datasets, self._tokenless_token_config = discover_tokenless(
+                    root, output_dir
+                )
+                if not datasets:
+                    self._tokenless_token_config = None
+                    self._datasets = []
+                    self._aggregate_tokens()
+                    self._populate_lists()
+                    self._ds_count_label.setText(
+                        "No name-suffixed TIFFs found to group"
+                    )
+                    return
+            elif mode_idx == 0:
+                self._tokenless_token_config = None
                 datasets = discover_by_subdirectory(
-                    root, token_config, output_dir
+                    root, self._current_token_config(), output_dir
                 )
             else:
-                datasets = discover_flat(root, token_config, output_dir)
+                self._tokenless_token_config = None
+                datasets = discover_flat(
+                    root, self._current_token_config(), output_dir
+                )
         except Exception as e:
             self._ds_count_label.setText(f"Error: {e}")
             return
@@ -736,7 +783,7 @@ class CompressDialog(QDialog):
         self._ch_list.blockSignals(True)
         self._ch_list.clear()
         for ch in self._all_channels:
-            item = QListWidgetItem(f"ch{ch}")
+            item = QListWidgetItem(channel_display_name(ch))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             item.setData(Qt.UserRole, ch)
@@ -800,12 +847,12 @@ class CompressDialog(QDialog):
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 2, 0, 2)
 
-            cb = QCheckBox(f"ch{ch}")
+            cb = QCheckBox(channel_display_name(ch))
             cb.setChecked(True)
             cb.toggled.connect(self._update_compress_button)
             row.addWidget(cb)
 
-            name_edit = QLineEdit(f"ch{ch}")
+            name_edit = QLineEdit(channel_display_name(ch))
             name_edit.setPlaceholderText("Name")
             name_edit.setFixedWidth(100)
             # A rename here is the name the importer keys its registration
@@ -846,7 +893,7 @@ class CompressDialog(QDialog):
         combo.clear()
         for ch in self._all_channels:
             cfg = self._channel_configs.get(ch)
-            name = (cfg.name_edit.text().strip() if cfg else "") or f"ch{ch}"
+            name = (cfg.name_edit.text().strip() if cfg else "") or channel_display_name(ch)
             combo.addItem(name, name)
         if 0 <= prev_idx < combo.count():
             combo.setCurrentIndex(prev_idx)  # same channel position, new name
@@ -879,7 +926,7 @@ class CompressDialog(QDialog):
             return
 
         for ch in self._all_channels:
-            ch_name = f"ch{ch}" if ch else "ch0"
+            ch_name = channel_display_name(ch)
             group = QGroupBox(f"Channel {ch_name}")
             form = QFormLayout(group)
 
