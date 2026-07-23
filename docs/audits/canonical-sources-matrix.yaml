@@ -65,12 +65,16 @@ canonical_sources:
     canonical_file: src/percell4/gui/viewer.py
     status: pre_canonical
   - slug: channel-name-default-ch-prefix
-    solution_doc: docs/solutions/logic-errors/tiff-pending-channel-name-prefix-mismatch-2026-05-21.md
-    canonical_file: src/percell4/adapters/importer.py
-    status: pre_canonical
+    solution_doc: docs/solutions/architecture-patterns/channel-name-contract-and-tokenless-discovery-2026-07-23.md
+    canonical_file: src/percell4/domain/io/naming.py
+    status: canonical_clean
     applies_to:
+      - src/percell4/domain/io/naming.py
       - src/percell4/adapters/importer.py
+      - src/percell4/gui/compress_dialog.py
       - src/percell4/gui/workflows/single_cell/config_dialog.py
+      - src/percell4/domain/io/discovery.py
+      - src/percell4/domain/io/tokenless.py
   - slug: registered-analysis-framework
     solution_doc: docs/solutions/architecture-patterns/registered-analysis-framework.md
     canonical_file: src/percell4/application/analysis/modules/per_particle_donut.py

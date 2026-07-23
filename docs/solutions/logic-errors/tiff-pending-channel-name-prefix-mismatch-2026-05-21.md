@@ -29,6 +29,16 @@ related_components:
 
 # tiff_pending channel-name fallback dropped the `ch` prefix, breaking threshold_compute
 
+> **Update (2026-07-23) — superseded in part.** The `f"ch{ch_id}"` fallback shown
+> below was later consolidated into one canonical helper,
+> `channel_display_name(token)` in `src/percell4/domain/io/naming.py`, now called by
+> both the importer (producer) and every consumer (`config_dialog`,
+> `compress_dialog`). The Prevention rule "treat `f"ch{ch_id}"` as a contract spanning
+> two files" is **replaced** by that single source of truth — new producers/consumers
+> call the helper rather than mirroring an f-string. The `KeyError` diagnosis and the
+> byte-identical numeric `chXX` behavior described here still hold. See
+> `docs/solutions/architecture-patterns/channel-name-contract-and-tokenless-discovery-2026-07-23.md`.
+
 ## Problem
 
 The workflow config dialog produced bare token channel names (`"02"`) on `WorkflowDatasetEntry.channel_names` for `tiff_pending` datasets when the user did not rename any channels in the compress dialog. The importer wrote the HDF5 `/metadata.channel_names` with the `ch` prefix (`"ch02"`). The thresholding-round dropdown picked up the bare token, and the runtime channel lookup against the HDF5 raised `KeyError` — but only after a long segmentation pass had already completed for every dataset.
@@ -106,15 +116,16 @@ The producer side (`src/percell4/adapters/importer.py:211`) writes `default_name
 
 ## Prevention
 
-- **Treat `f"ch{ch_id}"` as a single API contract spanning two files.** Both `src/percell4/adapters/importer.py:211` and `_derive_tiff_pending_channel_names` now carry a comment pointing at the other. Any future change to one must update both. Code review on either file should look for the partner.
-- **Pin the importer convention with a unit test.** Add coverage that imports a TIFF dataset with no `layer_assignments` and asserts `store.metadata["channel_names"] == ["ch00", "ch01", ...]`. If a future change drops the `ch` prefix on the importer side, the test fails immediately with a pointer back to the dialog helper.
-- **Add `pytest-qt` coverage for `_add_tiff_via_compress_dialog`.** A test that monkeypatches `CompressDialog.exec_` to return `Accepted` with a stub `compress_config` would exercise the full payload-build path. This is the gap that let the `NameError` regression land green on unit tests.
-- **Cross-phase invariant check at workflow start.** Validate in Phase 0 (compress) that every `WorkflowDatasetEntry.channel_names` value referenced by any `ThresholdingRound.channel` will resolve against what `import_dataset` is about to write. Failing loudly at run start beats failing after segmentation.
-- **Nearest-name suggestion in `_channel_index`.** The error already shows `available:` (which did help diagnosis), but adding `did you mean 'ch02'?` for misses by a common prefix/suffix would cut diagnosis to seconds. Cheap to add at `src/percell4/workflows/phases.py:447-449`.
-- **Audit-matrix entry.** Add a row to `docs/audits/canonical-sources-matrix.yaml` keyed on the channel-name `ch`-prefix contract, with `applies_to` covering both `src/percell4/adapters/importer.py` and `src/percell4/gui/workflows/single_cell/config_dialog.py` — so the `PreToolUse` learnings hook surfaces this doc on edits to either file.
+- **~~Treat `f"ch{ch_id}"` as a single API contract spanning two files.~~** *(Superseded 2026-07-23.)* Both sides now delegate to `channel_display_name(token)` in `src/percell4/domain/io/naming.py` — there is no f-string to mirror. Any new channel-name producer or consumer must call that helper rather than format the string itself. See `docs/solutions/architecture-patterns/channel-name-contract-and-tokenless-discovery-2026-07-23.md`.
+- **~~Pin the importer convention with a unit test.~~** *(Done 2026-07-23.)* `tests/test_gui_workflows/test_channel_name_derivation.py::test_producer_consumer_contract_numeric_tokens` (and `_name_tokens`) now import a real dataset and assert the consumer's derived names equal `store.metadata["channel_names"]` for both numeric and name tokens.
+- **Add `pytest-qt` coverage for `_add_tiff_via_compress_dialog`.** A test that monkeypatches `CompressDialog.exec_` to return `Accepted` with a stub `compress_config` would exercise the full payload-build path. This is the gap that let the `NameError` regression land green on unit tests. *(Still open.)*
+- **Cross-phase invariant check at workflow start.** Validate in Phase 0 (compress) that every `WorkflowDatasetEntry.channel_names` value referenced by any `ThresholdingRound.channel` will resolve against what `import_dataset` is about to write. Failing loudly at run start beats failing after segmentation. *(Still open.)*
+- **Nearest-name suggestion in `_channel_index`.** The error already shows `available:` (which did help diagnosis), but adding `did you mean 'ch02'?` for misses by a common prefix/suffix would cut diagnosis to seconds. Cheap to add at `src/percell4/workflows/phases.py:447-449`. *(Still open.)*
+- **~~Audit-matrix entry.~~** *(Done; updated 2026-07-23.)* `docs/audits/canonical-sources-matrix.yaml` row `channel-name-default-ch-prefix` now points its `canonical_file` at `src/percell4/domain/io/naming.py` and its `applies_to` covers the importer, both dialogs, and the tokenless discovery modules.
 
 ## Related Issues
 
+- `docs/solutions/architecture-patterns/channel-name-contract-and-tokenless-discovery-2026-07-23.md` — the architecture that generalizes and supersedes this incident's prevention rule: `channel_display_name` as the single canonical channel-name string across producer and consumers, plus tokenless name-suffixed discovery.
 - `docs/solutions/logic-errors/flim-phasor-cross-layer-alignment-2026-04-29.md` — documents `f"ch{i}"` as the orphan-slice fallback in the deletion path. This new doc elevates the same string as the *default for fresh import* of unnamed channels. Cross-reference would close the loop.
 - `docs/solutions/logic-errors/batch-compress-development-lessons.md` — Bugs #3/#4 are the prior compress-dialog → downstream handoff regressions; this is a sibling in that family (identity leaking incorrectly across the boundary).
 - `docs/solutions/architecture-patterns/channel-deletion-permanence.md` — owns the writer side of the channel-name lifecycle; its `applies_to` could widen to cover any module that **constructs** channel names, not just deletes them.
