@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 
+from percell4.interfaces.gui.task_panels import batch_command_runner as bcr_mod
 from percell4.interfaces.gui.task_panels.batch_command_runner import (
     BatchCommandRunner,
 )
@@ -62,3 +63,31 @@ def test_multibyte_glyph_split_across_reads(qtbot):
     joined = "".join(outputs)
     assert "█" in joined
     assert "�" not in joined
+
+
+# ── Native-Windows portability ──────────────────────────────
+
+
+def test_non_posix_skips_process_group(qtbot, monkeypatch):
+    # Simulated Windows: os.getpgid / os.setsid do not exist. _on_started must
+    # not crash and must leave _pgid None — the exact bug the user hit was an
+    # unguarded os.getpgid raising AttributeError on native Windows.
+    monkeypatch.setattr(bcr_mod, "_POSIX", False)
+    runner = BatchCommandRunner()
+    pgid_at_start: list = []
+    runner.started.connect(lambda: pgid_at_start.append(runner._pgid))
+    with qtbot.waitSignal(runner.finished, timeout=10000):
+        runner.run([sys.executable, "-c", "print('x')"])
+    assert pgid_at_start == [None]
+
+
+def test_cancel_non_posix_uses_qprocess_terminate(qtbot, monkeypatch):
+    # Simulated Windows: cancel must fall back to QProcess.terminate()/kill()
+    # without ever referencing os.killpg / signal.SIGKILL.
+    monkeypatch.setattr(bcr_mod, "_POSIX", False)
+    runner = BatchCommandRunner()
+    with qtbot.waitSignal(runner.started, timeout=10000):
+        runner.run([sys.executable, "-c", "import time; time.sleep(30)"])
+    with qtbot.waitSignal(runner.finished, timeout=10000):
+        runner.cancel()
+    assert not runner.is_running
