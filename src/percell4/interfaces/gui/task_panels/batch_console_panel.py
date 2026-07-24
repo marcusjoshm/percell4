@@ -121,7 +121,9 @@ class BatchConsolePanel(QWidget):
         left_layout.addWidget(self._catalog, stretch=2)
 
         left_layout.addWidget(self._muted_label("Files"))
-        self._navigator = FileNavigator(start_dir=self._cwd)
+        self._navigator = FileNavigator(
+            start_dir=self._cwd, get_dataset_dir=self._dataset_dir
+        )
         self._navigator.path_chosen.connect(self._on_path_chosen)
         left_layout.addWidget(self._navigator, stretch=3)
 
@@ -196,6 +198,11 @@ class BatchConsolePanel(QWidget):
         name = current.data(Qt.UserRole)
         if name:
             self._input.insert_command(name)
+
+    def _dataset_dir(self) -> str | None:
+        """Directory holding the currently-open ``.h5`` (for the navigator)."""
+        open_h5 = self._get_open_h5_path()
+        return os.path.dirname(open_h5) if open_h5 else None
 
     def _on_path_chosen(self, path: str) -> None:
         # Insert the chosen path (shell-quoted) into the command input, and
