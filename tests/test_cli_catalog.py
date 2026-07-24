@@ -11,11 +11,13 @@ from importlib import util as importlib_util
 
 import pytest
 
+from percell4.interfaces.cli import catalog as catalog_mod
 from percell4.interfaces.cli.catalog import (
     CommandParseError,
     UnknownCommandError,
     list_batch_tools,
     resolve_command,
+    split_command,
 )
 
 # ── Enumeration ─────────────────────────────────────────────────────────
@@ -102,3 +104,44 @@ def test_resolve_empty_and_whitespace():
 def test_resolve_unbalanced_quote():
     with pytest.raises(CommandParseError):
         resolve_command('percell4-batch-export "unclosed')
+
+
+# ── split_command: native-Windows path safety ───────────────────────────
+
+
+def _simulate_windows(monkeypatch):
+    monkeypatch.setattr(catalog_mod.os, "name", "nt")
+
+
+def test_split_command_posix_default():
+    # On POSIX (this platform), plain shlex.split — forward-slash paths and
+    # quoted paths tokenize cleanly.
+    assert split_command("t /a/b.h5") == ["t", "/a/b.h5"]
+    assert split_command('t "/a b/x.h5"') == ["t", "/a b/x.h5"]
+
+
+def test_split_command_windows_preserves_backslashes(monkeypatch):
+    # The exact defect: a typed native path must NOT lose its separators.
+    _simulate_windows(monkeypatch)
+    assert split_command(r"t E:\data\dish.h5") == ["t", r"E:\data\dish.h5"]
+    assert split_command(r"m C:\Users\me\dishes") == ["m", r"C:\Users\me\dishes"]
+
+
+def test_split_command_windows_quoted_paths_round_trip(monkeypatch):
+    _simulate_windows(monkeypatch)
+    # double-quoted path with a space
+    assert split_command(r't "E:\My Data\d.h5"') == ["t", r"E:\My Data\d.h5"]
+    # single-quoted path — what shlex.quote (navigator / drag-drop) inserts
+    assert split_command(r"t 'E:\data\d.h5'") == ["t", r"E:\data\d.h5"]
+
+
+def test_split_command_windows_hash_in_path(monkeypatch):
+    # '#' must not start a comment — a real filename can contain it.
+    _simulate_windows(monkeypatch)
+    assert split_command(r"t E:\exp#1\d.h5") == ["t", r"E:\exp#1\d.h5"]
+
+
+def test_split_command_windows_unbalanced_quote_raises(monkeypatch):
+    _simulate_windows(monkeypatch)
+    with pytest.raises(ValueError):
+        split_command('t "unclosed')

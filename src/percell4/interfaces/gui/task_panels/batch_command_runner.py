@@ -24,7 +24,13 @@ import codecs
 import os
 import signal
 
-from qtpy.QtCore import QObject, QProcess, QTimer, Signal
+from qtpy.QtCore import (
+    QObject,
+    QProcess,
+    QProcessEnvironment,
+    QTimer,
+    Signal,
+)
 
 # The process-group machinery (setsid / getpgid / killpg / SIGKILL) is POSIX
 # only. On Windows these os/signal members do not exist, so gate every use.
@@ -69,6 +75,13 @@ class BatchCommandRunner(QObject):
             proc.setWorkingDirectory(cwd)
         proc.setProgram(program)
         proc.setArguments(args)
+        # Force the child to emit UTF-8 so it matches the console's UTF-8
+        # decoder: on Windows a child's piped stdout otherwise defaults to the
+        # ANSI code page (cp1252), garbling µm / × glyphs into replacement chars.
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
+        proc.setProcessEnvironment(env)
         # POSIX only: launch the child in its own session/process group so cancel
         # can signal the whole tree. Available on Qt6 bindings; harmless no-op
         # where the modifier API is absent (we verify success in _on_started

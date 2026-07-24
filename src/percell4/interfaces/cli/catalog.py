@@ -12,6 +12,7 @@ today; a ``forbidden`` contract on this module could enforce the rule.
 
 from __future__ import annotations
 
+import os
 import shlex
 import sys
 from dataclasses import dataclass
@@ -82,12 +83,33 @@ def list_batch_tools() -> list[BatchTool]:
     return sorted(tools.values(), key=lambda t: t.name)
 
 
+def split_command(line: str) -> list[str]:
+    """Tokenize a typed command line, preserving native Windows backslash paths.
+
+    POSIX ``shlex`` treats backslash as an escape character, which silently eats
+    the separators in a typed Windows path (``C:\\data\\x.h5`` tokenizes to
+    ``C:datax.h5``). On Windows, tokenize with escaping and ``#``-comment
+    handling disabled so *both* raw backslash paths and quoted paths — the file
+    navigator and drag-drop ``shlex.quote`` their inserts — tokenize correctly.
+    On POSIX, plain ``shlex.split``. Raises ``ValueError`` on unbalanced quotes
+    on either platform.
+    """
+    if os.name == "nt":
+        lex = shlex.shlex(line, posix=True)
+        lex.whitespace_split = True
+        lex.escape = ""
+        lex.commenters = ""
+        return list(lex)
+    return shlex.split(line, posix=True)
+
+
 def resolve_command(line: str) -> list[str]:
     """Resolve a typed command line into an executable argv.
 
     Tokenizes ``line`` the way a shell would split it — but with no shell
-    features (no pipes, redirects, globbing, or substitution) — verifies the
-    first token is an importable ``percell4-*`` catalog tool, and returns
+    features (no pipes, redirects, globbing, or substitution) and preserving
+    native Windows paths (see :func:`split_command`) — verifies the first token
+    is an importable ``percell4-*`` catalog tool, and returns
     ``[sys.executable, "-m", <module>, *rest]``.
 
     Raises :class:`CommandParseError` on unbalanced quotes and
@@ -95,7 +117,7 @@ def resolve_command(line: str) -> list[str]:
     tool.
     """
     try:
-        argv = shlex.split(line, posix=True)
+        argv = split_command(line)
     except ValueError as exc:
         raise CommandParseError(str(exc)) from exc
     if not argv:
