@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import os
 
-from percell4.interfaces.gui.task_panels.file_navigator import FileNavigator
+import pytest
+from qtpy.QtCore import QDir
+from qtpy.QtWidgets import QPushButton
+
+from percell4.interfaces.gui.task_panels.file_navigator import (
+    FileNavigator,
+    _drive_label,
+)
 
 
 def test_starts_at_given_dir(qtbot, tmp_path):
@@ -107,3 +114,35 @@ def test_path_bar_unknown_path_restores_current(qtbot, tmp_path):
     nav._on_path_entered()
     assert os.path.samefile(nav._current, str(tmp_path))
     assert os.path.samefile(nav._path_edit.text(), str(tmp_path))
+
+
+# ── Cross-platform quick jumps ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [("C:/", "C:"), ("C:\\", "C:"), ("D:/", "D:"), ("Z:/", "Z:"), ("/", "/")],
+)
+def test_drive_label(path, label):
+    assert _drive_label(path) == label
+
+
+def test_quick_jumps_include_home_and_every_drive(qtbot, tmp_path):
+    nav = FileNavigator(start_dir=str(tmp_path))
+    qtbot.addWidget(nav)
+    labels = {b.text() for b in nav.findChildren(QPushButton)}
+    assert "Home" in labels
+    # Every drive root reported by Qt (drive letters on Windows, "/" on Unix)
+    # gets its own quick-jump button — the PC equivalent of macOS /Volumes.
+    for drive in QDir.drives():
+        assert _drive_label(drive.absoluteFilePath()) in labels
+
+
+def test_home_quick_button_navigates(qtbot, tmp_path):
+    nav = FileNavigator(start_dir=str(tmp_path))
+    qtbot.addWidget(nav)
+    home_btn = next(
+        b for b in nav.findChildren(QPushButton) if b.text() == "Home"
+    )
+    home_btn.click()
+    assert os.path.samefile(nav._current, QDir.homePath())

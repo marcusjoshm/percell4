@@ -3,10 +3,12 @@
 A compact single-column browser: the list shows one directory's entries;
 double-clicking a folder descends into it, double-clicking a file emits its
 path, and Up walks to the parent. An editable path bar (type/paste a path, press
-Enter) jumps anywhere directly — including mounted drives under ``/Volumes`` —
-and Home / Volumes quick buttons jump to the common roots. It exists so batch
-commands can be composed without leaving PerCell to look up file paths in a
-terminal or Finder.
+Enter) jumps anywhere directly on any platform — a Windows drive (``D:\\data``),
+a UNC share (``\\\\server\\share``), or a macOS mount (``/Volumes/Drive``). Quick
+buttons cover the common roots cross-platform: Home, each drive from
+``QDir.drives()`` (drive letters on Windows, ``/`` on Unix), and — on macOS only,
+where external drives mount — ``/Volumes``. It exists so batch commands can be
+composed without leaving PerCell to look up file paths in a terminal or Finder.
 
 The widget emits ``path_chosen(str)`` with an absolute path; the host decides
 what to do with it (the console inserts it, shell-quoted, into the command
@@ -34,6 +36,12 @@ except ImportError:  # pragma: no cover - binding-dependent fallback
     from qtpy.QtGui import QFileSystemModel
 
 _VOLUMES = "/Volumes"
+
+
+def _drive_label(path: str) -> str:
+    """Short button label for a drive root: ``C:/`` -> ``C:``, ``/`` -> ``/``."""
+    trimmed = path.rstrip("/\\")
+    return trimmed or "/"
 
 
 class FileNavigator(QWidget):
@@ -73,12 +81,21 @@ class FileNavigator(QWidget):
         nav.addWidget(self._path_edit, stretch=1)
         layout.addLayout(nav)
 
-        # Quick jumps: Home and (on macOS) mounted drives under /Volumes.
+        # Quick jumps (cross-platform): Home, each drive root (drive letters on
+        # Windows, "/" on Unix), and — on macOS only — mounted drives /Volumes.
         quick = QHBoxLayout()
         home_btn = QPushButton("Home")
         home_btn.setToolTip("Jump to your home folder.")
         home_btn.clicked.connect(lambda: self._set_root(QDir.homePath()))
         quick.addWidget(home_btn)
+        for drive in QDir.drives():
+            drive_path = drive.absoluteFilePath()
+            btn = QPushButton(_drive_label(drive_path))
+            btn.setToolTip(f"Jump to {drive_path}")
+            btn.clicked.connect(
+                lambda _checked=False, p=drive_path: self._set_root(p)
+            )
+            quick.addWidget(btn)
         if os.path.isdir(_VOLUMES):
             vol_btn = QPushButton("Volumes")
             vol_btn.setToolTip("Jump to mounted drives (/Volumes).")
