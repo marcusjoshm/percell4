@@ -75,3 +75,35 @@ def test_insert_noop_without_selection(qtbot, tmp_path):
     nav.path_chosen.connect(fired.append)
     nav._on_insert()  # no current selection → no emit, no raise
     assert fired == []
+
+
+# ── Path bar (jump anywhere, incl. /Volumes) ────────────────
+
+
+def test_path_bar_navigates_to_typed_dir(qtbot, tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    nav = FileNavigator(start_dir=str(tmp_path))
+    qtbot.addWidget(nav)
+    nav._path_edit.setText(str(sub))
+    nav._on_path_entered()
+    assert os.path.samefile(nav._current, str(sub))
+
+
+def test_path_bar_file_navigates_to_parent(qtbot, tmp_path):
+    f = tmp_path / "data.h5"
+    f.write_text("x")
+    nav = FileNavigator(start_dir=str(tmp_path.parent))
+    qtbot.addWidget(nav)
+    nav._path_edit.setText(str(f))
+    nav._on_path_entered()
+    assert os.path.samefile(nav._current, str(tmp_path))
+
+
+def test_path_bar_unknown_path_restores_current(qtbot, tmp_path):
+    nav = FileNavigator(start_dir=str(tmp_path))
+    qtbot.addWidget(nav)
+    nav._path_edit.setText("/no/such/path/xyz123")
+    nav._on_path_entered()
+    assert os.path.samefile(nav._current, str(tmp_path))
+    assert os.path.samefile(nav._path_edit.text(), str(tmp_path))

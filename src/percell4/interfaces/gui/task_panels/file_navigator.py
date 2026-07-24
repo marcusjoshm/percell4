@@ -2,8 +2,11 @@
 
 A compact single-column browser: the list shows one directory's entries;
 double-clicking a folder descends into it, double-clicking a file emits its
-path, and Up walks to the parent. It exists so batch commands can be composed
-without leaving PerCell to look up file paths in a terminal or Finder.
+path, and Up walks to the parent. An editable path bar (type/paste a path, press
+Enter) jumps anywhere directly — including mounted drives under ``/Volumes`` —
+and Home / Volumes quick buttons jump to the common roots. It exists so batch
+commands can be composed without leaving PerCell to look up file paths in a
+terminal or Finder.
 
 The widget emits ``path_chosen(str)`` with an absolute path; the host decides
 what to do with it (the console inserts it, shell-quoted, into the command
@@ -17,16 +20,20 @@ import os
 from qtpy.QtCore import QDir, Signal
 from qtpy.QtWidgets import (
     QAbstractItemView,
-    QFileSystemModel,
     QHBoxLayout,
-    QLabel,
+    QLineEdit,
     QListView,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from percell4.gui import theme
+try:  # QFileSystemModel moved QtWidgets (Qt5) -> QtGui (Qt6); qtpy normalizes.
+    from qtpy.QtWidgets import QFileSystemModel
+except ImportError:  # pragma: no cover - binding-dependent fallback
+    from qtpy.QtGui import QFileSystemModel
+
+_VOLUMES = "/Volumes"
 
 
 class FileNavigator(QWidget):
@@ -42,24 +49,43 @@ class FileNavigator(QWidget):
         self._model.setFilter(
             QDir.Filter.AllEntries | QDir.Filter.NoDotAndDotDot
         )
-        self._current = os.path.abspath(start_dir or QDir.homePath())
+        self._current = ""
         self._build_ui()
-        self._set_root(self._current)
+        self._set_root(start_dir or QDir.homePath())
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        top = QHBoxLayout()
+        # Nav row: Up + an editable path bar (type/paste a path, Enter to jump).
+        nav = QHBoxLayout()
         self._up_btn = QPushButton("↑ Up")
         self._up_btn.setToolTip("Go to the parent directory.")
         self._up_btn.clicked.connect(self._on_up)
-        top.addWidget(self._up_btn)
-        self._path_label = QLabel()
-        self._path_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        top.addWidget(self._path_label, stretch=1)
-        layout.addLayout(top)
+        nav.addWidget(self._up_btn)
+        self._path_edit = QLineEdit()
+        self._path_edit.setPlaceholderText("Type or paste a path, Enter to go…")
+        self._path_edit.setToolTip(
+            "Jump to any directory (e.g. /Volumes/MyDrive/data), then Enter."
+        )
+        self._path_edit.returnPressed.connect(self._on_path_entered)
+        nav.addWidget(self._path_edit, stretch=1)
+        layout.addLayout(nav)
+
+        # Quick jumps: Home and (on macOS) mounted drives under /Volumes.
+        quick = QHBoxLayout()
+        home_btn = QPushButton("Home")
+        home_btn.setToolTip("Jump to your home folder.")
+        home_btn.clicked.connect(lambda: self._set_root(QDir.homePath()))
+        quick.addWidget(home_btn)
+        if os.path.isdir(_VOLUMES):
+            vol_btn = QPushButton("Volumes")
+            vol_btn.setToolTip("Jump to mounted drives (/Volumes).")
+            vol_btn.clicked.connect(lambda: self._set_root(_VOLUMES))
+            quick.addWidget(vol_btn)
+        quick.addStretch()
+        layout.addLayout(quick)
 
         self._view = QListView()
         self._view.setModel(self._model)
@@ -79,15 +105,27 @@ class FileNavigator(QWidget):
     # ── navigation ──────────────────────────────────────────────────────
 
     def _set_root(self, path: str) -> None:
+        path = os.path.abspath(os.path.expanduser(path))
         self._current = path
         self._view.setRootIndex(self._model.setRootPath(path))
-        self._path_label.setText(path)
-        self._path_label.setToolTip(path)
+        self._path_edit.setText(path)
 
     def _on_up(self) -> None:
         parent = os.path.dirname(self._current.rstrip(os.sep)) or self._current
         if parent and parent != self._current:
             self._set_root(parent)
+
+    def _on_path_entered(self) -> None:
+        text = self._path_edit.text().strip()
+        if not text:
+            return
+        path = os.path.abspath(os.path.expanduser(text))
+        if os.path.isdir(path):
+            self._set_root(path)
+        elif os.path.isfile(path):
+            self._set_root(os.path.dirname(path))
+        else:
+            self._path_edit.setText(self._current)  # unknown path — restore
 
     def _on_double_click(self, index) -> None:
         path = self._model.filePath(index)
