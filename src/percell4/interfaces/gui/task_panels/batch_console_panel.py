@@ -1,14 +1,21 @@
 """Batch Tools Console panel.
 
-Assembles the catalog dropdown, ``Show --help``, the command input, the
-streaming console view, and Run/Cancel/Clear into a decoupled, Action-class
-panel: it reads session state via injected getters but never writes the five
-session fields. A completed run that referenced the currently-open dataset
-triggers a reload through an injected callback (never by poking session).
+Assembles the catalog list, ``Show --help``, the command input, the streaming
+console view, and Run/Cancel/Clear into a decoupled, Action-class panel: it reads
+session state via injected getters but never writes the five session fields. A
+completed run that referenced the currently-open dataset triggers a reload
+through an injected callback (never by poking session).
+
+The panel is laid out for a wide, resizable window (it is the central widget of
+``BatchToolsWindow``): a left column with the tool catalog, ``Show --help``, and
+a dedicated ``--help`` pane; a right column with the streaming run console; and a
+full-width command row spanning the bottom. ``Show --help`` streams into the help
+pane via a **separate** ``_help_runner`` so a tool's ``--help`` can be read while
+a real command runs on the main runner — the two never contend.
 
 Because HDF5 file locking makes a batch write *fail* while the GUI holds the
-target file open, the panel renders that lock failure legibly and only
-reloads after a successful (exit 0) run.
+target file open, the panel renders that lock failure legibly and only reloads
+after a successful (exit 0) run.
 """
 
 from __future__ import annotations
@@ -18,11 +25,14 @@ import shlex
 import time
 from collections.abc import Callable
 
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -52,8 +62,8 @@ _OUTPUT_TAIL_CAP = 8192
 class BatchConsolePanel(QWidget):
     """Command console for running the ``percell4-*`` batch CLI catalog."""
 
-    # The streaming console manages its own scroll — the launcher adds it to
-    # the content stack directly rather than wrapping it in a QScrollArea.
+    # The streaming console manages its own scroll — hosts add it directly
+    # rather than wrapping it in a QScrollArea.
     manages_own_scroll = True
 
     def __init__(
@@ -63,6 +73,7 @@ class BatchConsolePanel(QWidget):
         reload_open_dataset: Callable[[], None] = lambda: None,
         show_status: Callable[[str], None] = lambda _: None,
         runner: BatchCommandRunner | None = None,
+        help_runner: BatchCommandRunner | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -70,6 +81,9 @@ class BatchConsolePanel(QWidget):
         self._reload_open_dataset = reload_open_dataset
         self._show_status = show_status
         self._runner = runner if runner is not None else BatchCommandRunner(self)
+        self._help_runner = (
+            help_runner if help_runner is not None else BatchCommandRunner(self)
+        )
         self._cwd = os.getcwd()
 
         # per-run state
@@ -81,38 +95,58 @@ class BatchConsolePanel(QWidget):
 
         self._build_ui()
         self._wire_runner()
+        self._wire_help_runner()
         self._populate_catalog()
 
     # ── UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # Deliberate deviation from the standard panel convention: the console
-        # view must expand (stretch=1) and manage its own scroll, so there is
+        # The console view must expand and manage its own scroll, so there is
         # no Qt.AlignTop and no trailing addStretch().
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(theme.section_label("Batch Tools"))
+        # ── Top region: catalog + help (left) | run console (right) ──
+        splitter = QSplitter(Qt.Horizontal)
 
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Tool:"))
-        self._combo = QComboBox()
-        self._combo.setToolTip("Pick a percell4-* batch tool to insert its name.")
-        self._combo.activated.connect(self._on_catalog_selected)
-        top.addWidget(self._combo, stretch=1)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+
+        left_layout.addWidget(self._muted_label("Batch tools"))
+        self._catalog = QListWidget()
+        self._catalog.setToolTip("Pick a percell4-* batch tool to compose it.")
+        self._catalog.currentItemChanged.connect(self._on_catalog_selected)
+        left_layout.addWidget(self._catalog, stretch=2)
+
         self._help_btn = QPushButton("Show --help")
         self._help_btn.setToolTip("Run the selected tool with --help.")
         self._help_btn.clicked.connect(self._on_show_help)
-        top.addWidget(self._help_btn)
-        layout.addLayout(top)
+        left_layout.addWidget(self._help_btn)
+
+        left_layout.addWidget(self._muted_label("--help"))
+        self._help_view = AnsiConsoleView()
+        self._help_view.setPlaceholderText(
+            "Select a tool and click 'Show --help'."
+        )
+        left_layout.addWidget(self._help_view, stretch=3)
+
+        splitter.addWidget(left)
 
         self._view = AnsiConsoleView()
         self._view.setPlaceholderText(
             "No output yet — pick a tool or type a percell4-* command."
         )
-        layout.addWidget(self._view, stretch=1)
+        splitter.addWidget(self._view)
 
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 650])
+        layout.addWidget(splitter, stretch=1)
+
+        # ── Bottom region: command input + Run/Cancel/Clear (full width) ──
         bottom = QHBoxLayout()
         self._input = CommandLineEdit()
         self._input.command_submitted.connect(self._run_line)
@@ -129,33 +163,75 @@ class BatchConsolePanel(QWidget):
         bottom.addWidget(self._clear_btn)
         layout.addLayout(bottom)
 
+    @staticmethod
+    def _muted_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        return label
+
     def _wire_runner(self) -> None:
         self._runner.output.connect(self._on_output)
         self._runner.started.connect(lambda: None)
         self._runner.cancelled.connect(self._on_cancelled)
         self._runner.finished.connect(self._on_finished)
 
+    def _wire_help_runner(self) -> None:
+        # A dedicated handler pair — never reuse _on_output / _on_finished,
+        # which run lock-error detection, success-only reload, and main-run
+        # button toggles that must not fire for --help.
+        self._help_runner.output.connect(self._on_help_output)
+        self._help_runner.finished.connect(self._on_help_finished)
+
     def _populate_catalog(self) -> None:
         tools = list_batch_tools()
-        self._combo.clear()
+        self._catalog.clear()
         for tool in tools:
-            label = f"{tool.name}  —  {tool.summary}" if tool.summary else tool.name
-            self._combo.addItem(label, tool.name)
+            item = QListWidgetItem(tool.name)
+            item.setData(Qt.UserRole, tool.name)
+            if tool.summary:
+                item.setToolTip(tool.summary)
+            self._catalog.addItem(item)
         self._input.set_completions([t.name for t in tools])
+        # A fresh QListWidget selects nothing; seed row 0 so a tool is always
+        # current (Show --help works with no prior click). currentItemChanged
+        # then seeds the command input with the first tool name.
         if tools:
-            self._input.insert_command(tools[0].name)
+            self._catalog.setCurrentRow(0)
 
     # ── catalog / help ──────────────────────────────────────────────────
 
-    def _on_catalog_selected(self, index: int) -> None:
-        name = self._combo.itemData(index)
+    def _current_tool_name(self) -> str | None:
+        item = self._catalog.currentItem()
+        return item.data(Qt.UserRole) if item is not None else None
+
+    def _on_catalog_selected(self, current, _previous=None) -> None:
+        if current is None:
+            return
+        name = current.data(Qt.UserRole)
         if name:
             self._input.insert_command(name)
+        # Clear stale help so the visible --help always matches the composed
+        # tool — never leave a previous tool's help beside a different command.
+        self._help_view.clear_output()
 
     def _on_show_help(self) -> None:
-        name = self._combo.currentData()
-        if name:
-            self._run_line(f"{name} --help")
+        name = self._current_tool_name()
+        if not name or self._help_runner.is_running:
+            return
+        try:
+            argv = resolve_command(f"{name} --help")
+        except (CommandParseError, UnknownCommandError):
+            return  # catalog names always resolve; guard defensively
+        self._help_view.clear_output()
+        self._help_view.append_output(f"$ {name} --help\n")
+        self._set_help_running(True)
+        self._help_runner.run(argv, self._cwd)
+
+    def _on_help_output(self, text: str) -> None:
+        self._help_view.append_output(text)
+
+    def _on_help_finished(self, _code: int) -> None:
+        self._set_help_running(False)
 
     # ── run lifecycle ───────────────────────────────────────────────────
 
@@ -233,9 +309,13 @@ class BatchConsolePanel(QWidget):
     def _set_running(self, running: bool) -> None:
         self._run_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
+        # Show --help and the catalog stay enabled during a run so the wide
+        # window's payoff — reading --help while a command streams — holds. The
+        # help button's own enabled-state is driven by the help runner (see
+        # _set_help_running). Clear stays enabled at all times.
+
+    def _set_help_running(self, running: bool) -> None:
         self._help_btn.setEnabled(not running)
-        self._combo.setEnabled(not running)
-        # Clear stays enabled at all times.
 
     def _emit(self, msg: str, color: str) -> None:
         self._view.append_output(f"{color}{msg}{_RESET}\n")
