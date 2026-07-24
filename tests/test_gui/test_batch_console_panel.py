@@ -1,15 +1,19 @@
 """Tests for BatchConsolePanel.
 
 A FakeRunner stands in for the QProcess runner so no real subprocess is
-spawned; the panel's catalog/resolve logic is exercised for real.
+spawned; the panel's catalog/resolve logic is exercised for real. The wide
+layout (U3) has a QListWidget catalog + a FileNavigator on the left and the run
+console on the right; picking a tool seeds the command input, and a chosen file
+path is inserted (shell-quoted) into the input.
 """
 
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 
-from qtpy.QtCore import QObject, Signal
+from qtpy.QtCore import QObject, Qt, Signal
 
 from percell4.interfaces.gui.task_panels.batch_console_panel import (
     BatchConsolePanel,
@@ -60,6 +64,29 @@ def test_instantiates_headless_with_defaults(qtbot):
     assert panel._input.text().startswith("percell4-")
 
 
+def test_default_catalog_selection_present(qtbot):
+    # setCurrentRow(0) in _populate_catalog means a tool is always current.
+    panel, _ = _panel(qtbot)
+    item = panel._catalog.currentItem()
+    assert item is not None
+    assert item.data(Qt.UserRole).startswith("percell4-")
+
+
+def test_catalog_selection_inserts_tool_name(qtbot):
+    panel, _ = _panel(qtbot)
+    assert panel._catalog.count() > 1, "catalog should list multiple tools"
+    panel._catalog.setCurrentRow(1)
+    name1 = panel._catalog.item(1).data(Qt.UserRole)
+    assert panel._input.text().startswith(name1)
+
+
+def test_navigator_path_inserts_into_command_input(qtbot):
+    panel, _ = _panel(qtbot)
+    panel._navigator.path_chosen.emit("/data/some file.h5")
+    # insert_paths shell-quotes the path (space → single-quoted).
+    assert shlex.quote("/data/some file.h5") in panel._input.text()
+
+
 def test_unknown_command_shows_error_and_does_not_run(qtbot):
     panel, runner = _panel(qtbot)
     panel._run_line("ls -la")
@@ -95,12 +122,17 @@ def test_known_command_runs_with_module_argv_and_toggles_buttons(qtbot):
     assert "[Done] Exit 0" in panel._view.toPlainText()
 
 
-def test_show_help_runs_selected_tool_with_help_flag(qtbot):
+def test_set_running_keeps_catalog_and_navigator_enabled(qtbot):
+    # A run must not disable the catalog or navigator, and _set_running must not
+    # reference any removed widget (regression guard for the old _combo).
     panel, runner = _panel(qtbot)
-    panel._combo.setCurrentIndex(0)
-    panel._on_show_help()
-    assert runner.calls, "help should invoke the runner"
-    assert runner.calls[0][0][-1] == "--help"
+    panel._run_line("percell4-inspect exp.h5")
+    assert not panel._run_btn.isEnabled()
+    assert panel._cancel_btn.isEnabled()
+    assert panel._catalog.isEnabled()
+    assert panel._navigator.isEnabled()
+    runner.emit_finished(0)
+    assert panel._run_btn.isEnabled()
 
 
 def test_cancelled_run_shows_cancelled_and_skips_exit_status(qtbot):

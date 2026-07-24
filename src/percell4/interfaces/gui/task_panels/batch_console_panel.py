@@ -1,14 +1,22 @@
 """Batch Tools Console panel.
 
-Assembles the catalog dropdown, ``Show --help``, the command input, the
-streaming console view, and Run/Cancel/Clear into a decoupled, Action-class
-panel: it reads session state via injected getters but never writes the five
-session fields. A completed run that referenced the currently-open dataset
-triggers a reload through an injected callback (never by poking session).
+Assembles the tool catalog, a file-system navigator, the command input, and the
+streaming console into a decoupled, Action-class panel: it reads session state
+via injected getters but never writes the five session fields. A completed run
+that referenced the currently-open dataset triggers a reload through an injected
+callback (never by poking session).
+
+The panel is laid out for a wide, resizable window (it is the central widget of
+``BatchToolsWindow``): a left column with the tool catalog and a file navigator
+that inserts paths into the command input (so batch commands can be composed
+without leaving PerCell to look up file paths); a right column with the
+streaming run console; and a full-width command row spanning the bottom. To read
+a tool's usage, run it with ``-h`` / ``--help`` in the command input — it streams
+full-width into the run console.
 
 Because HDF5 file locking makes a batch write *fail* while the GUI holds the
-target file open, the panel renders that lock failure legibly and only
-reloads after a successful (exit 0) run.
+target file open, the panel renders that lock failure legibly and only reloads
+after a successful (exit 0) run.
 """
 
 from __future__ import annotations
@@ -18,11 +26,15 @@ import shlex
 import time
 from collections.abc import Callable
 
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QComboBox,
+    QApplication,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +51,7 @@ from percell4.interfaces.gui.task_panels.batch_command_runner import (
     BatchCommandRunner,
 )
 from percell4.interfaces.gui.task_panels.command_line_edit import CommandLineEdit
+from percell4.interfaces.gui.task_panels.file_navigator import FileNavigator
 
 _GREEN = "\x1b[32m"
 _RED = "\x1b[31m"
@@ -52,8 +65,9 @@ _OUTPUT_TAIL_CAP = 8192
 class BatchConsolePanel(QWidget):
     """Command console for running the ``percell4-*`` batch CLI catalog."""
 
-    # The streaming console manages its own scroll — the launcher adds it to
-    # the content stack directly rather than wrapping it in a QScrollArea.
+    # The streaming console manages its own scroll — its host (BatchToolsWindow)
+    # adds it directly as the central widget rather than wrapping it in a
+    # QScrollArea.
     manages_own_scroll = True
 
     def __init__(
@@ -86,33 +100,48 @@ class BatchConsolePanel(QWidget):
     # ── UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # Deliberate deviation from the standard panel convention: the console
-        # view must expand (stretch=1) and manage its own scroll, so there is
+        # The console view must expand and manage its own scroll, so there is
         # no Qt.AlignTop and no trailing addStretch().
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        layout.addWidget(theme.section_label("Batch Tools"))
+        # ── Top region: catalog + file navigator (left) | console (right) ──
+        splitter = QSplitter(Qt.Horizontal)
 
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Tool:"))
-        self._combo = QComboBox()
-        self._combo.setToolTip("Pick a percell4-* batch tool to insert its name.")
-        self._combo.activated.connect(self._on_catalog_selected)
-        top.addWidget(self._combo, stretch=1)
-        self._help_btn = QPushButton("Show --help")
-        self._help_btn.setToolTip("Run the selected tool with --help.")
-        self._help_btn.clicked.connect(self._on_show_help)
-        top.addWidget(self._help_btn)
-        layout.addLayout(top)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+
+        left_layout.addWidget(self._muted_label("Batch tools"))
+        self._catalog = QListWidget()
+        self._catalog.setToolTip("Pick a percell4-* batch tool to compose it.")
+        self._catalog.currentItemChanged.connect(self._on_catalog_selected)
+        left_layout.addWidget(self._catalog, stretch=2)
+
+        left_layout.addWidget(self._muted_label("Files"))
+        self._navigator = FileNavigator(
+            start_dir=self._cwd, get_dataset_dir=self._dataset_dir
+        )
+        self._navigator.path_chosen.connect(self._on_path_chosen)
+        left_layout.addWidget(self._navigator, stretch=3)
+
+        splitter.addWidget(left)
 
         self._view = AnsiConsoleView()
         self._view.setPlaceholderText(
-            "No output yet — pick a tool or type a percell4-* command."
+            "No output yet — pick a tool or type a percell4-* command. "
+            "Add -h to a command to print its help here."
         )
-        layout.addWidget(self._view, stretch=1)
+        splitter.addWidget(self._view)
 
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([320, 640])
+        layout.addWidget(splitter, stretch=1)
+
+        # ── Bottom region: command input + Run/Cancel/Clear (full width) ──
         bottom = QHBoxLayout()
         self._input = CommandLineEdit()
         self._input.command_submitted.connect(self._run_line)
@@ -129,6 +158,12 @@ class BatchConsolePanel(QWidget):
         bottom.addWidget(self._clear_btn)
         layout.addLayout(bottom)
 
+    @staticmethod
+    def _muted_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        return label
+
     def _wire_runner(self) -> None:
         self._runner.output.connect(self._on_output)
         self._runner.started.connect(lambda: None)
@@ -137,25 +172,45 @@ class BatchConsolePanel(QWidget):
 
     def _populate_catalog(self) -> None:
         tools = list_batch_tools()
-        self._combo.clear()
+        self._catalog.clear()
         for tool in tools:
-            label = f"{tool.name}  —  {tool.summary}" if tool.summary else tool.name
-            self._combo.addItem(label, tool.name)
+            item = QListWidgetItem(tool.name)
+            item.setData(Qt.UserRole, tool.name)
+            if tool.summary:
+                item.setToolTip(tool.summary)
+            self._catalog.addItem(item)
         self._input.set_completions([t.name for t in tools])
+        # A fresh QListWidget selects nothing; seed row 0 so a tool is always
+        # current. currentItemChanged then seeds the command input with the
+        # first tool name.
         if tools:
-            self._input.insert_command(tools[0].name)
+            self._catalog.setCurrentRow(0)
 
-    # ── catalog / help ──────────────────────────────────────────────────
+    # ── catalog / file navigator ────────────────────────────────────────
 
-    def _on_catalog_selected(self, index: int) -> None:
-        name = self._combo.itemData(index)
+    def _on_catalog_selected(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None = None,
+    ) -> None:
+        if current is None:
+            return
+        name = current.data(Qt.UserRole)
         if name:
             self._input.insert_command(name)
 
-    def _on_show_help(self) -> None:
-        name = self._combo.currentData()
-        if name:
-            self._run_line(f"{name} --help")
+    def _dataset_dir(self) -> str | None:
+        """Directory holding the currently-open ``.h5`` (for the navigator)."""
+        open_h5 = self._get_open_h5_path()
+        return os.path.dirname(open_h5) if open_h5 else None
+
+    def _on_path_chosen(self, path: str) -> None:
+        # Insert the chosen path (shell-quoted) into the command input, and
+        # also copy it to the clipboard for use elsewhere.
+        self._input.insert_paths([path])
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(path)
 
     # ── run lifecycle ───────────────────────────────────────────────────
 
@@ -233,9 +288,8 @@ class BatchConsolePanel(QWidget):
     def _set_running(self, running: bool) -> None:
         self._run_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
-        self._help_btn.setEnabled(not running)
-        self._combo.setEnabled(not running)
-        # Clear stays enabled at all times.
+        # The catalog and file navigator stay enabled during a run. Clear stays
+        # enabled at all times.
 
     def _emit(self, msg: str, color: str) -> None:
         self._view.append_output(f"{color}{msg}{_RESET}\n")
