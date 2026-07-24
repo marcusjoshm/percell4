@@ -134,20 +134,18 @@ def test_double_click_file_emits_path(qtbot, tmp_path):
     assert os.path.samefile(blocker.args[0], str(f))
 
 
-def test_double_click_dir_does_not_reroot_or_emit(qtbot, tmp_path):
-    # In the tree a folder expands in place; double-click must NOT change the
-    # root or emit a path (root navigation is via the toolbar).
+def test_double_click_dir_navigates_into_it(qtbot, tmp_path):
+    # Double-click a folder re-roots into it; the expand arrow (not double-
+    # click) opens the subtree in place.
     sub = tmp_path / "sub"
     sub.mkdir()
     nav = FileNavigator(str(tmp_path))
     qtbot.addWidget(nav)
     qtbot.waitUntil(lambda: nav._model.index(str(sub)).isValid(), timeout=3000)
     idx = nav._model.index(str(sub))
-    fired: list[str] = []
-    nav.path_chosen.connect(fired.append)
     nav._on_double_click(idx)
-    assert os.path.samefile(nav._current, str(tmp_path))  # root unchanged
-    assert fired == []  # folders don't emit a path
+    assert os.path.samefile(nav._current, str(sub))
+    assert nav._back_btn.isEnabled()  # navigation recorded in history
 
 
 # ── Editable path field ─────────────────────────────────────

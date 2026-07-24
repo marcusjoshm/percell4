@@ -6,8 +6,9 @@ tree. The toolbar has Back / Forward (directory history), Up (parent), Open
 drives, and network shares on every platform), and Go to dataset (☞ — jump to
 the folder holding the currently-loaded ``.h5``). An editable path field below
 the toolbar shows the current folder and lets you type or paste any path to jump
-there. Folders expand in place in the tree; double-clicking a file — or selecting
-one and pressing Insert — emits its path.
+there. Double-clicking a folder navigates into it (re-roots); its expand arrow
+opens the subtree in place. Double-clicking a file — or selecting one and
+pressing Insert — emits its path.
 
 It exists so batch commands can be composed without leaving PerCell to look up
 file paths in a terminal or Finder. The widget emits ``path_chosen(str)`` with an
@@ -117,6 +118,9 @@ class FileNavigator(QWidget):
         self._view.setHeaderHidden(True)
         for col in range(1, self._model.columnCount()):
             self._view.hideColumn(col)  # Name only — hide Size/Type/Date
+        # Double-click navigates into a folder; the expand arrow (not the
+        # double-click) toggles the subtree.
+        self._view.setExpandsOnDoubleClick(False)
         self._view.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
@@ -213,11 +217,13 @@ class FileNavigator(QWidget):
     # ── selection → path ────────────────────────────────────────────────
 
     def _on_double_click(self, index) -> None:
-        # Files insert their path; folders expand/collapse in the tree (the
-        # toolbar — Up / Back / Forward / Open / ☞ Dataset — changes the root).
+        # Double-click navigates into a folder (re-roots); a file inserts its
+        # path. The expand arrow still opens a folder's subtree in place.
+        path = self._model.filePath(index)
         if self._model.isDir(index):
-            return
-        self.path_chosen.emit(self._model.filePath(index))
+            self._navigate(path)
+        else:
+            self.path_chosen.emit(path)
 
     def _on_insert(self) -> None:
         index = self._view.currentIndex()
