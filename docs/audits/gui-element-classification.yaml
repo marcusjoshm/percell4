@@ -78,6 +78,14 @@ counts:
 #   and writes only dialog-local state (later folded into the frozen
 #   WorkflowConfig). It never touches session.active_* / filter_ids /
 #   selection. No new Selectors, Creators, or session mutations.
+# 2026-07-24 update (feat/batch-tools-dedicated-window U2):
+#   Batch Tools moved from an inline stacked-content console to a dedicated
+#   top-level window (peer_views/batch_tools_window.py). The sidebar page is now
+#   BatchToolsPanel with two Action buttons (open_button, hide_button); selecting
+#   the Batch Tools tab also auto-opens that window via
+#   main_window._on_sidebar_click (navigation Action — reads/writes no session
+#   field). The relocated BatchConsolePanel stays Action-class (writes none of
+#   the five session fields). No new Selectors, Creators, or session mutations.
 
 # Three-class taxonomy:
 #   Selector — reads session, writes session selection fields, no resource write
@@ -234,6 +242,29 @@ widgets:
     writes: [filter_ids]
     keystroke: null
     notes: "Selector for filter_ids (writes None). Disabled when no filter active."
+
+  # ── batch_tools_panel.py (Open/Hide the dedicated Batch Tools window) ──
+  - id: batch_tools_panel.open_button
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/batch_tools_panel.py
+    lines: "55-58"
+    widget_type: QPushButton
+    handler: "lambda -> show_window('batch_tools')"
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Shows/raises the Batch Tools window. Manual reopen path after a hide; selecting the tab also auto-opens via main_window._on_sidebar_click. No session write."
+
+  - id: batch_tools_panel.hide_button
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/batch_tools_panel.py
+    lines: "60-63, 69-73"
+    widget_type: QPushButton
+    handler: _on_hide
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Hides the Batch Tools window (stays alive). No-op when the window was never created. No session write."
 
   # ── analysis_panel.py ────────────────────────────────────────
   - id: analysis_panel.threshold_method_combo

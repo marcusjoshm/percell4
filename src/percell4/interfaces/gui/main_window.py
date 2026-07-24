@@ -211,12 +211,15 @@ class LauncherWindow(QMainWindow):
             ("Analysis", self._create_analysis_panel),
             ("FLIM", self._create_flim_panel),
             ("Workflows", self._create_scripts_workflows_panel),
-            ("Batch Tools", self._create_batch_console_panel),
+            ("Batch Tools", self._create_batch_tools_panel),
             ("Data", self._create_data_panel),
         ]
 
         self._sidebar_buttons: list[QPushButton] = []
+        self._batch_tools_index = -1
         for i, (name, panel_factory) in enumerate(categories):
+            if name == "Batch Tools":
+                self._batch_tools_index = i
             btn = QPushButton(name)
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, idx=i: self._on_sidebar_click(idx))
@@ -240,10 +243,18 @@ class LauncherWindow(QMainWindow):
         self._on_sidebar_click(0)
 
     def _on_sidebar_click(self, index: int) -> None:
-        """Switch content panel when sidebar button is clicked."""
+        """Switch content panel when sidebar button is clicked.
+
+        Selecting the Batch Tools tab also auto-opens/raises its dedicated
+        window — the batch console lives there, not in this narrow content
+        column. The startup call with index 0 never matches ``_batch_tools_index``,
+        so nothing auto-opens at launch.
+        """
         for i, btn in enumerate(self._sidebar_buttons):
             btn.setChecked(i == index)
         self._content_stack.setCurrentIndex(index)
+        if index == self._batch_tools_index:
+            self._show_window("batch_tools")
 
     # ── Content panels ────────────────────────────────────────
 
@@ -899,17 +910,16 @@ class LauncherWindow(QMainWindow):
         )
         return self._data_panel
 
-    def _create_batch_console_panel(self) -> QWidget:
-        from percell4.interfaces.gui.task_panels.batch_console_panel import (
-            BatchConsolePanel,
+    def _create_batch_tools_panel(self) -> QWidget:
+        from percell4.interfaces.gui.task_panels.batch_tools_panel import (
+            BatchToolsPanel,
         )
 
-        self._batch_console_panel = BatchConsolePanel(
-            get_open_h5_path=lambda: getattr(self, "_current_h5_path", None),
-            reload_open_dataset=self._reload_current_dataset,
-            show_status=lambda msg: self.statusBar().showMessage(msg),
+        self._batch_tools_panel = BatchToolsPanel(
+            show_window=self._show_window,
+            get_batch_tools_window=lambda: self._windows.get("batch_tools"),
         )
-        return self._batch_console_panel
+        return self._batch_tools_panel
 
     def _reload_current_dataset(self) -> None:
         """Reload the open dataset from disk after a batch run that wrote it.
@@ -963,6 +973,9 @@ class LauncherWindow(QMainWindow):
         """Get an existing window or create it on demand."""
         if key not in self._windows:
             from percell4.gui.viewer import ViewerWindow
+            from percell4.interfaces.gui.peer_views.batch_tools_window import (
+                BatchToolsWindow,
+            )
             from percell4.interfaces.gui.peer_views.cell_table import CellTableWindow
             from percell4.interfaces.gui.peer_views.data_plot import DataPlotWindow
             from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
@@ -977,6 +990,11 @@ class LauncherWindow(QMainWindow):
                     get_seg_labels=self._get_active_seg_labels,
                 ),
                 "cell_table": lambda: CellTableWindow(session),
+                "batch_tools": lambda: BatchToolsWindow(
+                    get_open_h5_path=lambda: getattr(self, "_current_h5_path", None),
+                    reload_open_dataset=self._reload_current_dataset,
+                    show_status=lambda msg: self.statusBar().showMessage(msg),
+                ),
             }
             if key in factories:
                 window = factories[key]()
