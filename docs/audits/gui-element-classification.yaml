@@ -1,13 +1,13 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
-last_updated: 2026-07-23
+last_updated: 2026-07-24
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 206
+total_widgets: 208
 counts:
   selector: 16
   creator: 17
-  action: 173
+  action: 175
 # 2026-07-23 update (feat/cellpose-diameter-reference-circle U3):
 #   +1 widget: segmentation_panel.cellpose_diameter_circle_checkbox => ACTION.
 #   Toggles a magenta `_diameter_reference` Shapes layer sized to the Cellpose

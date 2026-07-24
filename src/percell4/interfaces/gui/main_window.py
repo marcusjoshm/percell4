@@ -227,9 +227,10 @@ class LauncherWindow(QMainWindow):
             self._sidebar_buttons.append(btn)
 
             panel = panel_factory()
-            # Panels that manage their own scrolling (e.g. the streaming
-            # Batch Tools console) are added directly; the rest are wrapped
-            # in a QScrollArea so they can exceed the window height.
+            # Panels that set `manages_own_scroll` are added directly; the rest
+            # are wrapped in a QScrollArea so they can exceed the window height.
+            # (No current category panel sets it — the Batch Tools console that
+            # used to now lives in its own BatchToolsWindow.)
             if getattr(panel, "manages_own_scroll", False):
                 self._content_stack.addWidget(panel)
             else:

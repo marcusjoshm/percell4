@@ -2,12 +2,14 @@
 
 A FakeRunner stands in for the QProcess runner so no real subprocess is
 spawned; the panel's catalog/resolve logic is exercised for real. The wide
-redesign (U3) adds a dedicated help runner + help pane, a QListWidget catalog,
-and a run path that keeps Show --help / the catalog enabled while a command runs.
+layout (U3) has a QListWidget catalog + a FileNavigator on the left and the run
+console on the right; picking a tool seeds the command input, and a chosen file
+path is inserted (shell-quoted) into the input.
 """
 
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 
@@ -63,11 +65,26 @@ def test_instantiates_headless_with_defaults(qtbot):
 
 
 def test_default_catalog_selection_present(qtbot):
-    # setCurrentRow(0) in _populate_catalog means a tool is always current, so
-    # Show --help resolves without a prior click.
+    # setCurrentRow(0) in _populate_catalog means a tool is always current.
     panel, _ = _panel(qtbot)
-    assert panel._current_tool_name() is not None
-    assert panel._current_tool_name().startswith("percell4-")
+    item = panel._catalog.currentItem()
+    assert item is not None
+    assert item.data(Qt.UserRole).startswith("percell4-")
+
+
+def test_catalog_selection_inserts_tool_name(qtbot):
+    panel, _ = _panel(qtbot)
+    assert panel._catalog.count() > 1, "catalog should list multiple tools"
+    panel._catalog.setCurrentRow(1)
+    name1 = panel._catalog.item(1).data(Qt.UserRole)
+    assert panel._input.text().startswith(name1)
+
+
+def test_navigator_path_inserts_into_command_input(qtbot):
+    panel, _ = _panel(qtbot)
+    panel._navigator.path_chosen.emit("/data/some file.h5")
+    # insert_paths shell-quotes the path (space → single-quoted).
+    assert shlex.quote("/data/some file.h5") in panel._input.text()
 
 
 def test_unknown_command_shows_error_and_does_not_run(qtbot):
@@ -105,61 +122,17 @@ def test_known_command_runs_with_module_argv_and_toggles_buttons(qtbot):
     assert "[Done] Exit 0" in panel._view.toPlainText()
 
 
-def test_set_running_keeps_help_and_catalog_enabled(qtbot):
-    # The wide window's payoff: --help must stay reachable while a run streams.
-    # This also guards against the old _set_running referencing the removed
-    # _combo (which would AttributeError on the run path).
+def test_set_running_keeps_catalog_and_navigator_enabled(qtbot):
+    # A run must not disable the catalog or navigator, and _set_running must not
+    # reference any removed widget (regression guard for the old _combo).
     panel, runner = _panel(qtbot)
     panel._run_line("percell4-inspect exp.h5")
     assert not panel._run_btn.isEnabled()
     assert panel._cancel_btn.isEnabled()
-    assert panel._help_btn.isEnabled()
     assert panel._catalog.isEnabled()
+    assert panel._navigator.isEnabled()
     runner.emit_finished(0)
     assert panel._run_btn.isEnabled()
-
-
-# ── Help pane (dedicated runner) ────────────────────────────
-
-
-def test_show_help_runs_selected_tool_on_help_runner(qtbot):
-    help_runner = FakeRunner()
-    panel, runner = _panel(qtbot, help_runner=help_runner)
-    panel._catalog.setCurrentRow(0)
-    panel._on_show_help()
-    assert help_runner.calls, "help should invoke the help runner"
-    assert help_runner.calls[0][0][-1] == "--help"
-    assert runner.calls == []  # main runner untouched by --help
-
-
-def test_help_output_streams_to_help_pane_only(qtbot):
-    help_runner = FakeRunner()
-    panel, _ = _panel(qtbot, help_runner=help_runner)
-    panel._catalog.setCurrentRow(0)
-    panel._on_show_help()
-    # Show --help disabled while its own runner streams.
-    assert not panel._help_btn.isEnabled()
-    help_runner.output.emit("usage: percell4-foo [-h]\n")
-    assert "usage:" in panel._help_view.toPlainText()
-    assert "usage:" not in panel._view.toPlainText()  # not the run console
-    help_runner.emit_finished(0)
-    assert panel._help_btn.isEnabled()  # re-enabled on finish
-
-
-def test_catalog_selection_updates_input_and_clears_help(qtbot):
-    help_runner = FakeRunner()
-    panel, _ = _panel(qtbot, help_runner=help_runner)
-    assert panel._catalog.count() > 1, "catalog should list multiple tools"
-    # Show help for the first tool.
-    panel._catalog.setCurrentRow(0)
-    panel._on_show_help()
-    help_runner.output.emit("help for tool 0\n")
-    assert panel._help_view.toPlainText() != ""
-    # Selecting a different tool inserts its name and clears the stale help.
-    panel._catalog.setCurrentRow(1)
-    name1 = panel._catalog.item(1).data(Qt.UserRole)
-    assert panel._input.text().startswith(name1)
-    assert panel._help_view.toPlainText() == ""
 
 
 def test_cancelled_run_shows_cancelled_and_skips_exit_status(qtbot):
