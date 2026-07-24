@@ -1,12 +1,13 @@
 """File-system navigator for the Batch Tools console.
 
-A compact, Spyder-style browser: a toolbar of navigation actions above a
-single-column file list. The toolbar has Back / Forward (directory history), Up
-(parent), Open (native folder picker — the OS dialog handles typing/pasting any
-path, mounted drives, and network shares on every platform), and Go to dataset
-(jump to the folder holding the currently-loaded ``.h5``). Double-clicking a
-folder descends into it; double-clicking a file — or selecting one and pressing
-Insert — emits its path.
+A compact, Spyder-style browser: a toolbar of navigation actions above a file
+tree. The toolbar has Back / Forward (directory history), Up (parent), Open
+(native folder picker — the OS dialog handles typing/pasting any path, mounted
+drives, and network shares on every platform), and Go to dataset (☞ — jump to
+the folder holding the currently-loaded ``.h5``). An editable path field below
+the toolbar shows the current folder and lets you type or paste any path to jump
+there. Folders expand in place in the tree; double-clicking a file — or selecting
+one and pressing Insert — emits its path.
 
 It exists so batch commands can be composed without leaving PerCell to look up
 file paths in a terminal or Finder. The widget emits ``path_chosen(str)`` with an
@@ -24,16 +25,14 @@ from qtpy.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
     QHBoxLayout,
-    QLabel,
-    QListView,
+    QLineEdit,
     QPushButton,
     QStyle,
     QToolButton,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
-
-from percell4.gui import theme
 
 try:  # QFileSystemModel moved QtWidgets (Qt5) -> QtGui (Qt6); qtpy normalizes.
     from qtpy.QtWidgets import QFileSystemModel
@@ -42,7 +41,7 @@ except ImportError:  # pragma: no cover - binding-dependent fallback
 
 
 class FileNavigator(QWidget):
-    """Toolbar-driven single-column file browser that emits chosen paths."""
+    """Toolbar-driven file-tree browser that emits chosen paths."""
 
     path_chosen = Signal(str)
 
@@ -95,7 +94,7 @@ class FileNavigator(QWidget):
         for btn in (self._back_btn, self._fwd_btn, self._up_btn, self._browse_btn):
             bar.addWidget(btn)
         self._dataset_btn = QToolButton()
-        self._dataset_btn.setText("Dataset")
+        self._dataset_btn.setText("☞")  # pointing finger → jump to dataset
         self._dataset_btn.setToolTip(
             "Go to the folder of the currently loaded dataset."
         )
@@ -104,12 +103,20 @@ class FileNavigator(QWidget):
         bar.addStretch()
         layout.addLayout(bar)
 
-        self._path_label = QLabel()
-        self._path_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        layout.addWidget(self._path_label)
+        self._path_edit = QLineEdit()
+        self._path_edit.setPlaceholderText("Type or paste a path, Enter to go…")
+        self._path_edit.setToolTip(
+            "Current folder — edit and press Enter to jump anywhere "
+            "(e.g. /Volumes/Drive/data or C:\\data)."
+        )
+        self._path_edit.returnPressed.connect(self._on_path_entered)
+        layout.addWidget(self._path_edit)
 
-        self._view = QListView()
+        self._view = QTreeView()
         self._view.setModel(self._model)
+        self._view.setHeaderHidden(True)
+        for col in range(1, self._model.columnCount()):
+            self._view.hideColumn(col)  # Name only — hide Size/Type/Date
         self._view.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
@@ -145,12 +152,23 @@ class FileNavigator(QWidget):
         self._apply(path)
 
     def _apply(self, path: str) -> None:
-        """Show ``path`` in the view/label without touching history."""
+        """Show ``path`` in the view/path-field without touching history."""
         self._current = path
         self._view.setRootIndex(self._model.setRootPath(path))
-        self._path_label.setText(path)
-        self._path_label.setToolTip(path)
+        self._path_edit.setText(path)
         self._update_nav_buttons()
+
+    def _on_path_entered(self) -> None:
+        text = self._path_edit.text().strip()
+        if not text:
+            return
+        path = os.path.abspath(os.path.expanduser(text))
+        if os.path.isdir(path):
+            self._navigate(path)
+        elif os.path.isfile(path):
+            self._navigate(os.path.dirname(path))
+        else:
+            self._path_edit.setText(self._current)  # unknown path — restore
 
     def _back(self) -> None:
         if self._hist_idx > 0:
@@ -195,11 +213,11 @@ class FileNavigator(QWidget):
     # ── selection → path ────────────────────────────────────────────────
 
     def _on_double_click(self, index) -> None:
-        path = self._model.filePath(index)
+        # Files insert their path; folders expand/collapse in the tree (the
+        # toolbar — Up / Back / Forward / Open / ☞ Dataset — changes the root).
         if self._model.isDir(index):
-            self._navigate(path)
-        else:
-            self.path_chosen.emit(path)
+            return
+        self.path_chosen.emit(self._model.filePath(index))
 
     def _on_insert(self) -> None:
         index = self._view.currentIndex()

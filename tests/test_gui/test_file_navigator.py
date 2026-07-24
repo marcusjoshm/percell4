@@ -14,7 +14,7 @@ def test_starts_at_given_dir(qtbot, tmp_path):
     nav = FileNavigator(str(tmp_path))
     qtbot.addWidget(nav)
     assert os.path.samefile(nav._current, str(tmp_path))
-    assert nav._path_label.text()  # path shown
+    assert nav._path_edit.text()  # current path shown in the editable field
 
 
 def test_up_navigates_to_parent(qtbot, tmp_path):
@@ -134,16 +134,58 @@ def test_double_click_file_emits_path(qtbot, tmp_path):
     assert os.path.samefile(blocker.args[0], str(f))
 
 
-def test_double_click_dir_descends(qtbot, tmp_path):
+def test_double_click_dir_does_not_reroot_or_emit(qtbot, tmp_path):
+    # In the tree a folder expands in place; double-click must NOT change the
+    # root or emit a path (root navigation is via the toolbar).
     sub = tmp_path / "sub"
     sub.mkdir()
-    nav = FileNavigator(str(tmp_path.parent))
+    nav = FileNavigator(str(tmp_path))
     qtbot.addWidget(nav)
-    nav._navigate(str(tmp_path))
     qtbot.waitUntil(lambda: nav._model.index(str(sub)).isValid(), timeout=3000)
     idx = nav._model.index(str(sub))
+    fired: list[str] = []
+    nav.path_chosen.connect(fired.append)
     nav._on_double_click(idx)
+    assert os.path.samefile(nav._current, str(tmp_path))  # root unchanged
+    assert fired == []  # folders don't emit a path
+
+
+# ── Editable path field ─────────────────────────────────────
+
+
+def test_path_field_navigates_to_typed_dir(qtbot, tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    nav = FileNavigator(str(tmp_path))
+    qtbot.addWidget(nav)
+    nav._path_edit.setText(str(sub))
+    nav._on_path_entered()
     assert os.path.samefile(nav._current, str(sub))
+
+
+def test_path_field_file_navigates_to_parent(qtbot, tmp_path):
+    f = tmp_path / "data.h5"
+    f.write_text("x")
+    nav = FileNavigator(str(tmp_path.parent))
+    qtbot.addWidget(nav)
+    nav._path_edit.setText(str(f))
+    nav._on_path_entered()
+    assert os.path.samefile(nav._current, str(tmp_path))
+
+
+def test_path_field_unknown_restores_current(qtbot, tmp_path):
+    nav = FileNavigator(str(tmp_path))
+    qtbot.addWidget(nav)
+    nav._path_edit.setText("/no/such/path/xyz123")
+    nav._on_path_entered()
+    assert os.path.samefile(nav._current, str(tmp_path))
+    assert os.path.samefile(nav._path_edit.text(), str(tmp_path))
+
+
+def test_dataset_button_uses_finger_glyph(qtbot, tmp_path):
+    nav = FileNavigator(str(tmp_path))
+    qtbot.addWidget(nav)
+    assert nav._dataset_btn.text() == "☞"
 
 
 def test_insert_emits_current_selection(qtbot, tmp_path):
