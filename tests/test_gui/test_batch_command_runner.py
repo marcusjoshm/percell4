@@ -91,3 +91,18 @@ def test_cancel_non_posix_uses_qprocess_terminate(qtbot, monkeypatch):
     with qtbot.waitSignal(runner.finished, timeout=10000):
         runner.cancel()
     assert not runner.is_running
+
+
+def test_child_receives_utf8_env(qtbot):
+    # The child is forced to UTF-8 so the console decoder matches (Windows
+    # children otherwise emit cp1252, garbling µm / × into replacement chars).
+    runner = BatchCommandRunner()
+    outputs: list[str] = []
+    runner.output.connect(outputs.append)
+    code = (
+        "import os; "
+        "print(os.environ.get('PYTHONUTF8'), os.environ.get('PYTHONIOENCODING'))"
+    )
+    with qtbot.waitSignal(runner.finished, timeout=10000):
+        runner.run([sys.executable, "-c", code])
+    assert "1 utf-8" in "".join(outputs)

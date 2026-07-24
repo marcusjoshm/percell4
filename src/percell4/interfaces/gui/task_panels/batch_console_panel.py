@@ -22,7 +22,6 @@ after a successful (exit 0) run.
 from __future__ import annotations
 
 import os
-import shlex
 import time
 from collections.abc import Callable
 
@@ -45,6 +44,7 @@ from percell4.interfaces.cli.catalog import (
     UnknownCommandError,
     list_batch_tools,
     resolve_command,
+    split_command,
 )
 from percell4.interfaces.gui.task_panels.ansi_console_view import AnsiConsoleView
 from percell4.interfaces.gui.task_panels.batch_command_runner import (
@@ -303,19 +303,21 @@ class BatchConsolePanel(QWidget):
         if not open_h5:
             return False
         try:
-            open_real = os.path.realpath(open_h5)
-            tokens = shlex.split(line, posix=True)[1:]
+            # normcase makes the compare case-insensitive on Windows (no-op on
+            # POSIX); split_command preserves typed Windows backslash paths.
+            open_real = os.path.normcase(os.path.realpath(open_h5))
+            tokens = split_command(line)[1:]
         except ValueError:
             return False
         for tok in tokens:
             if tok.startswith("-"):
                 continue
             base = tok if os.path.isabs(tok) else os.path.join(self._cwd, tok)
-            tok_real = os.path.realpath(base)
+            tok_real = os.path.normcase(os.path.realpath(base))
             if tok_real == open_real:
                 return True
             # a directory argument that contains the open .h5
-            if open_real.startswith(tok_real.rstrip("/") + os.sep):
+            if open_real.startswith(tok_real.rstrip(os.sep) + os.sep):
                 return True
         return False
 
