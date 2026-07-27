@@ -677,10 +677,29 @@ class WorkflowConfig:
     # /labels layer before group thresholding. Defaults to True so a
     # batch-produced segmentation gets a review pass by default; set
     # False to use the existing labels as-is and go straight to
-    # thresholding. Gates ONLY the pre-segmented path — datasets
-    # segmented by Cellpose inside the workflow always run seg-QC under
-    # the runner's interactive_qc switch, independent of this flag.
+    # thresholding. Gates ONLY the pre-segmented path — a dataset that
+    # Cellpose segments during this run is gated by
+    # ``run_seg_qc_on_new_segmentations`` instead.
     run_seg_qc_on_existing: bool = True
+    # Whether datasets the workflow segments ITSELF (Cellpose runs during
+    # this run) get the interactive segmentation-QC step before group
+    # thresholding. Defaults to True, preserving the historical behavior
+    # where every fresh segmentation was reviewed. Set False for a batch
+    # whose Cellpose parameters are already settled, so an unattended run
+    # is not stopped at the first dataset waiting for a human.
+    #
+    # This is a separate decision from ``run_seg_qc_on_existing`` —
+    # reviewing a segmentation you just produced is not the same question
+    # as reviewing one that arrived with the dataset — so it gets its own
+    # field and its own default rather than sharing one control.
+    #
+    # Note the boundary: a re-run over datasets that already carry a
+    # segmentation is diverted by the runner's auto-detect into the
+    # pre-existing branch and never reaches Cellpose, so it is governed by
+    # ``run_seg_qc_on_existing``, not this flag. Both are subordinate to
+    # the runner's ``interactive_qc`` switch — a headless run never yields
+    # QC regardless.
+    run_seg_qc_on_new_segmentations: bool = True
     # Existing-mask reuse. When ``use_existing_masks`` is True the workflow
     # skips the Threshold Rounds step entirely (either/or per run) and
     # measures the masks already present in each dataset.

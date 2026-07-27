@@ -390,6 +390,14 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             # Interleaved with segment so the user sees each dataset's
             # Cellpose result immediately, edits it, and accepts before
             # the next segment runs.
+            #
+            # Gated by cfg.run_seg_qc_on_new_segmentations (the config-dialog
+            # checkbox, default True) so a batch with settled Cellpose
+            # parameters can run unattended. When the gate is off we emit an
+            # explicit status + run-log line rather than silently advancing —
+            # an unreviewed segmentation must never be handed downstream
+            # without the user being told, the same convention the headless
+            # threshold-apply handler follows.
             if self._interactive_qc:
                 # Skip datasets that segment marked as failed.
                 failed_names = {
@@ -398,14 +406,28 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     if rec.phase_name == "segment"
                 }
                 if entry.name not in failed_names:
-                    yield PhaseRequest(
-                        kind=PhaseKind.INTERACTIVE,
-                        phase_name="seg_qc",
-                        dataset_index=idx,
-                        dataset_total=len(active),
-                        dataset_name=entry.name,
-                        handler=self._make_seg_qc_handler(entry, idx, len(active)),
-                    )
+                    if cfg.run_seg_qc_on_new_segmentations:
+                        yield PhaseRequest(
+                            kind=PhaseKind.INTERACTIVE,
+                            phase_name="seg_qc",
+                            dataset_index=idx,
+                            dataset_total=len(active),
+                            dataset_name=entry.name,
+                            handler=self._make_seg_qc_handler(
+                                entry, idx, len(active)
+                            ),
+                        )
+                    else:
+                        msg = (
+                            f"{entry.name}: segmentation accepted without QC "
+                            "(seg-QC turned off for workflow-created "
+                            "segmentations)"
+                        )
+                        print(f"  [seg_qc] {msg}", flush=True)
+                        self._log(
+                            phase="seg_qc", dataset=entry.name,
+                            event="skipped_no_qc", message=msg,
+                        )
 
         # ── Tracking (time-lapse): link cells across timepoints ──
         # Runs after seg-QC for datasets with n_timepoints > 1 that aren't

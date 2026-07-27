@@ -96,6 +96,7 @@ logger = logging.getLogger(__name__)
 _QSETTINGS_ORG = "LeeLabPerCell4"
 _QSETTINGS_APP = "PerCell4"
 _QSETTINGS_OUTPUT_KEY = "single_cell_threshold_workflow/output_parent"
+_QSETTINGS_SEG_QC_NEW_KEY = "single_cell_threshold_workflow/run_seg_qc_on_new"
 
 # Always-on identity columns prepended to the CSV column picker.
 _ALWAYS_ON_COLUMNS = ("dataset", "cell_id", "label")
@@ -651,10 +652,35 @@ class WorkflowConfigDialog(QDialog):
             "percell4-batch) open their selected segmentation layer in the QC "
             "editor so you can review and correct it before thresholding. "
             "Uncheck to trust the existing segmentation and go straight to "
-            "group thresholding. Datasets segmented by Cellpose during this "
-            "run always run seg-QC. Skipped for time-lapse datasets."
+            "group thresholding. Skipped for time-lapse datasets."
         )
         outer.addWidget(self._run_seg_qc)
+
+        # Sibling gate for the OTHER seg-QC path: segmentations Cellpose
+        # produces during this run. Last-used state is remembered via
+        # QSettings, because otherwise the researcher has to uncheck it on
+        # every re-run and forgetting once stalls an unattended batch at
+        # the first dataset.
+        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        self._run_seg_qc_new = QCheckBox(
+            "Run segmentation QC on segmentations this workflow creates"
+        )
+        self._run_seg_qc_new.setChecked(
+            qs.value(_QSETTINGS_SEG_QC_NEW_KEY, True, type=bool)
+        )
+        self._run_seg_qc_new.setToolTip(
+            "When checked, every segmentation Cellpose produces during this "
+            "run opens in the QC editor so you can review and correct it "
+            "before thresholding. Uncheck when the Cellpose settings are "
+            "already dialled in and you want the run to proceed unattended — "
+            "the run log records each segmentation that was accepted without "
+            "review.\n\n"
+            "This is separate from the checkbox above: that one governs "
+            "segmentations the datasets already had, this one governs "
+            "segmentations this run creates. Your choice here is remembered "
+            "between runs."
+        )
+        outer.addWidget(self._run_seg_qc_new)
 
         # Datasets with no /labels can't have their segmentation overridden and
         # are omitted; a note reports how many will be Cellpose-segmented.
@@ -2338,6 +2364,9 @@ class WorkflowConfigDialog(QDialog):
                 or "cp_mask",
                 particle_settings=particle_settings,
                 run_seg_qc_on_existing=self._run_seg_qc.isChecked(),
+                run_seg_qc_on_new_segmentations=(
+                    self._run_seg_qc_new.isChecked()
+                ),
                 use_existing_masks=use_existing_masks,
                 existing_mask_selections=existing_mask_selections,
             )
@@ -2542,10 +2571,19 @@ class WorkflowConfigDialog(QDialog):
         )
 
     def _save_output_setting(self) -> None:
+        """Persist the settings that should survive between runs.
+
+        The output folder and the create-segmentation QC choice. The latter
+        is remembered because unchecking it on every re-run is the kind of
+        step that gets forgotten once, stalling an unattended batch.
+        """
+        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
         out = self._output_edit.text().strip()
         if out:
-            qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
             qs.setValue(_QSETTINGS_OUTPUT_KEY, out)
+        qs.setValue(
+            _QSETTINGS_SEG_QC_NEW_KEY, self._run_seg_qc_new.isChecked()
+        )
 
     def _warn(self, message: str) -> None:
         QMessageBox.warning(self, "Configuration incomplete", message)
