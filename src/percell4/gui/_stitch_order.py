@@ -60,6 +60,51 @@ _ORDER_TO_CORNER: dict[str, str] = {
 }
 
 
+# ── Display labels (Fiji Grid/Collection Stitching vocabulary) ──────────
+#
+# Taken from the plugin's own ``GridType.java``: ``choose1`` for Type and
+# ``choose2[gridType]`` for Order. The Order set is keyed to the Type, which is
+# the dependency this vocabulary reproduces.
+#
+# Order labels read "travel & step": for a row type the first word is the
+# direction along a row and the second is how rows advance; for a column type
+# the first word is the direction down a column and the second is how columns
+# advance. Either way the pair resolves to the corner tile 0 occupies, which is
+# what the value carries.
+
+GRID_TYPE_LABELS: dict[str, str] = {
+    "row_by_row": "Grid: row-by-row",
+    "column_by_column": "Grid: column-by-column",
+    "snake_by_row": "Grid: snake-by-row",
+    "snake_by_column": "Grid: snake-by-column",
+}
+
+# (label, corner value) pairs, in Fiji's presentation order.
+_ROW_ORDER_LABELS: tuple[tuple[str, str], ...] = (
+    ("Right & Down", "top_left"),
+    ("Left & Down", "top_right"),
+    ("Right & Up", "bottom_left"),
+    ("Left & Up", "bottom_right"),
+)
+
+_COLUMN_ORDER_LABELS: tuple[tuple[str, str], ...] = (
+    ("Down & Right", "top_left"),
+    ("Down & Left", "top_right"),
+    ("Up & Right", "bottom_left"),
+    ("Up & Left", "bottom_right"),
+)
+
+
+def order_labels_for(grid_type: str) -> tuple[tuple[str, str], ...]:
+    """The ``(label, value)`` pairs the Order combo shows for ``grid_type``.
+
+    The *values* are identical across both sets and in the same positions —
+    only the wording differs — which is what lets a Type change preserve the
+    user's current pick instead of resetting it.
+    """
+    return _ROW_ORDER_LABELS if is_row_major(grid_type) else _COLUMN_ORDER_LABELS
+
+
 def normalize_order(value: str) -> str:
     """Map any accepted ``TileConfig.order`` string onto its canonical corner.
 
