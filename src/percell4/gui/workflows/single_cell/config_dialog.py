@@ -54,6 +54,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.domain.io.models import LayerType
 from percell4.domain.io.naming import channel_display_name
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.gui._cellpose_settings_form import CellposeSettingsForm
@@ -161,10 +162,20 @@ def _derive_tiff_pending_channel_names(
     (``"02"`` → ``"ch02"``) and name (``"DNA"`` → ``"DNA"``) tokens. A bare-token
     fallback used to produce a silent mismatch (workflow config ``"02"`` vs HDF5
     ``"ch02"``) that wrecked ``threshold_compute`` after a long segmentation pass.
+
+    Tokens assigned a ``segmentation`` or ``mask`` layer type are skipped:
+    ``import_dataset`` routes those into ``/labels`` and ``/masks`` and never
+    appends them to ``/metadata.channel_names``. Including them here would
+    offer a mask as a selectable *channel* in the rounds and Cellpose combos,
+    and would poison ``intersect_channels`` with a name no dataset reports.
     """
     out: list[str] = []
     for ch_id in selected_token_ids:
         override = layer_assignments.get(ch_id)
+        if override is not None:
+            layer_type = getattr(override, "layer_type", LayerType.CHANNEL)
+            if layer_type != LayerType.CHANNEL:
+                continue
         name = getattr(override, "name", "") if override is not None else ""
         out.append(name or channel_display_name(ch_id))
     return out
@@ -198,7 +209,35 @@ def _build_compress_plan(
         "z_project_method": cfg.z_project_method,
         "selected_channels": list(selected_token_ids),
         "layer_assignments": layer_assignments_payload,
+        # Sum-binning factor. ``compress_one`` has always read this key; the
+        # producer never wrote it, so the dialog's binning spinbox was
+        # silently ignored on the workflow path.
+        "creation_bin": int(getattr(cfg, "creation_bin", 1)),
     }
+
+    # Filename-token regexes. For a tokenless (name-suffixed) import this is
+    # the pattern ``discover_tokenless`` synthesized inside the CompressDialog;
+    # for a normal import it is the default or whatever the user edited.
+    # Omitting it made ``import_dataset`` fall back to ``TokenConfig()``
+    # (channel = ``_ch(\d+)``), which matches nothing for tokenless sources —
+    # every file grouped under "", the selected_channels filter dropped all
+    # groups, and the .h5 landed with no /intensity and empty channel_names.
+    # Patterns are Optional[str]; a disabled token stays JSON null.
+    token_config = getattr(cfg, "token_config", None)
+    if token_config is not None:
+        plan["token_config"] = {
+            "channel": token_config.channel,
+            "timepoint": token_config.timepoint,
+            "z_slice": token_config.z_slice,
+            "tile": token_config.tile,
+        }
+
+    # FLIM/TCSPC calibration. Built entirely from spinbox ints, floats, and
+    # combobox strings, so it is JSON-safe as-is. Without it a TIFF-start run
+    # on FLIM-bearing sources produces an .h5 with no usable phasor data.
+    flim_params = getattr(cfg, "flim_params", None)
+    if flim_params:
+        plan["flim_params"] = flim_params
 
     tile_config = (
         getattr(gui_state, "tile_config_override", None) if gui_state else None

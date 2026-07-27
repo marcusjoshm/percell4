@@ -85,6 +85,95 @@ def test_name_token_override_still_wins():
     assert names == ["GFP", "G3BP1"]
 
 
+def test_mask_and_segmentation_assignments_are_not_channels():
+    """A token assigned as mask/segmentation is not a channel.
+
+    ``import_dataset`` routes those layers into ``/masks`` and ``/labels`` and
+    never appends them to ``/metadata.channel_names``. Returning them here
+    offered a mask as a selectable channel in the rounds and Cellpose combos,
+    and poisoned ``intersect_channels`` with a name no dataset reports.
+    """
+    from percell4.domain.io.models import LayerType
+
+    override = {
+        "DNA": SimpleNamespace(name="DNA", layer_type=LayerType.CHANNEL),
+        "SG_mask": SimpleNamespace(name="SG_mask", layer_type=LayerType.MASK),
+        "cells": SimpleNamespace(name="cells", layer_type=LayerType.SEGMENTATION),
+    }
+    names = _derive_tiff_pending_channel_names(
+        ["DNA", "SG_mask", "cells"], override
+    )
+    assert names == ["DNA"]
+
+
+def test_assignment_without_layer_type_defaults_to_channel():
+    """Back-compat: an override carrying only a name is still a channel."""
+    override = {"00": SimpleNamespace(name="EU")}
+    assert _derive_tiff_pending_channel_names(["00"], override) == ["EU"]
+
+
+def test_all_tokens_assigned_non_channel_yields_no_names():
+    """Every token routed away from /intensity → no derivable channels.
+
+    The dialog treats an empty result as "nothing to add", which is the
+    correct outcome rather than offering phantom channels.
+    """
+    from percell4.domain.io.models import LayerType
+
+    override = {
+        "a": SimpleNamespace(name="a", layer_type=LayerType.MASK),
+        "b": SimpleNamespace(name="b", layer_type=LayerType.SEGMENTATION),
+    }
+    assert _derive_tiff_pending_channel_names(["a", "b"], override) == []
+
+
+def test_producer_consumer_contract_excludes_mask_layers(tmp_path):
+    """The contract holds when some tokens are assigned to /masks.
+
+    Asserting the full derivation against ``channel_names`` would fail even on
+    a correct implementation, because mask-typed tokens land in ``/masks``.
+    """
+    import numpy as np
+    import tifffile
+
+    from percell4.adapters.importer import import_dataset
+    from percell4.domain.io.discovery import discover_tokenless
+    from percell4.domain.io.models import LayerAssignment, LayerType
+    from percell4.store import DatasetStore
+
+    src = tmp_path / "raw"
+    src.mkdir()
+    # Single-word suffixes: tokenless discovery splits on the last underscore,
+    # so a name like "SG_mask" would tokenize as "mask".
+    for i, ch in enumerate(("DNA", "puncta")):
+        tifffile.imwrite(
+            str(src / f"Exp_B_{ch}.tif"),
+            np.full((16, 16), (i + 1) * 30, dtype=np.uint16),
+        )
+
+    datasets, token_config = discover_tokenless(src)
+    ds = datasets[0]
+    assignments = {
+        "DNA": LayerAssignment(layer_type=LayerType.CHANNEL, name="DNA"),
+        "puncta": LayerAssignment(layer_type=LayerType.MASK, name="puncta"),
+    }
+    h5_path = tmp_path / "Exp_B.h5"
+    import_dataset(
+        src,
+        h5_path,
+        token_config=token_config,
+        files=list(ds.files),
+        layer_assignments=assignments,
+    )
+
+    store = DatasetStore(h5_path)
+    derived = _derive_tiff_pending_channel_names(
+        sorted(ds.scan_result.channels), assignments
+    )
+    assert derived == list(store.metadata["channel_names"]) == ["DNA"]
+    assert "puncta" in store.list_masks()
+
+
 def test_producer_consumer_contract_name_tokens(tmp_path):
     """The consumer's derived names equal what the importer actually stored in
     /metadata.channel_names — the byte-for-byte producer/consumer contract."""

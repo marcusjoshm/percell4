@@ -147,10 +147,36 @@ def compress_one(
             reference_channel=str(_ref) if _ref else None,
         )
 
+    # Deserialize token_config — the filename-token regexes the user either
+    # edited in the CompressDialog or that ``discover_tokenless`` synthesized
+    # for a name-suffixed (tokenless) import. Dropping this key made
+    # import_dataset fall back to ``TokenConfig()`` (channel = ``_ch(\d+)``),
+    # which matches nothing for tokenless or custom-named TIFFs: every file
+    # groups under "", the selected_channels filter drops all groups, and the
+    # .h5 lands with no /intensity and empty channel_names. The run then
+    # failed minutes later in an unrelated phase.
+    #
+    # ``None`` (key absent) is passed through rather than defaulted so a
+    # pre-change run_config.json reconstructs to exactly the old behavior —
+    # import_dataset applies its own TokenConfig() default.
+    token_config: Any | None = None
+    tok_payload = plan.get("token_config")
+    if tok_payload:
+        from percell4.domain.io.models import TokenConfig
+
+        # Patterns are Optional[str]; a disabled token serializes as JSON
+        # null and must stay None, not become the string "None" (which would
+        # compile as a regex and match nothing).
+        token_config = TokenConfig(
+            channel=tok_payload.get("channel"),
+            timepoint=tok_payload.get("timepoint"),
+            z_slice=tok_payload.get("z_slice"),
+            tile=tok_payload.get("tile"),
+        )
+
     # import_dataset accepts ``files=`` as either DiscoveredFile-like
     # objects or plain path strings — its scanner re-derives tokens
-    # from filenames. Pass path strings directly so we don't need to
-    # serialize / reconstruct tokens through the compress_plan dict.
+    # from filenames using ``token_config``.
     try:
         from percell4.adapters.importer import import_dataset
 
@@ -162,12 +188,14 @@ def compress_one(
         import_dataset(
             source_dir=source_dir or str(output_path.parent),
             output_h5=output_path,
+            token_config=token_config,
             z_project_method=z_project_method,
             selected_channels=selected_channels or None,
             layer_assignments=layer_assignments,
             files=files_paths or None,
             creation_bin=creation_bin,
             tile_config=tile_config,
+            flim_params=plan.get("flim_params"),
         )
     except Exception as e:
         logger.exception("compress_one failed for %s", entry.name)
