@@ -1,7 +1,7 @@
 ---
 title: "fix: Single-cell workflow — TIFF-start ingest parity, optional seg-QC, CNR mask measurement"
 type: fix
-status: active
+status: completed
 date: 2026-07-27
 deepened: 2026-07-27
 ---
