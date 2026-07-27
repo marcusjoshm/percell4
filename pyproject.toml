@@ -115,7 +115,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-v --tb=short"
+# Skip the napari-viewer tests by default. They are excluded here, not
+# deleted, because they still pass on CI -- the instability is specific to a
+# real GPU. See the napari_viewer marker below.
+addopts = "-v --tb=short -m 'not napari_viewer'"
 # Pin the Qt binding for pytest-qt. A dev machine can easily end up with
 # PyQt5, PyQt6, and PySide6 all installed (napari and its plugins pull
 # different ones), and without this pytest-qt picks whichever it finds first —
@@ -128,6 +131,25 @@ qt_api = "pyqt5"
 markers = [
     "slow: marks tests as slow (requires cellpose model download, deselect with '-m \"not slow\"')",
     "gui: marks tests requiring Qt/napari (deselect with '-m \"not gui\"')",
+    # 100 tests across 16 modules that construct a real napari.Viewer, and so a
+    # real OpenGL canvas. On a machine with a real GPU, repeatedly creating and
+    # destroying those canvases corrupts GL state: a run ends in
+    # "GLError 1281 (invalid value)" during a canvas paint, or segfaults
+    # outright. napari makes this fatal on purpose --
+    # napari/_vispy/canvas.py sets ignore_callback_errors = False -- so the
+    # error surfaces as a test failure attributed to whatever test was running.
+    #
+    # Deselected by default via addopts so a local run is usable. CI passes its
+    # own -m expression, which overrides addopts, so these still run there:
+    # xvfb's software GL does not have the problem and the tests are green.
+    #
+    # Excluded, not deleted, and deliberately narrow: these 100 assert on real
+    # napari objects (napari.layers.Tracks, DirectLabelColormap, layer.opacity)
+    # and are the only coverage of the viewer integration contract. The other
+    # ~1200 tests under tests/test_gui* never build a viewer and keep running.
+    #
+    # To run them anyway:  pytest -m napari_viewer
+    "napari_viewer: constructs a real napari viewer; needs a GL context that survives repeated canvas teardown (deselected locally, run on CI)",
 ]
 
 # ── Import-linter: hexagonal architecture contracts ──────────

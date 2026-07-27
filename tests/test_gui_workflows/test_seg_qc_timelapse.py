@@ -14,6 +14,10 @@ from percell4.model import CellDataModel
 from percell4.store import DatasetStore
 from percell4.workflows.models import DatasetSource, WorkflowDatasetEntry
 
+# Builds a real napari viewer, so this module carries the ``napari_viewer``
+# marker: skipped by default (see pyproject addopts), run explicitly on CI.
+pytestmark = pytest.mark.napari_viewer
+
 
 def _timelapse_dataset(path: Path, n_t=2):
     s = DatasetStore(path)
