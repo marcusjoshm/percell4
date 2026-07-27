@@ -147,10 +147,36 @@ def compress_one(
             reference_channel=str(_ref) if _ref else None,
         )
 
+    # Deserialize token_config — the filename-token regexes the user either
+    # edited in the CompressDialog or that ``discover_tokenless`` synthesized
+    # for a name-suffixed (tokenless) import. Dropping this key made
+    # import_dataset fall back to ``TokenConfig()`` (channel = ``_ch(\d+)``),
+    # which matches nothing for tokenless or custom-named TIFFs: every file
+    # groups under "", the selected_channels filter drops all groups, and the
+    # .h5 lands with no /intensity and empty channel_names. The run then
+    # failed minutes later in an unrelated phase.
+    #
+    # ``None`` (key absent) is passed through rather than defaulted so a
+    # pre-change run_config.json reconstructs to exactly the old behavior —
+    # import_dataset applies its own TokenConfig() default.
+    token_config: Any | None = None
+    tok_payload = plan.get("token_config")
+    if tok_payload:
+        from percell4.domain.io.models import TokenConfig
+
+        # Patterns are Optional[str]; a disabled token serializes as JSON
+        # null and must stay None, not become the string "None" (which would
+        # compile as a regex and match nothing).
+        token_config = TokenConfig(
+            channel=tok_payload.get("channel"),
+            timepoint=tok_payload.get("timepoint"),
+            z_slice=tok_payload.get("z_slice"),
+            tile=tok_payload.get("tile"),
+        )
+
     # import_dataset accepts ``files=`` as either DiscoveredFile-like
     # objects or plain path strings — its scanner re-derives tokens
-    # from filenames. Pass path strings directly so we don't need to
-    # serialize / reconstruct tokens through the compress_plan dict.
+    # from filenames using ``token_config``.
     try:
         from percell4.adapters.importer import import_dataset
 
@@ -162,12 +188,14 @@ def compress_one(
         import_dataset(
             source_dir=source_dir or str(output_path.parent),
             output_h5=output_path,
+            token_config=token_config,
             z_project_method=z_project_method,
             selected_channels=selected_channels or None,
             layer_assignments=layer_assignments,
             files=files_paths or None,
             creation_bin=creation_bin,
             tile_config=tile_config,
+            flim_params=plan.get("flim_params"),
         )
     except Exception as e:
         logger.exception("compress_one failed for %s", entry.name)
@@ -185,6 +213,93 @@ def compress_one(
         compress_plan=None,
     )
     return updated, None, ""
+
+
+def validate_compressed_dataset(
+    store: DatasetStore,
+    *,
+    seg_channel_name: str = "",
+    round_channels: Iterable[str] = (),
+    needs_pixel_size: bool = False,
+) -> str | None:
+    """Check a freshly compressed dataset against what the run needs.
+
+    Returns ``None`` when the dataset is usable, or a researcher-facing
+    message naming the specific missing thing.
+
+    ``import_dataset`` does not raise when no source file matches the channel
+    token pattern — it writes an ``.h5`` with ``channel_names == []``,
+    ``n_channels == 0`` and no ``/intensity``, and reports success. Without
+    this gate the run continues against an empty dataset: the segmentation
+    channel lookup logs "falling back to 0", segmentation produces nothing,
+    and the failure only surfaces minutes later in an unrelated phase.
+
+    Deliberately no stricter than what later phases already require. This
+    check moves an existing failure earlier; it must never reject a dataset
+    that would otherwise have worked. In particular the pixel-size check is
+    conditional on a round actually using a µm or µm² unit — px-native rounds
+    need no pixel size, and we never default to 1 µm/px.
+
+    The caller passes a non-session :class:`DatasetStore`, so every read here
+    opens and closes its own handle. HDF5 locking is non-blocking and
+    exclusive; a handle left open would resurface as a ``BlockingIOError``
+    (errno 35) from an unrelated write phase later in the run.
+    """
+    try:
+        meta = store.metadata
+    except Exception as e:  # noqa: BLE001 — unreadable file is a dataset failure
+        return f"cannot read the compressed dataset: {type(e).__name__}: {e}"
+
+    channels = list(meta.get("channel_names") or [])
+    if not channels:
+        return (
+            "compression produced no channels. Check that the source files "
+            "match the channel naming pattern configured in the compress "
+            "dialog — no file matched, so nothing was imported."
+        )
+
+    missing_named = []
+    if seg_channel_name and seg_channel_name not in channels:
+        missing_named.append(f"segmentation channel {seg_channel_name!r}")
+    for ch in dict.fromkeys(round_channels):
+        if ch and ch not in channels:
+            missing_named.append(f"round channel {ch!r}")
+    if missing_named:
+        return (
+            f"{', '.join(missing_named)} not present in the compressed "
+            f"dataset. Available channels: {channels}."
+        )
+
+    if needs_pixel_size:
+        raw_ps = meta.get("pixel_size_um")
+        if not raw_ps or float(raw_ps) <= 0:
+            return (
+                "a round uses a µm / µm² size value but the source TIFFs "
+                "carry no pixel size, so none was stored. Set the pixel size "
+                "on the dataset, or switch the round's unit to px / px²."
+            )
+
+    return None
+
+
+def config_needs_pixel_size(rounds: Iterable[Any]) -> bool:
+    """Whether any round's size knob is expressed in µm or µm².
+
+    Mirrors the config dialog's pre-flight predicate so the two cannot drift.
+    The dialog can only check ``h5_existing`` datasets up front — a
+    ``tiff_pending`` dataset has no ``.h5`` until Phase 0 runs — so this is
+    the same question asked again once the file exists.
+    """
+    return any(
+        (r.adaptive_clip is not None and r.adaptive_clip.d_min_unit == "um")
+        or (
+            r.auto_extract is not None
+            and r.auto_extract.smallest_particle_um is not None
+            and r.auto_extract.smallest_particle_unit == "um"
+        )
+        or (r.min_particle_size > 0 and r.min_particle_size_unit == "um2")
+        for r in rounds
+    )
 
 
 # ── Phase 1: Segment ────────────────────────────────────────────────────

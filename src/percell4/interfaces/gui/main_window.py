@@ -1164,6 +1164,12 @@ class LauncherWindow(QMainWindow):
                     layer_assignments=config.layer_assignments,
                     files=ds.files,
                     creation_bin=config.creation_bin,
+                    # CompressDialog collects FLIM/TCSPC calibration but this
+                    # call used to drop it, silently discarding the user's
+                    # frequency / phase / modulation / bin-dimension settings.
+                    # None when the FLIM group is unchecked, so non-FLIM
+                    # imports are unaffected.
+                    flim_params=config.flim_params,
                 )
                 completed.append(display_name)
             except Exception as e:

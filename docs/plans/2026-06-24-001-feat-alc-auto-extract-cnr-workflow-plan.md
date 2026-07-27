@@ -134,12 +134,13 @@ already-implemented domain modules `auto_extraction.py` / `cnr_classification.py
 
 ### Deferred to Follow-Up Work
 
-- **Downstream measurement/export of the CNR population masks.** `<round>_low` /
-  `<round>_high` are **not** in `cfg.thresholding_rounds`, so the **single-cell
-  thresholding workflow's own** measure/export phases (which build `round_masks` from the
-  round-spec list — `phases.py:1565-1586`, `:2124-2125`) will not auto-measure them. The
-  per-focus CNR table at `/classification/<round>` is the quantitative output for v1;
-  wiring the population masks into the cell-measure/export phases is a separate task.
+- ~~**Downstream measurement/export of the CNR population masks.**~~ **RESOLVED
+  2026-07-27** by `docs/plans/2026-07-27-001-fix-single-cell-workflow-tiff-qc-cnr-plan.md`
+  (U5/U6). The workflow now measures `<round>_low` / `<round>_high` when they exist on
+  disk, via measure-only specs appended in `runner._cnr_population_specs_for`, and the
+  config dialog predicts their CSV column names. `summary_groups.csv` still excludes them
+  — it selects by a `group_<name>` column that needs a `/groups/<name>` table the CNR
+  post-step never writes. The text below describes the superseded v1 behavior.
   **Cross-CLI interaction (not a regression, surfaced as a conscious choice):** the
   standalone `percell4-batch-measure` / `percell4-batch-export` CLIs default to *all*
   `/masks` when no `--masks`/`--mask` is given (`batch_measure.py:200-203`,
@@ -826,7 +827,8 @@ step)" status that surfaces the two-pass / CNR outcome.
   **applier's `logger.info`** (U3) and the `apply_threshold_headless` success message —
   **not** via the `_apply_threshold_frame` error slot (see U3's contract note).
 - No change to measure/export routing — the base round name flows through unchanged; the
-  CNR population masks are intentionally not measured in v1 (see Deferred).
+  CNR population masks were intentionally not measured in v1 (see Deferred). Superseded
+  2026-07-27: they are measured now.
 
 **Patterns to follow:** the existing adaptive-clip routing/status blocks
 (`runner.py:465`, `:1031-1040`); the "headless even when interactive + status line"

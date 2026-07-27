@@ -52,6 +52,7 @@ from percell4.workflows.models import (
 from percell4.workflows.phases import (
     apply_threshold_headless,
     compress_one,
+    config_needs_pixel_size,
     datasets_without_failures,
     export_run,
     measure_one,
@@ -60,6 +61,7 @@ from percell4.workflows.phases import (
     segment_one,
     threshold_compute_one,
     track_one,
+    validate_compressed_dataset,
     write_staging_parquet,
 )
 
@@ -167,9 +169,21 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         Per-dataset (not the union of all selections): a dataset measures
         only the masks the user picked for it, never another dataset's
         selection that happens to also exist on disk here.
+
+        In a normal run the configured rounds are followed by measure-only
+        specs for the CNR population masks (``<round>_low`` / ``<round>_high``)
+        that a ``cnr_classify`` round minted earlier in this run. Those masks
+        are written by a post-step and are deliberately not rounds themselves,
+        so without this they were written to the ``.h5`` and never measured —
+        the researcher had to re-run the whole workflow in existing-mask mode
+        to get particle statistics for them. The ``percell4-batch-measure``
+        CLI already measures them; this closes that GUI/CLI gap.
         """
         if not self._config.use_existing_masks:
-            return list(self._config.thresholding_rounds)
+            return [
+                *self._config.thresholding_rounds,
+                *self._cnr_population_specs_for(entry),
+            ]
         channel = entry.channel_names[0] if entry.channel_names else "channel"
         specs: list[ThresholdingRound] = []
         for mask_name in self._config.existing_mask_selections.get(entry.name, []):
@@ -193,6 +207,83 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     failure=DatasetFailure.MEASUREMENT_ERROR,
                     message=f"invalid mask name {mask_name!r}: {e}",
                 )
+        return specs
+
+    #: Suffixes the CNR post-step mints for a ``cnr_classify`` round. Reserved
+    #: against round-name collision in ``WorkflowConfig.__post_init__``, so
+    #: this is a validated contract rather than a naming convention.
+    _CNR_POPULATION_SUFFIXES = ("_low", "_high")
+
+    def _cnr_population_specs_for(self, entry) -> list[ThresholdingRound]:
+        """Measure-only specs for the CNR population masks present on disk.
+
+        Derived per dataset from what actually exists, not from config alone:
+        a dataset whose classification found a single population writes no
+        ``_high`` mask (and ``_classify_and_write_cnr`` skips an all-zero
+        population either way), so the spec list must follow the file.
+
+        Never raises. This runs inside ``_measure_round_specs_for``, which the
+        measure handler calls *outside* its own ``try`` — an exception here
+        would reach ``BaseWorkflowRunner._run_loop`` and terminate the entire
+        run, turning one unreadable dataset into a batch-wide abort. An
+        unreadable store degrades to "no population specs" plus a log line;
+        the base round's measurement still happens and the real error surfaces
+        from the phase that actually needs the data.
+        """
+        rounds = [
+            r for r in self._config.thresholding_rounds if r.cnr_classify is not None
+        ]
+        if not rounds:
+            return []
+        try:
+            present = set(DatasetStore(entry.h5_path).list_masks())
+        except Exception:
+            logger.exception(
+                "could not list masks for %s; skipping CNR population "
+                "measurement for this dataset",
+                entry.name,
+            )
+            return []
+
+        specs: list[ThresholdingRound] = []
+        channel = entry.channel_names[0] if entry.channel_names else "channel"
+        for r in rounds:
+            for suffix in self._CNR_POPULATION_SUFFIXES:
+                name = f"{r.name}{suffix}"
+                if name not in present:
+                    continue
+                try:
+                    specs.append(
+                        ThresholdingRound(
+                            name=name,
+                            channel=r.channel or channel,
+                            metric="mean_intensity",
+                            algorithm=ThresholdAlgorithm.KMEANS,
+                        )
+                    )
+                except ValueError as e:
+                    # A round name close to the 40-char limit produces a
+                    # suffixed name that overflows it. The dataset did nothing
+                    # wrong, so note it and move on rather than recording a
+                    # per-dataset MEASUREMENT_ERROR.
+                    logger.warning(
+                        "skipping CNR population mask %r on %s: %s",
+                        name, entry.name, e,
+                    )
+                    self._log(
+                        phase="measure", dataset=entry.name,
+                        event="cnr_population_skipped",
+                        message=f"cannot measure {name!r}: {e}",
+                    )
+        if specs:
+            self._log(
+                phase="measure", dataset=entry.name,
+                event="cnr_populations_measured",
+                message=(
+                    "also measuring CNR population masks: "
+                    + ", ".join(s.name for s in specs)
+                ),
+            )
         return specs
 
     def _detect_existing_segmentation(self, entry) -> str | None:
@@ -388,6 +479,14 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             # Interleaved with segment so the user sees each dataset's
             # Cellpose result immediately, edits it, and accepts before
             # the next segment runs.
+            #
+            # Gated by cfg.run_seg_qc_on_new_segmentations (the config-dialog
+            # checkbox, default True) so a batch with settled Cellpose
+            # parameters can run unattended. When the gate is off we emit an
+            # explicit status + run-log line rather than silently advancing —
+            # an unreviewed segmentation must never be handed downstream
+            # without the user being told, the same convention the headless
+            # threshold-apply handler follows.
             if self._interactive_qc:
                 # Skip datasets that segment marked as failed.
                 failed_names = {
@@ -396,14 +495,28 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     if rec.phase_name == "segment"
                 }
                 if entry.name not in failed_names:
-                    yield PhaseRequest(
-                        kind=PhaseKind.INTERACTIVE,
-                        phase_name="seg_qc",
-                        dataset_index=idx,
-                        dataset_total=len(active),
-                        dataset_name=entry.name,
-                        handler=self._make_seg_qc_handler(entry, idx, len(active)),
-                    )
+                    if cfg.run_seg_qc_on_new_segmentations:
+                        yield PhaseRequest(
+                            kind=PhaseKind.INTERACTIVE,
+                            phase_name="seg_qc",
+                            dataset_index=idx,
+                            dataset_total=len(active),
+                            dataset_name=entry.name,
+                            handler=self._make_seg_qc_handler(
+                                entry, idx, len(active)
+                            ),
+                        )
+                    else:
+                        msg = (
+                            f"{entry.name}: segmentation accepted without QC "
+                            "(seg-QC turned off for workflow-created "
+                            "segmentations)"
+                        )
+                        print(f"  [seg_qc] {msg}", flush=True)
+                        self._log(
+                            phase="seg_qc", dataset=entry.name,
+                            event="skipped_no_qc", message=msg,
+                        )
 
         # ── Tracking (time-lapse): link cells across timepoints ──
         # Runs after seg-QC for datasets with n_timepoints > 1 that aren't
@@ -565,6 +678,37 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 self._log(phase="compress", dataset=entry.name,
                           event="failed", failure=failure.value, message=msg)
                 return PhaseResult(success=False, message=msg)
+
+            # Gate on what the run actually needs before any later phase
+            # touches this dataset. import_dataset does not raise when no
+            # source file matches the channel token pattern — it writes an
+            # .h5 with no /intensity and empty channel_names and reports
+            # success — so without this the run continues against an empty
+            # dataset and fails minutes later somewhere unrelated.
+            problem = validate_compressed_dataset(
+                DatasetStore(updated.h5_path),
+                seg_channel_name=self._config.seg_channel_name,
+                round_channels=[
+                    r.channel for r in self._config.thresholding_rounds
+                ],
+                needs_pixel_size=config_needs_pixel_size(
+                    self._config.thresholding_rounds
+                ),
+            )
+            if problem is not None:
+                record_failure(
+                    self._metadata,
+                    dataset_name=entry.name,
+                    phase_name="compress",
+                    failure=DatasetFailure.COMPRESS_FAILED,
+                    message=problem,
+                )
+                self._log(
+                    phase="compress", dataset=entry.name, event="failed",
+                    failure=DatasetFailure.COMPRESS_FAILED.value,
+                    message=problem,
+                )
+                return PhaseResult(success=False, message=problem)
 
             # Swap the updated entry in place so later phases see the
             # real h5_path.
