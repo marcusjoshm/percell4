@@ -27,6 +27,7 @@ from percell4.domain.io.calibration_csv import (
     BatchCalibration,
     ChannelCalibration,
 )
+from percell4.domain.io.models import TileConfig
 from percell4.gui.batch_tcspc_dialog import (
     BatchTCSPCDialog,
     _best_match,
@@ -520,6 +521,35 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     form = dlg._stitching_form
     assert form is not None
 
+    # ── Wire format: itemData is what reaches TileConfig. ──
+    # These values are persisted into .h5 /metadata and run_config.json, so
+    # they must survive any relabeling. Asserted separately from the display
+    # text below precisely so a label change cannot quietly alter them.
+    pattern_values = [
+        form.stitch_type.itemData(i) for i in range(form.stitch_type.count())
+    ]
+    assert pattern_values == [
+        "row_by_row",
+        "column_by_column",
+        "snake_by_row",
+        "snake_by_column",
+    ]
+
+    origin_values = [
+        form.stitch_order.itemData(i) for i in range(form.stitch_order.count())
+    ]
+    assert origin_values == [
+        "right_down", "right_up", "left_down", "left_up",
+        "top_left", "top_right", "bottom_left", "bottom_right",
+    ]
+
+    # Every value the combos can emit must construct a valid TileConfig —
+    # this is the guard that a vocabulary drift fails loudly at its source.
+    for grid_type in pattern_values:
+        for order in origin_values:
+            TileConfig(grid_type=grid_type, order=order)
+
+    # ── Display text: presentation only. ──
     pattern_items = [
         form.stitch_type.itemText(i) for i in range(form.stitch_type.count())
     ]

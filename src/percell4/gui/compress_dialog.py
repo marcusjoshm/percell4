@@ -255,18 +255,19 @@ class CompressDialog(QDialog):
         stitch_layout.addWidget(self._stitch_cols)
         stitch_layout.addWidget(QLabel("Pattern:"))
         self._stitch_type = QComboBox()
-        self._stitch_type.addItems(
-            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
-        )
+        # Value rides in itemData, never the display text or the index — the
+        # PR #9 drift precedent, and what lets the label change later without
+        # breaking TileConfig construction. Label == value for now.
+        for _gt in ("row_by_row", "column_by_column", "snake_by_row", "snake_by_column"):
+            self._stitch_type.addItem(_gt, _gt)
         stitch_layout.addWidget(self._stitch_type)
         stitch_layout.addWidget(QLabel("Start:"))
         self._stitch_order = QComboBox()
-        self._stitch_order.addItems(
-            [
-                "right_down", "right_up", "left_down", "left_up",
-                "top_left", "top_right", "bottom_left", "bottom_right",
-            ]
-        )
+        for _o in (
+            "right_down", "right_up", "left_down", "left_up",
+            "top_left", "top_right", "bottom_left", "bottom_right",
+        ):
+            self._stitch_order.addItem(_o, _o)
         stitch_layout.addWidget(self._stitch_order)
         # ── Overlap-aware registration (phase-correlation) ──
         # Overlap is stored as a FRACTION in TileConfig; the spinbox shows
@@ -478,8 +479,8 @@ class CompressDialog(QDialog):
             tile_config = TileConfig(
                 grid_rows=self._stitch_rows.value(),
                 grid_cols=self._stitch_cols.value(),
-                grid_type=self._stitch_type.currentText(),
-                order=self._stitch_order.currentText(),
+                grid_type=self._stitch_type.currentData(),
+                order=self._stitch_order.currentData(),
                 # Spinbox shows a percentage; TileConfig stores a fraction.
                 overlap=self._stitch_overlap.value() / 100.0,
                 register=self._stitch_register.isChecked(),

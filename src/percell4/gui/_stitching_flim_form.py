@@ -80,18 +80,19 @@ class StitchingFlimForm(QWidget):
         stitch_row.addWidget(self.stitch_cols)
         stitch_row.addWidget(QLabel("Pattern:"))
         self.stitch_type = QComboBox()
-        self.stitch_type.addItems(
-            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
-        )
+        # Value rides in itemData, never the display text or the index — the
+        # PR #9 drift precedent, and what lets the label change later without
+        # breaking TileConfig construction. Label == value for now.
+        for _gt in ("row_by_row", "column_by_column", "snake_by_row", "snake_by_column"):
+            self.stitch_type.addItem(_gt, _gt)
         stitch_row.addWidget(self.stitch_type)
         stitch_row.addWidget(QLabel("Start:"))
         self.stitch_order = QComboBox()
-        self.stitch_order.addItems(
-            [
-                "right_down", "right_up", "left_down", "left_up",
-                "top_left", "top_right", "bottom_left", "bottom_right",
-            ]
-        )
+        for _o in (
+            "right_down", "right_up", "left_down", "left_up",
+            "top_left", "top_right", "bottom_left", "bottom_right",
+        ):
+            self.stitch_order.addItem(_o, _o)
         stitch_row.addWidget(self.stitch_order)
         stitch_row.addStretch()
         outer.addLayout(stitch_row)
@@ -205,8 +206,8 @@ class StitchingFlimForm(QWidget):
         return TileConfig(
             grid_rows=self.stitch_rows.value(),
             grid_cols=self.stitch_cols.value(),
-            grid_type=self.stitch_type.currentText(),
-            order=self.stitch_order.currentText(),
+            grid_type=self.stitch_type.currentData(),
+            order=self.stitch_order.currentData(),
             # Spinbox shows a percentage; TileConfig stores a fraction.
             overlap=self.overlap_spin.value() / 100.0,
             register=self.register_check.isChecked(),

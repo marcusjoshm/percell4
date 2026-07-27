@@ -110,15 +110,18 @@ class ImportDialog(QDialog):
         tile_layout.addRow("Grid cols:", self._tile_cols)
 
         self._tile_type = QComboBox()
-        self._tile_type.addItems([
-            "row_by_row", "column_by_column", "snake_by_row", "snake_by_column"
-        ])
+        # Value rides in itemData, never the display text or the index — the
+        # PR #9 drift precedent, and what lets the label change later without
+        # breaking TileConfig construction. Label == value for now.
+        for _gt in ("row_by_row", "column_by_column", "snake_by_row", "snake_by_column"):
+            self._tile_type.addItem(_gt, _gt)
         tile_layout.addRow("Grid type:", self._tile_type)
 
         self._tile_order = QComboBox()
-        self._tile_order.addItems([
-            "top_left", "bottom_left", "top_right", "bottom_right"
-        ])
+        # Four corners == all four distinct behaviors; the other four accepted
+        # order strings are aliases of these. Not a missing-items drift.
+        for _o in ("top_left", "bottom_left", "top_right", "bottom_right"):
+            self._tile_order.addItem(_o, _o)
         tile_layout.addRow("Start corner:", self._tile_order)
 
         # ── Overlap-aware registration (phase-correlation) ──
@@ -385,8 +388,8 @@ class ImportDialog(QDialog):
         return TileConfig(
             grid_rows=self._tile_rows.value(),
             grid_cols=self._tile_cols.value(),
-            grid_type=self._tile_type.currentText(),
-            order=self._tile_order.currentText(),
+            grid_type=self._tile_type.currentData(),
+            order=self._tile_order.currentData(),
             # Spinbox shows a percentage; TileConfig stores a fraction.
             overlap=self._tile_overlap.value() / 100.0,
             register=self._tile_register.isChecked(),
