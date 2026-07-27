@@ -116,6 +116,15 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-v --tb=short"
+# Pin the Qt binding for pytest-qt. A dev machine can easily end up with
+# PyQt5, PyQt6, and PySide6 all installed (napari and its plugins pull
+# different ones), and without this pytest-qt picks whichever it finds first —
+# so the same suite passes, fails, or segfaults from run to run depending on
+# which binding won. CI installs only PyQt5; pinning here makes a local run
+# reproduce CI instead of testing a configuration nobody ships.
+# The matching QT_API for qtpy is set in tests/conftest.py, which has to run
+# before the first qtpy import.
+qt_api = "pyqt5"
 markers = [
     "slow: marks tests as slow (requires cellpose model download, deselect with '-m \"not slow\"')",
     "gui: marks tests requiring Qt/napari (deselect with '-m \"not gui\"')",

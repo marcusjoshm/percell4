@@ -149,13 +149,31 @@ class GroupedThresholdSettingsWidget(QWidget):
         Per ``docs/solutions/conventions/qt-wire-user-edit-signals-2026-05-12.md``:
         downstream consumers (e.g. the dilute-phase panel's Start button)
         rely on this single aggregated signal to re-validate.
+
+        Every source signal carries a payload (``currentIndexChanged`` an int,
+        ``valueChanged`` an int or float) while ``config_changed`` takes none,
+        so they route through :meth:`_emit_config_changed` to drop it. Binding
+        directly to ``config_changed.emit`` raises
+        ``TypeError: config_changed() only accepts 0 argument(s), 1 given!``
+        under PyQt5 — the binding CI uses — while PySide silently discards the
+        extra argument, so the failure only appeared on one of the two.
         """
-        self._metric_combo.currentIndexChanged.connect(self.config_changed.emit)
-        self._algo_combo.currentIndexChanged.connect(self.config_changed.emit)
-        self._criterion_combo.currentIndexChanged.connect(self.config_changed.emit)
-        self._max_components.valueChanged.connect(self.config_changed.emit)
-        self._n_clusters.valueChanged.connect(self.config_changed.emit)
-        self._sigma.valueChanged.connect(self.config_changed.emit)
+        self._metric_combo.currentIndexChanged.connect(self._emit_config_changed)
+        self._algo_combo.currentIndexChanged.connect(self._emit_config_changed)
+        self._criterion_combo.currentIndexChanged.connect(
+            self._emit_config_changed
+        )
+        self._max_components.valueChanged.connect(self._emit_config_changed)
+        self._n_clusters.valueChanged.connect(self._emit_config_changed)
+        self._sigma.valueChanged.connect(self._emit_config_changed)
+
+    def _emit_config_changed(self, *_args) -> None:
+        """Re-emit any child widget's user-edit signal as ``config_changed``.
+
+        Absorbs the source signal's payload, which ``config_changed`` does not
+        declare.
+        """
+        self.config_changed.emit()
 
     # ──────────────────────────────────────────────────────────────
     # Slots

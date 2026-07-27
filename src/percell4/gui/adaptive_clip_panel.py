@@ -344,6 +344,14 @@ class AdaptiveClipPanel(QWidget):
         super().showEvent(event)
         self._refresh_cnr_masks()
 
+    def _on_cnr_segmenter_destroyed(self, *_args) -> None:
+        """Slot for the CNR segmenter window's ``destroyed`` signal.
+
+        Exists as a named method rather than a lambda so Qt ties the connection
+        to this panel's lifetime and drops it when the panel is destroyed.
+        """
+        self._refresh_cnr_masks()
+
     def _refresh_cnr_masks(self) -> None:
         """Repopulate the CNR source-mask combo from the store's current masks."""
         store = self._get_store()
@@ -880,5 +888,14 @@ class AdaptiveClipPanel(QWidget):
         self._cnr_segmenter.show()
         # New segment masks become available as CNR sources once saved; refresh
         # the source list when the segmenter window closes.
-        self._cnr_segmenter.destroyed.connect(lambda *_: self._refresh_cnr_masks())
+        #
+        # Bound method, NOT a lambda. Qt breaks a connection automatically when
+        # the receiver QObject is destroyed, but only when it can identify a
+        # receiver — a lambda has none, so the connection outlived this panel
+        # and `destroyed` fired into a half-torn-down widget tree. Reading the
+        # combo then hit a freed C++ object: RuntimeError under PySide, a hard
+        # segfault under PyQt5 (which is what CI runs), taking the whole test
+        # process down at whatever test happened to be executing when the old
+        # panel was garbage-collected.
+        self._cnr_segmenter.destroyed.connect(self._on_cnr_segmenter_destroyed)
         self._show_status(f"CNR segmenter open for '{source}' ({len(valid)} foci)")

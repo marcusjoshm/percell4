@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
 
-import numpy as np
-import pytest
+# Pin qtpy's binding before anything can import it. A dev machine often has
+# PyQt5, PyQt6, and PySide6 installed at once (napari and its plugins pull
+# different ones); without this qtpy picks whichever it finds first, so the
+# suite passes, fails, or segfaults from run to run. CI installs only PyQt5,
+# so pinning it here makes a local run reproduce CI rather than testing a
+# configuration nobody ships. pytest-qt's own binding is pinned via the
+# ``qt_api`` ini option in pyproject.toml — both are needed, they select
+# independently.
+#
+# setdefault, not assignment: an explicit QT_API in the environment still wins,
+# so it stays possible to check binding portability deliberately.
+os.environ.setdefault("QT_API", "pyqt5")
+
+# pyqtgraph does NOT honour QT_API — it runs its own binding detection and will
+# happily import PyQt6 when PyQt6 is installed, even with QT_API=pyqt5. Two
+# bindings loaded into one process abort with SIGABRT the moment both try to
+# own the Qt event loop, which is what made a full local run die partway
+# through tests/test_gui while the same directory passed when run alone.
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
+
+from pathlib import Path  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 
 
 @pytest.fixture
