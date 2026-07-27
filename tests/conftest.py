@@ -30,6 +30,37 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _flush_pending_qt_deletions():
+    """Drain Qt's deferred-delete queue at the end of every test.
+
+    ``widget.deleteLater()`` only schedules destruction; the object survives
+    until the event loop next processes ``DeferredDelete``. A test that closes
+    a napari viewer therefore leaves a live canvas behind, and the paint or
+    teardown that finally runs is delivered during a *later* test — pytest-qt
+    attributes the resulting exception to whichever test happens to be running,
+    which is why failures moved around and why Qt-free suites such as
+    ``tests/test_measure`` collected teardown errors they had no part in.
+
+    Draining here keeps each test's cleanup inside its own boundary. No-ops
+    when the test never created a QApplication, so the Qt-free suites pay
+    nothing.
+    """
+    yield
+    try:
+        from qtpy.QtCore import QEvent
+        from qtpy.QtWidgets import QApplication
+    except Exception:  # noqa: BLE001 — Qt not installed / not importable
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for _ in range(3):
+        app.processEvents()
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+
+
 @pytest.fixture
 def tmp_h5(tmp_path: Path) -> Path:
     """Return a temporary .h5 file path (does not create the file)."""

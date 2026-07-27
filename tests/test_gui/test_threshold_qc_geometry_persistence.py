@@ -116,9 +116,13 @@ def test_geometry_persists_across_group_transitions(
     qtbot.addWidget(win1)
     qtbot.waitExposed(win1)
 
-    # Move it somewhere distinctive.
+    # Move it somewhere distinctive. Capture what the window manager actually
+    # granted rather than what we asked for: a decorating WM (macOS adds a
+    # ~16px title bar) shifts the frame, so comparing Group 2 against the
+    # requested numbers tests the WM, not the persistence behaviour.
     win1.setGeometry(150, 50, 420, 380)
     qtbot.wait(50)
+    expected = win1.geometry()
 
     # Simulate transition to Group 2.
     controller._current_index = 1
@@ -134,13 +138,15 @@ def test_geometry_persists_across_group_transitions(
     # restoreGeometry can adjust by a small amount on some platforms;
     # mirror the loose-equality tolerance used by SessionWindow's
     # existing geometry test.
-    assert abs(g.x() - 150) <= 10, (
-        f"Group 2's QC window should open at the position Group 1's "
-        f"was moved to (x=150), got x={g.x()}"
+    assert abs(g.x() - expected.x()) <= 10, (
+        f"Group 2's QC window should open where Group 1's was moved to "
+        f"(x={expected.x()}), got x={g.x()}"
     )
-    assert abs(g.y() - 50) <= 10
-    assert abs(g.width() - 420) <= 10
-    assert abs(g.height() - 380) <= 10
+    assert abs(g.y() - expected.y()) <= 10, (
+        f"expected y≈{expected.y()}, got {g.y()}"
+    )
+    assert abs(g.width() - expected.width()) <= 10
+    assert abs(g.height() - expected.height()) <= 10
 
 
 def test_geometry_persists_across_workflow_runs(
