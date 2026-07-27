@@ -169,9 +169,21 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         Per-dataset (not the union of all selections): a dataset measures
         only the masks the user picked for it, never another dataset's
         selection that happens to also exist on disk here.
+
+        In a normal run the configured rounds are followed by measure-only
+        specs for the CNR population masks (``<round>_low`` / ``<round>_high``)
+        that a ``cnr_classify`` round minted earlier in this run. Those masks
+        are written by a post-step and are deliberately not rounds themselves,
+        so without this they were written to the ``.h5`` and never measured —
+        the researcher had to re-run the whole workflow in existing-mask mode
+        to get particle statistics for them. The ``percell4-batch-measure``
+        CLI already measures them; this closes that GUI/CLI gap.
         """
         if not self._config.use_existing_masks:
-            return list(self._config.thresholding_rounds)
+            return [
+                *self._config.thresholding_rounds,
+                *self._cnr_population_specs_for(entry),
+            ]
         channel = entry.channel_names[0] if entry.channel_names else "channel"
         specs: list[ThresholdingRound] = []
         for mask_name in self._config.existing_mask_selections.get(entry.name, []):
@@ -195,6 +207,83 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     failure=DatasetFailure.MEASUREMENT_ERROR,
                     message=f"invalid mask name {mask_name!r}: {e}",
                 )
+        return specs
+
+    #: Suffixes the CNR post-step mints for a ``cnr_classify`` round. Reserved
+    #: against round-name collision in ``WorkflowConfig.__post_init__``, so
+    #: this is a validated contract rather than a naming convention.
+    _CNR_POPULATION_SUFFIXES = ("_low", "_high")
+
+    def _cnr_population_specs_for(self, entry) -> list[ThresholdingRound]:
+        """Measure-only specs for the CNR population masks present on disk.
+
+        Derived per dataset from what actually exists, not from config alone:
+        a dataset whose classification found a single population writes no
+        ``_high`` mask (and ``_classify_and_write_cnr`` skips an all-zero
+        population either way), so the spec list must follow the file.
+
+        Never raises. This runs inside ``_measure_round_specs_for``, which the
+        measure handler calls *outside* its own ``try`` — an exception here
+        would reach ``BaseWorkflowRunner._run_loop`` and terminate the entire
+        run, turning one unreadable dataset into a batch-wide abort. An
+        unreadable store degrades to "no population specs" plus a log line;
+        the base round's measurement still happens and the real error surfaces
+        from the phase that actually needs the data.
+        """
+        rounds = [
+            r for r in self._config.thresholding_rounds if r.cnr_classify is not None
+        ]
+        if not rounds:
+            return []
+        try:
+            present = set(DatasetStore(entry.h5_path).list_masks())
+        except Exception:
+            logger.exception(
+                "could not list masks for %s; skipping CNR population "
+                "measurement for this dataset",
+                entry.name,
+            )
+            return []
+
+        specs: list[ThresholdingRound] = []
+        channel = entry.channel_names[0] if entry.channel_names else "channel"
+        for r in rounds:
+            for suffix in self._CNR_POPULATION_SUFFIXES:
+                name = f"{r.name}{suffix}"
+                if name not in present:
+                    continue
+                try:
+                    specs.append(
+                        ThresholdingRound(
+                            name=name,
+                            channel=r.channel or channel,
+                            metric="mean_intensity",
+                            algorithm=ThresholdAlgorithm.KMEANS,
+                        )
+                    )
+                except ValueError as e:
+                    # A round name close to the 40-char limit produces a
+                    # suffixed name that overflows it. The dataset did nothing
+                    # wrong, so note it and move on rather than recording a
+                    # per-dataset MEASUREMENT_ERROR.
+                    logger.warning(
+                        "skipping CNR population mask %r on %s: %s",
+                        name, entry.name, e,
+                    )
+                    self._log(
+                        phase="measure", dataset=entry.name,
+                        event="cnr_population_skipped",
+                        message=f"cannot measure {name!r}: {e}",
+                    )
+        if specs:
+            self._log(
+                phase="measure", dataset=entry.name,
+                event="cnr_populations_measured",
+                message=(
+                    "also measuring CNR population masks: "
+                    + ", ".join(s.name for s in specs)
+                ),
+            )
         return specs
 
     def _detect_existing_segmentation(self, entry) -> str | None:

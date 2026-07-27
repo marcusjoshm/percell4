@@ -182,6 +182,26 @@ def _derive_tiff_pending_channel_names(
     return out
 
 
+def _round_names_with_cnr_populations(rounds: Iterable[Any]) -> list[str]:
+    """Round names, each ``cnr_classify`` round followed by its populations.
+
+    A CNR round mints ``<round>_low`` / ``<round>_high`` masks as a post-step.
+    They are measured by the runner when present on disk, but CSV export keeps
+    only columns that were selected at config time, so their names have to be
+    predicted here. The suffixes are reserved against round-name collision in
+    ``WorkflowConfig.__post_init__``, which makes this a contract rather than a
+    naming convention.
+
+    Pulled out of the dialog method so it is unit-testable without Qt.
+    """
+    names: list[str] = []
+    for r in rounds:
+        names.append(r.name)
+        if getattr(r, "cnr_classify", None) is not None:
+            names.extend((f"{r.name}_low", f"{r.name}_high"))
+    return names
+
+
 def _build_compress_plan(
     ds: Any,
     gui_state: Any,
@@ -2560,11 +2580,22 @@ class WorkflowConfigDialog(QDialog):
         prepended by the export step regardless of what's in this list. The
         ``_out_<round>`` overlap variants are intentionally NOT emitted —
         measure_one drops them from the parquet too.
+
+        A ``cnr_classify`` round also contributes its population-mask names
+        (``<round>_low`` / ``<round>_high``). The runner measures those masks
+        when they exist on disk, but ``_ordered_csv_columns`` keeps only
+        columns that are BOTH selected here and present in the aggregated
+        frame — so without this the measurements would land in the parquet and
+        be filtered out of every CSV. The suffixes are reserved in
+        ``WorkflowConfig.__post_init__``, so predicting them here is safe even
+        though we cannot know yet which datasets will actually split: a run
+        where at least one dataset split gets the column null-filled for the
+        rest, and a run where none split drops the column entirely.
         """
         channels = [ch for ch in intersected if ch in self._selected_csv_channels]
         return build_selected_csv_columns(
             channels,
-            [r.name for r in rounds],
+            _round_names_with_cnr_populations(rounds),
             metrics=self._selected_csv_metrics,
             particle_per_cell=self._selected_csv_particle_per_cell,
             particle_per_channel=self._selected_csv_particle_per_channel,
