@@ -18,6 +18,10 @@ from percell4.config import viewer_presets as vp
 from percell4.gui.viewer import ViewerWindow
 from percell4.model import CellDataModel
 
+# Builds a real napari viewer, so this module carries the ``napari_viewer``
+# marker: skipped by default (see pyproject addopts), run explicitly on CI.
+pytestmark = pytest.mark.napari_viewer
+
 
 @pytest.fixture
 def viewer_harness(qtbot):
