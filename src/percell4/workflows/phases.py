@@ -215,6 +215,93 @@ def compress_one(
     return updated, None, ""
 
 
+def validate_compressed_dataset(
+    store: DatasetStore,
+    *,
+    seg_channel_name: str = "",
+    round_channels: Iterable[str] = (),
+    needs_pixel_size: bool = False,
+) -> str | None:
+    """Check a freshly compressed dataset against what the run needs.
+
+    Returns ``None`` when the dataset is usable, or a researcher-facing
+    message naming the specific missing thing.
+
+    ``import_dataset`` does not raise when no source file matches the channel
+    token pattern — it writes an ``.h5`` with ``channel_names == []``,
+    ``n_channels == 0`` and no ``/intensity``, and reports success. Without
+    this gate the run continues against an empty dataset: the segmentation
+    channel lookup logs "falling back to 0", segmentation produces nothing,
+    and the failure only surfaces minutes later in an unrelated phase.
+
+    Deliberately no stricter than what later phases already require. This
+    check moves an existing failure earlier; it must never reject a dataset
+    that would otherwise have worked. In particular the pixel-size check is
+    conditional on a round actually using a µm or µm² unit — px-native rounds
+    need no pixel size, and we never default to 1 µm/px.
+
+    The caller passes a non-session :class:`DatasetStore`, so every read here
+    opens and closes its own handle. HDF5 locking is non-blocking and
+    exclusive; a handle left open would resurface as a ``BlockingIOError``
+    (errno 35) from an unrelated write phase later in the run.
+    """
+    try:
+        meta = store.metadata
+    except Exception as e:  # noqa: BLE001 — unreadable file is a dataset failure
+        return f"cannot read the compressed dataset: {type(e).__name__}: {e}"
+
+    channels = list(meta.get("channel_names") or [])
+    if not channels:
+        return (
+            "compression produced no channels. Check that the source files "
+            "match the channel naming pattern configured in the compress "
+            "dialog — no file matched, so nothing was imported."
+        )
+
+    missing_named = []
+    if seg_channel_name and seg_channel_name not in channels:
+        missing_named.append(f"segmentation channel {seg_channel_name!r}")
+    for ch in dict.fromkeys(round_channels):
+        if ch and ch not in channels:
+            missing_named.append(f"round channel {ch!r}")
+    if missing_named:
+        return (
+            f"{', '.join(missing_named)} not present in the compressed "
+            f"dataset. Available channels: {channels}."
+        )
+
+    if needs_pixel_size:
+        raw_ps = meta.get("pixel_size_um")
+        if not raw_ps or float(raw_ps) <= 0:
+            return (
+                "a round uses a µm / µm² size value but the source TIFFs "
+                "carry no pixel size, so none was stored. Set the pixel size "
+                "on the dataset, or switch the round's unit to px / px²."
+            )
+
+    return None
+
+
+def config_needs_pixel_size(rounds: Iterable[Any]) -> bool:
+    """Whether any round's size knob is expressed in µm or µm².
+
+    Mirrors the config dialog's pre-flight predicate so the two cannot drift.
+    The dialog can only check ``h5_existing`` datasets up front — a
+    ``tiff_pending`` dataset has no ``.h5`` until Phase 0 runs — so this is
+    the same question asked again once the file exists.
+    """
+    return any(
+        (r.adaptive_clip is not None and r.adaptive_clip.d_min_unit == "um")
+        or (
+            r.auto_extract is not None
+            and r.auto_extract.smallest_particle_um is not None
+            and r.auto_extract.smallest_particle_unit == "um"
+        )
+        or (r.min_particle_size > 0 and r.min_particle_size_unit == "um2")
+        for r in rounds
+    )
+
+
 # ── Phase 1: Segment ────────────────────────────────────────────────────
 
 

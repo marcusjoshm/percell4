@@ -52,6 +52,7 @@ from percell4.workflows.models import (
 from percell4.workflows.phases import (
     apply_threshold_headless,
     compress_one,
+    config_needs_pixel_size,
     datasets_without_failures,
     export_run,
     measure_one,
@@ -60,6 +61,7 @@ from percell4.workflows.phases import (
     segment_one,
     threshold_compute_one,
     track_one,
+    validate_compressed_dataset,
     write_staging_parquet,
 )
 
@@ -565,6 +567,37 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 self._log(phase="compress", dataset=entry.name,
                           event="failed", failure=failure.value, message=msg)
                 return PhaseResult(success=False, message=msg)
+
+            # Gate on what the run actually needs before any later phase
+            # touches this dataset. import_dataset does not raise when no
+            # source file matches the channel token pattern — it writes an
+            # .h5 with no /intensity and empty channel_names and reports
+            # success — so without this the run continues against an empty
+            # dataset and fails minutes later somewhere unrelated.
+            problem = validate_compressed_dataset(
+                DatasetStore(updated.h5_path),
+                seg_channel_name=self._config.seg_channel_name,
+                round_channels=[
+                    r.channel for r in self._config.thresholding_rounds
+                ],
+                needs_pixel_size=config_needs_pixel_size(
+                    self._config.thresholding_rounds
+                ),
+            )
+            if problem is not None:
+                record_failure(
+                    self._metadata,
+                    dataset_name=entry.name,
+                    phase_name="compress",
+                    failure=DatasetFailure.COMPRESS_FAILED,
+                    message=problem,
+                )
+                self._log(
+                    phase="compress", dataset=entry.name, event="failed",
+                    failure=DatasetFailure.COMPRESS_FAILED.value,
+                    message=problem,
+                )
+                return PhaseResult(success=False, message=problem)
 
             # Swap the updated entry in place so later phases see the
             # real h5_path.

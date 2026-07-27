@@ -2249,7 +2249,11 @@ class WorkflowConfigDialog(QDialog):
                         "pixel size (µm/px) on every dataset, but it is missing on: "
                         + ", ".join(missing)
                         + ". Set the pixel size on these datasets, switch the round's "
-                        "Unit / Min unit to px, or use auto-detect (Smallest = 0)."
+                        "Unit / Min unit to px, or use auto-detect (Smallest = 0).\n\n"
+                        "Note: .tiff datasets cannot be checked here because their "
+                        ".h5 does not exist until the run compresses them. They are "
+                        "checked immediately after compression instead, and any that "
+                        "lack a pixel size are failed then rather than mid-run."
                     )
                     return None
 

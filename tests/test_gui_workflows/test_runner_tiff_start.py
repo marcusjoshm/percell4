@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-import pytest
 import tifffile
 
 from percell4.gui.workflows.base_runner import WorkflowEventKind
@@ -36,7 +35,7 @@ from percell4.workflows.models import (
     WorkflowDatasetEntry,
 )
 
-SIZE = 60
+from .conftest import TIFF_FIXTURE_SIZE as SIZE
 
 
 def _write_tiffs(src: Path, stem: str) -> None:
@@ -242,7 +241,7 @@ def test_compress_swaps_entry_to_h5_existing(qtbot, tmp_path):
     next(gen).handler()
 
     swapped = runner._working_entries[0]
-    assert swapped.source is DatasetSource.H5_EXISTING
+    assert swapped.source == DatasetSource.H5_EXISTING
     assert swapped.h5_path == entry.h5_path
     assert swapped.h5_path.exists()
 
@@ -280,35 +279,8 @@ def test_compress_of_an_unmatched_source_yields_an_empty_dataset(
 # ── Full run ────────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def _fake_segment(monkeypatch):
-    """Write deterministic labels instead of running Cellpose.
-
-    A freshly compressed dataset has no /labels, so the threshold and
-    measure phases need segmentation to exist. Patched at both the phases
-    module and the runner's imported reference.
-    """
-    import percell4.gui.workflows.single_cell.runner as runner_mod
-    import percell4.workflows.phases as phases
-
-    def fake_segment_one(store, cfg, cellpose_model=None, channel_idx=0,
-                         edge_mode=None, edge_margin_px=0,
-                         seg_name="cellpose_qc"):
-        labels = np.zeros((SIZE, SIZE), dtype=np.int32)
-        for i in range(4):
-            row = 5 + (i // 2) * 25
-            col = 5 + (i % 2) * 25
-            labels[row : row + 10, col : col + 10] = i + 1
-        store.write_labels(seg_name, labels)
-        return labels, None, ""
-
-    monkeypatch.setattr(phases, "segment_one", fake_segment_one)
-    monkeypatch.setattr(runner_mod, "segment_one", fake_segment_one)
-    return fake_segment_one
-
-
 def test_full_run_from_tiff_reaches_export(
-    qtbot, fake_host, tmp_path, _fake_segment
+    qtbot, fake_host, tmp_path, fake_segment_one
 ):
     """The whole point: a TIFF-start run completes and produces artifacts.
 
@@ -337,7 +309,7 @@ def test_full_run_from_tiff_reaches_export(
 
 
 def test_full_run_measures_cells_from_the_compressed_dataset(
-    qtbot, fake_host, tmp_path, _fake_segment
+    qtbot, fake_host, tmp_path, fake_segment_one
 ):
     """Measurements must reflect the TIFF pixel data, not an empty dataset."""
     import pandas as pd

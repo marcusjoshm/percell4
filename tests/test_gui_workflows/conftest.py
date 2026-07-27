@@ -173,3 +173,42 @@ def phasor_window(qtbot, session_with_dataset) -> PhasorPlotWindow:
     # so push it by hand. Idempotent for tests that don't care.
     win._refresh_apply_buttons_enabled()
     return win
+
+
+# ── Single-cell workflow: TIFF-start fixtures ───────────────────────────
+
+#: Edge length of the synthetic images used by the TIFF-start tests.
+TIFF_FIXTURE_SIZE = 60
+
+
+@pytest.fixture
+def fake_segment_one(monkeypatch):
+    """Write deterministic labels instead of running Cellpose.
+
+    A freshly compressed dataset has no ``/labels``, so the threshold and
+    measure phases need a segmentation to exist. Patched at both the phases
+    module and the runner's own imported reference, since the runner binds
+    the name at import time.
+
+    Lives here rather than in a test module because two TIFF-start test
+    files need it, and importing a fixture across test modules shadows the
+    parameter name at every use site.
+    """
+    import numpy as np
+
+    import percell4.gui.workflows.single_cell.runner as runner_mod
+    import percell4.workflows.phases as phases
+
+    def _fake(store, cfg, cellpose_model=None, channel_idx=0,
+              edge_mode=None, edge_margin_px=0, seg_name="cellpose_qc"):
+        labels = np.zeros((TIFF_FIXTURE_SIZE, TIFF_FIXTURE_SIZE), dtype=np.int32)
+        for i in range(4):
+            row = 5 + (i // 2) * 25
+            col = 5 + (i % 2) * 25
+            labels[row : row + 10, col : col + 10] = i + 1
+        store.write_labels(seg_name, labels)
+        return labels, None, ""
+
+    monkeypatch.setattr(phases, "segment_one", _fake)
+    monkeypatch.setattr(runner_mod, "segment_one", _fake)
+    return _fake
