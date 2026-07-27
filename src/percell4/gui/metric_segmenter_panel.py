@@ -174,6 +174,14 @@ class MetricSegmenterPanel(QWidget):
         super().showEvent(event)
         self._refresh_masks()
 
+    def _on_segmenter_window_destroyed(self, *_args) -> None:
+        """Slot for the segmenter window's ``destroyed`` signal.
+
+        Exists as a named method rather than a lambda so Qt ties the connection
+        to this panel's lifetime and drops it when the panel is destroyed.
+        """
+        self._refresh_masks()
+
     def _refresh_masks(self) -> None:
         store = self._get_store()
         names = (
@@ -391,7 +399,10 @@ class MetricSegmenterPanel(QWidget):
             save_default_suffix=f"_{metric}",
         )
         self._window.show()
-        self._window.destroyed.connect(lambda *_: self._refresh_masks())
+        # Bound method, NOT a lambda — Qt can only auto-disconnect on receiver
+        # destruction when it can identify a receiver, and a lambda has none.
+        # See the matching comment in adaptive_clip_panel.py.
+        self._window.destroyed.connect(self._on_segmenter_window_destroyed)
         note = f", {excluded} excluded" if excluded else ""
         self._show_status(
             f"{label} segmenter open for '{source}' "
