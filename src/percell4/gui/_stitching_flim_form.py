@@ -2,10 +2,18 @@
 
 Single source of truth for the widget set every TCSPC append flow uses to
 collect ``TileConfig`` + rotation/flip + the raw-binary ``FlimConfig``
-fields (``bin_x``, ``bin_y``, ``bin_t``, ``bin_dtype``, ``bin_dim_order``,
-``bin_header_bytes``). The widget construction is ported verbatim from
-``AddLayerDialog`` (single-dataset TCSPC tab) so the two flows stay
-visually and behaviorally identical.
+fields.
+
+As of the canonical-stitching-form refactor this class is a **composite**:
+the rotate/flip pair and the raw-``.bin`` geometry group live in
+``_flim_bin_form.py`` (:class:`RotateFlipForm`, :class:`FlimBinParamsForm`),
+and are embedded here. The public surface — every widget attribute and every
+accessor — is unchanged, so callers and tests do not care that the internals
+moved.
+
+The split exists so the stitching controls can be embedded on surfaces with no
+TCSPC concerns. This class remains until those surfaces are migrated onto the
+canonical ``StitchingForm``.
 
 Out of scope here:
 
@@ -14,10 +22,6 @@ Out of scope here:
   dataset from the calibration CSV. Each caller owns its own frequency.
 * Per-channel ``(phase, modulation)`` calibration widgets — same
   rationale as frequency: differs across the two flows.
-
-Future work: migrate ``AddLayerDialog`` to consume this widget so both
-dialogs share a single construction site. Tracked as follow-up after
-PR #9.
 """
 
 from __future__ import annotations
@@ -27,8 +31,6 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QSpinBox,
@@ -37,6 +39,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.domain.io.models import FlimConfig, TileConfig
+from percell4.gui._flim_bin_form import FlimBinParamsForm, RotateFlipForm
 
 
 class StitchingFlimForm(QWidget):
@@ -56,7 +59,7 @@ class StitchingFlimForm(QWidget):
 
     # ──────────────────────────────────────────────────────────────
     # Construction — every value below mirrors AddLayerDialog's TCSPC
-    # tab (lines 845-975 at time of extraction). Keep them in lockstep.
+    # tab. Keep them in lockstep.
     # ──────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
@@ -120,24 +123,11 @@ class StitchingFlimForm(QWidget):
         outer.addLayout(reg_row)
 
         # ── Rotation + Flip (applies to /decay only; T-axis untouched) ──
-        rot_row = QHBoxLayout()
-        rot_row.addWidget(QLabel("Rotate stitched array:"))
-        self.rotation_combo = QComboBox()
-        self.rotation_combo.addItem("None", 0)
-        self.rotation_combo.addItem("90° CCW", 1)
-        self.rotation_combo.addItem("180°", 2)
-        self.rotation_combo.addItem("90° CW", 3)
-        rot_row.addWidget(self.rotation_combo)
-        rot_row.addWidget(QLabel("Flip:"))
-        self.flip_combo = QComboBox()
-        # ``-1`` = no flip; ``0`` = vertical (top↔bottom, np.flipud);
-        # ``1`` = horizontal (left↔right, np.fliplr).
-        self.flip_combo.addItem("None", -1)
-        self.flip_combo.addItem("Vertical (top ↔ bottom)", 0)
-        self.flip_combo.addItem("Horizontal (left ↔ right)", 1)
-        rot_row.addWidget(self.flip_combo)
-        rot_row.addStretch()
-        outer.addLayout(rot_row)
+        self._rotate_flip = RotateFlipForm()
+        outer.addWidget(self._rotate_flip)
+        # Re-exposed so callers and tests keep reaching the widgets directly.
+        self.rotation_combo = self._rotate_flip.rotation_combo
+        self.flip_combo = self._rotate_flip.flip_combo
 
         # NOTE: the per-import "Spatial bin factor" spinner previously here
         # was removed when spatial binning became a dataset-wide concept
@@ -148,61 +138,19 @@ class StitchingFlimForm(QWidget):
         # and surfaces as a LayerSizeMismatchError.
 
         # ── FLIM .bin Parameters (raw binary geometry) ──
-        # Checkable: when unchecked, callers should treat the FLIM config
-        # as defaulted (every numeric field zero, dtype/dim_order empty —
-        # ``add_decay_to_dataset`` then falls back to 512/512/132/
-        # uint16/YXT/0 internally, which matches the single-dataset flow).
-        self.flim_group = QGroupBox("FLIM .bin Parameters")
-        self.flim_group.setCheckable(True)
-        self.flim_group.setChecked(False)
-        self.flim_group.setToolTip(
-            "Parameters for raw binary TCSPC histogram (.bin) files.\n"
-            "Leave unchecked to use built-in defaults; check and override "
-            "when your .bin export uses a non-default dtype or header."
-        )
-        flim_layout = QFormLayout(self.flim_group)
-
-        self.bin_x = QSpinBox()
-        self.bin_x.setRange(1, 10000)
-        self.bin_x.setValue(512)
-        flim_layout.addRow("X dimension:", self.bin_x)
-
-        self.bin_y = QSpinBox()
-        self.bin_y.setRange(1, 10000)
-        self.bin_y.setValue(512)
-        flim_layout.addRow("Y dimension:", self.bin_y)
-
-        self.bin_t = QSpinBox()
-        self.bin_t.setRange(1, 4096)
-        self.bin_t.setValue(132)
-        flim_layout.addRow("Time bins:", self.bin_t)
-
-        self.bin_dtype = QComboBox()
-        self.bin_dtype.addItems(["uint32", "uint16", "float32", "uint8"])
-        flim_layout.addRow("Data type:", self.bin_dtype)
-
-        self.bin_dim_order = QComboBox()
-        self.bin_dim_order.addItems(["YXT", "XYT", "TYX"])
-        flim_layout.addRow("Dimension order:", self.bin_dim_order)
-
-        self.bin_header = QSpinBox()
-        self.bin_header.setRange(0, 10000)
-        self.bin_header.setValue(0)
-        self.bin_header.setSpecialValueText("Auto-detect")
-        flim_layout.addRow("Header bytes:", self.bin_header)
-
-        outer.addWidget(self.flim_group)
+        self._flim_bin = FlimBinParamsForm()
+        outer.addWidget(self._flim_bin)
+        self.flim_group = self._flim_bin.flim_group
+        self.bin_x = self._flim_bin.bin_x
+        self.bin_y = self._flim_bin.bin_y
+        self.bin_t = self._flim_bin.bin_t
+        self.bin_dtype = self._flim_bin.bin_dtype
+        self.bin_dim_order = self._flim_bin.bin_dim_order
+        self.bin_header = self._flim_bin.bin_header
 
     def _connect_change_signals(self) -> None:
         """Wire every control's edit signal to :attr:`changed`."""
-        for spin in (
-            self.stitch_rows,
-            self.stitch_cols,
-            self.bin_x,
-            self.bin_y,
-            self.bin_t,
-            self.bin_header,
-        ):
+        for spin in (self.stitch_rows, self.stitch_cols):
             # ``valueChanged(int)`` carries an arg; discard it so the 0-arg
             # ``changed`` Signal never receives the value (strict in PySide6).
             spin.valueChanged.connect(lambda _v: self.changed.emit())
@@ -211,15 +159,7 @@ class StitchingFlimForm(QWidget):
         # signal below is strict under PySide6 — wrap both in arg-discarding
         # lambdas so ``changed`` (a 0-arg Signal) never receives a value.
         self.overlap_spin.valueChanged.connect(lambda _v: self.changed.emit())
-        for combo in (
-            self.stitch_type,
-            self.stitch_order,
-            self.reference_combo,
-            self.rotation_combo,
-            self.flip_combo,
-            self.bin_dtype,
-            self.bin_dim_order,
-        ):
+        for combo in (self.stitch_type, self.stitch_order, self.reference_combo):
             # ``currentIndexChanged(int)`` carries an arg; discard it so the
             # 0-arg ``changed`` Signal never receives the index (strict under
             # PySide6 when the combo is actually driven).
@@ -229,7 +169,10 @@ class StitchingFlimForm(QWidget):
             lambda _text: self.changed.emit()
         )
         self.register_check.toggled.connect(lambda _checked: self.changed.emit())
-        self.flim_group.toggled.connect(lambda _checked: self.changed.emit())
+        # Re-emit the embedded widgets' edits as our own so a caller wiring
+        # only ``StitchingFlimForm.changed`` still sees every edit exactly once.
+        self._rotate_flip.changed.connect(self.changed.emit)
+        self._flim_bin.changed.connect(self.changed.emit)
 
     def set_reference_channels(self, names: list[str]) -> None:
         """Populate the reference-channel combo from discovered channels.
@@ -271,14 +214,11 @@ class StitchingFlimForm(QWidget):
         )
 
     def rotation_k(self) -> int:
-        return int(self.rotation_combo.currentData() or 0)
+        return self._rotate_flip.rotation_k()
 
     def flip_axis(self) -> int | None:
         """``None`` = no flip; ``0`` = vertical (np.flipud); ``1`` = horizontal (np.fliplr)."""
-        data = self.flip_combo.currentData()
-        if data is None or int(data) < 0:
-            return None
-        return int(data)
+        return self._rotate_flip.flip_axis()
 
     def flim_config(self, *, frequency_mhz: float = 80.0) -> FlimConfig:
         """Build the ``FlimConfig`` from the raw-``.bin`` fields.
@@ -292,14 +232,4 @@ class StitchingFlimForm(QWidget):
         so ``add_decay_to_dataset`` falls back to the built-in geometry
         (matches the single-dataset flow's behavior).
         """
-        if not self.flim_group.isChecked():
-            return FlimConfig(frequency_mhz=frequency_mhz)
-        return FlimConfig(
-            frequency_mhz=frequency_mhz,
-            bin_x=self.bin_x.value(),
-            bin_y=self.bin_y.value(),
-            bin_t=self.bin_t.value(),
-            bin_dtype=self.bin_dtype.currentText(),
-            bin_dim_order=self.bin_dim_order.currentText(),
-            bin_header_bytes=self.bin_header.value(),
-        )
+        return self._flim_bin.flim_config(frequency_mhz=frequency_mhz)
