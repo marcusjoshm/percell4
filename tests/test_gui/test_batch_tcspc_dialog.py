@@ -555,10 +555,10 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     assert [
         form.grid_type.itemText(i) for i in range(form.grid_type.count())
     ] == [
-        "Grid: row-by-row",
-        "Grid: column-by-column",
-        "Grid: snake-by-row",
-        "Grid: snake-by-column",
+        "Row-by-row",
+        "Column-by-column",
+        "Snake-by-row",
+        "Snake-by-column",
     ]
 
     # Order options are keyed to the selected Type.

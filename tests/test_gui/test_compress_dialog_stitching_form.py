@@ -147,4 +147,4 @@ def test_no_horizontal_scrollbar_at_minimum_width(qtbot) -> None:
 
 def test_minimum_width_fits_a_standard_window(qtbot) -> None:
     dlg = _dialog(qtbot)
-    assert dlg.minimumWidth() <= 700
+    assert dlg.minimumWidth() <= 760

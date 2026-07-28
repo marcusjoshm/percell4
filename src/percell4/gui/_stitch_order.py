@@ -73,10 +73,10 @@ _ORDER_TO_CORNER: dict[str, str] = {
 # what the value carries.
 
 GRID_TYPE_LABELS: dict[str, str] = {
-    "row_by_row": "Grid: row-by-row",
-    "column_by_column": "Grid: column-by-column",
-    "snake_by_row": "Grid: snake-by-row",
-    "snake_by_column": "Grid: snake-by-column",
+    "row_by_row": "Row-by-row",
+    "column_by_column": "Column-by-column",
+    "snake_by_row": "Snake-by-row",
+    "snake_by_column": "Snake-by-column",
 }
 
 # (label, corner value) pairs, in Fiji's presentation order.

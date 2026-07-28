@@ -59,10 +59,10 @@ def test_grid_x_is_cols_and_y_is_rows(qtbot) -> None:
 def test_type_labels_match_fiji(qtbot) -> None:
     form = _form(qtbot)
     assert _labels(form.grid_type) == [
-        "Grid: row-by-row",
-        "Grid: column-by-column",
-        "Grid: snake-by-row",
-        "Grid: snake-by-column",
+        "Row-by-row",
+        "Column-by-column",
+        "Snake-by-row",
+        "Snake-by-column",
     ]
     assert _values(form.grid_type) == list(GRID_TYPES)
 
@@ -288,3 +288,57 @@ def test_form_fits_a_standard_window_width(qtbot) -> None:
         f"stitching form wants {form.sizeHint().width()}px — "
         "it has regressed toward the old wide-row layout"
     )
+
+
+# ── Acquisition-order preview ───────────────────────────────────────
+
+
+def test_preview_tracks_pattern_and_order(qtbot) -> None:
+    form = _form(qtbot)
+    form.grid_type.setCurrentIndex(form.grid_type.findData("snake_by_column"))
+    form.order.setCurrentIndex(form.order.findData("bottom_right"))
+
+    assert form.preview._grid_type == "snake_by_column"
+    assert form.preview._order == "bottom_right"
+
+
+def test_preview_renders_for_every_combination(qtbot) -> None:
+    """Smoke-test paintEvent across all 16 Pattern/Order pairs.
+
+    The diagram derives its path from the real _tile_positions, so a domain
+    change that broke one combination would surface here rather than as a
+    blank box in the dialog.
+    """
+    from qtpy.QtGui import QPixmap
+
+    form = _form(qtbot)
+    for t in range(form.grid_type.count()):
+        form.grid_type.setCurrentIndex(t)
+        for o in range(form.order.count()):
+            form.order.setCurrentIndex(o)
+            pixmap = QPixmap(form.preview.size())
+            form.preview.render(pixmap)
+            assert not pixmap.isNull()
+
+
+def test_preview_ignores_unknown_values(qtbot) -> None:
+    """A bad value must leave the last good diagram up, not blank it."""
+    form = _form(qtbot)
+    before = (form.preview._grid_type, form.preview._order)
+    form.preview.set_pattern("diagonal", "sideways")
+    assert (form.preview._grid_type, form.preview._order) == before
+
+
+def test_preview_path_follows_the_domain_traversal(qtbot) -> None:
+    """The diagram must not reimplement the walk.
+
+    Asserting the widget reads its path from the same function the importer
+    uses is what guarantees the picture cannot lie about tile placement.
+    """
+    import inspect
+
+    from percell4.gui import _tile_order_preview
+
+    source = inspect.getsource(_tile_order_preview)
+    assert "_tile_positions" in source
+    assert "from percell4.domain.io.assembler import _tile_positions" in source

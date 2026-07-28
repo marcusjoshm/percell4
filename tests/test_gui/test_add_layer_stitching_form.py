@@ -213,7 +213,7 @@ def test_both_tabs_use_the_canonical_form(qtbot, tmp_path) -> None:
 def test_both_tabs_show_fiji_labels(qtbot, tmp_path) -> None:
     dlg = _dialog(qtbot, tmp_path)
     for form in (dlg._batch_stitch_widget, dlg._tcspc_stitch_widget):
-        assert form.grid_type.itemText(0) == "Grid: row-by-row"
+        assert form.grid_type.itemText(0) == "Row-by-row"
         assert form.order.itemText(0) == "Right & Down"
         form.grid_type.setCurrentIndex(form.grid_type.findData("column_by_column"))
         assert form.order.itemText(0) == "Down & Right"

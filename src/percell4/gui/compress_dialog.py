@@ -61,11 +61,12 @@ class CompressDialog(QDialog):
         self.setWindowTitle("Compress TIFF Dataset")
         # 750 dated from when the stitching controls were one wide QHBoxLayout
         # of eight widgets — and even 750 overflowed, forcing a horizontal
-        # scrollbar. The binding constraint is now the Manual-mode channel
-        # panel, not stitching; 680 clears it with the vertical scrollbar
-        # present, verified by test_compress_dialog_stitching_form.py.
-        self.setMinimumWidth(680)
-        self.resize(720, 700)
+        # scrollbar. StitchingForm plus its acquisition-order diagram needs
+        # ~692px of content, so 740 clears it once the vertical scrollbar and
+        # frame are accounted for. Measured under test, not guessed —
+        # test_compress_dialog_stitching_form.py fails if it stops fitting.
+        self.setMinimumWidth(740)
+        self.resize(780, 700)
         cap_to_screen(self)
         self._project_dir = project_dir
 

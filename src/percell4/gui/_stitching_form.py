@@ -8,11 +8,11 @@ Layout is a ``QGridLayout`` (label, field, label, field) inside a
 used — that row held eight widgets and overflowed its host dialog into a
 horizontal scrollbar.
 
-Presentation follows the Fiji *Grid/Collection Stitching* plugin: ``Type`` and
-``Order``, with the Order options keyed to the selected Type. The labels are
-Fiji's; the values handed to ``TileConfig`` are PerCell4's existing canonical
-strings, carried in ``itemData``. See ``_stitch_order.py`` for why the two are
-separable.
+Presentation follows the Fiji *Grid/Collection Stitching* plugin: ``Pattern``
+and ``Order``, with the Order options keyed to the selected Pattern, plus a
+small diagram of the resulting acquisition path. The values handed to
+``TileConfig`` are PerCell4's existing canonical strings, carried in
+``itemData``. See ``_stitch_order.py`` for why label and value are separable.
 
 Per-surface variation is expressed with constructor flags rather than
 subclasses, so there stays exactly one construction site.
@@ -20,7 +20,7 @@ subclasses, so there stays exactly one construction site.
 
 from __future__ import annotations
 
-from qtpy.QtCore import Signal
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -40,6 +40,7 @@ from percell4.gui._stitch_order import (
     normalize_order,
     order_labels_for,
 )
+from percell4.gui._tile_order_preview import TileOrderPreview
 
 
 class StitchingForm(QWidget):
@@ -71,6 +72,7 @@ class StitchingForm(QWidget):
         # combo is populated, but signals are blocked inside so this does not
         # count as a user edit.
         self._repopulate_order(emit=False)
+        self._sync_preview()
 
     # ── Construction ────────────────────────────────────────────────
 
@@ -95,7 +97,7 @@ class StitchingForm(QWidget):
         self.grid_x.setToolTip("Number of tile columns (the horizontal extent of the grid).")
         grid.addWidget(self.grid_x, 0, 1)
 
-        grid.addWidget(QLabel("Type:"), 0, 2)
+        grid.addWidget(QLabel("Pattern:"), 0, 2)
         self.grid_type = QComboBox()
         for value in GRID_TYPES:
             self.grid_type.addItem(GRID_TYPE_LABELS[value], value)
@@ -166,7 +168,16 @@ class StitchingForm(QWidget):
         )
         grid.addWidget(self.fusion, 3, 3)
 
-        grid.setColumnStretch(4, 1)
+        # Acquisition-order diagram, filling the space to the right of the
+        # controls. Spans all four rows so it stays visually tied to the whole
+        # block rather than to one field.
+        self.preview = TileOrderPreview(
+            grid_type=self.grid_type.currentData(), order="top_left"
+        )
+        grid.addWidget(self.preview, 0, 4, 4, 1, Qt.AlignTop | Qt.AlignHCenter)
+
+        grid.setColumnStretch(5, 1)
+        grid.setColumnMinimumWidth(4, self.preview.width() + 12)
         outer.addWidget(self.group)
 
         for widget in (self.overlap_label, self.overlap, self.register_check,
@@ -183,6 +194,7 @@ class StitchingForm(QWidget):
         self.overlap.valueChanged.connect(lambda _v: self.changed.emit())
         for combo in (self.order, self.reference, self.fusion):
             combo.currentIndexChanged.connect(lambda _i: self.changed.emit())
+        self.order.currentIndexChanged.connect(lambda _i: self._sync_preview())
         # The reference combo is editable — free-text edits count too.
         self.reference.editTextChanged.connect(lambda _t: self.changed.emit())
         self.register_check.toggled.connect(lambda _c: self.changed.emit())
@@ -193,11 +205,17 @@ class StitchingForm(QWidget):
 
     # ── Type → Order dependency ─────────────────────────────────────
 
+    def _sync_preview(self) -> None:
+        self.preview.set_pattern(
+            self.grid_type.currentData(), self.order.currentData()
+        )
+
     def _on_grid_type_changed(self, _index: int) -> None:
         # A Type change is itself a user edit even when the Order value is
         # unaffected, so always announce it; _repopulate_order stays silent and
         # this one emission covers both.
         self._repopulate_order(emit=False)
+        self._sync_preview()
         self.changed.emit()
 
     def _repopulate_order(self, *, emit: bool) -> None:
