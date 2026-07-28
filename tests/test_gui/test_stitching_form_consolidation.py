@@ -29,14 +29,9 @@ CANONICAL = "_stitching_form.py"
 GRID_TYPE_VALUES = {"row_by_row", "column_by_column", "snake_by_row", "snake_by_column"}
 
 # Surfaces not yet migrated, with the reason. Mirrors the EXEMPT_DIALOGS
-# convention in test_dialog_helper_compliance.py. This set must only ever
-# shrink — emptying it is U7's acceptance criterion.
-PENDING_MIGRATION: dict[str, str] = {
-    "import_dialog.py": (
-        "not instantiated anywhere in src/ (superseded by CompressDialog); "
-        "migrated in U7"
-    ),
-}
+# convention in test_dialog_helper_compliance.py. Empty, and it must stay that
+# way: a new entry here means someone hand-rolled stitching controls again.
+PENDING_MIGRATION: dict[str, str] = {}
 
 
 def _gui_sources() -> list[Path]:
@@ -98,6 +93,7 @@ def test_canonical_form_is_imported_by_every_migrated_surface() -> None:
         "compress_dialog.py",
         "add_layer_dialog.py",
         "batch_tcspc_dialog.py",
+        "import_dialog.py",
     } - set(PENDING_MIGRATION)
 
     importers = {
@@ -107,3 +103,12 @@ def test_canonical_form_is_imported_by_every_migrated_surface() -> None:
     }
     missing = expected - importers
     assert not missing, f"these surfaces do not use the canonical form: {missing}"
+
+
+def test_no_surface_is_pending_migration() -> None:
+    """Consolidation is complete. This is not a formality: the exemption list
+    is the escape hatch, so an entry appearing here is the signal that the
+    single-construction-site invariant has been given up on."""
+    assert PENDING_MIGRATION == {}, (
+        f"stitching controls still hand-rolled in: {sorted(PENDING_MIGRATION)}"
+    )
