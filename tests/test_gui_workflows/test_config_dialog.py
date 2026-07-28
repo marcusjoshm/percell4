@@ -902,12 +902,17 @@ def _dilute_group(dialog):
     return dialog._dilute_mask_name.parent()
 
 
-def test_dilute_group_checked_by_default(dialog):
-    """Dilute generation is ON by default (workflow's phase-separation
-    use case). The default mask name is pre-filled so Start isn't blocked."""
+def test_dilute_group_unchecked_by_default(dialog):
+    """Dilute generation is OFF by default.
+
+    It is an interactive per-dataset phase, so defaulting it on made every run
+    pause for it unless the researcher remembered to untick it. The mask name
+    stays pre-filled so ticking the group is all that is needed — an empty name
+    is a required field and would block Start.
+    """
     group = _dilute_group(dialog)
     assert group.isCheckable() is True
-    assert group.isChecked() is True
+    assert group.isChecked() is False
     assert dialog._dilute_mask_name.text() == "dilute"
     # Default field values per the requested config.
     assert dialog._dilute_dilation_px.value() == 5

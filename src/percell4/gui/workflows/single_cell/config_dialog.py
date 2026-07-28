@@ -1420,7 +1420,10 @@ class WorkflowConfigDialog(QDialog):
         """
         box = QGroupBox("Generate dilute-phase mask")
         box.setCheckable(True)
-        box.setChecked(True)
+        # Off by default: dilute-phase generation is an interactive per-dataset
+        # phase, so leaving it on made every run pause for it unless the
+        # researcher remembered to untick it.
+        box.setChecked(False)
         box.setToolTip(
             "Optional: insert a per-dataset interactive dilute-phase mask "
             "generation phase between thresholding rounds and measurement. "
@@ -1429,9 +1432,8 @@ class WorkflowConfigDialog(QDialog):
         )
         form = QFormLayout(box)
 
-        # Default mask name so the checked-by-default group doesn't block
-        # Start with an empty-required-field warning. The user can rename
-        # or uncheck the group.
+        # Pre-filled so ticking the group is enough to run it — the name is a
+        # required field and an empty one blocks Start with a warning.
         self._dilute_mask_name = QLineEdit("dilute")
         self._dilute_mask_name.setPlaceholderText("e.g. dilute")
         self._dilute_mask_name.setToolTip(
