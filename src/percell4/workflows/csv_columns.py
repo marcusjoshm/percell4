@@ -35,7 +35,7 @@ DEFAULT_CSV_METRICS: frozenset[str] = frozenset(
 # one ``<round>_<metric>`` column; per-channel metrics emit one
 # ``<round>_<channel>_<metric>`` column.
 DEFAULT_CSV_PARTICLE_PER_CELL: frozenset[str] = frozenset(
-    {"particle_count", "total_particle_area"}
+    {"particle_count", "total_particle_area", "mean_particle_area"}
 )
 DEFAULT_CSV_PARTICLE_PER_CHANNEL: frozenset[str] = frozenset(
     {"particle_mean_intensity"}

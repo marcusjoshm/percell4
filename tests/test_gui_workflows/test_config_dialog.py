@@ -1083,6 +1083,7 @@ def test_csv_picker_default_selections(dialog, h5_ds1):
     assert dialog._selected_csv_particle_per_cell == {
         "particle_count",
         "total_particle_area",
+        "mean_particle_area",
     }
     assert dialog._selected_csv_particle_per_channel == {
         "particle_mean_intensity",

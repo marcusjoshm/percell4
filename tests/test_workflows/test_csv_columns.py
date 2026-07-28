@@ -36,9 +36,11 @@ def test_build_columns_default_selection_shape():
         particle_per_channel=DEFAULT_CSV_PARTICLE_PER_CHANNEL,
     )
     # area (core) + GFP_{area,integrated,mean} + group_m + GFP_{...}_in_m
-    # + m_{particle_count,total_particle_area} + m_GFP_particle_mean_intensity
+    # + m_{particle_count,total_particle_area,mean_particle_area}
+    # + m_GFP_particle_mean_intensity
     assert "m_particle_count" in cols
     assert "m_total_particle_area" in cols
+    assert "m_mean_particle_area" in cols
     assert "m_GFP_particle_mean_intensity" in cols
     # No duplicate entries.
     assert len(cols) == len(set(cols))
