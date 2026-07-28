@@ -32,6 +32,13 @@ _CELL = 26
 _GAP = 4
 _MARGIN = 8
 
+# Arrowhead geometry. The stroke stops short of the final point by
+# ``_ARROW_LEN * _STROKE_BACKOFF`` so the head's tip — not a round line cap
+# poking through it — is what lands on the last tile's centre.
+_ARROW_LEN = 10.0
+_ARROW_SPREAD = math.radians(24)
+_STROKE_BACKOFF = 0.8
+
 
 class TileOrderPreview(QWidget):
     """Draws the acquisition path for a ``(grid_type, order)`` pair."""
@@ -99,11 +106,15 @@ class TileOrderPreview(QWidget):
                     )
                 )
 
-        # The walk, in acquisition order.
+        # The walk, in acquisition order. The stroke stops short of the very
+        # last point so the arrowhead sits flush at the tip instead of being
+        # overlaid on a line that already ran past it.
         points = [self._cell_center(*positions[i]) for i in range(_N * _N)]
+        stroke_end = _pull_back(points[-2], points[-1], _ARROW_LEN * _STROKE_BACKOFF)
         path = QPainterPath(points[0])
-        for point in points[1:]:
+        for point in points[1:-1]:
             path.lineTo(point)
+        path.lineTo(stroke_end)
         painter.setBrush(Qt.NoBrush)
         painter.setPen(
             QPen(QColor(theme.ACCENT), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
@@ -121,13 +132,11 @@ class TileOrderPreview(QWidget):
 
     @staticmethod
     def _draw_arrow_head(painter: QPainter, start: QPointF, end: QPointF) -> None:
+        """Filled triangle with its tip exactly on ``end``."""
         dx, dy = end.x() - start.x(), end.y() - start.y()
-        length = math.hypot(dx, dy)
-        if length == 0:
+        if math.hypot(dx, dy) == 0:
             return
         angle = math.atan2(dy, dx)
-        size = 7.0
-        spread = math.radians(26)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(theme.ACCENT))
         painter.drawPolygon(
@@ -135,13 +144,26 @@ class TileOrderPreview(QWidget):
                 [
                     end,
                     QPointF(
-                        end.x() - size * math.cos(angle - spread),
-                        end.y() - size * math.sin(angle - spread),
+                        end.x() - _ARROW_LEN * math.cos(angle - _ARROW_SPREAD),
+                        end.y() - _ARROW_LEN * math.sin(angle - _ARROW_SPREAD),
                     ),
                     QPointF(
-                        end.x() - size * math.cos(angle + spread),
-                        end.y() - size * math.sin(angle + spread),
+                        end.x() - _ARROW_LEN * math.cos(angle + _ARROW_SPREAD),
+                        end.y() - _ARROW_LEN * math.sin(angle + _ARROW_SPREAD),
                     ),
                 ]
             )
         )
+
+
+def _pull_back(start: QPointF, end: QPointF, distance: float) -> QPointF:
+    """A point ``distance`` back along the segment from ``end`` toward ``start``.
+
+    Clamped so a short final leg cannot invert the segment.
+    """
+    dx, dy = end.x() - start.x(), end.y() - start.y()
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return end
+    distance = min(distance, length)
+    return QPointF(end.x() - dx / length * distance, end.y() - dy / length * distance)
