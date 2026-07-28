@@ -103,6 +103,7 @@ def _build_panel(qtbot, monkeypatch, *, channel="ch0", existing_labels=None):
     viewer.layers = [layer]
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
 
     launcher = MagicMock()
     launcher._current_store = store

@@ -43,8 +43,12 @@ def _make_panel(qtbot, tmp_path):
     data_model = CellDataModel(session)
 
     viewer_win = MagicMock()
-    viewer_win.viewer = MagicMock()
-    viewer_win.viewer.layers = []
+    _viewer = MagicMock()
+    _viewer.layers = []
+    # Same object behind both accessors, matching ViewerWindow: once a viewer
+    # exists, `existing_viewer` and `viewer` return it.
+    viewer_win.viewer = _viewer
+    viewer_win.existing_viewer = _viewer
 
     def _get_active_seg_labels():
         return np.zeros((8, 8), dtype=np.int32)

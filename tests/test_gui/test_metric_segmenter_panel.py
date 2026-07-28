@@ -57,6 +57,11 @@ class _FakeViewer:
     def __init__(self, layers):
         self.viewer = SimpleNamespace(layers=layers)
 
+    @property
+    def existing_viewer(self):
+        """Mirrors ``ViewerWindow.existing_viewer`` — the fake always has one."""
+        return self.viewer
+
     def add_labels(self, data, name, **kwargs):
         self.viewer.layers.append(SimpleNamespace(name=name, data=np.asarray(data)))
 

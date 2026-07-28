@@ -70,7 +70,11 @@ def _make_fake_launcher(store: DatasetStore, image_shape=(10, 10)):
         fake_viewer.layers.append(labels_layer)
         added_layers.append(labels_layer)
 
-    viewer_win = SimpleNamespace(viewer=fake_viewer, add_labels=fake_add_labels)
+    viewer_win = SimpleNamespace(
+        viewer=fake_viewer,
+        existing_viewer=fake_viewer,
+        add_labels=fake_add_labels,
+    )
     status_messages: list[str] = []
     fake_status_bar = SimpleNamespace(
         showMessage=lambda msg: status_messages.append(msg)

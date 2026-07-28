@@ -19,6 +19,11 @@ class _FakeViewer:
     def __init__(self) -> None:
         self.viewer = SimpleNamespace(layers=_FakeLayers())
 
+    @property
+    def existing_viewer(self):
+        """Mirrors ``ViewerWindow.existing_viewer`` — the fake always has one."""
+        return self.viewer
+
     # The window calls viewer_win.add_labels / add_mask (the ViewerWindow API).
     def add_labels(self, data, name, **kwargs):
         # replace same-name layer if present (napari add would collide; the window

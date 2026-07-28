@@ -395,7 +395,7 @@ class DilutePhaseMaskPanel(QWidget):
         Returns ``None`` when the channel layer can't be located (the
         panel surfaces this via the status label).
         """
-        viewer = getattr(self._viewer_win, "viewer", None)
+        viewer = getattr(self._viewer_win, "existing_viewer", None)
         if viewer is None:
             return None
         channel = self._session.active_channel

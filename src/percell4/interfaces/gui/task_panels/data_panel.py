@@ -288,7 +288,7 @@ class DataPanel(QWidget):
                     self._mgmt_chan_combo.addItem(name)
                     seen.add(name)
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in viewer_win.viewer.layers:
                 if layer.__class__.__name__ == "Image" and layer.name not in seen:
                     self._mgmt_chan_combo.addItem(layer.name)
@@ -379,7 +379,7 @@ class DataPanel(QWidget):
                 return
 
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in viewer_win.viewer.layers:
                 if layer.name == old_name:
                     layer.name = new_name
@@ -423,7 +423,7 @@ class DataPanel(QWidget):
             store.delete_item(f"{prefix}/{name}")
 
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in list(viewer_win.viewer.layers):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
@@ -484,7 +484,7 @@ class DataPanel(QWidget):
                 session.set_active_channel(new_name)
 
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in viewer_win.viewer.layers:
                 if layer.name == old_name:
                     layer.name = new_name
@@ -631,7 +631,7 @@ class DataPanel(QWidget):
 
         # Remove the napari layer.
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in list(viewer_win.viewer.layers):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)

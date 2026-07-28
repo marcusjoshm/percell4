@@ -193,7 +193,7 @@ def _build_panel(qtbot, *, channel="ch0", image_data=None, with_viewer=True):
     if with_viewer:
         layers = [] if image_data is False else [_image_layer(channel, image_data)]
         viewer = _FakeViewer(layers)
-        viewer_win = SimpleNamespace(viewer=viewer)
+        viewer_win = SimpleNamespace(viewer=viewer, existing_viewer=viewer)
         launcher._windows = {"viewer": viewer_win}
     else:
         viewer = None
@@ -386,7 +386,9 @@ def test_add_does_not_steal_active_layer_from_labels(qtbot) -> None:
     assert viewer.layers.selection.active.name == "manual"
 
     panel, _ = _build_panel(qtbot)
-    panel._launcher._windows = {"viewer": SimpleNamespace(viewer=viewer)}
+    panel._launcher._windows = {
+        "viewer": SimpleNamespace(viewer=viewer, existing_viewer=viewer)
+    }
     panel._cp_form._diameter.setValue(100.0)
 
     panel._cp_show_diameter_circle.setChecked(True)

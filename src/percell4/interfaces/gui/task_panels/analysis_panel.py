@@ -295,7 +295,7 @@ class AnalysisPanel(QWidget):
 
         # Get the image data from the viewer layer (still need viewer for the array)
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("Open the viewer first")
             return
 
@@ -392,7 +392,7 @@ class AnalysisPanel(QWidget):
 
     def _on_threshold_roi_changed(self, event=None) -> None:
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return
 
         image = self._thresh_working_image
@@ -451,7 +451,7 @@ class AnalysisPanel(QWidget):
 
     def _on_threshold_accept(self) -> None:
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("No preview to accept")
             return
 

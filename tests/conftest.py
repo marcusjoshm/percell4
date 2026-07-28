@@ -24,10 +24,82 @@ os.environ.setdefault("QT_API", "pyqt5")
 # through tests/test_gui while the same directory passed when run alone.
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 
+import tempfile  # noqa: E402
+import traceback  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+
+# ── GL-dependency audit ─────────────────────────────────────────────
+#
+# Set PERCELL4_GL_AUDIT=1 to find every test that ends up constructing a real
+# ``napari.Viewer``. Those need an OpenGL context, which the macOS offscreen
+# platform does not provide, so they cannot live under ``tests/``.
+#
+# Grep cannot find them. ``test_dilute_phase_workflow_sidebar.py`` mentions
+# neither napari nor ViewerWindow, yet it builds a real ``LauncherWindow``
+# that owns a ``ViewerWindow``; a queued ``_wire_paint_autosave`` then reads
+# ``.viewer`` during a *later* test's setup and builds the canvas there. It
+# passes alone and segfaults when paired with ``test_cnr_segmenter.py``.
+#
+# The audit records before it raises, and that ordering is required rather
+# than defensive: ``segmentation_panel.py`` wraps the very same access in
+# ``try: ... except Exception: return``, so a raise-only probe is swallowed
+# at exactly the site it exists to find and reports a clean run.
+
+#: Populated by the patched constructor: (nodeid, formatted stack).
+GL_AUDIT_HITS: list[tuple[str, str]] = []
+
+_CURRENT_NODEID = "<no test running>"
+
+
+def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
+    """Track which test is executing, for attribution of deferred builds."""
+    global _CURRENT_NODEID
+    _CURRENT_NODEID = item.nodeid
+    return None  # carry on with the normal protocol
+
+
+def pytest_configure(config):  # noqa: ARG001
+    if os.environ.get("PERCELL4_GL_AUDIT") != "1":
+        return
+
+    import napari
+
+    original = napari.Viewer.__init__
+
+    def _audited_init(self, *args, **kwargs):
+        GL_AUDIT_HITS.append(
+            (_CURRENT_NODEID, "".join(traceback.format_stack(limit=25)))
+        )
+        raise RuntimeError(
+            "PERCELL4_GL_AUDIT: napari.Viewer constructed during "
+            f"{_CURRENT_NODEID}"
+        )
+        return original(self, *args, **kwargs)  # noqa: W0101 — documents intent
+
+    napari.Viewer.__init__ = _audited_init
+
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
+    if os.environ.get("PERCELL4_GL_AUDIT") != "1":
+        return
+    out = Path(
+        os.environ.get("PERCELL4_GL_AUDIT_OUT")
+        or Path(tempfile.gettempdir()) / "percell4_gl_audit.txt"
+    )
+    seen: dict[str, int] = {}
+    for nodeid, _stack in GL_AUDIT_HITS:
+        module = nodeid.split("::")[0]
+        seen[module] = seen.get(module, 0) + 1
+    lines = [f"{count:4d}  {module}" for module, count in sorted(seen.items())]
+    out.write_text(
+        f"napari.Viewer constructions: {len(GL_AUDIT_HITS)} "
+        f"across {len(seen)} modules\n\n" + "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+    print(f"\n[gl-audit] {len(GL_AUDIT_HITS)} hits across {len(seen)} modules -> {out}")
 
 
 @pytest.fixture(autouse=True)

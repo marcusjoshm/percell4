@@ -52,6 +52,7 @@ def fake_viewer():
 
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
     viewer_win.show = MagicMock()
     viewer_win.add_mask = MagicMock()
     return viewer_win

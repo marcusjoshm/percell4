@@ -67,6 +67,7 @@ def _build_fake_viewer():
 
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
     viewer_win.add_image = MagicMock(side_effect=lambda data, **kw: add_image(data, **kw))
     viewer_win.add_labels = MagicMock(side_effect=lambda data, **kw: add_labels(data, **kw))
     viewer_win.add_mask = MagicMock()

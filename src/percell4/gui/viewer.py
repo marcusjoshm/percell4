@@ -224,6 +224,22 @@ class ViewerWindow(QObject):
         self._ensure_viewer()
         return self._viewer
 
+    @property
+    def existing_viewer(self):
+        """The napari viewer if one has been built, else ``None``.
+
+        Use this to *ask whether* a viewer exists; use :attr:`viewer` to show
+        the user something. The distinction matters because ``viewer`` builds
+        one on access, so ``if win.viewer is None:`` is a test that can never
+        be true and that constructs a full OpenGL canvas in order to fail.
+
+        Cleanup and refresh paths want this one. There is nothing to remove
+        from a viewer that was never opened, and forcing it into existence to
+        find that out means loading a dataset spawns the napari window even
+        when the researcher never asked for it.
+        """
+        return self._viewer
+
     def set_subtitle(self, subtitle: str) -> None:
         """Update the window title to show a subtitle (e.g. filename)."""
         self._ensure_viewer()

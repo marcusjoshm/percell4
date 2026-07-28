@@ -381,7 +381,13 @@ class SegmentationPanel(QWidget):
         if viewer_win is None:
             return
         try:
-            napari_viewer = viewer_win.viewer
+            # existing_viewer, not viewer: this runs on every ``data`` state
+            # change, so reading the constructing property here built a napari
+            # window (and an OpenGL canvas) the moment a dataset was loaded,
+            # whether or not the researcher had opened the viewer. There is
+            # nothing to subscribe to on a viewer that does not exist yet —
+            # when one is created, a later ``data`` change wires it up.
+            napari_viewer = viewer_win.existing_viewer
         except Exception:  # noqa: BLE001
             return
         if napari_viewer is None:
@@ -464,7 +470,7 @@ class SegmentationPanel(QWidget):
             return
 
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("Open a dataset in the viewer first")
             return
 
@@ -734,7 +740,9 @@ class SegmentationPanel(QWidget):
         must not spam the status bar on every open.
         """
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        viewer = getattr(viewer_win, "viewer", None) if viewer_win else None
+        # existing_viewer: this also runs on dataset load, so asking through
+        # the constructing property built a napari window on every open.
+        viewer = getattr(viewer_win, "existing_viewer", None) if viewer_win else None
         if viewer is None:
             if announce:
                 self._show_status("Open a dataset in the viewer first")
@@ -803,7 +811,7 @@ class SegmentationPanel(QWidget):
         if self._launcher is None:
             return None
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return None
         if channel_name:
             for layer in viewer_win.viewer.layers:
@@ -819,7 +827,7 @@ class SegmentationPanel(QWidget):
 
     def _on_create_empty_labels(self) -> None:
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("Open a dataset in the viewer first")
             return
         shape = self._get_image_shape()
@@ -864,7 +872,7 @@ class SegmentationPanel(QWidget):
         if self._launcher is None:
             return None
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return None
         import napari
         active_name = self.data_model.active_segmentation
@@ -884,7 +892,7 @@ class SegmentationPanel(QWidget):
         if self._launcher is None:
             return
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return
         viewer_win.viewer.layers.selection.active = labels_layer
 
@@ -893,7 +901,7 @@ class SegmentationPanel(QWidget):
         if self._launcher is None:
             return 0
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return 0
         dims = viewer_win.viewer.dims
         if dims.ndim >= 3 and len(dims.current_step) > 0:
@@ -1071,7 +1079,7 @@ class SegmentationPanel(QWidget):
         )
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return
 
         for layer in list(viewer_win.viewer.layers):
@@ -1150,7 +1158,7 @@ class SegmentationPanel(QWidget):
         self._persist_labels_layer(labels_layer)
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in list(viewer_win.viewer.layers):
                 if layer.name == "_cleanup_preview":
                     viewer_win.viewer.layers.remove(layer)

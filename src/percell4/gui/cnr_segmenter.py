@@ -364,7 +364,7 @@ class CnrSegmenterWindow(QWidget):
 
     def _push_preview(self, seg_img: np.ndarray, n: int) -> None:
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or getattr(viewer_win, "viewer", None) is None:
+        if viewer_win is None or getattr(viewer_win, "existing_viewer", None) is None:
             return
         viewer = viewer_win.viewer
         existing = None
@@ -386,7 +386,7 @@ class CnrSegmenterWindow(QWidget):
 
     def _remove_preview_layer(self) -> None:
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or getattr(viewer_win, "viewer", None) is None:
+        if viewer_win is None or getattr(viewer_win, "existing_viewer", None) is None:
             return
         viewer = viewer_win.viewer
         for layer in list(viewer.layers):
