@@ -120,71 +120,31 @@ def test_flip_axis_maps_user_data_including_none_sentinel(qtbot) -> None:
     assert form.flip_axis() == 1
 
 
-# ── Composite re-emission ────────────────────────────────────────────
+# ── changed signal ───────────────────────────────────────────────────
 
 
-def test_extracted_widget_edits_reach_composite_changed_exactly_once(qtbot) -> None:
-    """Editing a control that now lives in an extracted widget must still emit
-    ``StitchingFlimForm.changed`` — once per edit, never zero, never twice.
+def test_each_widget_emits_changed_exactly_once_per_edit(qtbot) -> None:
+    """Zero emissions would leave BatchTCSPCDialog's Run button enabled
+    against a stale config; two would signal a double-wire."""
+    from percell4.gui._flim_bin_form import FlimBinParamsForm, RotateFlipForm
 
-    Zero would leave BatchTCSPCDialog's Run button enabled against a stale
-    config; twice would be harmless but signals a double-wire.
-    """
-    from percell4.gui._stitching_flim_form import StitchingFlimForm
-
-    form = StitchingFlimForm()
-    qtbot.addWidget(form)
+    rotate = RotateFlipForm()
+    flim = FlimBinParamsForm()
+    qtbot.addWidget(rotate)
+    qtbot.addWidget(flim)
 
     counter = {"n": 0}
-    form.changed.connect(lambda: counter.__setitem__("n", counter["n"] + 1))
+    bump = lambda: counter.__setitem__("n", counter["n"] + 1)  # noqa: E731
+    rotate.changed.connect(bump)
+    flim.changed.connect(bump)
 
-    # Rotate/flip (RotateFlipForm)
-    counter["n"] = 0
-    form.rotation_combo.setCurrentIndex(2)
-    assert counter["n"] == 1
-
-    counter["n"] = 0
-    form.flip_combo.setCurrentIndex(1)
-    assert counter["n"] == 1
-
-    # Raw .bin geometry (FlimBinParamsForm)
-    counter["n"] = 0
-    form.flim_group.setChecked(True)
-    assert counter["n"] == 1
-
-    counter["n"] = 0
-    form.bin_t.setValue(64)
-    assert counter["n"] == 1
-
-    counter["n"] = 0
-    form.bin_dtype.setCurrentIndex(1)
-    assert counter["n"] == 1
-
-    # A stitching control still owned by the composite itself.
-    counter["n"] = 0
-    form.stitch_rows.setValue(3)
-    assert counter["n"] == 1
-
-
-def test_composite_accessors_delegate_to_extracted_widgets(qtbot) -> None:
-    """The public surface is unchanged by the split: every accessor callers
-    and tests use must still resolve through the composite."""
-    from percell4.gui._stitching_flim_form import StitchingFlimForm
-
-    form = StitchingFlimForm()
-    qtbot.addWidget(form)
-
-    form.rotation_combo.setCurrentIndex(3)
-    form.flip_combo.setCurrentIndex(2)
-    assert form.rotation_k() == 3
-    assert form.flip_axis() == 1
-
-    form.flim_group.setChecked(True)
-    form.bin_x.setValue(128)
-    cfg = form.flim_config(frequency_mhz=80.0)
-    assert cfg.bin_x == 128
-
-    # Widget identity: the composite's attribute IS the extracted widget's,
-    # so external code mutating one is seen by the other.
-    assert form.rotation_combo is form._rotate_flip.rotation_combo
-    assert form.bin_dtype is form._flim_bin.bin_dtype
+    for action in (
+        lambda: rotate.rotation_combo.setCurrentIndex(2),
+        lambda: rotate.flip_combo.setCurrentIndex(1),
+        lambda: flim.flim_group.setChecked(True),
+        lambda: flim.bin_t.setValue(64),
+        lambda: flim.bin_dtype.setCurrentIndex(1),
+    ):
+        counter["n"] = 0
+        action()
+        assert counter["n"] == 1

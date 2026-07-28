@@ -246,7 +246,7 @@ def test_settings_change_disables_run(qtbot, tmp_path: Path) -> None:
 
     # Touching a stitching widget should re-disable Run.
     form = dlg._stitching_form
-    form.stitch_rows.setValue(form.stitch_rows.value() + 1)
+    form.grid_y.setValue(form.grid_y.value() + 1)
     assert dlg._validated is False
     assert not dlg._run_btn.isEnabled()
 
@@ -513,20 +513,23 @@ def test_channel_token_override_picks_propagate_to_run(qtbot, tmp_path: Path) ->
 
 
 def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
-    """Origin, rotate, flip, and bin-geometry combos must match the
-    single-dataset TCSPC tab and compress_dialog. Both dialogs share the
-    StitchingFlimForm widget, so this also pins the canonical lists."""
+    """Pins the canonical lists every tiling surface shows.
+
+    All surfaces now build the same StitchingForm / RotateFlipForm /
+    FlimBinParamsForm, so this doubles as the anti-drift guard: itemData is
+    the wire format persisted into .h5 /metadata and run_config.json and must
+    not move, while itemText is presentation and follows Fiji.
+    """
     dlg = BatchTCSPCDialog()
     qtbot.addWidget(dlg)
     form = dlg._stitching_form
-    assert form is not None
+    rotate = dlg._rotate_flip_form
+    flim = dlg._flim_bin_form
+    assert form is not None and rotate is not None and flim is not None
 
     # ── Wire format: itemData is what reaches TileConfig. ──
-    # These values are persisted into .h5 /metadata and run_config.json, so
-    # they must survive any relabeling. Asserted separately from the display
-    # text below precisely so a label change cannot quietly alter them.
     pattern_values = [
-        form.stitch_type.itemData(i) for i in range(form.stitch_type.count())
+        form.grid_type.itemData(i) for i in range(form.grid_type.count())
     ]
     assert pattern_values == [
         "row_by_row",
@@ -535,42 +538,41 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
         "snake_by_column",
     ]
 
-    origin_values = [
-        form.stitch_order.itemData(i) for i in range(form.stitch_order.count())
-    ]
-    assert origin_values == [
-        "right_down", "right_up", "left_down", "left_up",
+    # Four canonical corners. The other four accepted order strings are exact
+    # aliases of these, so nothing is lost by not listing them.
+    order_values = [form.order.itemData(i) for i in range(form.order.count())]
+    assert order_values == [
         "top_left", "top_right", "bottom_left", "bottom_right",
     ]
 
     # Every value the combos can emit must construct a valid TileConfig —
-    # this is the guard that a vocabulary drift fails loudly at its source.
+    # the guard that a vocabulary drift fails loudly at its source.
     for grid_type in pattern_values:
-        for order in origin_values:
+        for order in order_values:
             TileConfig(grid_type=grid_type, order=order)
 
-    # ── Display text: presentation only. ──
-    pattern_items = [
-        form.stitch_type.itemText(i) for i in range(form.stitch_type.count())
-    ]
-    assert pattern_items == [
-        "row_by_row",
-        "column_by_column",
-        "snake_by_row",
-        "snake_by_column",
+    # ── Display text: Fiji Grid/Collection Stitching wording. ──
+    assert [
+        form.grid_type.itemText(i) for i in range(form.grid_type.count())
+    ] == [
+        "Grid: row-by-row",
+        "Grid: column-by-column",
+        "Grid: snake-by-row",
+        "Grid: snake-by-column",
     ]
 
-    origin_items = [
-        form.stitch_order.itemText(i) for i in range(form.stitch_order.count())
+    # Order options are keyed to the selected Type.
+    assert [form.order.itemText(i) for i in range(form.order.count())] == [
+        "Right & Down", "Left & Down", "Right & Up", "Left & Up",
     ]
-    assert origin_items == [
-        "right_down", "right_up", "left_down", "left_up",
-        "top_left", "top_right", "bottom_left", "bottom_right",
+    form.grid_type.setCurrentIndex(form.grid_type.findData("column_by_column"))
+    assert [form.order.itemText(i) for i in range(form.order.count())] == [
+        "Down & Right", "Down & Left", "Up & Right", "Up & Left",
     ]
 
     rotate_items = [
-        (form.rotation_combo.itemText(i), form.rotation_combo.itemData(i))
-        for i in range(form.rotation_combo.count())
+        (rotate.rotation_combo.itemText(i), rotate.rotation_combo.itemData(i))
+        for i in range(rotate.rotation_combo.count())
     ]
     assert rotate_items == [
         ("None", 0),
@@ -580,8 +582,8 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     ]
 
     flip_items = [
-        (form.flip_combo.itemText(i), form.flip_combo.itemData(i))
-        for i in range(form.flip_combo.count())
+        (rotate.flip_combo.itemText(i), rotate.flip_combo.itemData(i))
+        for i in range(rotate.flip_combo.count())
     ]
     assert flip_items == [
         ("None", -1),
@@ -590,25 +592,25 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
     ]
 
     dtype_items = [
-        form.bin_dtype.itemText(i) for i in range(form.bin_dtype.count())
+        flim.bin_dtype.itemText(i) for i in range(flim.bin_dtype.count())
     ]
     assert dtype_items == ["uint32", "uint16", "float32", "uint8"]
 
     dim_order_items = [
-        form.bin_dim_order.itemText(i)
-        for i in range(form.bin_dim_order.count())
+        flim.bin_dim_order.itemText(i)
+        for i in range(flim.bin_dim_order.count())
     ]
     assert dim_order_items == ["YXT", "XYT", "TYX"]
 
     # Header spinbox shows "Auto-detect" when value is 0 (matches compress).
-    assert form.bin_header.specialValueText() == "Auto-detect"
-    assert form.bin_header.value() == 0
+    assert flim.bin_header.specialValueText() == "Auto-detect"
+    assert flim.bin_header.value() == 0
 
 
 def test_flip_axis_helper_maps_userdata_correctly(qtbot) -> None:
     dlg = BatchTCSPCDialog()
     qtbot.addWidget(dlg)
-    form = dlg._stitching_form
+    form = dlg._rotate_flip_form
     form.flip_combo.setCurrentIndex(0)  # None
     assert form.flip_axis() is None
     form.flip_combo.setCurrentIndex(1)  # vertical, data = 0
@@ -643,7 +645,7 @@ def test_flim_group_checked_propagates_dtype_to_run(qtbot, tmp_path: Path) -> No
     dlg._pairings[h5] = root / "G"
 
     # Check the FLIM group and set dtype to uint32 (the user's real case).
-    form = dlg._stitching_form
+    form = dlg._flim_bin_form
     form.flim_group.setChecked(True)
     form.bin_dtype.setCurrentText("uint32")
     form.bin_header.setValue(20)
@@ -775,3 +777,42 @@ def test_render_summary_text_covers_every_status() -> None:
     assert "c.h5" in text and "skipped_no_changes" in text
     assert "d.h5" in text and "cancelled" in text
     assert "1 succeeded, 1 failed, 1 skipped, 1 cancelled" in text
+
+
+def test_run_gate_covers_all_three_section5_widgets(qtbot) -> None:
+    """Section 5 is three widgets since the stitching consolidation. If any one
+    is not wired to _invalidate_run, Run stays enabled against a stale config.
+    """
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+
+    for label, action in (
+        ("stitching", lambda: dlg._stitching_form.grid_y.setValue(3)),
+        ("rotate/flip", lambda: dlg._rotate_flip_form.rotation_combo.setCurrentIndex(2)),
+        ("flim .bin", lambda: dlg._flim_bin_form.flim_group.setChecked(True)),
+    ):
+        dlg._validated = True
+        action()
+        assert dlg._validated is False, f"{label} edit did not invalidate Run"
+
+
+def test_registration_controls_remain_on_this_append_surface(qtbot) -> None:
+    """Deliberately NOT hidden.
+
+    They are inert on the append path (which reads persisted geometry), and an
+    earlier draft of the consolidation proposed hiding them for that reason.
+    Removing controls the user can currently see is out of scope for a
+    presentation refactor, so they stay.
+    """
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    form = dlg._stitching_form
+
+    form.overlap.setValue(20.0)
+    form.register_check.setChecked(True)
+    form.reference.setCurrentText("ch00")
+
+    tc = form.tile_config()
+    assert tc.overlap == 0.2
+    assert tc.register is True
+    assert tc.reference_channel == "ch00"

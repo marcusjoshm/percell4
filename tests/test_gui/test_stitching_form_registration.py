@@ -1,25 +1,27 @@
-"""Tests for StitchingFlimForm + ImportDialog registration controls (U8).
+"""Tests for StitchingForm + ImportDialog registration controls.
 
-The canonical shared widget (StitchingFlimForm) and the ImportDialog both
-BUILD a TileConfig (hop 1). Both must carry overlap (as a fraction),
-register, and reference_channel.
+The canonical shared widget and the ImportDialog both BUILD a TileConfig
+(hop 1). Both must carry overlap (as a fraction), register, and
+reference_channel.
+
+Retargeted from StitchingFlimForm when that transitional composite was retired.
 """
 
 from __future__ import annotations
 
 
 def test_form_tile_config_threads_registration_fields(qtbot) -> None:
-    from percell4.gui._stitching_flim_form import StitchingFlimForm
+    from percell4.gui._stitching_form import StitchingForm
 
-    form = StitchingFlimForm()
+    form = StitchingForm()
     qtbot.addWidget(form)
 
-    form.stitch_rows.setValue(2)
-    form.stitch_cols.setValue(2)
-    form.overlap_spin.setValue(20.0)  # percent
+    form.grid_y.setValue(2)
+    form.grid_x.setValue(2)
+    form.overlap.setValue(20.0)  # percent
     form.register_check.setChecked(True)
     form.set_reference_channels(["ch00", "ch01"])
-    form.reference_combo.setCurrentText("ch01")
+    form.reference.setCurrentText("ch01")
 
     tc = form.tile_config()
     assert tc.register is True
@@ -28,9 +30,9 @@ def test_form_tile_config_threads_registration_fields(qtbot) -> None:
 
 
 def test_form_defaults_keep_gate_closed(qtbot) -> None:
-    from percell4.gui._stitching_flim_form import StitchingFlimForm
+    from percell4.gui._stitching_form import StitchingForm
 
-    form = StitchingFlimForm()
+    form = StitchingForm()
     qtbot.addWidget(form)
 
     tc = form.tile_config()
@@ -41,19 +43,19 @@ def test_form_defaults_keep_gate_closed(qtbot) -> None:
 
 def test_form_reference_channels_carry_name_as_itemdata(qtbot) -> None:
     """set_reference_channels stores the name as itemData (not an index)."""
-    from percell4.gui._stitching_flim_form import StitchingFlimForm
+    from percell4.gui._stitching_form import StitchingForm
 
-    form = StitchingFlimForm()
+    form = StitchingForm()
     qtbot.addWidget(form)
     form.set_reference_channels(["ch00", "ch01", "ch02"])
-    assert form.reference_combo.itemData(0) == "ch00"
-    assert form.reference_combo.itemData(2) == "ch02"
+    assert form.reference.itemData(0) == "ch00"
+    assert form.reference.itemData(2) == "ch02"
 
 
 def test_form_change_signal_fires_on_register_toggle(qtbot) -> None:
-    from percell4.gui._stitching_flim_form import StitchingFlimForm
+    from percell4.gui._stitching_form import StitchingForm
 
-    form = StitchingFlimForm()
+    form = StitchingForm()
     qtbot.addWidget(form)
     with qtbot.waitSignal(form.changed, timeout=1000):
         form.register_check.setChecked(True)

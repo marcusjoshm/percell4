@@ -69,7 +69,8 @@ from percell4.domain.io.models import (
     TokenConfig,
 )
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
-from percell4.gui._stitching_flim_form import StitchingFlimForm
+from percell4.gui._flim_bin_form import FlimBinParamsForm, RotateFlipForm
+from percell4.gui._stitching_form import StitchingForm
 from percell4.gui.tcspc_tab_state import build_rule_from_preset
 
 _NO_PAIR_LABEL = "— select —"
@@ -132,9 +133,11 @@ class BatchTCSPCDialog(QDialog):
         self._run_btn: QPushButton | None = None
         self._validate_btn: QPushButton | None = None
 
-        # Section 5 widgets — owned by the shared StitchingFlimForm so
+        # Section 5 widgets — owned by the shared canonical forms so
         # the batch dialog and single-dataset TCSPC tab stay in lockstep.
-        self._stitching_form: StitchingFlimForm | None = None
+        self._stitching_form: StitchingForm | None = None
+        self._rotate_flip_form: RotateFlipForm | None = None
+        self._flim_bin_form: FlimBinParamsForm | None = None
         self._conflict_skip_radio: QRadioButton | None = None
         self._conflict_overwrite_radio: QRadioButton | None = None
 
@@ -312,16 +315,29 @@ class BatchTCSPCDialog(QDialog):
     def _build_section_stitching(self) -> QGroupBox:
         """Section 5 — Stitching + orientation + raw ``.bin`` geometry.
 
-        All widgets live in the shared :class:`StitchingFlimForm` so the
-        batch dialog inherits any future fixes made to the single-dataset
-        TCSPC tab's widget set. Drift between the two dialogs was the
-        recurring root cause of every regression in PR #9.
+        Three canonical widgets rather than one combined form: the stitching
+        grid is shared with every other tiling surface, while rotate/flip and
+        the raw ``.bin`` geometry are TCSPC-only. Building them here rather
+        than reimplementing is what keeps this dialog from drifting against
+        the single-dataset TCSPC tab — the recurring root cause of every
+        regression in PR #9.
+
+        Registration controls stay visible on this surface, unchanged.
         """
         box = QGroupBox("5. Stitching & orientation (applied to every dataset)")
         layout = QVBoxLayout(box)
-        self._stitching_form = StitchingFlimForm()
-        self._stitching_form.changed.connect(self._invalidate_run)
-        layout.addWidget(self._stitching_form)
+        self._stitching_form = StitchingForm(
+            show_registration=True, show_fusion=False, title=""
+        )
+        self._rotate_flip_form = RotateFlipForm()
+        self._flim_bin_form = FlimBinParamsForm()
+        for form in (
+            self._stitching_form,
+            self._rotate_flip_form,
+            self._flim_bin_form,
+        ):
+            form.changed.connect(self._invalidate_run)
+            layout.addWidget(form)
         return box
 
     def _build_section_conflict_policy(self) -> QGroupBox:
@@ -866,13 +882,15 @@ class BatchTCSPCDialog(QDialog):
         # Frequency is per-dataset (from CSV) and lands in /metadata via
         # _calibration_attrs; the shared form's FlimConfig only carries
         # geometry. Picking 80.0 here is a no-op for the actual write path.
-        flim_config = self._stitching_form.flim_config(frequency_mhz=80.0)
+        assert self._flim_bin_form is not None
+        flim_config = self._flim_bin_form.flim_config(frequency_mhz=80.0)
         # Same preset the single-dataset TCSPC tab uses: direct token equality
         # first (driven by the per-channel-name overrides set in Section 4),
         # base-stem fallback for .bin files without a channel token.
         cross_format_rule: CrossFormatRule = build_rule_from_preset()
-        rotate_k = self._stitching_form.rotation_k()
-        flip_axis = self._stitching_form.flip_axis()
+        assert self._rotate_flip_form is not None
+        rotate_k = self._rotate_flip_form.rotation_k()
+        flip_axis = self._rotate_flip_form.flip_axis()
         force = bool(self._conflict_overwrite_radio and self._conflict_overwrite_radio.isChecked())
 
         progress = QProgressDialog(
