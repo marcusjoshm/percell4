@@ -5,21 +5,24 @@ canvas. They cannot run under `QT_QPA_PLATFORM=offscreen` on macOS — that
 combination segfaults (exit 139) rather than failing — so they live in
 `tests_gui/` rather than `tests/`.
 
-Regenerate with:
+The boundary is enforced, not documented: an always-on guard in
+`tests/conftest.py` patches `napari.Viewer.__init__` to record and then raise,
+so any test under `tests/` that builds a viewer fails by name instead of
+segfaulting. A run that finds offenders prints a per-module tally and writes it
+to `$TMPDIR/percell4_gl_audit.txt`, so one pass gives the whole relocation
+list. Set `PERCELL4_GL_AUDIT_OUT` to redirect that file.
 
-```bash
-PERCELL4_GL_AUDIT=1 QT_QPA_PLATFORM=offscreen pytest -o addopts="-m 'not slow'"
-```
-
-The audit patches `napari.Viewer.__init__` to record and then raise, so no GL
-context is ever created and one pass enumerates everything. Recording *before*
-raising is required, not defensive: `segmentation_panel.py` wraps the same
-access in `try: ... except Exception: return`, which swallows a raise-only
-probe at precisely the site worth finding.
+Recording *before* raising is required rather than defensive:
+`segmentation_panel.py` wraps the same access in `try: ... except Exception:
+return`, which would swallow a raise-only guard at precisely the site worth
+catching. An autouse fixture inspects the record, so a swallowed raise still
+fails the test that caused it.
 
 ## Inventory
 
-200 constructions across 17 modules.
+The snapshot below is what the audit found *before* the split, when everything
+still lived under `tests/`: 200 constructions across 17 modules. All 16
+`tests/test_gui_workflows/` entries now live in `tests_gui/`.
 
 | Constructions | Module |
 |---:|---|

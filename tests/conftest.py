@@ -24,6 +24,38 @@ os.environ.setdefault("QT_API", "pyqt5")
 # through tests/test_gui while the same directory passed when run alone.
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 
+# Render to an offscreen buffer instead of the desktop. Without this, a run
+# put real windows on screen and took focus — 13 modules call .show() directly
+# and roughly as many more reach it through production code, e.g.
+# MultiSelectController.show() does show(); raise_(); activateWindow().
+#
+# This works only because the tests that build a real napari.Viewer now live in
+# tests_gui/. macOS offscreen provides no OpenGL context, so a viewer built
+# under it segfaults (exit 139, no traceback) rather than failing — which is
+# why an earlier attempt at this concluded offscreen was unusable and reverted
+# it. The order matters: quarantine first, then offscreen.
+#
+# Expect "QOpenGLWidget is not supported on this platform." on stderr. It is
+# benign for the widget tests that remain here; if it is followed by a crash,
+# something GL-dependent has leaked back into tests/ and the autouse guard in
+# this file will name it.
+#
+# setdefault, like the pins above: QT_QPA_PLATFORM=cocoa pytest still runs
+# windowed, which is the way to watch a layout problem happen.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# Qt assumes 96 DPI under the offscreen platform while macOS lays out on a
+# 72pt basis, so the same widget measures about 25% wider offscreen (average
+# char width 10 vs 8, line height 20 vs 16). Several tests assert a pixel
+# budget — "this form fits a standard window width" — and those assertions
+# would otherwise mean something different from what the researcher sees.
+#
+# Pinning the font DPI restores the macOS basis. An environment variable
+# rather than a fixture because there is no ordering hazard: it must be set
+# before the QApplication is constructed, and pytest-qt builds that during
+# fixture setup, after any autouse fixture we could write here.
+os.environ.setdefault("QT_FONT_DPI", "72")
+
 import tempfile  # noqa: E402
 import traceback  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -31,75 +63,96 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-# ── GL-dependency audit ─────────────────────────────────────────────
+# ── No napari viewer under tests/ ───────────────────────────────────
 #
-# Set PERCELL4_GL_AUDIT=1 to find every test that ends up constructing a real
-# ``napari.Viewer``. Those need an OpenGL context, which the macOS offscreen
-# platform does not provide, so they cannot live under ``tests/``.
+# Every test here runs under QT_QPA_PLATFORM=offscreen, which provides no
+# OpenGL context on macOS. A real ``napari.Viewer`` built under it does not
+# fail — it segfaults, exit 139, with no traceback and no attribution. Tests
+# that need one live in ``tests_gui/``.
 #
-# Grep cannot find them. ``test_dilute_phase_workflow_sidebar.py`` mentions
-# neither napari nor ViewerWindow, yet it builds a real ``LauncherWindow``
-# that owns a ``ViewerWindow``; a queued ``_wire_paint_autosave`` then reads
-# ``.viewer`` during a *later* test's setup and builds the canvas there. It
-# passes alone and segfaults when paired with ``test_cnr_segmenter.py``.
+# Grep cannot police that boundary. ``test_dilute_phase_workflow_sidebar.py``
+# mentioned neither napari nor ViewerWindow, yet built a real
+# ``LauncherWindow`` that owns a ``ViewerWindow``; a queued handler then read
+# ``.viewer`` and constructed the canvas, sometimes during a *later* test's
+# setup. It passed alone and segfaulted when run after another module. So the
+# rule is enforced dynamically, at the constructor.
 #
-# The audit records before it raises, and that ordering is required rather
-# than defensive: ``segmentation_panel.py`` wraps the very same access in
-# ``try: ... except Exception: return``, so a raise-only probe is swallowed
-# at exactly the site it exists to find and reports a clean run.
+# Record *before* raising. That ordering is required, not defensive:
+# ``segmentation_panel`` wraps the same access in ``try: ... except
+# Exception: return``, which would swallow a raise-only guard at precisely the
+# site worth catching and report a clean run. The fixture below inspects the
+# record, so a swallowed raise still fails the test that caused it.
 
-#: Populated by the patched constructor: (nodeid, formatted stack).
-GL_AUDIT_HITS: list[tuple[str, str]] = []
+#: (nodeid, formatted stack) for every construction attempt this session.
+VIEWER_CONSTRUCTIONS: list[tuple[str, str]] = []
 
 _CURRENT_NODEID = "<no test running>"
 
 
 def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
-    """Track which test is executing, for attribution of deferred builds."""
+    """Track the executing test, so deferred builds are attributed somewhere."""
     global _CURRENT_NODEID
     _CURRENT_NODEID = item.nodeid
     return None  # carry on with the normal protocol
 
 
 def pytest_configure(config):  # noqa: ARG001
-    if os.environ.get("PERCELL4_GL_AUDIT") != "1":
-        return
-
+    """Make ``napari.Viewer()`` a recorded failure rather than a segfault."""
     import napari
 
     original = napari.Viewer.__init__
 
-    def _audited_init(self, *args, **kwargs):
-        GL_AUDIT_HITS.append(
+    def _guarded_init(self, *args, **kwargs):
+        VIEWER_CONSTRUCTIONS.append(
             (_CURRENT_NODEID, "".join(traceback.format_stack(limit=25)))
         )
         raise RuntimeError(
-            "PERCELL4_GL_AUDIT: napari.Viewer constructed during "
-            f"{_CURRENT_NODEID}"
+            f"napari.Viewer constructed during {_CURRENT_NODEID}. Tests under "
+            "tests/ run headless and cannot build a viewer; move this test to "
+            "tests_gui/, or ask whether a viewer exists with "
+            "ViewerWindow.existing_viewer instead of .viewer."
         )
         return original(self, *args, **kwargs)  # noqa: W0101 — documents intent
 
-    napari.Viewer.__init__ = _audited_init
+    napari.Viewer.__init__ = _guarded_init
 
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
-    if os.environ.get("PERCELL4_GL_AUDIT") != "1":
+    """Summarise offenders, so one run gives the whole relocation list."""
+    if not VIEWER_CONSTRUCTIONS:
         return
+    by_module: dict[str, int] = {}
+    for nodeid, _stack in VIEWER_CONSTRUCTIONS:
+        module = nodeid.split("::")[0]
+        by_module[module] = by_module.get(module, 0) + 1
     out = Path(
         os.environ.get("PERCELL4_GL_AUDIT_OUT")
         or Path(tempfile.gettempdir()) / "percell4_gl_audit.txt"
     )
-    seen: dict[str, int] = {}
-    for nodeid, _stack in GL_AUDIT_HITS:
-        module = nodeid.split("::")[0]
-        seen[module] = seen.get(module, 0) + 1
-    lines = [f"{count:4d}  {module}" for module, count in sorted(seen.items())]
+    lines = [f"{count:4d}  {module}" for module, count in sorted(by_module.items())]
     out.write_text(
-        f"napari.Viewer constructions: {len(GL_AUDIT_HITS)} "
-        f"across {len(seen)} modules\n\n" + "\n".join(lines) + "\n",
+        f"napari.Viewer constructions: {len(VIEWER_CONSTRUCTIONS)} "
+        f"across {len(by_module)} modules\n\n" + "\n".join(lines) + "\n",
         encoding="utf-8",
     )
-    print(f"\n[gl-audit] {len(GL_AUDIT_HITS)} hits across {len(seen)} modules -> {out}")
+    print(
+        f"\n[gl-guard] {len(VIEWER_CONSTRUCTIONS)} napari.Viewer construction(s) "
+        f"across {len(by_module)} module(s); these belong in tests_gui/ -> {out}"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _forbid_napari_viewer():
+    """Fail the test that built a viewer, even if it swallowed the exception."""
+    before = len(VIEWER_CONSTRUCTIONS)
+    yield
+    new = VIEWER_CONSTRUCTIONS[before:]
+    if new:
+        raise AssertionError(
+            f"{len(new)} napari.Viewer construction(s) during this test. "
+            "tests/ runs headless (no GL context); move this module to "
+            "tests_gui/. Most recent stack:\n" + new[-1][1]
+        )
 
 
 @pytest.fixture(autouse=True)

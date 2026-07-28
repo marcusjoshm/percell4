@@ -25,10 +25,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[2] / "src" / "percell4"
+_REPO = Path(__file__).resolve().parents[2]
 
-#: The one file allowed to construct a ``QSettings``.
-_CANONICAL = SRC / "gui" / "settings.py"
+#: Scanned trees. The test trees are included deliberately: seven test modules
+#: were constructing the real store directly, and one asserted against it. A
+#: src-only scan would have left those invisible, and they are the reason the
+#: production migration alone would not have been enough.
+_SCANNED = [
+    _REPO / "src" / "percell4",
+    _REPO / "tests",
+    _REPO / "tests_gui",
+]
+
+#: The one file allowed to construct a ``QSettings`` — plus this file, whose
+#: prose and self-check literals necessarily spell out the forbidden shapes.
+_CANONICAL = _REPO / "src" / "percell4" / "gui" / "settings.py"
+_EXEMPT = {_CANONICAL, Path(__file__).resolve()}
 
 #: Any ``QSettings(...)`` construction. Deliberately matches the call form
 #: only — bare ``QSettings`` in a type annotation, an ``isinstance`` check or
@@ -44,19 +56,24 @@ _LOCAL_ORG_APP_CONST = re.compile(
 
 
 def _py_files() -> list[Path]:
-    return [p for p in SRC.rglob("*.py") if "__pycache__" not in p.parts]
+    files: list[Path] = []
+    for root in _SCANNED:
+        if root.is_dir():
+            files.extend(
+                p for p in root.rglob("*.py") if "__pycache__" not in p.parts
+            )
+    return files
 
 
 def _offenders(pattern: re.Pattern[str]) -> list[str]:
     hits: list[str] = []
     for path in _py_files():
-        if path == _CANONICAL:
+        if path in _EXEMPT:
             continue
         text = path.read_text(encoding="utf-8")
         for lineno, line in enumerate(text.splitlines(), start=1):
             if pattern.search(line):
-                rel = path.relative_to(SRC.parents[1])
-                hits.append(f"{rel}:{lineno}: {line.strip()}")
+                hits.append(f"{path.relative_to(_REPO)}:{lineno}: {line.strip()}")
     return hits
 
 

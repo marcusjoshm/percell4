@@ -41,10 +41,6 @@ from percell4.gui.viewer import (
 from percell4.interfaces.gui.main_window import LauncherWindow
 from percell4.model import CellDataModel
 
-# Builds a real napari viewer, so this module carries the ``napari_viewer``
-# marker: skipped by default (see pyproject addopts), run explicitly on CI.
-pytestmark = pytest.mark.napari_viewer
-
 # ──────────────────────────────────────────────────────────────────────
 # Fixture — real Session + CellDataModel + ViewerWindow + LauncherWindow.
 #
