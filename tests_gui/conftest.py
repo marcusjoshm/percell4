@@ -24,6 +24,7 @@ import os
 os.environ.setdefault("QT_API", "pyqt5")
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 
@@ -93,3 +94,27 @@ def _flush_pending_qt_deletions():
         app.processEvents()
     app.sendPostedEvents(None, QEvent.DeferredDelete)
     app.processEvents()
+
+
+@pytest.fixture
+def sample_labels() -> np.ndarray:
+    """Synthetic 100x100 label array with 5 cells.
+
+    Duplicated from ``tests/conftest.py`` because that file is not an ancestor
+    of this tree and so is never loaded here. Three relocated modules request
+    it; keep the two definitions identical, since their assertions depend on
+    the exact block positions.
+
+    Cell 1: 20x20 block at (10, 10)
+    Cell 2: 20x20 block at (10, 60)
+    Cell 3: 20x20 block at (50, 10)
+    Cell 4: 20x20 block at (50, 60)
+    Cell 5: 15x15 block at (70, 35)
+    """
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[10:30, 10:30] = 1
+    labels[10:30, 60:80] = 2
+    labels[50:70, 10:30] = 3
+    labels[50:70, 60:80] = 4
+    labels[70:85, 35:50] = 5
+    return labels
