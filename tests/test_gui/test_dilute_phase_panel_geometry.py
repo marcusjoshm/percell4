@@ -4,10 +4,9 @@ position across workflow runs.
 The launcher shows the panel as a top-level window with a default
 size of 520x700. Without geometry persistence, every open re-centers
 the window — the same painful pattern that already bit the Threshold
-QC and Group Preview windows. Mirror the QSettings("LeeLabPerCell4",
-"PerCell4") + saveGeometry / restoreGeometry pattern under the key
-``dilute_phase_panel/geometry`` so the panel opens where the user
-last left it.
+QC and Group Preview windows. Mirror the app_settings() + saveGeometry /
+restoreGeometry pattern under the key ``dilute_phase_panel/geometry`` so
+the panel opens where the user last left it.
 """
 
 from __future__ import annotations
@@ -15,23 +14,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
-from qtpy.QtCore import QCoreApplication, QSettings, Qt
+from qtpy.QtCore import Qt
 
-
-@pytest.fixture
-def isolated_settings(tmp_path, monkeypatch):
-    """Sandbox QSettings so the test doesn't bleed into user prefs.
-    Same fixture shape as test_threshold_qc_geometry_persistence.py
-    and test_session_window.py."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    QCoreApplication.setOrganizationName("LeeLabPerCell4")
-    QCoreApplication.setApplicationName("PerCell4")
-    QSettings.setDefaultFormat(QSettings.IniFormat)
-    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path))
-    QSettings("LeeLabPerCell4", "PerCell4").clear()
-    yield tmp_path
-    QSettings("LeeLabPerCell4", "PerCell4").clear()
+from percell4.gui.settings import app_settings
 
 
 def _make_panel(qtbot, tmp_path):
@@ -82,7 +67,7 @@ def _make_panel(qtbot, tmp_path):
 
 
 def test_panel_geometry_persists_across_workflow_runs(
-    qtbot, isolated_settings, tmp_path,
+    qtbot, tmp_path,
 ):
     """Move the panel, close it, reopen a fresh panel — the new
     panel comes up at the remembered position."""
@@ -109,7 +94,7 @@ def test_panel_geometry_persists_across_workflow_runs(
 
 
 def test_panel_first_open_uses_launcher_default_when_no_saved_geometry(
-    qtbot, isolated_settings, tmp_path,
+    qtbot, tmp_path,
 ):
     """No prior geometry → the launcher's resize(520, 700) baseline
     wins (no zero-size, no center-snap that ignores the launcher)."""
@@ -124,7 +109,7 @@ def test_panel_first_open_uses_launcher_default_when_no_saved_geometry(
 
 
 def test_panel_uses_distinct_settings_key_from_qc_windows(
-    qtbot, isolated_settings, tmp_path,
+    qtbot, tmp_path,
 ):
     """The dilute panel's settings key must not collide with the
     threshold_qc/* keys — moving the QC window mustn't move the
@@ -136,7 +121,7 @@ def test_panel_uses_distinct_settings_key_from_qc_windows(
     qtbot.wait(50)
     panel.close()
 
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     keys = set(qs.allKeys())
     assert "dilute_phase_panel/geometry" in keys
     # Must NOT have overwritten the threshold_qc keys (they don't

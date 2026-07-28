@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 from qtpy.QtWidgets import QMessageBox
 
+from percell4.gui.settings import app_settings
 from percell4.gui.workflows.single_cell.config_dialog import (
     WorkflowConfigDialog,
     _PendingDataset,
@@ -805,9 +806,7 @@ def test_accept_saves_output_parent_to_qsettings(
     target = tmp_path / "saved_runs"
     dialog._output_edit.setText(str(target))
     dialog._on_start_clicked()
-
-    from qtpy.QtCore import QSettings
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     assert qs.value("single_cell_threshold_workflow/output_parent", "", type=str) == str(target)
 
 

@@ -31,6 +31,31 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _sandbox_app_settings(tmp_path_factory):
+    """Point every ``app_settings()`` call at a throw-away store.
+
+    Window geometry and remembered dialog choices persist through
+    ``percell4.gui.settings.app_settings``. Unredirected, that is the live
+    macOS preference domain ``com.LeeLabPerCell4.PerCell4`` — so a test run
+    used to overwrite the researcher's saved window layout, and two geometry
+    modules went further and ``clear()``-ed it outright. Their own
+    ``isolated_settings`` fixtures were built on ``setDefaultFormat`` +
+    ``setPath``, which macOS ignores for the native format; the sandbox
+    silently did nothing while the ``clear()`` landed on the real store.
+
+    A fresh directory per test, rather than one per session, so a dialog that
+    reads a remembered value sees only what the current test wrote. That is
+    what the various ``_clear_qsettings`` fixtures were hand-rolling, and it
+    keeps default-value assertions from depending on execution order.
+    """
+    from percell4.gui import settings
+
+    settings.redirect_to(tmp_path_factory.mktemp("qsettings"))
+    yield
+    settings.clear_redirect()
+
+
+@pytest.fixture(autouse=True)
 def _flush_pending_qt_deletions():
     """Drain Qt's deferred-delete queue at the end of every test.
 

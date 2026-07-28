@@ -15,7 +15,7 @@ from typing import Any, Final
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QRectF, QSettings, Qt, QTimer, Signal
+from qtpy.QtCore import QRectF, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -42,6 +42,7 @@ from percell4.domain.flim.phasor_display import (
     mask_shape_matches,
 )
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
+from percell4.gui.settings import app_settings
 
 COLOR_CYCLE: Final[tuple[str, ...]] = (
     "#3498db", "#e74c3c", "#2ecc71", "#f39c12",
@@ -2392,11 +2393,11 @@ class PhasorPlotWindow(QMainWindow):
         self._refresh_apply_buttons_enabled()
 
     def _save_geometry(self) -> None:
-        QSettings("LeeLabPerCell4", "PerCell4").setValue(
+        app_settings().setValue(
             "phasor_plot/geometry", self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("phasor_plot/geometry")
+        geom = app_settings().value("phasor_plot/geometry")
         if geom:
             self.restoreGeometry(geom)

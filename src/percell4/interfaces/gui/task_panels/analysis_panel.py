@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -29,6 +29,7 @@ from qtpy.QtWidgets import (
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
 
@@ -640,7 +641,7 @@ class AnalysisPanel(QWidget):
     @staticmethod
     def _load_selected_metrics() -> list[str]:
         from percell4.domain.measure.metrics import BUILTIN_METRICS
-        settings = QSettings("LeeLabPerCell4", "PerCell4")
+        settings = app_settings()
         raw = settings.value("metrics/selected", defaultValue=None)
         if raw is None:
             return list(BUILTIN_METRICS.keys())
@@ -650,7 +651,7 @@ class AnalysisPanel(QWidget):
 
     @staticmethod
     def _save_selected_metrics(metrics: list[str]) -> None:
-        settings = QSettings("LeeLabPerCell4", "PerCell4")
+        settings = app_settings()
         settings.setValue("metrics/selected", metrics)
 
     def _get_phasor_roi_names(self) -> dict[int, str] | None:

@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from qtpy.QtCore import QSettings, QSignalBlocker, Qt
+from qtpy.QtCore import QSignalBlocker, Qt
 from qtpy.QtWidgets import (
     QApplication,
     QComboBox,
@@ -62,14 +62,13 @@ from percell4.application.use_cases.batch_dilute_from_mask import (
     batch_dilute_from_mask,
 )
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 from percell4.workflows.channels import intersect_channels
 
 logger = logging.getLogger(__name__)
 
 # QSettings keys — same org/app convention as the phasor-masks dialog.
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 
 _QS_RADIUS = "dilute_from_mask/radius_px"
 _QS_OUTPUT = "dilute_from_mask/output_name"
@@ -276,7 +275,7 @@ class DiluteFromMaskDialog(QDialog):
     # ── QSettings persistence ────────────────────────────
 
     def _restore_qsettings(self) -> None:
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         assert self._radius_spin is not None
         assert self._output_edit is not None
         self._radius_spin.setValue(
@@ -287,7 +286,7 @@ class DiluteFromMaskDialog(QDialog):
         )
 
     def _save_qsettings(self) -> None:
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         assert self._radius_spin is not None
         assert self._output_edit is not None
         qs.setValue(_QS_RADIUS, self._radius_spin.value())

@@ -13,7 +13,7 @@ Session events so its combos always reflect Session truth.
 
 from __future__ import annotations
 
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,10 +25,9 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 _GEOMETRY_KEY = "session_window/geometry"
 _PIN_KEY = "session_window/pin_on_top"
 _NO_DATASET_TEXT = "(no dataset)"
@@ -295,7 +294,7 @@ class SessionWindow(QMainWindow):
     # ── Pin-on-top ──────────────────────────────────────────────────
 
     def _restore_pin_on_top(self) -> None:
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         raw = qs.value(_PIN_KEY, True)
         # QSettings stores booleans as strings on some backends.
         if isinstance(raw, str):
@@ -325,17 +324,17 @@ class SessionWindow(QMainWindow):
 
     def _on_pin_toggled(self, pinned: bool) -> None:
         self._apply_pin_on_top(pinned)
-        QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(_PIN_KEY, pinned)
+        app_settings().setValue(_PIN_KEY, pinned)
 
     # ── Geometry persistence ────────────────────────────────────────
 
     def _save_geometry(self) -> None:
-        QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+        app_settings().setValue(
             _GEOMETRY_KEY, self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(_GEOMETRY_KEY)
+        geom = app_settings().value(_GEOMETRY_KEY)
         if geom:
             self.restoreGeometry(geom)
         else:

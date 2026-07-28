@@ -11,7 +11,7 @@ from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QApplication,
@@ -32,6 +32,7 @@ from qtpy.QtWidgets import (
 from percell4.config import viewer_presets as vp
 from percell4.domain.io.layout import split_intensity_layers
 from percell4.gui import theme
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
 if TYPE_CHECKING:
@@ -2173,11 +2174,11 @@ class LauncherWindow(QMainWindow):
         event.accept()
 
     def _save_geometry(self) -> None:
-        QSettings("LeeLabPerCell4", "PerCell4").setValue(
+        app_settings().setValue(
             "launcher/geometry", self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("launcher/geometry")
+        geom = app_settings().value("launcher/geometry")
         if geom:
             self.restoreGeometry(geom)

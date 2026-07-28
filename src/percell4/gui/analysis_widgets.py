@@ -30,7 +30,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from qtpy.QtCore import QSettings
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -44,6 +43,8 @@ from qtpy.QtWidgets import (
     QSpinBox,
     QWidget,
 )
+
+from percell4.gui.settings import app_settings
 
 # Sentinel item shown as the first entry in every layer combo. Selecting
 # it means "this role is not supplied" — the dialog should treat it as
@@ -270,13 +271,10 @@ def _format_preset_tooltip(values: dict[str, Any]) -> str:
 def build_output_parent_picker(
     qsettings_key: str,
     parent: QWidget,
-    *,
-    qsettings_org: str = "LeeLabPerCell4",
-    qsettings_app: str = "PerCell4",
 ) -> tuple[QHBoxLayout, QLineEdit, QPushButton]:
     """LineEdit + Browse… for an output directory, persisted in QSettings."""
     line = QLineEdit(parent)
-    qs = QSettings(qsettings_org, qsettings_app)
+    qs = app_settings()
     prior = qs.value(qsettings_key, "", type=str)
     if prior:
         line.setText(str(prior))
@@ -302,9 +300,6 @@ def build_output_parent_picker(
 def persist_output_parent(
     qsettings_key: str,
     value: str,
-    *,
-    qsettings_org: str = "LeeLabPerCell4",
-    qsettings_app: str = "PerCell4",
 ) -> None:
-    qs = QSettings(qsettings_org, qsettings_app)
+    qs = app_settings()
     qs.setValue(qsettings_key, value)

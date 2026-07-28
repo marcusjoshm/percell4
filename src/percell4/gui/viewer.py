@@ -9,9 +9,10 @@ from __future__ import annotations
 import logging
 import weakref
 
-from qtpy.QtCore import QObject, QSettings, Signal
+from qtpy.QtCore import QObject, Signal
 
 from percell4.config import viewer_presets as vp
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
@@ -727,12 +728,12 @@ class ViewerWindow(QObject):
 
     def _save_geometry(self) -> None:
         if self._is_alive():
-            QSettings("LeeLabPerCell4", "PerCell4").setValue(
+            app_settings().setValue(
                 "viewer/geometry", self._qt_window.saveGeometry()
             )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("viewer/geometry")
+        geom = app_settings().value("viewer/geometry")
         if geom and self._is_alive():
             self._qt_window.restoreGeometry(geom)
 

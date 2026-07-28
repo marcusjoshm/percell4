@@ -17,9 +17,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from qtpy.QtCore import QSettings
 from qtpy.QtWidgets import QMainWindow, QWidget
 
+from percell4.gui.settings import app_settings
 from percell4.interfaces.gui.task_panels.batch_console_panel import BatchConsolePanel
 
 
@@ -59,11 +59,11 @@ class BatchToolsWindow(QMainWindow):
         event.ignore()
 
     def _save_geometry(self) -> None:
-        QSettings("LeeLabPerCell4", "PerCell4").setValue(
+        app_settings().setValue(
             "batch_tools/geometry", self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("batch_tools/geometry")
+        geom = app_settings().value("batch_tools/geometry")
         if geom:
             self.restoreGeometry(geom)

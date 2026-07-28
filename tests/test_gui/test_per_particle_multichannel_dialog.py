@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 
 from percell4.application.analysis import (
     BatchAnalysisItemResult,
@@ -25,6 +25,7 @@ from percell4.gui.per_particle_multichannel_dialog import (
     _QSETTINGS_OUTPUT_KEY,
     PerParticleMultichannelDialog,
 )
+from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 
 
@@ -38,7 +39,7 @@ def _reregister_analysis() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _clear_qsettings() -> Iterator[None]:
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     qs.remove(_QSETTINGS_OUTPUT_KEY)
     yield
     qs.remove(_QSETTINGS_OUTPUT_KEY)

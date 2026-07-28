@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -60,6 +60,7 @@ from percell4.application.use_cases.flim_fret_discovery import (
 )
 from percell4.application.use_cases.run_flim_fret import run_flim_fret
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 from percell4.workflows.artifacts import create_run_folder, write_atomic
 from percell4.workflows.models import (
@@ -74,8 +75,6 @@ from percell4.workflows.run_log import RunLog
 logger = logging.getLogger(__name__)
 
 # QSettings keys — same org/app convention as single-cell workflow.
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 _QSETTINGS_OUTPUT_KEY = "flim_fret_workflow/output_parent"
 _QSETTINGS_SOURCE_KEY = "flim_fret_workflow/source_folder"
 
@@ -310,7 +309,7 @@ class FlimFretDialog(QDialog):
         return [p for p, c in sorted(self._candidates.items()) if c.qualifies]
 
     def _restore_qsettings_paths(self) -> None:
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         src = qs.value(_QSETTINGS_SOURCE_KEY, "", type=str)
         out = qs.value(_QSETTINGS_OUTPUT_KEY, "", type=str)
         if src and Path(src).is_dir():
@@ -320,7 +319,7 @@ class FlimFretDialog(QDialog):
             self._output_folder_edit.setText(out)
 
     def _save_qsettings_paths(self) -> None:
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         if self._source_folder is not None:
             qs.setValue(_QSETTINGS_SOURCE_KEY, str(self._source_folder))
         assert self._output_folder_edit is not None
