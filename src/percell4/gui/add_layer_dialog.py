@@ -56,6 +56,8 @@ from percell4.gui._add_layer_logic import (
     is_time_invariant_add,
 )
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._stitch_order import normalize_order
+from percell4.gui._stitching_form import StitchingForm
 from percell4.gui.tcspc_tab_state import TcspcTabState
 
 
@@ -282,34 +284,19 @@ class AddLayerDialog(QDialog):
         )
         settings_layout.addWidget(self._batch_stitch_check)
 
-        self._batch_stitch_widget = QWidget()
-        stitch_layout = QHBoxLayout(self._batch_stitch_widget)
-        stitch_layout.setContentsMargins(20, 0, 0, 0)
-        stitch_layout.addWidget(QLabel("Rows:"))
-        self._batch_stitch_rows = QSpinBox()
-        self._batch_stitch_rows.setRange(1, 100)
-        self._batch_stitch_rows.setValue(1)
-        stitch_layout.addWidget(self._batch_stitch_rows)
-        stitch_layout.addWidget(QLabel("Cols:"))
-        self._batch_stitch_cols = QSpinBox()
-        self._batch_stitch_cols.setRange(1, 100)
-        self._batch_stitch_cols.setValue(1)
-        stitch_layout.addWidget(self._batch_stitch_cols)
-        stitch_layout.addWidget(QLabel("Pattern:"))
-        # Value rides in itemData, never the display text or the index — the
-        # PR #9 drift precedent, and what lets the label change later without
-        # breaking TileConfig construction. Label == value for now.
-        self._batch_stitch_type = QComboBox()
-        for _gt in ("row_by_row", "column_by_column", "snake_by_row", "snake_by_column"):
-            self._batch_stitch_type.addItem(_gt, _gt)
-        stitch_layout.addWidget(self._batch_stitch_type)
-        stitch_layout.addWidget(QLabel("Start:"))
-        self._batch_stitch_order = QComboBox()
-        for _o in ("right_down", "right_up", "left_down", "left_up",
-                   "top_left", "top_right", "bottom_left", "bottom_right"):
-            self._batch_stitch_order.addItem(_o, _o)
-        stitch_layout.addWidget(self._batch_stitch_order)
-        stitch_layout.addStretch()
+        # Controls live in the canonical StitchingForm. No registration or
+        # fusion on this append surface — that is a compress-time concern; the
+        # reuse affordance below covers persisted geometry instead.
+        self._batch_stitch_widget = StitchingForm(
+            show_registration=False, show_fusion=False, title=""
+        )
+        self._batch_stitch_widget.setContentsMargins(20, 0, 0, 0)
+        # Thin aliases. Grid size X is the COLUMN count, Grid size Y the ROW
+        # count — swapping them would transpose the mosaic.
+        self._batch_stitch_rows = self._batch_stitch_widget.grid_y
+        self._batch_stitch_cols = self._batch_stitch_widget.grid_x
+        self._batch_stitch_type = self._batch_stitch_widget.grid_type
+        self._batch_stitch_order = self._batch_stitch_widget.order
         self._batch_stitch_widget.setVisible(False)
         settings_layout.addWidget(self._batch_stitch_widget)
 
@@ -525,14 +512,11 @@ class AddLayerDialog(QDialog):
         if not selected_ds_names or not selected:
             return
 
-        tile_config = None
-        if self._batch_stitch_check.isChecked():
-            tile_config = TileConfig(
-                grid_rows=self._batch_stitch_rows.value(),
-                grid_cols=self._batch_stitch_cols.value(),
-                grid_type=self._batch_stitch_type.currentData(),
-                order=self._batch_stitch_order.currentData(),
-            )
+        tile_config = (
+            self._batch_stitch_widget.tile_config()
+            if self._batch_stitch_check.isChecked()
+            else None
+        )
 
         token_config = self._batch_token_config()
 
@@ -953,48 +937,32 @@ class AddLayerDialog(QDialog):
         # .bin scan order is independent of how the TIFF was stitched.
         self._tcspc_stitching_user_edited = False
 
-        self._tcspc_stitch_widget = QWidget()
-        stitch_layout = QHBoxLayout(self._tcspc_stitch_widget)
-        stitch_layout.setContentsMargins(20, 0, 0, 0)
-        stitch_layout.addWidget(QLabel("Rows:"))
-        self._tcspc_stitch_rows = QSpinBox()
-        self._tcspc_stitch_rows.setRange(1, 100)
-        self._tcspc_stitch_rows.setValue(1)
-        stitch_layout.addWidget(self._tcspc_stitch_rows)
-        stitch_layout.addWidget(QLabel("Cols:"))
-        self._tcspc_stitch_cols = QSpinBox()
-        self._tcspc_stitch_cols.setRange(1, 100)
-        self._tcspc_stitch_cols.setValue(1)
-        stitch_layout.addWidget(self._tcspc_stitch_cols)
-        stitch_layout.addWidget(QLabel("Pattern:"))
-        # Value rides in itemData, never the display text or the index — the
-        # PR #9 drift precedent, and what lets the label change later without
-        # breaking TileConfig construction. Label == value for now.
-        self._tcspc_stitch_type = QComboBox()
-        for _gt in ("row_by_row", "column_by_column", "snake_by_row", "snake_by_column"):
-            self._tcspc_stitch_type.addItem(_gt, _gt)
-        stitch_layout.addWidget(self._tcspc_stitch_type)
-        stitch_layout.addWidget(QLabel("Start:"))
-        self._tcspc_stitch_order = QComboBox()
-        for _o in (
-            "right_down", "right_up", "left_down", "left_up",
-            "top_left", "top_right", "bottom_left", "bottom_right",
-        ):
-            self._tcspc_stitch_order.addItem(_o, _o)
-        stitch_layout.addWidget(self._tcspc_stitch_order)
-        stitch_layout.addStretch()
+        # Controls live in the canonical StitchingForm. No registration or
+        # fusion here (append surface); persisted geometry is surfaced by the
+        # read-only reuse label below.
+        self._tcspc_stitch_widget = StitchingForm(
+            show_registration=False, show_fusion=False, title=""
+        )
+        self._tcspc_stitch_widget.setContentsMargins(20, 0, 0, 0)
+        # Thin aliases. Grid size X is the COLUMN count, Grid size Y the ROW
+        # count — swapping them would transpose the mosaic.
+        self._tcspc_stitch_rows = self._tcspc_stitch_widget.grid_y
+        self._tcspc_stitch_cols = self._tcspc_stitch_widget.grid_x
+        self._tcspc_stitch_type = self._tcspc_stitch_widget.grid_type
+        self._tcspc_stitch_order = self._tcspc_stitch_widget.order
         self._tcspc_stitch_widget.setVisible(False)
         layout.addWidget(self._tcspc_stitch_widget)
 
         # Mark stitching as user-edited as soon as any stitch control changes.
         # Connected AFTER the initial setValue/addItems calls so the seed
         # values above don't trip the flag at construction time.
+        # One wire now that the form owns every control, including the
+        # Type->Order repopulation (which emits ``changed`` too). Seeding is
+        # bracketed by a save/restore of this flag, so the extra emission a
+        # programmatic Type change produces cannot mark the form user-edited.
         def _mark_user_edited(*_):
             self._tcspc_stitching_user_edited = True
-        self._tcspc_stitch_rows.valueChanged.connect(_mark_user_edited)
-        self._tcspc_stitch_cols.valueChanged.connect(_mark_user_edited)
-        self._tcspc_stitch_type.currentIndexChanged.connect(_mark_user_edited)
-        self._tcspc_stitch_order.currentIndexChanged.connect(_mark_user_edited)
+        self._tcspc_stitch_widget.changed.connect(_mark_user_edited)
 
         # ── Read-only "reuse persisted geometry" affordance (R13) ──
         # When the open dataset carries registered stitch geometry, the
@@ -1260,13 +1228,26 @@ class AddLayerDialog(QDialog):
                 self._tcspc_stitch_type.setCurrentIndex(idx)
         order = meta.get("stitch_order")
         if order:
-            idx = self._tcspc_stitch_order.findData(str(order))
-            if idx >= 0:
-                self._tcspc_stitch_order.setCurrentIndex(idx)
+            # The combo carries only the four canonical corners, while
+            # /metadata may hold either accepted vocabulary (a dataset written
+            # with ``right_up`` must still select ``Right & Up``). Normalize
+            # first; an unrecognized value leaves the default standing rather
+            # than raising mid-Scan.
+            try:
+                corner = normalize_order(str(order))
+            except ValueError:
+                corner = None
+            if corner is not None:
+                idx = self._tcspc_stitch_order.findData(corner)
+                if idx >= 0:
+                    self._tcspc_stitch_order.setCurrentIndex(idx)
         self._tcspc_stitching_user_edited = was_edited
+        # Report what the user can actually see in the combos, not the raw
+        # stored strings.
         self.statusBar_msg(
             f"Pre-filled stitching from dataset metadata: "
-            f"{rows}×{cols} {grid_type or ''} {order or ''}".strip()
+            f"{rows}×{cols} {self._tcspc_stitch_type.currentText()} "
+            f"{self._tcspc_stitch_order.currentText()}".strip()
         )
 
     def _tcspc_discover_bin_tokens(self, bin_files: list[Path]) -> list[str]:
@@ -1576,13 +1557,10 @@ class AddLayerDialog(QDialog):
     def _on_tcspc_accept(self) -> None:
         rule = self._tcspc_state.build_selected_rule()
         if self._tcspc_stitch_check.isChecked():
-            tile_config = TileConfig(
-                grid_rows=self._tcspc_stitch_rows.value(),
-                grid_cols=self._tcspc_stitch_cols.value(),
-                grid_type=self._tcspc_stitch_type.currentData(),
-                order=self._tcspc_stitch_order.currentData(),
-            )
+            tile_config = self._tcspc_stitch_widget.tile_config()
         else:
+            # A 1x1 config, NOT None — this surface differs from Compress and
+            # Import on purpose. Do not unify.
             tile_config = TileConfig(grid_rows=1, grid_cols=1)
         flim_config = self._tcspc_build_flim_config()
         rotate_k = int(self._tcspc_rotation_combo.currentData() or 0)

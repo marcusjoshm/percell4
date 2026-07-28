@@ -65,8 +65,15 @@ def test_every_persisted_order_seeds_the_matching_control(
 ) -> None:
     """All eight accepted values live in real .h5 files on disk.
 
-    Whichever vocabulary a dataset was written with must round-trip.
+    Whichever vocabulary a dataset was written with must reproduce the tile
+    placement it recorded. The seeded string need not be byte-identical to the
+    stored one — the combo carries only the four canonical corners, so a
+    dataset written with ``right_up`` seeds as its exact alias
+    ``bottom_left``. What must hold is that the placement is unchanged, so
+    that is what is asserted, against the real domain function.
     """
+    from percell4.domain.io.assembler import _tile_positions
+
     store = _store_with_stitch_metadata(
         tmp_path / f"{stored_order}.h5",
         stitch_grid_rows=3,
@@ -81,7 +88,9 @@ def test_every_persisted_order_seeds_the_matching_control(
     assert tc.grid_rows == 3
     assert tc.grid_cols == 4
     assert tc.grid_type == "snake_by_row"
-    assert tc.order == stored_order
+    assert _tile_positions(3, 4, "snake_by_row", tc.order) == _tile_positions(
+        3, 4, "snake_by_row", stored_order
+    ), f"seeded {tc.order!r} places tiles differently from stored {stored_order!r}"
 
 
 def test_seeded_grid_is_not_transposed(qtbot, tmp_path) -> None:
