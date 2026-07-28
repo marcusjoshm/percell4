@@ -38,11 +38,11 @@ from percell4.domain.io.models import (
     DatasetSpec,
     LayerAssignment,
     LayerType,
-    TileConfig,
     TokenConfig,
 )
 from percell4.domain.io.naming import channel_display_name
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._stitching_form import StitchingForm
 
 # Index of the "Tokenless (by name)" entry in the Discovery combo.
 _TOKENLESS_INDEX = 2
@@ -59,8 +59,13 @@ class CompressDialog(QDialog):
     def __init__(self, parent=None, project_dir: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Compress TIFF Dataset")
-        self.setMinimumWidth(750)
-        self.resize(800, 700)
+        # 750 dated from when the stitching controls were one wide QHBoxLayout
+        # of eight widgets — and even 750 overflowed, forcing a horizontal
+        # scrollbar. The binding constraint is now the Manual-mode channel
+        # panel, not stitching; 680 clears it with the vertical scrollbar
+        # present, verified by test_compress_dialog_stitching_form.py.
+        self.setMinimumWidth(680)
+        self.resize(720, 700)
         cap_to_screen(self)
         self._project_dir = project_dir
 
@@ -235,76 +240,29 @@ class CompressDialog(QDialog):
         row1.addStretch()
         settings_layout.addLayout(row1)
 
-        # Tile stitching
+        # Tile stitching — every control lives in the canonical StitchingForm.
+        # The checkbox already labels the section, so the form's own group
+        # title is suppressed to avoid saying "Tile Stitching" twice.
         self._stitch_check = QCheckBox("Tile Stitching")
         self._stitch_check.toggled.connect(self._on_stitch_toggled)
         settings_layout.addWidget(self._stitch_check)
 
-        self._stitch_widget = QWidget()
-        stitch_layout = QHBoxLayout(self._stitch_widget)
-        stitch_layout.setContentsMargins(20, 0, 0, 0)
-        stitch_layout.addWidget(QLabel("Rows:"))
-        self._stitch_rows = QSpinBox()
-        self._stitch_rows.setRange(1, 100)
-        self._stitch_rows.setValue(1)
-        stitch_layout.addWidget(self._stitch_rows)
-        stitch_layout.addWidget(QLabel("Cols:"))
-        self._stitch_cols = QSpinBox()
-        self._stitch_cols.setRange(1, 100)
-        self._stitch_cols.setValue(1)
-        stitch_layout.addWidget(self._stitch_cols)
-        stitch_layout.addWidget(QLabel("Pattern:"))
-        self._stitch_type = QComboBox()
-        # Value rides in itemData, never the display text or the index — the
-        # PR #9 drift precedent, and what lets the label change later without
-        # breaking TileConfig construction. Label == value for now.
-        for _gt in ("row_by_row", "column_by_column", "snake_by_row", "snake_by_column"):
-            self._stitch_type.addItem(_gt, _gt)
-        stitch_layout.addWidget(self._stitch_type)
-        stitch_layout.addWidget(QLabel("Start:"))
-        self._stitch_order = QComboBox()
-        for _o in (
-            "right_down", "right_up", "left_down", "left_up",
-            "top_left", "top_right", "bottom_left", "bottom_right",
-        ):
-            self._stitch_order.addItem(_o, _o)
-        stitch_layout.addWidget(self._stitch_order)
-        # ── Overlap-aware registration (phase-correlation) ──
-        # Overlap is stored as a FRACTION in TileConfig; the spinbox shows
-        # a percentage. Register opts into the phase-correlation path,
-        # gated at the importer on register ∧ overlap>0 ∧ grid>1×1.
-        stitch_layout.addWidget(QLabel("Overlap:"))
-        self._stitch_overlap = QDoubleSpinBox()
-        self._stitch_overlap.setRange(0.0, 99.0)
-        self._stitch_overlap.setSuffix("%")
-        self._stitch_overlap.setValue(0.0)
-        stitch_layout.addWidget(self._stitch_overlap)
-        self._stitch_register = QCheckBox(
-            "Register overlapping tiles (phase correlation)"
+        self._stitch_widget = StitchingForm(
+            show_registration=True, show_fusion=True, title=""
         )
-        stitch_layout.addWidget(self._stitch_register)
-        stitch_layout.addWidget(QLabel("Reference:"))
-        # Reference channel identified by NAME. Populated from discovered
-        # channels (``chXX``), editable so a free-text name is also accepted.
-        # itemData carries the name verbatim (not an index).
-        self._stitch_reference = QComboBox()
-        self._stitch_reference.setEditable(True)
-        stitch_layout.addWidget(self._stitch_reference)
-        # ── Overlap fusion ──
-        # "None" keeps each overlap pixel from a single tile (measurement-correct;
-        # forced for FLIM datasets). "Linear Blending" feathers the seam for a
-        # display mosaic. itemData carries the TileConfig value verbatim.
-        stitch_layout.addWidget(QLabel("Fusion:"))
-        self._stitch_fusion = QComboBox()
-        self._stitch_fusion.addItem("None", "none")
-        self._stitch_fusion.addItem("Linear Blending", "linear_blending")
-        self._stitch_fusion.setToolTip(
-            "How overlapping pixels combine. None = single tile (no intensity "
-            "distortion; required when FLIM decay is present). Linear Blending "
-            "= feathered seam for display (intensity-only datasets)."
-        )
-        stitch_layout.addWidget(self._stitch_fusion)
-        stitch_layout.addStretch()
+        self._stitch_widget.setContentsMargins(20, 0, 0, 0)
+        # Thin aliases onto the shared form's widgets so the rest of this
+        # dialog (and its tests) keep their existing call sites. Mind the axis
+        # mapping: Grid size X is the COLUMN count, Grid size Y is the ROW
+        # count — swapping them would transpose every mosaic.
+        self._stitch_rows = self._stitch_widget.grid_y
+        self._stitch_cols = self._stitch_widget.grid_x
+        self._stitch_type = self._stitch_widget.grid_type
+        self._stitch_order = self._stitch_widget.order
+        self._stitch_overlap = self._stitch_widget.overlap
+        self._stitch_register = self._stitch_widget.register_check
+        self._stitch_reference = self._stitch_widget.reference
+        self._stitch_fusion = self._stitch_widget.fusion
         self._stitch_widget.setVisible(False)
         settings_layout.addWidget(self._stitch_widget)
 
@@ -473,20 +431,14 @@ class CompressDialog(QDialog):
                         name=cfg.name_edit.text().strip() or channel_display_name(ch_id),
                     )
 
-        tile_config = None
-        if self._stitch_check.isChecked():
-            ref = self._stitch_reference.currentText().strip()
-            tile_config = TileConfig(
-                grid_rows=self._stitch_rows.value(),
-                grid_cols=self._stitch_cols.value(),
-                grid_type=self._stitch_type.currentData(),
-                order=self._stitch_order.currentData(),
-                # Spinbox shows a percentage; TileConfig stores a fraction.
-                overlap=self._stitch_overlap.value() / 100.0,
-                register=self._stitch_register.isChecked(),
-                reference_channel=ref or None,
-                fusion_method=self._stitch_fusion.currentData() or "none",
-            )
+        # Unchecked means no stitching at all for this surface (Import agrees;
+        # the TCSPC tab instead uses a 1x1 config — that divergence is
+        # deliberate and not unified here).
+        tile_config = (
+            self._stitch_widget.tile_config()
+            if self._stitch_check.isChecked()
+            else None
+        )
 
         # Dataset check states + name overrides
         checked_names: set[str] = set()
