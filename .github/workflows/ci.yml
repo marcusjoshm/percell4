@@ -102,10 +102,15 @@ jobs:
       # software GL is what makes these reliable here; on a machine with a real
       # GPU they are not, which is why they are CI-only.
       #
-      # This job is meant to block merges. These tests were inside the blocking
-      # gate before the tests/ vs tests_gui/ split, and they are the only
-      # automated coverage of the napari integration contract — demoting them to
-      # advisory would be a real loss of protection dressed up as a move.
+      # These are the only automated coverage of the napari integration
+      # contract, so the job runs on every PR. `main` has no branch protection,
+      # here as elsewhere in this repo, so a failure surfaces as a red check
+      # rather than blocking a merge — same as it did before the tests/ vs
+      # tests_gui/ split, when these tests failed inside the main test job.
+      #
+      # If this job ever starts flaking *on CI* (a real GPU is a different
+      # story — see above), fix it or drop it. A check that cries wolf is how
+      # the whole suite stopped being trusted in the first place.
       #
       # napari/vispy can abort with a core dump during interpreter teardown,
       # after the session has already reported its result. os._exit on pytest's
