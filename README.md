@@ -862,6 +862,7 @@ Bundled apps are large (scientific stack + napari). GPU/CUDA is not included in 
 
 - **`Qt platform plugin "xcb" not loaded`** — Install the `libxcb-*` packages listed in the Linux install section above. The most common culprit is `libxcb-xinerama0`.
 - **GUI launches but is unusable over SSH** — Use `ssh -X` (or `-Y` for trusted forwarding), or run the app under `xvfb-run` for a virtual framebuffer. The batch-export CLI does not need a display.
+- **Blank napari canvas plus `OpenGL.error.Error: Attempt to retrieve context when no valid context`** — Qt and PyOpenGL disagreed about the GL backend. On GNOME Wayland, Qt5 runs on XWayland (a GLX context) while `WAYLAND_DISPLAY` makes PyOpenGL pick EGL. PerCell4 reconciles the two automatically at startup; if you have set `PYOPENGL_PLATFORM` yourself, unset it (the manual override is respected, so a wrong value sticks) or set it to match — `PYOPENGL_PLATFORM=glx` on XWayland, `egl` on native Wayland.
 
 ---
 

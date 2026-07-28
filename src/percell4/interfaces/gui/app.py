@@ -21,6 +21,12 @@ from percell4.interfaces.gui.main_window import HexMainWindow
 def main() -> int:
     qt_app = QApplication.instance() or QApplication(sys.argv)
 
+    # Linux: match PyOpenGL's GL backend to the one Qt just committed to,
+    # before the napari/vispy imports below pull OpenGL in.
+    from percell4.gui.opengl_platform import configure_pyopengl_platform
+
+    configure_pyopengl_platform(qt_app)
+
     from percell4.gui.theme import apply_theme
     apply_theme(qt_app)
 

@@ -39,6 +39,12 @@ def main() -> None:
     """Launch the PerCell4 GUI application."""
     app = QApplication.instance() or QApplication(sys.argv)
 
+    # Linux: match PyOpenGL's GL backend to the one Qt just committed to,
+    # before the napari/vispy imports below pull OpenGL in.
+    from percell4.gui.opengl_platform import configure_pyopengl_platform
+
+    configure_pyopengl_platform(app)
+
     # Application icon: Dock (macOS), taskbar (Windows, Linux). Set as the
     # QApplication default so every top-level window inherits it.
     from percell4.resources import app_icon_path
