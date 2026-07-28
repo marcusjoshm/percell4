@@ -69,7 +69,7 @@ follow this order:
    convention documents.
 2. **Extract first.** Create
    `src/percell4/gui/_channel_combo.py` exporting a small helper
-   (matching the `_resource_name_prompt.py` / `_stitching_flim_form.py`
+   (matching the `_resource_name_prompt.py` / `_stitching_form.py`
    private-utility convention):
 
    ```python

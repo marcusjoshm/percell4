@@ -23,6 +23,7 @@ from qtpy.QtWidgets import (
 
 from percell4.domain.io.models import TileConfig, TokenConfig
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._stitching_form import StitchingForm
 
 
 class ImportDialog(QDialog):
@@ -96,57 +97,27 @@ class ImportDialog(QDialog):
         self._tile_enabled = QCheckBox("Enable tile stitching")
         layout.addWidget(self._tile_enabled)
 
-        self._tile_group = QGroupBox("Tile Stitching")
-        tile_layout = QFormLayout(self._tile_group)
-
-        self._tile_rows = QSpinBox()
-        self._tile_rows.setRange(1, 100)
-        self._tile_rows.setValue(1)
-        tile_layout.addRow("Grid rows:", self._tile_rows)
-
-        self._tile_cols = QSpinBox()
-        self._tile_cols.setRange(1, 100)
-        self._tile_cols.setValue(1)
-        tile_layout.addRow("Grid cols:", self._tile_cols)
-
-        self._tile_type = QComboBox()
-        self._tile_type.addItems([
-            "row_by_row", "column_by_column", "snake_by_row", "snake_by_column"
-        ])
-        tile_layout.addRow("Grid type:", self._tile_type)
-
-        self._tile_order = QComboBox()
-        self._tile_order.addItems([
-            "top_left", "bottom_left", "top_right", "bottom_right"
-        ])
-        tile_layout.addRow("Start corner:", self._tile_order)
-
-        # ── Overlap-aware registration (phase-correlation) ──
-        # Overlap is stored as a FRACTION in TileConfig; the spinbox shows
-        # a percentage. Register opts into the phase-correlation path,
-        # gated at the importer on register ∧ overlap>0 ∧ grid>1×1.
-        self._tile_overlap = QDoubleSpinBox()
-        self._tile_overlap.setRange(0.0, 99.0)
-        self._tile_overlap.setSuffix("%")
-        self._tile_overlap.setValue(0.0)
-        tile_layout.addRow("Overlap:", self._tile_overlap)
-
-        self._tile_register = QCheckBox(
-            "Register overlapping tiles (phase correlation)"
+        # Every control lives in the canonical StitchingForm. The checkbox
+        # above already labels the section, so its own group title is
+        # suppressed. Fusion is compress-only, so it stays hidden here.
+        self._tile_widget = StitchingForm(
+            show_registration=True, show_fusion=False, title=""
         )
-        tile_layout.addRow("", self._tile_register)
+        # Thin aliases onto the shared form's widgets. Grid size X is the
+        # COLUMN count and Grid size Y the ROW count — swapping them would
+        # transpose the mosaic.
+        self._tile_group = self._tile_widget
+        self._tile_rows = self._tile_widget.grid_y
+        self._tile_cols = self._tile_widget.grid_x
+        self._tile_type = self._tile_widget.grid_type
+        self._tile_order = self._tile_widget.order
+        self._tile_overlap = self._tile_widget.overlap
+        self._tile_register = self._tile_widget.register_check
+        self._tile_reference = self._tile_widget.reference
 
-        # Reference channel identified by NAME (stable). This dialog may not
-        # know channels at config time (they're discovered for FLIM only),
-        # so the combo is editable — discovered channels populate it, but a
-        # free-text name is also accepted. itemData carries the name verbatim.
-        self._tile_reference = QComboBox()
-        self._tile_reference.setEditable(True)
-        tile_layout.addRow("Reference channel:", self._tile_reference)
-
-        self._tile_group.setVisible(False)
-        self._tile_enabled.toggled.connect(self._tile_group.setVisible)
-        layout.addWidget(self._tile_group)
+        self._tile_widget.setVisible(False)
+        self._tile_enabled.toggled.connect(self._tile_widget.setVisible)
+        layout.addWidget(self._tile_widget)
 
         # ── Z-projection ──────────────────────────────────────
         z_group = QGroupBox("Z-Projection")
@@ -331,22 +302,13 @@ class ImportDialog(QDialog):
             }
 
         # Seed the registration reference-channel combo from discovered
-        # channels (identified by name). itemData carries the name verbatim
-        # (not an index) so reads round-trip the name. The combo stays
-        # editable so a free-text name is still accepted.
-        current_ref = self._tile_reference.currentText()
-        self._tile_reference.blockSignals(True)
-        self._tile_reference.clear()
-        for ch in sorted(channels):
-            ch_name = f"ch{ch}"
-            self._tile_reference.addItem(ch_name, ch_name)
-        if current_ref:
-            idx = self._tile_reference.findText(current_ref)
-            if idx >= 0:
-                self._tile_reference.setCurrentIndex(idx)
-            else:
-                self._tile_reference.setCurrentText(current_ref)
-        self._tile_reference.blockSignals(False)
+        # channels. preserve="text" keeps the user's pick across a
+        # re-discovery: here the list is rebuilt from scanned channels, so the
+        # NAME is the stable identity (unlike CompressDialog, where a Manual
+        # rename means position is what must survive).
+        self._tile_widget.set_reference_channels(
+            [f"ch{ch}" for ch in sorted(channels)], preserve="text"
+        )
 
     def _browse_output(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -379,19 +341,12 @@ class ImportDialog(QDialog):
 
     @property
     def tile_config(self) -> TileConfig | None:
+        # Unchecked means no stitching at all, matching CompressDialog. (The
+        # AddLayer TCSPC tab instead yields a 1x1 config; that divergence is
+        # deliberate and not unified here.)
         if not self._tile_enabled.isChecked():
             return None
-        ref = self._tile_reference.currentText().strip()
-        return TileConfig(
-            grid_rows=self._tile_rows.value(),
-            grid_cols=self._tile_cols.value(),
-            grid_type=self._tile_type.currentText(),
-            order=self._tile_order.currentText(),
-            # Spinbox shows a percentage; TileConfig stores a fraction.
-            overlap=self._tile_overlap.value() / 100.0,
-            register=self._tile_register.isChecked(),
-            reference_channel=ref or None,
-        )
+        return self._tile_widget.tile_config()
 
     @property
     def z_project_method(self) -> str | None:

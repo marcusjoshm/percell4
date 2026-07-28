@@ -64,14 +64,20 @@ dialog, follow this order:
    lists / itemData / defaults from both dialogs and asserts equality,
    so drift fails CI.
 5. **Migrate the original dialog to consume the shared widget as a
-   follow-up, not a prerequisite.** Bundling the migration with the
+   follow-up, not a prerequisite.** *(Deferring is only safe if the follow-up
+   is actually scheduled and the invariant is enforced — see the outcome note
+   under Related.)* Bundling the migration with the
    new feature is scope creep; leaving it as a tracked todo keeps the
    PR focused while still committing to the eventual deduplication.
 
-PerCell4-specific: when building any new TCSPC append surface, the
-canonical widget set is `StitchingFlimForm` at
-`src/percell4/gui/_stitching_flim_form.py`. Consume it; do not
-reimplement.
+PerCell4-specific: when building any new tiling or TCSPC append surface, the
+canonical widgets are `StitchingForm` (`src/percell4/gui/_stitching_form.py`)
+for the stitching grid, plus `RotateFlipForm` / `FlimBinParamsForm`
+(`src/percell4/gui/_flim_bin_form.py`) for decay orientation and raw `.bin`
+geometry. Consume them; do not reimplement. `StitchingFlimForm`, the widget
+this doc was written about, was split into those three and deleted on
+2026-07-28 — see
+[`canonical-stitching-form.md`](canonical-stitching-form.md).
 
 ## Why This Matters
 
@@ -93,11 +99,12 @@ existing widget construction completely, which is exactly the activity
 that prevents drift.
 
 Once extracted, the new widget is a single update point. PR #9's
-`StitchingFlimForm` now owns: stitching grid rows/cols/pattern/start
-(8-item origin combo), rotation/flip with `itemData` carriers (0/1/2/3
-for k, -1/0/1 for axis), and the checkable `FLIM .bin Parameters`
-group with `uint32` first in the dtype list, `YXT` first in
-dim-order, and `setSpecialValueText("Auto-detect")` on header bytes.
+`StitchingFlimForm` owned: the stitching grid, rotation/flip with `itemData`
+carriers (0/1/2/3 for k, -1/0/1 for axis), and the checkable
+`FLIM .bin Parameters` group with `uint32` first in the dtype list, `YXT`
+first in dim-order, and `setSpecialValueText("Auto-detect")` on header bytes.
+Those invariants still hold; they now live in `StitchingForm` and
+`_flim_bin_form.py` respectively.
 Any future fix lands once.
 
 ## When to Apply
@@ -135,9 +142,9 @@ rotate_k = self._rotate_combo.currentIndex()
 
 ```python
 # in batch_tcspc_dialog.py, after extraction
-from percell4.gui._stitching_flim_form import StitchingFlimForm
+from percell4.gui._stitching_form import StitchingForm
 
-self._stitching_form = StitchingFlimForm()
+self._stitching_form = StitchingForm()
 self._stitching_form.changed.connect(self._invalidate_run)
 layout.addWidget(self._stitching_form)
 
@@ -167,10 +174,9 @@ def test_stitching_combos_match_existing_dialog_conventions(qtbot):
 
 ## Related
 
-- `src/percell4/gui/_stitching_flim_form.py` — the shared widget extracted in PR #9
-- `src/percell4/gui/batch_tcspc_dialog.py` — first consumer of `StitchingFlimForm`
-- `src/percell4/gui/add_layer_dialog.py:845-975` — original canonical widget construction (still inline; follow-up todo to migrate)
-- `todos/037-pending-p2-migrate-add-layer-tcspc-to-stitching-flim-form.md` — tracked follow-up to migrate the original dialog onto the shared widget
+- [`docs/solutions/architecture-patterns/canonical-stitching-form.md`](canonical-stitching-form.md) — **the outcome of this pattern, and the cautionary half of it.** `StitchingFlimForm` was extracted here and documented as canonical, yet four divergent copies of the stitching controls accumulated anyway, because nothing *failed* when someone rebuilt them inline. Rule 5 below (migrate as a follow-up) fired once and the follow-up sat unactioned from 2026-05-12 to 2026-07-28. The consolidation that finally paid it off replaced `StitchingFlimForm` with `StitchingForm` + `RotateFlipForm` + `FlimBinParamsForm` and added an AST guard that fails the build on a new copy. If you apply Rule 5, schedule the follow-up — or add the guard up front.
+- `src/percell4/gui/_stitching_form.py` — the current canonical widget (`_stitching_flim_form.py` no longer exists)
+- `src/percell4/gui/batch_tcspc_dialog.py` — first consumer of the extracted widget
 - `docs/solutions/architecture-decisions/decouple-task-panels-callback-injection.md` — related rule about how new dialogs receive dependencies (callback injection, not `launcher=self`)
 - `docs/solutions/logic-errors/batch-compress-development-lessons.md` — sibling lesson about per-input scope collapse in batch flows (different drift class, same family of root cause)
 - `docs/brainstorms/2026-05-12-batch-tcspc-append-requirements.md`, `docs/plans/2026-05-12-001-feat-batch-tcspc-append-plan.md` — the requirements + plan whose "default to copy" guidance turned out to be insufficient

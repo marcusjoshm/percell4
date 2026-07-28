@@ -1,13 +1,28 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
-last_updated: 2026-07-24
+last_updated: 2026-07-28
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 208
+total_widgets: 215
 counts:
   selector: 16
-  creator: 17
-  action: 175
+  creator: 19
+  action: 180
+# 2026-07-28 update (refactor/canonical-stitching-form U8):
+#   Collapses 13 per-surface stitching widget entries (compress.stitch_*,
+#   add_layer.batch_tab.stitch_*, add_layer.tcspc_tab.stitch_*,
+#   batch_tcspc.stitching.*) into 9 canonical stitching_form.* entries, because
+#   all four surfaces now embed ONE StitchingForm. The host-owned enable
+#   checkboxes stay with their own surfaces.
+#   Net -13 +9. CLASSIFICATION IS UNCHANGED: every stitching control was and
+#   remains an Action — a pre-run configuration operand touching no Session
+#   selection field. The consolidation moved code, not contracts.
+#   Also ADDS entries that were never recorded at all: overlap, register,
+#   reference and fusion (compress had none of them), plus the new read-only
+#   order-preview widget.
+#   NOTE: total_widgets/counts were already stale before this pass — the header
+#   read 208/16/17/175 while the file actually held 215 widgets. Corrected here
+#   to the real figures rather than adjusted by the delta.
 # 2026-07-23 update (feat/cellpose-diameter-reference-circle U3):
 #   +1 widget: segmentation_panel.cellpose_diameter_circle_checkbox => ACTION.
 #   Toggles a magenta `_diameter_reference` Shapes layer sized to the Cellpose
@@ -1589,50 +1604,6 @@ widgets:
     keystroke: null
     notes: "Toggles tile stitching widgets visibility."
 
-  - id: add_layer.batch_tab.stitch_rows_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "273-276"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch grid rows operand."
-
-  - id: add_layer.batch_tab.stitch_cols_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "278-281"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch grid cols operand."
-
-  - id: add_layer.batch_tab.stitch_type_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "283-287"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch pattern operand."
-
-  - id: add_layer.batch_tab.stitch_order_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "288-294"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch starting corner operand."
-
   - id: add_layer.batch_tab.token_group
     class: Action
     path: src/percell4/gui/add_layer_dialog.py
@@ -1688,50 +1659,6 @@ widgets:
     writes: []
     keystroke: null
     notes: "Toggles TCSPC stitch widgets visibility."
-
-  - id: add_layer.tcspc_tab.stitch_rows_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "826-829"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch rows operand."
-
-  - id: add_layer.tcspc_tab.stitch_cols_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "831-834"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch cols operand."
-
-  - id: add_layer.tcspc_tab.stitch_type_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "836-840"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch pattern operand."
-
-  - id: add_layer.tcspc_tab.stitch_order_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "842-849"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch starting corner operand."
 
   - id: add_layer.tcspc_tab.rotation_combo
     class: Action
@@ -1902,17 +1829,6 @@ widgets:
     writes: []
     keystroke: null
     notes: "Loads a long-format calibration CSV via parse_calibration_csv. Shows row-numbered errors on failure."
-
-  - id: batch_tcspc.stitching.grid_rows_spin
-    class: Action
-    path: src/percell4/gui/batch_tcspc_dialog.py
-    lines: "262-269"
-    widget_type: QSpinBox
-    handler: valueChanged → _invalidate_run
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "One of several stitching/orientation controls (grid_cols_spin, grid_type_combo, order_combo, rotate_combo, flip_combo). All are Action and re-disable Run on change."
 
   - id: batch_tcspc.conflict_policy_radios
     class: Action
@@ -2204,6 +2120,119 @@ widgets:
     keystroke: null
     notes: "Z-projection method operand."
 
+  # ── Canonical stitching form ────────────────────────────────────────
+  # Every tiling surface embeds ONE StitchingForm (see
+  # docs/solutions/architecture-patterns/canonical-stitching-form.md). The
+  # per-surface stitch_rows/cols/type/order entries that used to sit under
+  # compress.*, add_layer.batch_tab.*, add_layer.tcspc_tab.* and
+  # batch_tcspc.stitching.* are collapsed here — they were five copies of one
+  # widget set, and their line numbers were already stale. The host-owned
+  # enable checkboxes stay listed with their own surfaces, since those belong
+  # to the dialog, not the form.
+  #
+  # Classification is unchanged by the consolidation: every control is an
+  # Action — a pre-run configuration operand that neither reads nor writes any
+  # of the five Session selection fields.
+
+  - id: stitching_form.grid_size_x_spin
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "93-98"
+    widget_type: QSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Tile-grid COLUMN count (TileConfig.grid_cols). Labelled 'Grid size X' per Fiji's grid_size_x."
+
+  - id: stitching_form.grid_size_y_spin
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "112-118"
+    widget_type: QSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Tile-grid ROW count (TileConfig.grid_rows). Labelled 'Grid size Y'."
+
+  - id: stitching_form.pattern_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "100-110"
+    widget_type: QComboBox
+    handler: _on_grid_type_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Acquisition scan pattern (TileConfig.grid_type). Value in itemData; the display label is Fiji wording and is NOT the persisted string. Changing it repopulates the Order combo with the matching label set, preserving the selected corner."
+
+  - id: stitching_form.order_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "120-130"
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Start corner + travel directions (TileConfig.order). Options are keyed to the selected Pattern. Value in itemData is one of the four canonical corners; the row-centric aliases remain accepted on input via normalize_order."
+
+  - id: stitching_form.overlap_spin
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "133-142"
+    widget_type: QDoubleSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Tile overlap. Shown as a percentage; TileConfig stores a fraction. Hidden when show_registration=False, in which case tile_config() forces 0.0."
+
+  - id: stitching_form.register_check
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "144-145"
+    widget_type: QCheckBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Opts into the phase-correlation path. The gate (register AND overlap>0 AND grid>1x1) is enforced at the importer, not here. Hidden when show_registration=False, which forces False."
+
+  - id: stitching_form.reference_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "148-154"
+    widget_type: QComboBox (editable)
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Registration reference channel, identified by NAME (itemData carries the name verbatim, not an index). Editable so a free-text name is accepted. Populated via set_reference_channels(preserve='text'|'index')."
+
+  - id: stitching_form.fusion_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "156-169"
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Overlap fusion (none / linear_blending). Compress-only; hidden when show_fusion=False, which forces 'none'. The importer additionally forces 'none' on datasets carrying FLIM decay."
+
+  - id: stitching_form.order_preview
+    class: Action
+    path: src/percell4/gui/_tile_order_preview.py
+    lines: "36-140"
+    widget_type: QWidget (custom paintEvent)
+    handler: _sync_preview
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Read-only 3x3 diagram of the acquisition path for the selected Pattern/Order. Derives its path from assembler._tile_positions so it cannot disagree with real tile placement. No user input."
+
   - id: compress.stitch_check
     class: Action
     path: src/percell4/gui/compress_dialog.py
@@ -2214,50 +2243,6 @@ widgets:
     writes: []
     keystroke: null
     notes: "Toggles stitch-widgets visibility."
-
-  - id: compress.stitch_rows_spin
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "223-226"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch rows operand."
-
-  - id: compress.stitch_cols_spin
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "228-231"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch cols operand."
-
-  - id: compress.stitch_type_combo
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "233-237"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch pattern operand."
-
-  - id: compress.stitch_order_combo
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "239-247"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch starting-corner operand."
 
   - id: compress.flim_group_toggle
     class: Action
