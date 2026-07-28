@@ -29,10 +29,13 @@ class _StubViewer:
         # False during the initial populate before any toggle.
         self.originator_during_calls: list[bool] = []
         self.push_active_calls: list[tuple[str, str]] = []
-        # Faux viewer so the data_panel's
-        # refresh_management_combos check (`viewer_win.viewer is not None`)
-        # passes; we also alias _viewer for consistency with the real API.
-        self.viewer = None  # acts like "no napari viewer alive" for data_panel
+        # Faux viewer so the data_panel's refresh_management_combos check
+        # (`viewer_win.existing_viewer is not None`) sees "no napari viewer
+        # alive"; we also alias _viewer for consistency with the real API.
+        # Both accessors are defined because the real ViewerWindow has both,
+        # and production asks existence questions through existing_viewer.
+        self.viewer = None
+        self.existing_viewer = None
         self._viewer = self.viewer
 
     def _is_alive(self) -> bool:

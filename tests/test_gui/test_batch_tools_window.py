@@ -10,7 +10,7 @@ from percell4.interfaces.gui.task_panels.batch_console_panel import BatchConsole
 
 
 class _FakeSettings:
-    """In-memory stand-in for QSettings, isolated per test via a shared dict."""
+    """In-memory stand-in for the settings store, isolated per test."""
 
     def __init__(self, store: dict) -> None:
         self._store = store
@@ -24,7 +24,7 @@ class _FakeSettings:
 
 def _install_fake_settings(monkeypatch) -> dict:
     store: dict = {}
-    monkeypatch.setattr(btw_mod, "QSettings", lambda *a, **k: _FakeSettings(store))
+    monkeypatch.setattr(btw_mod, "app_settings", lambda: _FakeSettings(store))
     return store
 
 
@@ -84,7 +84,7 @@ def test_close_saves_geometry(qtbot, monkeypatch) -> None:
 
 def test_restore_applies_saved_geometry_when_present(qtbot, monkeypatch) -> None:
     store = {"batch_tools/geometry": QByteArray(b"seed")}
-    monkeypatch.setattr(btw_mod, "QSettings", lambda *a, **k: _FakeSettings(store))
+    monkeypatch.setattr(btw_mod, "app_settings", lambda: _FakeSettings(store))
     calls: list = []
     monkeypatch.setattr(
         BatchToolsWindow,

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
+from percell4.gui.settings import app_settings
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,6 @@ _LAYER_ROI = "_group_roi"
 # forcing the user to re-position once per group. Same QSettings org /
 # app namespace as every other persisted-geometry window in the
 # codebase (SessionWindow, PhasorPlot, DataPlot, CellTable, ...).
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 _QC_GEOMETRY_KEY = "threshold_qc/geometry"
 _PREVIEW_GEOMETRY_KEY = "threshold_qc_preview/geometry"
 
@@ -229,7 +228,6 @@ class ThresholdQCController(QObject):
 
     def _build_preview_dock(self) -> None:
         """Build the group preview as a separate window with histogram and buttons."""
-        from qtpy.QtCore import QSettings
         from qtpy.QtWidgets import QMainWindow
 
         win = QMainWindow()
@@ -242,7 +240,7 @@ class ThresholdQCController(QObject):
         # scenario is run-to-run rather than group-to-group, but the
         # mechanism is identical. Distinct settings key keeps the two
         # windows independent.
-        geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(
+        geom = app_settings().value(
             _PREVIEW_GEOMETRY_KEY,
         )
         if geom:
@@ -519,7 +517,6 @@ class ThresholdQCController(QObject):
 
     def _build_qc_dock(self, initial_value: float) -> None:
         """Build or rebuild the per-group QC as a separate window."""
-        from qtpy.QtCore import QSettings
         from qtpy.QtWidgets import QMainWindow
 
         self._remove_qc_dock()
@@ -535,7 +532,7 @@ class ThresholdQCController(QObject):
         # advance and workflow-to-workflow restart both honor the user's
         # placement. Falls through to Qt's default centering when no
         # geometry has been saved yet (first ever run).
-        geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(
+        geom = app_settings().value(
             _QC_GEOMETRY_KEY,
         )
         if geom:
@@ -916,9 +913,8 @@ class ThresholdQCController(QObject):
             # Persist geometry BEFORE close — see _remove_qc_dock for
             # the platform-flakiness rationale.
             try:
-                from qtpy.QtCore import QSettings
 
-                QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+                app_settings().setValue(
                     _PREVIEW_GEOMETRY_KEY,
                     self._preview_window.saveGeometry(),
                 )
@@ -938,9 +934,8 @@ class ThresholdQCController(QObject):
             # QMainWindow returns whatever Qt last knew, which on some
             # platforms is stale or empty.
             try:
-                from qtpy.QtCore import QSettings
 
-                QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+                app_settings().setValue(
                     _QC_GEOMETRY_KEY, self._qc_window.saveGeometry(),
                 )
             except Exception:

@@ -28,7 +28,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -59,6 +59,7 @@ from percell4.domain.io.naming import channel_display_name
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.gui._cellpose_settings_form import CellposeSettingsForm
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui.settings import app_settings
 from percell4.gui.workflows.single_cell.round_card import (
     METHOD_AUTO_EXTRACT,
     RoundCard,
@@ -93,8 +94,6 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────
 
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 _QSETTINGS_OUTPUT_KEY = "single_cell_threshold_workflow/output_parent"
 _QSETTINGS_SEG_QC_NEW_KEY = "single_cell_threshold_workflow/run_seg_qc_on_new"
 
@@ -681,7 +680,7 @@ class WorkflowConfigDialog(QDialog):
         # QSettings, because otherwise the researcher has to uncheck it on
         # every re-run and forgetting once stalls an unattended batch at
         # the first dataset.
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         self._run_seg_qc_new = QCheckBox(
             "Run segmentation QC on segmentations this workflow creates"
         )
@@ -1535,7 +1534,7 @@ class WorkflowConfigDialog(QDialog):
         row = QHBoxLayout(box)
 
         self._output_edit = QLineEdit()
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         default_out = qs.value(_QSETTINGS_OUTPUT_KEY, "", type=str)
         if default_out:
             self._output_edit.setText(default_out)
@@ -2610,7 +2609,7 @@ class WorkflowConfigDialog(QDialog):
         is remembered because unchecking it on every re-run is the kind of
         step that gets forgotten once, stalling an unattended batch.
         """
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         out = self._output_edit.text().strip()
         if out:
             qs.setValue(_QSETTINGS_OUTPUT_KEY, out)

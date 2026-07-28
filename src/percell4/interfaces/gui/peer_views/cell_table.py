@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from qtpy.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel, Qt
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -23,6 +23,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.gui.settings import app_settings
 from percell4.interfaces.gui.peer_views._timepoint_view import active_timepoint_view
 
 
@@ -419,11 +420,11 @@ class CellTableWindow(QMainWindow):
         event.ignore()
 
     def _save_geometry(self) -> None:
-        QSettings("LeeLabPerCell4", "PerCell4").setValue(
+        app_settings().setValue(
             "cell_table/geometry", self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("cell_table/geometry")
+        geom = app_settings().value("cell_table/geometry")
         if geom:
             self.restoreGeometry(geom)

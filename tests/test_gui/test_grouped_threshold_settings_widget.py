@@ -195,6 +195,7 @@ def _build_panel(qtbot, *, channel="ch0", active_seg="seg", existing_masks=None)
     viewer.layers = [channel_layer, seg_layer]
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
 
     panel = GroupedSegPanel(
         data_model=model,

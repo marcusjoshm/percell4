@@ -214,7 +214,7 @@ class MetricSegmenterPanel(QWidget):
         self._show_status_cb(msg)
 
     def _find_layer_data(self, viewer_win, kind: str, name: str | None):
-        if not name or viewer_win is None or viewer_win.viewer is None:
+        if not name or viewer_win is None or viewer_win.existing_viewer is None:
             return None
         for layer in viewer_win.viewer.layers:
             if layer.__class__.__name__ == kind and layer.name == name:
@@ -234,7 +234,7 @@ class MetricSegmenterPanel(QWidget):
         ``(image, labels, feature_mask, source_mask)`` or ``None`` after a status.
         """
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("Open a dataset in the viewer first")
             return None
         store = self._get_store()

@@ -383,7 +383,7 @@ class DilutePhaseMaskController(QObject):
         is pinned from the seed image so napari doesn't drift as more
         pixels become NaN across rounds.
         """
-        viewer = getattr(self._viewer_win, "viewer", None)
+        viewer = getattr(self._viewer_win, "existing_viewer", None)
         if viewer is None:
             return
 
@@ -406,7 +406,7 @@ class DilutePhaseMaskController(QObject):
 
     def _remove_layer(self, name: str) -> None:
         """Remove a named layer if present; tolerate napari/Qt teardown."""
-        viewer = getattr(self._viewer_win, "viewer", None)
+        viewer = getattr(self._viewer_win, "existing_viewer", None)
         if viewer is None:
             return
         try:

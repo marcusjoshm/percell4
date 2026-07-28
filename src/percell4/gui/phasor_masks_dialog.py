@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from qtpy.QtCore import QSettings, QSignalBlocker, Qt
+from qtpy.QtCore import QSignalBlocker, Qt
 from qtpy.QtWidgets import (
     QApplication,
     QComboBox,
@@ -64,14 +64,13 @@ from percell4.application.use_cases.batch_fit_phasor_masks import (
     batch_fit_phasor_masks,
 )
 from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 from percell4.workflows.channels import intersect_channels
 
 logger = logging.getLogger(__name__)
 
 # QSettings keys — same org/app convention as the FLIM-FRET dialog.
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 
 _QS_T_FIT = "phasor_masks/t_fit"
 _QS_T_MASK_A = "phasor_masks/t_mask_a"
@@ -345,7 +344,7 @@ class PhasorMasksDialog(QDialog):
     # ── QSettings persistence ────────────────────────────
 
     def _restore_qsettings(self) -> None:
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         assert self._t_fit_spin is not None
         assert self._t_mask_a_spin is not None
         assert self._t_mask_b_spin is not None
@@ -373,7 +372,7 @@ class PhasorMasksDialog(QDialog):
         # persisted. Dataset paths change run-to-run, so persisted
         # assignments would resolve to missing paths the next time the
         # dialog opens. Only the global thresholds + suffixes carry over.
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         assert self._t_fit_spin is not None
         assert self._t_mask_a_spin is not None
         assert self._t_mask_b_spin is not None

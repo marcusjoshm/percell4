@@ -9,9 +9,10 @@ from __future__ import annotations
 import logging
 import weakref
 
-from qtpy.QtCore import QObject, QSettings, Signal
+from qtpy.QtCore import QObject, Signal
 
 from percell4.config import viewer_presets as vp
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,22 @@ class ViewerWindow(QObject):
     def viewer(self):
         """Access the napari viewer (creates it if needed)."""
         self._ensure_viewer()
+        return self._viewer
+
+    @property
+    def existing_viewer(self):
+        """The napari viewer if one has been built, else ``None``.
+
+        Use this to *ask whether* a viewer exists; use :attr:`viewer` to show
+        the user something. The distinction matters because ``viewer`` builds
+        one on access, so ``if win.viewer is None:`` is a test that can never
+        be true and that constructs a full OpenGL canvas in order to fail.
+
+        Cleanup and refresh paths want this one. There is nothing to remove
+        from a viewer that was never opened, and forcing it into existence to
+        find that out means loading a dataset spawns the napari window even
+        when the researcher never asked for it.
+        """
         return self._viewer
 
     def set_subtitle(self, subtitle: str) -> None:
@@ -727,12 +744,12 @@ class ViewerWindow(QObject):
 
     def _save_geometry(self) -> None:
         if self._is_alive():
-            QSettings("LeeLabPerCell4", "PerCell4").setValue(
+            app_settings().setValue(
                 "viewer/geometry", self._qt_window.saveGeometry()
             )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("viewer/geometry")
+        geom = app_settings().value("viewer/geometry")
         if geom and self._is_alive():
             self._qt_window.restoreGeometry(geom)
 

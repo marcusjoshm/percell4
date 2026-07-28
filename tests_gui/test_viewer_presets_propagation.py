@@ -11,6 +11,8 @@ Pattern mirrors ``test_session_to_napari_push.py``'s viewer harness.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from napari.utils.colormaps import DirectLabelColormap
@@ -20,9 +22,19 @@ from percell4.config import viewer_presets as vp
 from percell4.gui.viewer import ViewerWindow
 from percell4.model import CellDataModel
 
-# Builds a real napari viewer, so this module carries the ``napari_viewer``
-# marker: skipped by default (see pyproject addopts), run explicitly on CI.
-pytestmark = pytest.mark.napari_viewer
+
+def _pkg_root() -> Path:
+    """Directory of the installed ``percell4`` package.
+
+    Several tests below read production source and assert a call site still
+    uses a preset helper. Anchoring that on the package rather than on this
+    file's depth in the tree keeps them working wherever the test module
+    lives — counting ``parents[...]`` levels broke silently the moment this
+    module moved from ``tests/test_gui_workflows/`` to ``tests_gui/``.
+    """
+    import percell4
+
+    return Path(percell4.__file__).resolve().parent
 
 
 @pytest.fixture
@@ -247,12 +259,7 @@ def test_threshold_qc_group_image_contrast_propagates_when_set(monkeypatch):
 def test_threshold_qc_group_image_call_site_uses_helper():
     """Source-level guard: the threshold_qc.py group-image add_image call
     must spread vp._optional_kwargs and reference both new constants."""
-    from pathlib import Path
-
-    src = (
-        Path(__file__).resolve().parents[2]
-        / "src" / "percell4" / "gui" / "threshold_qc.py"
-    )
+    src = _pkg_root() / "gui" / "threshold_qc.py"
     text = src.read_text(encoding="utf-8")
     assert "vp._optional_kwargs(" in text
     assert "THRESHOLD_QC_GROUP_IMAGE_OPACITY" in text
@@ -298,12 +305,7 @@ def test_flim_lifetime_renders_through_channel_path():
     path — no bespoke FLIM_LIFETIME_* kwargs at the call site. The turbo
     colormap comes from the ``"lifetime"`` entry in CHANNEL_COLORMAPS.
     """
-    from pathlib import Path
-
-    src = (
-        Path(__file__).resolve().parents[2]
-        / "src" / "percell4" / "interfaces" / "gui" / "task_panels" / "flim_panel.py"
-    )
+    src = _pkg_root() / "interfaces" / "gui" / "task_panels" / "flim_panel.py"
     text = src.read_text(encoding="utf-8")
     assert "viewer_win.add_image(result.lifetime" in text
     assert "FLIM_LIFETIME_OPACITY" not in text
@@ -328,12 +330,7 @@ def test_yellow_roi_opacity_propagates_when_set(monkeypatch):
 
 def test_yellow_roi_threshold_qc_call_site_uses_helper():
     """Source-level guard for threshold_qc.py add_shapes."""
-    from pathlib import Path
-
-    src = (
-        Path(__file__).resolve().parents[2]
-        / "src" / "percell4" / "gui" / "threshold_qc.py"
-    )
+    src = _pkg_root() / "gui" / "threshold_qc.py"
     text = src.read_text(encoding="utf-8")
     # Must use the helper for opacity at the yellow-ROI add_shapes site
     assert "YELLOW_ROI_OPACITY" in text
@@ -342,13 +339,7 @@ def test_yellow_roi_threshold_qc_call_site_uses_helper():
 def test_yellow_roi_analysis_panel_call_site_uses_helper():
     """Source-level guard for analysis_panel.py add_shapes — no blending=
     drift preserved."""
-    from pathlib import Path
-
-    src = (
-        Path(__file__).resolve().parents[2]
-        / "src" / "percell4" / "interfaces" / "gui" / "task_panels"
-        / "analysis_panel.py"
-    )
+    src = _pkg_root() / "interfaces" / "gui" / "task_panels" / "analysis_panel.py"
     text = src.read_text(encoding="utf-8")
     assert "YELLOW_ROI_OPACITY" in text
     # Drift preservation: the analysis_panel ROI add_shapes does NOT pass

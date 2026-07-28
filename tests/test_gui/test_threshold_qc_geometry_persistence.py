@@ -8,7 +8,7 @@ and again for Group 3, ad infinitum. Same after a fresh workflow run.
 
 The codebase's other windows (SessionWindow, PhasorPlot, DataPlot,
 CellTable, LauncherWindow, ViewerWindow) all use the canonical
-``QSettings("LeeLabPerCell4", "PerCell4")`` + ``saveGeometry`` /
+``app_settings()`` + ``saveGeometry`` /
 ``restoreGeometry`` pattern with a ``"<window>/geometry"`` key. This
 test pins the same pattern for ``threshold_qc/geometry``.
 """
@@ -20,24 +20,9 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
-from qtpy.QtCore import QCoreApplication, QSettings
 
 from percell4.domain.measure.grouper import GroupingResult
-
-
-@pytest.fixture
-def isolated_settings(tmp_path, monkeypatch):
-    """Sandbox QSettings so the geometry test doesn't bleed into the
-    real preferences store (mirrors tests/test_gui_workflows/
-    test_session_window.py's isolated_settings fixture)."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    QCoreApplication.setOrganizationName("LeeLabPerCell4")
-    QCoreApplication.setApplicationName("PerCell4")
-    QSettings.setDefaultFormat(QSettings.IniFormat)
-    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path))
-    QSettings("LeeLabPerCell4", "PerCell4").clear()
-    yield tmp_path
-    QSettings("LeeLabPerCell4", "PerCell4").clear()
+from percell4.gui.settings import app_settings
 
 
 def _make_grouping_result() -> GroupingResult:
@@ -67,6 +52,7 @@ def fake_viewer():
 
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
     viewer_win.show = MagicMock()
     viewer_win.add_mask = MagicMock()
     return viewer_win
@@ -101,7 +87,7 @@ def _make_controller(fake_viewer):
 
 
 def test_geometry_persists_across_group_transitions(
-    qtbot, isolated_settings, fake_viewer,
+    qtbot, fake_viewer,
 ):
     """Move the QC window during Group 1, advance to Group 2 — the new
     window must come up at the same position, not re-centered."""
@@ -150,7 +136,7 @@ def test_geometry_persists_across_group_transitions(
 
 
 def test_geometry_persists_across_workflow_runs(
-    qtbot, isolated_settings, fake_viewer,
+    qtbot, fake_viewer,
 ):
     """End the workflow, start a new one — the QC window opens at the
     last position the user moved it to in the previous run."""
@@ -190,7 +176,7 @@ def test_geometry_persists_across_workflow_runs(
 
 
 def test_first_build_uses_default_when_no_saved_geometry(
-    qtbot, isolated_settings, fake_viewer,
+    qtbot, fake_viewer,
 ):
     """No prior geometry stored → window comes up with at least the
     declared minimum size (no crash, no zero-size, no negative coords).
@@ -217,7 +203,7 @@ def test_first_build_uses_default_when_no_saved_geometry(
 
 
 def test_preview_window_geometry_persists_across_workflow_runs(
-    qtbot, isolated_settings, fake_viewer,
+    qtbot, fake_viewer,
 ):
     """Same QSettings persistence for the Group Preview window. The
     preview opens once per workflow run (before per-group QC begins),
@@ -253,7 +239,7 @@ def test_preview_window_geometry_persists_across_workflow_runs(
 
 
 def test_preview_first_build_uses_default_when_no_saved_geometry(
-    qtbot, isolated_settings, fake_viewer,
+    qtbot, fake_viewer,
 ):
     """First-ever preview build with no saved geometry → falls back
     to the declared minimum size (500x450)."""
@@ -269,13 +255,11 @@ def test_preview_first_build_uses_default_when_no_saved_geometry(
 
 
 def test_qc_and_preview_use_distinct_settings_keys(
-    qtbot, isolated_settings, fake_viewer,
+    qtbot, fake_viewer,
 ):
     """The two windows must persist under different keys so moving
     one doesn't reposition the other on the next open. Verifies the
     contract via QSettings.allKeys() rather than guessing internals."""
-    from qtpy.QtCore import QSettings
-
     controller = _make_controller(fake_viewer)
 
     # Open + move + close the preview window first.
@@ -301,7 +285,7 @@ def test_qc_and_preview_use_distinct_settings_keys(
     controller._remove_qc_dock()
 
     # Both keys should exist; they must be distinct.
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     keys = set(qs.allKeys())
     assert "threshold_qc/geometry" in keys
     assert "threshold_qc_preview/geometry" in keys

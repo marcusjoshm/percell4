@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from qtpy.QtCore import QSettings
 
 from percell4.application.analysis import (
     BatchAnalysisItemResult,
@@ -19,6 +18,7 @@ from percell4.application.analysis import registry as registry_mod
 from percell4.application.analysis.modules.whole_field_intensity import (  # noqa: F401
     WholeFieldIntensity,
 )
+from percell4.gui.settings import app_settings
 from percell4.gui.whole_field_intensity_dialog import (
     _NO_PRESET,
     _QSETTINGS_OUTPUT_KEY,
@@ -37,7 +37,7 @@ def _reregister() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _clear_qsettings() -> Iterator[None]:
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     qs.remove(_QSETTINGS_OUTPUT_KEY)
     yield
     qs.remove(_QSETTINGS_OUTPUT_KEY)

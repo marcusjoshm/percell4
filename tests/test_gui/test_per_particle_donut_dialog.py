@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from qtpy.QtCore import QSettings
 
 from percell4.application.analysis import (
     BatchAnalysisItemResult,
@@ -24,6 +23,7 @@ from percell4.gui.per_particle_donut_dialog import (
     _QSETTINGS_OUTPUT_KEY,
     PerParticleDonutDialog,
 )
+from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 
 # ── Fixtures ──────────────────────────────────────────────────
@@ -42,7 +42,7 @@ def _reregister_analysis() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _clear_qsettings() -> Iterator[None]:
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     qs.remove(_QSETTINGS_OUTPUT_KEY)
     yield
     qs.remove(_QSETTINGS_OUTPUT_KEY)
@@ -354,5 +354,5 @@ def test_start_persists_output_parent(qtbot, tmp_path):
 
     QMessageBox.exec_ = lambda self_: 0
     dlg._on_start_clicked()
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     assert qs.value(_QSETTINGS_OUTPUT_KEY, "", type=str) == str(out_dir)

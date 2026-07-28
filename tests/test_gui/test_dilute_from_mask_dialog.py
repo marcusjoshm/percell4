@@ -31,6 +31,7 @@ from percell4.gui.dilute_from_mask_dialog import (
     _RADIUS_MIN,
     DiluteFromMaskDialog,
 )
+from percell4.gui.settings import app_settings
 
 # ── Fixture builders ──────────────────────────────────────────
 
@@ -67,9 +68,7 @@ def _make_h5(
 @pytest.fixture(autouse=True)
 def _clear_qsettings():
     """Isolate QSettings so dialog defaults are deterministic per test."""
-    from qtpy.QtCore import QSettings
-
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     qs.remove("dilute_from_mask/radius_px")
     qs.remove("dilute_from_mask/output_name")
     yield

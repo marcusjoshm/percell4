@@ -40,6 +40,7 @@ def _build_panel(qtbot, *, channel="ch0", layer_data=None):
     viewer.layers = [layer]
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
 
     launcher = MagicMock()
     launcher._current_store = store

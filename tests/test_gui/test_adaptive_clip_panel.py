@@ -116,6 +116,7 @@ def _build(
     viewer.layers = layers
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
     viewer_win.add_mask = MagicMock()
 
     monkeypatch.setattr("percell4.gui.workers.Worker", FakeWorker)

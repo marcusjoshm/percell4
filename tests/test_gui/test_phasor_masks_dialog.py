@@ -39,6 +39,7 @@ from percell4.gui.phasor_masks_dialog import (
     _DEFAULT_T_MASK_B,
     PhasorMasksDialog,
 )
+from percell4.gui.settings import app_settings
 
 # ── Fixture builders ──────────────────────────────────────────
 
@@ -87,8 +88,7 @@ def _make_h5(
 @pytest.fixture(autouse=True)
 def _clear_qsettings(monkeypatch):
     """Isolate QSettings so dialog defaults are deterministic per test."""
-    from qtpy.QtCore import QSettings
-    qs = QSettings("LeeLabPerCell4", "PerCell4")
+    qs = app_settings()
     qs.remove("phasor_masks/t_fit")
     qs.remove("phasor_masks/t_mask_a")
     qs.remove("phasor_masks/t_mask_b")

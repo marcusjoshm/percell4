@@ -45,6 +45,7 @@ from qtpy.QtWidgets import (
 from percell4.application.session import Event
 from percell4.gui import theme
 from percell4.gui._grouped_threshold_settings import GroupedThresholdSettingsWidget
+from percell4.gui.settings import app_settings
 from percell4.gui.workflows.dilute_phase.controller import (
     DilutePhaseMaskController,
 )
@@ -73,8 +74,6 @@ _DILATION_TOOLTIP = (
 # other persisted-geometry window in the codebase (SessionWindow,
 # PhasorPlot, ThresholdQC, ...). Distinct key so moving the dilute
 # panel doesn't reposition the QC windows or vice versa.
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 _GEOMETRY_KEY = "dilute_phase_panel/geometry"
 
 
@@ -396,7 +395,7 @@ class DilutePhaseMaskPanel(QWidget):
         Returns ``None`` when the channel layer can't be located (the
         panel surfaces this via the status label).
         """
-        viewer = getattr(self._viewer_win, "viewer", None)
+        viewer = getattr(self._viewer_win, "existing_viewer", None)
         if viewer is None:
             return None
         channel = self._session.active_channel
@@ -529,9 +528,8 @@ class DilutePhaseMaskPanel(QWidget):
             return
         self._geometry_restored = True
         try:
-            from qtpy.QtCore import QSettings
 
-            geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(
+            geom = app_settings().value(
                 _GEOMETRY_KEY,
             )
             if geom:
@@ -559,9 +557,8 @@ class DilutePhaseMaskPanel(QWidget):
         # (saveGeometry on an already-closing widget can return stale
         # data on some platforms).
         try:
-            from qtpy.QtCore import QSettings
 
-            QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+            app_settings().setValue(
                 _GEOMETRY_KEY, self.saveGeometry(),
             )
         except Exception:

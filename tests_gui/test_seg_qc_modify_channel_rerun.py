@@ -30,10 +30,6 @@ from percell4.workflows.models import (
     WorkflowDatasetEntry,
 )
 
-# Builds a real napari viewer, so this module carries the ``napari_viewer``
-# marker: skipped by default (see pyproject addopts), run explicitly on CI.
-pytestmark = pytest.mark.napari_viewer
-
 
 def _make_dataset(path: Path) -> np.ndarray:
     rng = np.random.default_rng(31)

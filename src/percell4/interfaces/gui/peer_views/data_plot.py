@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from qtpy.QtCore import QEvent, QRectF, QSettings, Qt, Signal
+from qtpy.QtCore import QEvent, QRectF, Qt, Signal
 from qtpy.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -22,6 +22,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.gui.settings import app_settings
 from percell4.interfaces.gui.peer_views._timepoint_view import active_timepoint_view
 
 
@@ -367,11 +368,11 @@ class DataPlotWindow(QMainWindow):
         event.ignore()
 
     def _save_geometry(self) -> None:
-        QSettings("LeeLabPerCell4", "PerCell4").setValue(
+        app_settings().setValue(
             "data_plot/geometry", self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("data_plot/geometry")
+        geom = app_settings().value("data_plot/geometry")
         if geom:
             self.restoreGeometry(geom)
