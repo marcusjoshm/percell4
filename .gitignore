@@ -51,10 +51,9 @@ Thumbs.db
 .Rdata
 .Rproj.user/
 
-# Local agent context — kept on disk but never pushed to the remote
-# repo. Agent-generated DOCUMENTATION (docs/solutions/, docs/audits/,
-# etc.) is still tracked; only the per-developer context-engineering
-# files and tool hooks are excluded here.
+# Local agent context — kept on disk but never pushed to the remote repo.
+# Per-developer context-engineering files and tool hooks. The agent-generated
+# documentation trees are excluded further down.
 .claude/
 .cursor/
 CLAUDE.md
@@ -77,3 +76,20 @@ docs/archive/locked_SG.json
 
 # Separate Tauri/Node desktop-app project living in the repo dir (incl. node_modules).
 /desktop/
+
+# Compound Engineering config — machine-local on every dev machine, never shared.
+.compound-engineering/
+
+# Agentic context documentation: plans, learnings, brainstorms, audit write-ups,
+# and archived working notes. Kept on disk so the agent workflows and the
+# docs/ path citations in src/ docstrings still resolve locally, but never
+# pushed. Only SOFTWARE documentation stays tracked under docs/:
+# reference/, paper/, audits/*.yaml, and the top-level guides.
+docs/plans/
+docs/solutions/
+docs/brainstorms/
+docs/ideation/
+docs/initiatives/
+docs/methods/
+docs/archive/
+docs/audits/*.md
