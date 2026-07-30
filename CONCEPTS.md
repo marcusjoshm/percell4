@@ -22,7 +22,9 @@ An integer-labelled image where each distinct non-zero value identifies one dete
 ### Segmentation
 A Label Set whose name is *not* also a Mask name — the per-object labelling a researcher chose as the active object set for a Dataset.
 
-Segmentation is a derived category, not a separate artifact: every Segmentation is a Label Set, but a Label Set shadowed by a same-named Mask is excluded. Any code that offers the user a list of Segmentations must apply that exclusion; a list built from Label Sets alone will offer Masks as if they were object labellings, which is the defect this distinction exists to prevent.
+Segmentation is a derived category, not a separate artifact: every Segmentation is a Label Set, but a Label Set shadowed by a same-named Mask is excluded.
+
+The exclusion belongs to *choosing*, not to *managing*. A list offering the user a Segmentation to work with applies it — otherwise a Mask is offered as an object labelling, which is the defect the distinction exists to prevent. A list for renaming or deleting does not: it enumerates Label Sets, and a shadowed one must stay reachable or it can never be removed.
 
 ### Mask
 A per-pixel selection over a Dataset — which pixels are in play, as opposed to which object each pixel belongs to. A Mask answers "where", a Segmentation answers "which one".
