@@ -342,3 +342,175 @@ def test_center_on_screen_is_noop_off_linux(qtbot, monkeypatch):
 
     assert dialog.pos().x() == 11
     assert dialog.pos().y() == 22
+
+
+# ── popup constructors ───────────────────────────────────────────────
+
+
+def _accept_next_modal(qtbot, value: str | None = None) -> None:
+    """Dismiss whichever modal popup opens on the next event-loop tick."""
+    from qtpy.QtCore import QTimer
+    from qtpy.QtWidgets import QApplication, QInputDialog
+
+    def _dismiss() -> None:
+        widget = QApplication.activeModalWidget()
+        assert widget is not None, "expected a modal popup to be open"
+        if value is not None and isinstance(widget, QInputDialog):
+            widget.setTextValue(value)
+        widget.accept()
+
+    QTimer.singleShot(0, _dismiss)
+
+
+def test_message_box_is_freestanding_and_centred(qtbot, monkeypatch):
+    from qtpy.QtCore import QTimer
+    from qtpy.QtWidgets import QApplication
+
+    from percell4.gui._dialog_utils import message_box
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    parent.show()
+
+    seen: dict[str, object] = {}
+
+    def _inspect() -> None:
+        box = QApplication.activeModalWidget()
+        seen["type"] = box.windowType()
+        avail = box.screen().availableGeometry()
+        centre = box.frameGeometry().center()
+        seen["dx"] = abs(centre.x() - avail.center().x())
+        seen["dy"] = abs(centre.y() - avail.center().y())
+        box.accept()
+
+    QTimer.singleShot(0, _inspect)
+    message_box(parent, "Title", "Body text")
+
+    assert seen["type"] == Qt.Tool
+    # Horizontal centring is exact. Vertical is biased low by half the
+    # title-bar height, because a window's frame is unmeasurable before it
+    # is mapped and centring must happen before show to set WA_Moved.
+    # See center_on_screen's docstring.
+    assert seen["dx"] <= 5
+    assert seen["dy"] <= 25
+
+
+def test_message_box_returns_clicked_button(qtbot, monkeypatch):
+    from qtpy.QtCore import QTimer
+    from qtpy.QtWidgets import QApplication, QMessageBox
+
+    from percell4.gui._dialog_utils import message_box
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+
+    def _click_no() -> None:
+        box = QApplication.activeModalWidget()
+        box.button(QMessageBox.No).click()
+
+    QTimer.singleShot(0, _click_no)
+    answer = message_box(
+        parent,
+        "Confirm",
+        "Really?",
+        buttons=QMessageBox.Yes | QMessageBox.No,
+        default_button=QMessageBox.Yes,
+    )
+
+    assert answer == QMessageBox.No
+
+
+def test_progress_dialog_preserves_window_modal(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import progress_dialog
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    parent.show()
+
+    dialog = progress_dialog(
+        parent, "Compressing...", "Cancel", 0, 10, modality=Qt.WindowModal
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.windowModality() == Qt.WindowModal
+    assert dialog.windowType() == Qt.Tool
+
+
+def test_progress_dialog_preserves_application_modal(qtbot, monkeypatch):
+    """The dataset-loading dialog is application-modal, not window-modal.
+
+    A constructor that hardcoded one default would silently downgrade it
+    and break the promise that modality is unchanged.
+    """
+    from percell4.gui._dialog_utils import progress_dialog
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    parent.show()
+
+    dialog = progress_dialog(
+        parent, "Loading dataset…", None, 0, 10, modality=Qt.ApplicationModal
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.windowModality() == Qt.ApplicationModal
+    assert dialog.windowType() == Qt.Tool
+
+
+def test_text_input_returns_value_and_accepted(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import text_input
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+
+    _accept_next_modal(qtbot, value="chosen_name")
+    value, accepted = text_input(parent, "Name", "Enter a name:", text="default")
+
+    assert value == "chosen_name"
+    assert accepted is True
+
+
+def test_text_input_reports_cancel(qtbot, monkeypatch):
+    from qtpy.QtCore import QTimer
+    from qtpy.QtWidgets import QApplication
+
+    from percell4.gui._dialog_utils import text_input
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+
+    QTimer.singleShot(0, lambda: QApplication.activeModalWidget().reject())
+    value, accepted = text_input(parent, "Name", "Enter a name:", text="default")
+
+    assert accepted is False
+    assert value == "default"
+
+
+def test_text_input_is_freestanding(qtbot, monkeypatch):
+    from qtpy.QtCore import QTimer
+    from qtpy.QtWidgets import QApplication
+
+    from percell4.gui._dialog_utils import text_input
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    parent.show()
+
+    seen: dict[str, object] = {}
+
+    def _inspect() -> None:
+        dlg = QApplication.activeModalWidget()
+        seen["type"] = dlg.windowType()
+        dlg.reject()
+
+    QTimer.singleShot(0, _inspect)
+    text_input(parent, "Name", "Enter a name:")
+
+    assert seen["type"] == Qt.Tool

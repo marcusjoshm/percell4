@@ -32,6 +32,7 @@ from qtpy.QtWidgets import (
 from percell4.config import viewer_presets as vp
 from percell4.domain.io.layout import split_intensity_layers
 from percell4.gui import theme
+from percell4.gui._dialog_utils import message_box, progress_dialog
 from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
@@ -621,10 +622,11 @@ class LauncherWindow(QMainWindow):
         try:
             run_folder = create_run_folder(cfg.output_parent)
         except OSError as e:
-            QMessageBox.warning(
+            message_box(
                 self,
                 "Cannot create run folder",
                 f"Failed to create run folder under {cfg.output_parent}:\n\n{e}",
+                icon=QMessageBox.Warning,
             )
             return
 
@@ -644,13 +646,14 @@ class LauncherWindow(QMainWindow):
         # Close the current dataset before the run so the launcher UI
         # doesn't fight the workflow for control of the CellDataModel.
         if self.data_model.df is not None and not self.data_model.df.empty:
-            answer = QMessageBox.question(
+            answer = message_box(
                 self,
                 "Close current dataset?",
                 "Starting a workflow run will close the currently loaded "
                 "dataset. Continue?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                icon=QMessageBox.Question,
+                buttons=QMessageBox.Yes | QMessageBox.No,
+                default_button=QMessageBox.Yes,
             )
             if answer != QMessageBox.Yes:
                 # Run folder was already created — clean up to avoid an
@@ -682,10 +685,11 @@ class LauncherWindow(QMainWindow):
             runner.start(config=cfg, host=self, metadata=metadata)
         except Exception as e:
             logger.exception("workflow runner raised out of start()")
-            QMessageBox.warning(
+            message_box(
                 self,
                 "Workflow error",
                 f"The workflow runner raised an exception:\n\n{e}",
+                icon=QMessageBox.Warning,
             )
             self._active_workflow_runner = None
 
@@ -737,10 +741,11 @@ class LauncherWindow(QMainWindow):
             )
         except Exception as e:
             logger.exception("failed to construct DilutePhaseMaskPanel")
-            QMessageBox.warning(
+            message_box(
                 self,
                 "Dilute phase workflow error",
                 f"Could not open the dilute phase panel:\n\n{e}",
+                icon=QMessageBox.Warning,
             )
             return
 
@@ -890,11 +895,11 @@ class LauncherWindow(QMainWindow):
             # Use warning() for failure-tinged outcomes so the icon
             # matches; information() for the all-clean case.
             if all_failed or not event.success:
-                QMessageBox.critical(self, header, body)
+                message_box(self, header, body, icon=QMessageBox.Critical)
             elif n_failures > 0:
-                QMessageBox.warning(self, header, body)
+                message_box(self, header, body, icon=QMessageBox.Warning)
             else:
-                QMessageBox.information(self, header, body)
+                message_box(self, header, body, icon=QMessageBox.Information)
             self.statusBar().showMessage(
                 f"Workflow {'complete' if event.success else 'ended'}: "
                 f"{event.message}"
@@ -1104,7 +1109,7 @@ class LauncherWindow(QMainWindow):
     def _run_batch_compress(self, config, datasets) -> None:
         """Compress one or more datasets with a progress dialog."""
         from qtpy.QtCore import Qt
-        from qtpy.QtWidgets import QMessageBox, QProgressDialog
+        from qtpy.QtWidgets import QMessageBox
 
         from percell4.adapters.importer import import_dataset
 
@@ -1116,11 +1121,12 @@ class LauncherWindow(QMainWindow):
             names = ", ".join(ds.name for ds in existing[:5])
             if len(existing) > 5:
                 names += f" (+{len(existing) - 5} more)"
-            reply = QMessageBox.question(
+            reply = message_box(
                 self,
                 "Files Exist",
                 f"{len(existing)} output file(s) already exist:\n{names}\n\nOverwrite all?",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                icon=QMessageBox.Question,
+                buttons=QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
             )
             if reply == QMessageBox.Cancel:
                 return
@@ -1132,8 +1138,9 @@ class LauncherWindow(QMainWindow):
                     return
 
         # Window-modal progress dialog — blocks parent, prevents re-entrancy
-        progress = QProgressDialog("Compressing...", "Cancel", 0, n, self)
-        progress.setWindowModality(Qt.WindowModal)
+        progress = progress_dialog(
+            self, "Compressing...", "Cancel", 0, n, modality=Qt.WindowModal
+        )
         progress.setMinimumDuration(0)
 
         completed = []
@@ -1191,8 +1198,11 @@ class LauncherWindow(QMainWindow):
 
         if failed:
             error_text = "\n".join(f"• {name}: {err}" for name, err in failed)
-            QMessageBox.warning(
-                self, "Compression Errors", f"Failed datasets:\n\n{error_text}"
+            message_box(
+                self,
+                "Compression Errors",
+                f"Failed datasets:\n\n{error_text}",
+                icon=QMessageBox.Warning,
             )
 
     def _on_load_dataset(self) -> None:
@@ -1369,7 +1379,7 @@ class LauncherWindow(QMainWindow):
         (napari is not thread-safe); the intensity ``(T,C,H,W)`` block is split
         into per-channel layers via the same ``split_intensity_layers`` rule.
         """
-        from qtpy.QtWidgets import QApplication, QProgressDialog
+        from qtpy.QtWidgets import QApplication
 
         from percell4.adapters.parallel_decode import (
             array_meta,
@@ -1435,9 +1445,10 @@ class LauncherWindow(QMainWindow):
             flush=True,
         )
 
-        progress = QProgressDialog("Loading dataset…", None, 0, total, self)
+        progress = progress_dialog(
+            self, "Loading dataset…", None, 0, total, modality=Qt.ApplicationModal
+        )
         progress.setWindowTitle("Loading")
-        progress.setWindowModality(Qt.ApplicationModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
         progress.show()
@@ -2149,7 +2160,7 @@ class LauncherWindow(QMainWindow):
         window.
         """
         if self.is_workflow_locked and self._active_workflow_runner is not None:
-            answer = QMessageBox.question(
+            answer = message_box(
                 self,
                 "Cancel running workflow?",
                 "A workflow run is currently in progress. Quit and cancel "
@@ -2157,8 +2168,9 @@ class LauncherWindow(QMainWindow):
                 "runner unwinds; any labels, masks, and staging data "
                 "already written will remain on disk but the final run "
                 "artifacts may not be created.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                icon=QMessageBox.Question,
+                buttons=QMessageBox.Yes | QMessageBox.No,
+                default_button=QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
                 event.ignore()
