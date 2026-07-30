@@ -41,6 +41,7 @@ from percell4.domain.flim.phasor_display import (
     compute_valid_phasor_pixels,
     mask_shape_matches,
 )
+from percell4.gui._dialog_utils import message_box
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.gui.settings import app_settings
 
@@ -2023,12 +2024,13 @@ class PhasorPlotWindow(QMainWindow):
             return
 
         if int(binary.sum()) == 0:
-            response = QMessageBox.question(
+            response = message_box(
                 self,
                 "Empty mask",
                 "No pixels match your current filters. "
                 "Save this empty mask anyway?",
-                QMessageBox.Yes | QMessageBox.No,
+                icon=QMessageBox.Question,
+                buttons=QMessageBox.Yes | QMessageBox.No,
             )
             if response != QMessageBox.Yes:
                 return
@@ -2070,8 +2072,11 @@ class PhasorPlotWindow(QMainWindow):
             exporter = SVGExporter(self._plot.plotItem)
             exporter.export(path)
         except Exception as e:
-            QMessageBox.warning(
-                self, "Save Error", f"Failed to save phasor SVG to:\n{path}\n\n{e}"
+            message_box(
+                self,
+                "Save Error",
+                f"Failed to save phasor SVG to:\n{path}\n\n{e}",
+                icon=QMessageBox.Warning,
             )
             return
         self._status.showMessage(f"Saved phasor SVG: {path}", 4000)
@@ -2106,7 +2111,12 @@ class PhasorPlotWindow(QMainWindow):
             if not isinstance(rois_data, list):
                 raise ValueError("'rois' must be a list")
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            QMessageBox.warning(self, "Load Error", f"Invalid ROI file:\n{e}")
+            message_box(
+                self,
+                "Load Error",
+                f"Invalid ROI file:\n{e}",
+                icon=QMessageBox.Warning,
+            )
             return
 
         # Schema-version warning. v1 (no field) and v2 load fully; v>2 may
@@ -2114,11 +2124,13 @@ class PhasorPlotWindow(QMainWindow):
         # those fields will be lost on the next Save.
         loaded_version = int(data.get("schema_version", 1))
         if loaded_version > ROI_JSON_SCHEMA_VERSION:
-            QMessageBox.information(
-                self, "Newer ROI file",
+            message_box(
+                self,
+                "Newer ROI file",
                 f"This ROI file was written with schema_version={loaded_version}; "
                 f"this build understands up to {ROI_JSON_SCHEMA_VERSION}. "
                 "Some fields may be lost if you save it again.",
+                icon=QMessageBox.Information,
             )
 
         # Clear existing ROIs (and any napari preview layers from them)
@@ -2137,7 +2149,12 @@ class PhasorPlotWindow(QMainWindow):
                     default_color=COLOR_CYCLE[i % len(COLOR_CYCLE)],
                 )
             except ValueError as e:
-                QMessageBox.warning(self, "Load Error", f"ROI {i}: {e}")
+                message_box(
+                    self,
+                    "Load Error",
+                    f"ROI {i}: {e}",
+                    icon=QMessageBox.Warning,
+                )
                 continue
             self._create_roi_widget(phasor_roi)
 

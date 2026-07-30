@@ -20,9 +20,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from qtpy.QtWidgets import QInputDialog, QMessageBox, QWidget
+from qtpy.QtWidgets import QMessageBox, QWidget
 
 from percell4.gui._bin_suffix import bin_suffix
+from percell4.gui._dialog_utils import message_box, text_input
 
 
 def prompt_for_resource_name(
@@ -52,7 +53,7 @@ def prompt_for_resource_name(
     existing_set = set(existing_names)
     current_default = bin_suffix(default, bin)
     while True:
-        name, ok = QInputDialog.getText(parent, title, label, text=current_default)
+        name, ok = text_input(parent, title, label, text=current_default)
         if not ok:
             return None
         if name.strip() == "":
@@ -61,11 +62,12 @@ def prompt_for_resource_name(
             current_default = bin_suffix(default, bin)
             continue
         if name in existing_set:
-            QMessageBox.warning(
+            message_box(
                 parent,
                 "Name in use",
                 f"A resource named '{name}' already exists. "
                 "Please enter a different name below.",
+                icon=QMessageBox.Warning,
             )
             current_default = name
             continue

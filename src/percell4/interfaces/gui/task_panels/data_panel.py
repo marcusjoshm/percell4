@@ -14,7 +14,6 @@ from qtpy.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -23,6 +22,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.gui import theme
+from percell4.gui._dialog_utils import message_box, text_input
 from percell4.model import CellDataModel
 
 
@@ -364,7 +364,7 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to rename")
             return
 
-        new_name, ok = QInputDialog.getText(
+        new_name, ok = text_input(
             self, "Rename", f"New name for '{old_name}':", text=old_name
         )
         if not ok or not new_name or new_name == old_name:
@@ -410,10 +410,12 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to delete")
             return
 
-        reply = QMessageBox.question(
-            self, "Confirm Delete",
+        reply = message_box(
+            self,
+            "Confirm Delete",
             f"Delete '{name}'? This cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
+            icon=QMessageBox.Question,
+            buttons=QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -451,7 +453,7 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to rename")
             return
 
-        new_name, ok = QInputDialog.getText(
+        new_name, ok = text_input(
             self, "Rename Channel", f"New name for '{old_name}':", text=old_name
         )
         if not ok or not new_name or new_name == old_name:
@@ -499,12 +501,14 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to delete")
             return
 
-        reply = QMessageBox.question(
-            self, "Confirm Delete",
+        reply = message_box(
+            self,
+            "Confirm Delete",
             f"Permanently delete channel '{name}' and its FLIM data "
             "(decay, phasor, calibration) from the .h5 file? "
             "This cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
+            icon=QMessageBox.Question,
+            buttons=QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return

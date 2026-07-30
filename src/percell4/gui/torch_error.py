@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from qtpy.QtWidgets import QMessageBox, QWidget
 
+from percell4.gui._dialog_utils import message_box
 from percell4.workflows.diagnostics import ErrorKind, WorkerError, classify
 
 _TITLES_AND_BODIES: dict[ErrorKind, tuple[str, str]] = {
@@ -87,7 +88,12 @@ def show_msvc_redist_warning(
             "  https://aka.ms/vs/17/release/vc_redist.x64.exe\n\n"
             "Then reboot and relaunch PerCell4."
         )
-    QMessageBox.warning(parent, "PyTorch runtime may be out of date", body)
+    message_box(
+        parent,
+        "PyTorch runtime may be out of date",
+        body,
+        icon=QMessageBox.Warning,
+    )
 
 
 def handle_worker_error(
@@ -108,9 +114,10 @@ def handle_worker_error(
 
     title, body = entry
     prefix = f"[{context}] " if context else ""
-    QMessageBox.warning(
+    message_box(
         parent,
         title,
         f"{prefix}{body}\n\nRaw error: {err.exc_type}: {err.message}",
+        icon=QMessageBox.Warning,
     )
     return True

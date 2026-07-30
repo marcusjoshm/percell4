@@ -59,6 +59,7 @@ from percell4.domain.segmentation.postprocess import (
     relabel_sequential,
 )
 from percell4.domain.segmentation.preprocess import apply_lut
+from percell4.gui._dialog_utils import message_box, progress_dialog
 from percell4.gui.workflows.base_runner import PhaseResult
 from percell4.store import DatasetStore
 from percell4.workflows.models import CELLPOSE_MODELS, WorkflowDatasetEntry
@@ -638,11 +639,15 @@ class SegmentationQCController(QObject):
         self._rerun_button.setEnabled(False)
         if self._modify_rerun_button is not None:
             self._modify_rerun_button.setEnabled(False)
-        progress = QProgressDialog(
-            "Running Cellpose…", "Cancel", 0, 0, self._window,
+        progress = progress_dialog(
+            self._window,
+            "Running Cellpose…",
+            "Cancel",
+            0,
+            0,
+            modality=Qt.WindowModal,
         )
         progress.setWindowTitle("Re-run Cellpose")
-        progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
         self._rerun_progress = progress
@@ -1315,14 +1320,15 @@ class SegmentationQCController(QObject):
             if int(final_labels.max()) == 0:
                 # User deleted every label. Treat as auto-skip (the
                 # runner will later mark this dataset as having no cells).
-                answer = QMessageBox.question(
+                answer = message_box(
                     self._window,
                     "No cells left",
                     "You have deleted every label in this dataset. "
                     "Accept anyway? The dataset will have no cells in "
                     "the output and will be skipped by downstream phases.",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
+                    icon=QMessageBox.Question,
+                    buttons=QMessageBox.Yes | QMessageBox.No,
+                    default_button=QMessageBox.No,
                 )
                 if answer != QMessageBox.Yes:
                     return
@@ -1347,14 +1353,15 @@ class SegmentationQCController(QObject):
     def _on_cancel_clicked(self) -> None:
         if self._finished:
             return
-        answer = QMessageBox.question(
+        answer = message_box(
             self._window,
             "Cancel workflow run?",
             "Cancel the running workflow? Any labels, masks, and "
             "per-dataset data already written to the h5 files will "
             "remain; the final run-folder artifacts will not be created.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            icon=QMessageBox.Question,
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
             return
