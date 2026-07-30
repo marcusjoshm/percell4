@@ -36,7 +36,7 @@ def _make_input_dialog_stub(
 def test_happy_path_returns_typed_name(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     """First-try valid name is returned."""
     fake, calls = _make_input_dialog_stub([("my_resource", True)])
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     result = prompt_for_resource_name(
         None,
@@ -52,7 +52,7 @@ def test_happy_path_returns_typed_name(qtbot, monkeypatch: pytest.MonkeyPatch) -
 
 def test_cancel_returns_none(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     fake, _ = _make_input_dialog_stub([("anything", False)])  # ok=False
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     result = prompt_for_resource_name(
         None, title="t", label="l", default="d", existing_names=[]
@@ -68,7 +68,7 @@ def test_empty_name_reprompts_with_original_default(
     fake, calls = _make_input_dialog_stub(
         [("", True), ("valid_name", True)],
     )
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     result = prompt_for_resource_name(
         None,
@@ -87,7 +87,7 @@ def test_whitespace_only_name_treated_as_empty(
     qtbot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake, calls = _make_input_dialog_stub([("   ", True), ("clean", True)])
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     result = prompt_for_resource_name(
         None, title="t", label="l", default="orig", existing_names=[]
@@ -104,14 +104,14 @@ def test_collision_warns_and_reprompts_with_colliding_name_as_default(
     fake, calls = _make_input_dialog_stub(
         [("existing", True), ("fresh", True)],
     )
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     warn_count = {"n": 0}
 
     def fake_warn(*args, **kwargs):  # noqa: ARG001
         warn_count["n"] += 1
 
-    monkeypatch.setattr(rnp.QMessageBox, "warning", staticmethod(fake_warn))
+    monkeypatch.setattr(rnp, "message_box", fake_warn)
 
     result = prompt_for_resource_name(
         None,
@@ -131,11 +131,11 @@ def test_existing_names_accepts_any_iterable(
 ) -> None:
     """Callers may pass a list, tuple, set, or any iterable of strings."""
     fake, _ = _make_input_dialog_stub([("name", True)])
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     for collection in (["a"], ("a",), {"a"}, iter(["a"])):
         fake, _ = _make_input_dialog_stub([("name", True)])
-        monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+        monkeypatch.setattr(rnp, "text_input", fake)
         assert (
             prompt_for_resource_name(
                 None, title="t", label="l", default="d", existing_names=collection
@@ -150,7 +150,7 @@ def test_existing_names_accepts_any_iterable(
 def test_bin_one_default_unchanged(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     """bin=1 (the default) seeds the prompt with the raw default."""
     fake, calls = _make_input_dialog_stub([("cellpose", True)])
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     result = prompt_for_resource_name(
         None,
@@ -169,7 +169,7 @@ def test_bin_greater_than_one_seeds_suffixed_default(
 ) -> None:
     """bin=3 seeds the prompt with ``cellpose_bin3``."""
     fake, calls = _make_input_dialog_stub([("cellpose_bin3", True)])
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     result = prompt_for_resource_name(
         None,
@@ -189,7 +189,7 @@ def test_bin_idempotency_when_caller_passes_already_suffixed_default(
     """If the caller passes ``cellpose_bin3`` as default with bin=3, the
     prompt shows ``cellpose_bin3``, not ``cellpose_bin3_bin3``."""
     fake, calls = _make_input_dialog_stub([("cellpose_bin3", True)])
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     prompt_for_resource_name(
         None,
@@ -209,7 +209,7 @@ def test_bin_empty_input_reprompts_with_suffixed_default(
     fake, calls = _make_input_dialog_stub(
         [("", True), ("cellpose_bin3", True)]
     )
-    monkeypatch.setattr(rnp.QInputDialog, "getText", staticmethod(fake))
+    monkeypatch.setattr(rnp, "text_input", fake)
 
     prompt_for_resource_name(
         None,

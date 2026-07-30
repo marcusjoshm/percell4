@@ -51,7 +51,12 @@ from percell4.application.analysis.modules.per_particle_multichannel import (
     PerParticleMultichannel,
 )
 from percell4.domain.analysis import BoolParam
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui.analysis_widgets import (
     LAYER_SENTINEL,
     build_dataset_picker,
@@ -82,6 +87,8 @@ class PerParticleMultichannelDialog(QDialog):
         self.setMinimumWidth(720)
         self.resize(820, 720)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         self._host = parent
         self._orchestrator = orchestrator

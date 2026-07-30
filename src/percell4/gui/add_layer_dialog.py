@@ -55,7 +55,12 @@ from percell4.gui._add_layer_logic import (
     coerce_added_array,
     is_time_invariant_add,
 )
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui._stitch_order import normalize_order
 from percell4.gui._stitching_form import StitchingForm
 from percell4.gui.tcspc_tab_state import TcspcTabState
@@ -74,6 +79,8 @@ class AddLayerDialog(QDialog):
         self.setMinimumWidth(700)
         self.resize(800, 700)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         self._store = store
         self._data_model = data_model

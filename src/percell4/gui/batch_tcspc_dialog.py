@@ -68,7 +68,12 @@ from percell4.domain.io.models import (
     CrossFormatRule,
     TokenConfig,
 )
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui._flim_bin_form import FlimBinParamsForm, RotateFlipForm
 from percell4.gui._stitching_form import StitchingForm
 from percell4.gui.tcspc_tab_state import build_rule_from_preset
@@ -97,6 +102,8 @@ class BatchTCSPCDialog(QDialog):
         self.setMinimumWidth(820)
         self.resize(900, 760)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         # Injected callables — see module docstring for rationale.
         self._session = session

@@ -12,6 +12,7 @@ import weakref
 from qtpy.QtCore import QObject, Signal
 
 from percell4.config import viewer_presets as vp
+from percell4.gui._dialog_utils import message_box
 from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
@@ -363,13 +364,14 @@ class ViewerWindow(QObject):
             existing = self.viewer.layers[name]
             from qtpy.QtWidgets import QMessageBox
 
-            QMessageBox.warning(
+            message_box(
                 self._qt_window,
                 "Mask name conflict",
                 f"Can't add mask {name!r}: a "
                 f"{type(existing).__name__} layer with that name already "
                 f"exists. Rename the new mask or remove the existing "
                 f"layer before retrying.",
+                icon=QMessageBox.Warning,
             )
             return
 

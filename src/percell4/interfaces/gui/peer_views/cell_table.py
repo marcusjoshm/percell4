@@ -11,7 +11,6 @@ import pandas as pd
 from qtpy.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
     QAbstractItemView,
-    QFileDialog,
     QHBoxLayout,
     QMainWindow,
     QMenu,
@@ -23,6 +22,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.gui._dialog_utils import save_file_name
 from percell4.gui.settings import app_settings
 from percell4.interfaces.gui.peer_views._timepoint_view import active_timepoint_view
 
@@ -384,7 +384,7 @@ class CellTableWindow(QMainWindow):
             if self._session.is_filtered
             else "Export All Measurements"
         )
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, label, "measurements.csv", "CSV (*.csv)"
         )
         if path:
@@ -400,7 +400,7 @@ class CellTableWindow(QMainWindow):
             return
 
         selected_df = df[df["label"].isin(selected_ids)]
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Export Selection", "selection.csv", "CSV (*.csv)"
         )
         if path:

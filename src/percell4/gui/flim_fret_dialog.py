@@ -59,7 +59,12 @@ from percell4.application.use_cases.flim_fret_discovery import (
     list_lifetime_channel_names,
 )
 from percell4.application.use_cases.run_flim_fret import run_flim_fret
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 from percell4.workflows.artifacts import create_run_folder, write_atomic
@@ -142,6 +147,8 @@ class FlimFretDialog(QDialog):
         self.setMinimumWidth(820)
         self.resize(900, 720)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         # Injected callables.
         self._orchestrator = orchestrator
@@ -813,7 +820,13 @@ class _ConfigurePairDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Configure pair: {donor_path.name} ↔ {da_path.name}")
         self.setMinimumWidth(720)
+        # Unlike its siblings this dialog never sized itself, so centring
+        # would compute from a pre-layout size and push the title bar off
+        # the top edge -- the symptom detach_window exists to fix.
+        self.resize(720, 600)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         self._single_cell = single_cell
         self._initial = initial

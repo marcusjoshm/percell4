@@ -14,6 +14,7 @@ import pytest
 
 from percell4.application.session import Event, Session
 from percell4.domain.dataset import DatasetHandle
+from percell4.interfaces.gui.task_panels import data_panel as dp
 from percell4.interfaces.gui.task_panels.data_panel import DataPanel
 from percell4.model import CellDataModel
 
@@ -67,9 +68,12 @@ def panel(qtbot, tmp_path, monkeypatch):
     )
     session.set_dataset(handle)
 
-    # Auto-accept the QMessageBox.question confirmation in _on_delete_layer.
+    # Auto-accept the delete confirmation in _on_delete_layer. Patched on
+    # the data_panel module's own name, not the Qt static: popups now go
+    # through _dialog_utils.message_box so they can be made freestanding,
+    # and patching QMessageBox.question would no longer intercept.
     from qtpy.QtWidgets import QMessageBox
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.Yes)
+    monkeypatch.setattr(dp, "message_box", lambda *a, **kw: QMessageBox.Yes)
 
     p = DataPanel(
         data_model=model,
@@ -150,8 +154,7 @@ def test_rename_mask_emits_mask_list_changed_and_follows_active(
     session.subscribe(Event.MASK_LIST_CHANGED, lambda: fired.append(None))
 
     # Bypass the QInputDialog by returning the new name directly.
-    from qtpy.QtWidgets import QInputDialog
-    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: ("mask_a_renamed", True))
+    monkeypatch.setattr(dp, "text_input", lambda *a, **kw: ("mask_a_renamed", True))
 
     p._mgmt_mask_combo.clear()
     p._mgmt_mask_combo.addItems(store.list_masks())
@@ -172,8 +175,7 @@ def test_rename_segmentation_emits_segmentation_list_changed_and_follows_active(
     fired: list[None] = []
     session.subscribe(Event.SEGMENTATION_LIST_CHANGED, lambda: fired.append(None))
 
-    from qtpy.QtWidgets import QInputDialog
-    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: ("cellpose_v2", True))
+    monkeypatch.setattr(dp, "text_input", lambda *a, **kw: ("cellpose_v2", True))
 
     p._mgmt_seg_combo.clear()
     p._mgmt_seg_combo.addItems(store.list_labels())

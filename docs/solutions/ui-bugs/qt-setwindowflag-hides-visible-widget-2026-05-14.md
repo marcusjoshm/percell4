@@ -191,3 +191,6 @@ self._pin_check.setToolTip(
   unless show() is called after the change has been made." This is
   documented but easy to read past — the side-effect-hides-the-widget
   behavior is not on the same docs page.
+- [`gnome-attaches-parented-modal-dialogs-2026-07-29.md`](gnome-attaches-parented-modal-dialogs-2026-07-29.md)
+  — the popup-window-independence convention, whose two helpers must run
+  before the first `show()` for exactly the reason documented here.

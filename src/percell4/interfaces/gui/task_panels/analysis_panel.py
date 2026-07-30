@@ -17,7 +17,6 @@ from qtpy.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -29,6 +28,7 @@ from qtpy.QtWidgets import (
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
+from percell4.gui._dialog_utils import make_freestanding, save_file_name
 from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
@@ -628,6 +628,11 @@ class AnalysisPanel(QWidget):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
+        # After the layout is populated so adjustSize() yields the real
+        # size, and before exec() -- which is this dialog's first show(),
+        # and both helpers must run before that.
+        make_freestanding(dialog)
+
         if dialog.exec() != QDialog.Accepted:
             return None
 
@@ -695,7 +700,7 @@ class AnalysisPanel(QWidget):
             self._show_status("No particle data — run Analyze Particles first")
             return
 
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Export Particle Data", "particles.csv", "CSV (*.csv)"
         )
         if path:

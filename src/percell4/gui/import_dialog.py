@@ -22,7 +22,12 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.domain.io.models import TileConfig, TokenConfig
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui._stitching_form import StitchingForm
 
 
@@ -40,6 +45,8 @@ class ImportDialog(QDialog):
         self.setMinimumWidth(500)
         self.resize(500, 500)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
         self._project_dir = project_dir
 
         self._build_ui()
