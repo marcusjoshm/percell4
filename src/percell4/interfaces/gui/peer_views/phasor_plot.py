@@ -20,7 +20,6 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -41,7 +40,7 @@ from percell4.domain.flim.phasor_display import (
     compute_valid_phasor_pixels,
     mask_shape_matches,
 )
-from percell4.gui._dialog_utils import message_box
+from percell4.gui._dialog_utils import message_box, open_file_name, save_file_name
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.gui.settings import app_settings
 
@@ -2058,7 +2057,7 @@ class PhasorPlotWindow(QMainWindow):
             channel = self._session.active_channel
             default_name = f"{stem}_{channel}_phasor.svg" if channel else f"{stem}_phasor.svg"
 
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Save Phasor SVG", default_name, "SVG (*.svg)"
         )
         if not path:
@@ -2087,7 +2086,7 @@ class PhasorPlotWindow(QMainWindow):
         if not self._roi_widgets:
             self._status.showMessage("No ROIs to save", 3000)
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Save ROIs", "", "JSON Files (*.json)"
         )
         if not path:
@@ -2100,7 +2099,7 @@ class PhasorPlotWindow(QMainWindow):
         self._status.showMessage(f"Saved {len(self._roi_widgets)} ROIs", 3000)
 
     def _on_load_rois(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = open_file_name(
             self, "Load ROIs", "", "JSON Files (*.json)"
         )
         if not path:

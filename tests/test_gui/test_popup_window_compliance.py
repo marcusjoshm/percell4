@@ -60,6 +60,15 @@ _POPUP_STATIC = re.compile(
     r"|about|getText|getItem|getInt|getDouble)\s*\("
 )
 
+#: File pickers. Assumed out of scope at first because they were thought to
+#: resolve to the desktop portal; measured on GNOME/XWayland they fall back
+#: to a Qt widget dialog that meets all three attach conditions and lands
+#: off-screen. Same rule, same exemption for converted dialog modules.
+_FILE_PICKER_STATIC = re.compile(
+    r"\bQFileDialog\.(?:getOpenFileName|getOpenFileNames|getSaveFileName"
+    r"|getExistingDirectory)\s*\("
+)
+
 #: Directly constructed popups. Neither class exposes a usable static
 #: convenience API in this codebase, so construction is the only shape.
 _POPUP_CONSTRUCTION = re.compile(r"\bQ(?:Dialog|ProgressDialog)\s*\(")
@@ -262,6 +271,35 @@ def test_no_popup_statics_outside_converted_dialogs():
     )
 
 
+# ── Rule 4 ───────────────────────────────────────────────────────────
+
+
+def test_no_file_picker_statics_outside_converted_dialogs():
+    """File pickers are popups too, and Qt's widget fallback attaches.
+
+    Measured: ``QFileDialog.getOpenFileName`` on a launcher docked to the
+    right edge produced a DIALOG + MODAL + transient-for window whose right
+    edge sat at 2045 on a 1920 screen. Use the ``_dialog_utils`` wrappers,
+    which leave ``DontUseNativeDialog`` alone so a real portal still wins.
+    """
+    converted = _converted_dialog_modules()
+    offenders: list[str] = []
+    for path in _scannable():
+        rel = _rel(path)
+        if rel in converted:
+            continue
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if _FILE_PICKER_STATIC.search(line):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "Call percell4.gui._dialog_utils.open_file_name() / open_file_names() "
+        "/ save_file_name() / existing_directory() instead of the QFileDialog "
+        "static.\n" + "\n".join(f"  - {o}" for o in offenders)
+    )
+
+
 # ── Coverage and self-check ──────────────────────────────────────────
 
 
@@ -321,3 +359,9 @@ def test_detectors_fire_on_synthetic_offenders():
     assert not _POPUP_STATIC.search("buttons=QMessageBox.Yes | QMessageBox.No")
     assert not _POPUP_STATIC.search("if reply == QMessageBox.Cancel:")
     assert not _POPUP_CONSTRUCTION.search("def f() -> QDialog:")
+
+    assert _FILE_PICKER_STATIC.search('QFileDialog.getOpenFileName(self, "t")')
+    assert _FILE_PICKER_STATIC.search("QFileDialog.getExistingDirectory(self)")
+    assert _FILE_PICKER_STATIC.search("QFileDialog.getSaveFileName(self, c, d, f)")
+    assert not _FILE_PICKER_STATIC.search("from qtpy.QtWidgets import QFileDialog")
+    assert not _FILE_PICKER_STATIC.search("dialog.setOption(QFileDialog.ShowDirsOnly)")

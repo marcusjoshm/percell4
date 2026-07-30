@@ -24,7 +24,6 @@ from collections.abc import Callable
 from qtpy.QtCore import QDir, Signal
 from qtpy.QtWidgets import (
     QAbstractItemView,
-    QFileDialog,
     QHBoxLayout,
     QLineEdit,
     QPushButton,
@@ -34,6 +33,8 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from percell4.gui._dialog_utils import existing_directory
 
 try:  # QFileSystemModel moved QtWidgets (Qt5) -> QtGui (Qt6); qtpy normalizes.
     from qtpy.QtWidgets import QFileSystemModel
@@ -190,7 +191,7 @@ class FileNavigator(QWidget):
             self._navigate(parent)
 
     def _browse(self) -> None:
-        path = QFileDialog.getExistingDirectory(
+        path = existing_directory(
             self, "Open folder", self._current
         )
         if path:

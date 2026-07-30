@@ -34,7 +34,6 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -44,6 +43,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from percell4.gui._dialog_utils import existing_directory
 from percell4.gui.settings import app_settings
 
 # Sentinel item shown as the first entry in every layer combo. Selecting
@@ -283,7 +283,7 @@ def build_output_parent_picker(
 
     def on_browse() -> None:
         start = line.text() or str(Path.home())
-        chosen = QFileDialog.getExistingDirectory(
+        chosen = existing_directory(
             parent, "Choose output folder", start
         )
         if chosen:

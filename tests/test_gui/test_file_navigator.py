@@ -78,9 +78,10 @@ def test_navigate_truncates_forward_history(qtbot, tmp_path):
 def test_browse_navigates_to_picked_dir(qtbot, tmp_path, monkeypatch):
     sub = tmp_path / "sub"
     sub.mkdir()
-    monkeypatch.setattr(
-        fnav_mod.QFileDialog, "getExistingDirectory", lambda *a, **k: str(sub)
-    )
+    # Patched on the module's own name: the folder picker now routes
+    # through _dialog_utils.existing_directory so it can be made
+    # freestanding, and GNOME no longer glues it to the launcher.
+    monkeypatch.setattr(fnav_mod, "existing_directory", lambda *a, **k: str(sub))
     nav = FileNavigator(str(tmp_path))
     qtbot.addWidget(nav)
     nav._browse()
@@ -88,9 +89,7 @@ def test_browse_navigates_to_picked_dir(qtbot, tmp_path, monkeypatch):
 
 
 def test_browse_cancel_is_noop(qtbot, tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        fnav_mod.QFileDialog, "getExistingDirectory", lambda *a, **k: ""
-    )
+    monkeypatch.setattr(fnav_mod, "existing_directory", lambda *a, **k: "")
     nav = FileNavigator(str(tmp_path))
     qtbot.addWidget(nav)
     nav._browse()

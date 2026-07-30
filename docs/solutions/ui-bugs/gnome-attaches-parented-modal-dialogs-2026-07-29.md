@@ -202,33 +202,33 @@ mechanised guard, and the check below is manual.
    presence: a transient-type window with no transient parent still gets
    `WM_TRANSIENT_FOR` pointing at the client leader.
 
-## Open: file pickers are affected too
+## File pickers are affected too
 
-`QFileDialog.get*` was assumed to resolve to the desktop portal and
-therefore to be out of scope. **Measured on this machine, it does not.** The
-static returns a Qt widget `QFileDialog` that meets all three attach
-conditions and lands off-screen:
+`QFileDialog.get*` was initially assumed to resolve to the desktop portal
+and therefore to be out of scope. **Measured on GNOME/XWayland, it does
+not.** The static returns a Qt widget `QFileDialog` that meets all three
+attach conditions and lands off-screen:
 
-```
-QFileDialog.getOpenFileName(launcher, …) with the launcher docked right
-  _NET_WM_WINDOW_TYPE = DIALOG, NORMAL
-  _NET_WM_STATE       = MODAL, SKIP_TASKBAR
-  WM_TRANSIENT_FOR    = <launcher>
-  frame               = (1416, 274, 629, 452)   right edge 2045 of 1920
-  fully on screen     = False
-```
+| | frame, launcher docked right | on screen |
+|---|---|---|
+| `QFileDialog.getOpenFileName` | `(1416, 274, 629, 452)` — right edge 2045 of 1920 | no |
+| `_dialog_utils.open_file_name` | `(645, 332, 629, 452)` — dx 0 from centre | yes |
 
 `testOption(DontUseNativeDialog)` is `False`, so this is Qt falling back to
 its own widget dialog for want of a platform-theme plugin, not an explicit
-choice. The repo sets neither `DontUseNativeDialog`, `AA_DontUseNativeDialogs`,
-nor `QT_QPA_PLATFORMTHEME`.
+choice. The repo sets neither `DontUseNativeDialog`,
+`AA_DontUseNativeDialogs`, nor `QT_QPA_PLATFORMTHEME`.
 
-Roughly 15 `QFileDialog.get*` call sites remain unconverted across the
-launcher, the peer views, and the task panels. Fixing them needs a fourth
-`_dialog_utils` wrapper on the same pattern; a wrapper that constructs a
-`QFileDialog` without setting `DontUseNativeDialog` still uses the platform's
-native chooser where one exists, so the fix is inert rather than a
-regression on machines that do have a portal.
+Four wrappers now cover the statics: `open_file_name`, `open_file_names`,
+`save_file_name`, and `existing_directory`. **They deliberately do not set
+`DontUseNativeDialog`.** Where a real native or portal chooser exists Qt
+still uses it, the Qt widget is never mapped, and the helpers apply to
+nothing — inert rather than a regression. Where Qt falls back to its own
+widget dialog, the helpers make it freestanding.
+
+Twelve call sites were converted. The other twenty-nine live inside the
+converted dialog classes, parented to a UTILITY window, and are already
+free by the parent-type condition above.
 
 ## Related
 

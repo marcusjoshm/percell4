@@ -20,6 +20,7 @@ import sys
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QDialog,
+    QFileDialog,
     QInputDialog,
     QMessageBox,
     QProgressDialog,
@@ -235,3 +236,95 @@ def text_input(
     center_on_screen(dialog)
     accepted = dialog.exec_() == QDialog.Accepted
     return dialog.textValue(), accepted
+
+
+def _prepare_file_dialog(
+    parent: QWidget | None,
+    caption: str,
+    directory: str,
+    name_filter: str,
+) -> QFileDialog:
+    """A freestanding, centred ``QFileDialog``, not yet shown.
+
+    Deliberately does **not** set ``DontUseNativeDialog``. Where the
+    platform provides a native or portal chooser, Qt still uses it and the
+    helpers below apply to a widget that is never mapped -- inert rather
+    than a regression. Where Qt falls back to its own widget dialog, as it
+    does with no platform-theme plugin installed, that fallback is a
+    parented modal DIALOG which GNOME attaches and pushes off-screen.
+    """
+    dialog = QFileDialog(parent, caption, directory)
+    if name_filter:
+        dialog.setNameFilter(name_filter)
+    dialog.adjustSize()
+    detach_window(dialog)
+    center_on_screen(dialog)
+    return dialog
+
+
+def open_file_name(
+    parent: QWidget | None,
+    caption: str = "",
+    directory: str = "",
+    name_filter: str = "",
+) -> tuple[str, str]:
+    """Freestanding replacement for ``QFileDialog.getOpenFileName``."""
+    dialog = _prepare_file_dialog(parent, caption, directory, name_filter)
+    dialog.setFileMode(QFileDialog.ExistingFile)
+    dialog.setAcceptMode(QFileDialog.AcceptOpen)
+    if dialog.exec_() != QDialog.Accepted:
+        return "", ""
+    chosen = dialog.selectedFiles()
+    return (chosen[0] if chosen else ""), dialog.selectedNameFilter()
+
+
+def open_file_names(
+    parent: QWidget | None,
+    caption: str = "",
+    directory: str = "",
+    name_filter: str = "",
+) -> tuple[list[str], str]:
+    """Freestanding replacement for ``QFileDialog.getOpenFileNames``."""
+    dialog = _prepare_file_dialog(parent, caption, directory, name_filter)
+    dialog.setFileMode(QFileDialog.ExistingFiles)
+    dialog.setAcceptMode(QFileDialog.AcceptOpen)
+    if dialog.exec_() != QDialog.Accepted:
+        return [], ""
+    return list(dialog.selectedFiles()), dialog.selectedNameFilter()
+
+
+def save_file_name(
+    parent: QWidget | None,
+    caption: str = "",
+    directory: str = "",
+    name_filter: str = "",
+) -> tuple[str, str]:
+    """Freestanding replacement for ``QFileDialog.getSaveFileName``.
+
+    ``directory`` doubles as the suggested filename, matching the static's
+    behaviour where callers pass e.g. ``"measurements.csv"``.
+    """
+    dialog = _prepare_file_dialog(parent, caption, directory, name_filter)
+    dialog.setFileMode(QFileDialog.AnyFile)
+    dialog.setAcceptMode(QFileDialog.AcceptSave)
+    if directory:
+        dialog.selectFile(directory)
+    if dialog.exec_() != QDialog.Accepted:
+        return "", ""
+    chosen = dialog.selectedFiles()
+    return (chosen[0] if chosen else ""), dialog.selectedNameFilter()
+
+
+def existing_directory(
+    parent: QWidget | None,
+    caption: str = "",
+    directory: str = "",
+) -> str:
+    """Freestanding replacement for ``QFileDialog.getExistingDirectory``."""
+    dialog = _prepare_file_dialog(parent, caption, directory, "")
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.ShowDirsOnly, True)
+    if dialog.exec_() != QDialog.Accepted:
+        return ""
+    chosen = dialog.selectedFiles()
+    return chosen[0] if chosen else ""

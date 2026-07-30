@@ -16,7 +16,6 @@ from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QApplication,
     QDialog,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -32,7 +31,13 @@ from qtpy.QtWidgets import (
 from percell4.config import viewer_presets as vp
 from percell4.domain.io.layout import split_intensity_layers
 from percell4.gui import theme
-from percell4.gui._dialog_utils import message_box, progress_dialog
+from percell4.gui._dialog_utils import (
+    existing_directory,
+    message_box,
+    open_file_name,
+    progress_dialog,
+    save_file_name,
+)
 from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
@@ -1051,7 +1056,7 @@ class LauncherWindow(QMainWindow):
     # ── Action handlers ──────────────────────────────────────────
 
     def _on_open_project(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Open Project Folder")
+        path = existing_directory(self, "Open Project Folder")
         if path:
             self._project_dir = path
             self.statusBar().showMessage(f"Opened project: {path}")
@@ -1206,7 +1211,7 @@ class LauncherWindow(QMainWindow):
             )
 
     def _on_load_dataset(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = open_file_name(
             self, "Load Dataset", "", "HDF5 Files (*.h5);;All Files (*)"
         )
         if path:
@@ -1925,7 +1930,7 @@ class LauncherWindow(QMainWindow):
         if self.data_model.df.empty:
             self.statusBar().showMessage("No measurements to export")
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Export Measurements", "measurements.csv", "CSV Files (*.csv)"
         )
         if path:
@@ -2001,7 +2006,7 @@ class LauncherWindow(QMainWindow):
             self.statusBar().showMessage("No dataset loaded")
             return
 
-        out_dir = QFileDialog.getExistingDirectory(
+        out_dir = existing_directory(
             self, "Export Phasor (.npz) to..."
         )
         if not out_dir:

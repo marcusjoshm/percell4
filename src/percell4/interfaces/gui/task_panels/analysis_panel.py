@@ -17,7 +17,6 @@ from qtpy.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -29,7 +28,7 @@ from qtpy.QtWidgets import (
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
-from percell4.gui._dialog_utils import center_on_screen, detach_window
+from percell4.gui._dialog_utils import center_on_screen, detach_window, save_file_name
 from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
@@ -703,7 +702,7 @@ class AnalysisPanel(QWidget):
             self._show_status("No particle data — run Analyze Particles first")
             return
 
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Export Particle Data", "particles.csv", "CSV (*.csv)"
         )
         if path:

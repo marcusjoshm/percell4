@@ -514,3 +514,124 @@ def test_text_input_is_freestanding(qtbot, monkeypatch):
     text_input(parent, "Name", "Enter a name:")
 
     assert seen["type"] == Qt.Tool
+
+
+# ── file-picker wrappers ─────────────────────────────────────────────
+
+
+def _dismiss_next_file_dialog(reject: bool = True, select: str | None = None):
+    """Drive whichever QFileDialog opens on the next event-loop tick."""
+    from qtpy.QtCore import QTimer
+    from qtpy.QtWidgets import QApplication, QFileDialog
+
+    seen: dict[str, object] = {}
+
+    def _act() -> None:
+        dlg = QApplication.activeModalWidget()
+        assert isinstance(dlg, QFileDialog), f"expected a QFileDialog, got {dlg!r}"
+        seen["type"] = dlg.windowType()
+        avail = dlg.screen().availableGeometry()
+        seen["dx"] = abs(dlg.frameGeometry().center().x() - avail.center().x())
+        if reject:
+            dlg.reject()
+        else:
+            if select is not None:
+                dlg.selectFile(select)
+            dlg.accept()
+
+    QTimer.singleShot(0, _act)
+    return seen
+
+
+def test_open_file_name_is_freestanding_and_centred(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import open_file_name
+
+    _force_linux(monkeypatch)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    parent.show()
+
+    seen = _dismiss_next_file_dialog()
+    open_file_name(parent, "Load Dataset", "", "HDF5 (*.h5)")
+
+    assert seen["type"] == Qt.Tool
+    assert seen["dx"] <= 5
+
+
+def test_open_file_name_returns_static_shape_on_cancel(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import open_file_name
+
+    _force_linux(monkeypatch)
+    _dismiss_next_file_dialog()
+    path, selected_filter = open_file_name(None, "Load", "", "HDF5 (*.h5)")
+
+    assert path == ""
+    assert selected_filter == ""
+
+
+def test_open_file_names_returns_list_on_cancel(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import open_file_names
+
+    _force_linux(monkeypatch)
+    _dismiss_next_file_dialog()
+    paths, _ = open_file_names(None, "Load many", "", "TIFF (*.tif)")
+
+    assert paths == []
+
+
+def test_save_file_name_returns_static_shape_on_cancel(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import save_file_name
+
+    _force_linux(monkeypatch)
+    _dismiss_next_file_dialog()
+    path, _ = save_file_name(None, "Export", "measurements.csv", "CSV (*.csv)")
+
+    assert path == ""
+
+
+def test_save_file_name_returns_chosen_path(qtbot, monkeypatch, tmp_path):
+    from percell4.gui._dialog_utils import save_file_name
+
+    _force_linux(monkeypatch)
+    target = tmp_path / "out.csv"
+    _dismiss_next_file_dialog(reject=False, select=str(target))
+    path, _ = save_file_name(None, "Export", str(target), "CSV (*.csv)")
+
+    assert path.endswith("out.csv")
+
+
+def test_existing_directory_returns_empty_string_on_cancel(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import existing_directory
+
+    _force_linux(monkeypatch)
+    _dismiss_next_file_dialog()
+
+    assert existing_directory(None, "Choose folder", "") == ""
+
+
+def test_existing_directory_is_freestanding(qtbot, monkeypatch):
+    from percell4.gui._dialog_utils import existing_directory
+
+    _force_linux(monkeypatch)
+    seen = _dismiss_next_file_dialog()
+    existing_directory(None, "Choose folder", "")
+
+    assert seen["type"] == Qt.Tool
+
+
+def test_file_dialog_does_not_force_the_qt_widget_dialog(qtbot, monkeypatch):
+    """Where a native or portal chooser exists, Qt must still use it.
+
+    Setting DontUseNativeDialog would make the fix a regression on machines
+    that have a working portal, so the wrappers deliberately leave the
+    option alone.
+    """
+    from qtpy.QtWidgets import QFileDialog
+
+    from percell4.gui._dialog_utils import _prepare_file_dialog
+
+    _force_linux(monkeypatch)
+    dialog = _prepare_file_dialog(None, "Caption", "", "CSV (*.csv)")
+    qtbot.addWidget(dialog)
+
+    assert dialog.testOption(QFileDialog.DontUseNativeDialog) is False
