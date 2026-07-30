@@ -20,7 +20,12 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 
 if TYPE_CHECKING:
     from percell4.application.session import Session
@@ -46,6 +51,8 @@ class ExportImagesDialog(QDialog):
         self.setMinimumWidth(450)
         self.resize(500, 500)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         self._store = store
         self._session = session

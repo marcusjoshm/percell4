@@ -61,7 +61,12 @@ from percell4.application.use_cases.batch_dilute_from_mask import (
     DiluteReport,
     batch_dilute_from_mask,
 )
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 from percell4.workflows.channels import intersect_channels
@@ -118,6 +123,8 @@ class DiluteFromMaskDialog(QDialog):
         self.setMinimumWidth(620)
         self.resize(700, 560)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         # Host (LauncherWindow) is the parent; cache for end-of-run refresh.
         self._host = parent

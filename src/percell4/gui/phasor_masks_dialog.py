@@ -63,7 +63,12 @@ from percell4.application.use_cases.batch_compute_phasor import (
 from percell4.application.use_cases.batch_fit_phasor_masks import (
     batch_fit_phasor_masks,
 )
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui.settings import app_settings
 from percell4.store import DatasetStore
 from percell4.workflows.channels import intersect_channels
@@ -143,6 +148,8 @@ class PhasorMasksDialog(QDialog):
         self.setMinimumWidth(680)
         self.resize(760, 640)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         # Host (LauncherWindow) is the parent; cache for end-of-run refresh.
         self._host = parent

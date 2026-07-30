@@ -41,7 +41,12 @@ from percell4.domain.io.models import (
     TokenConfig,
 )
 from percell4.domain.io.naming import channel_display_name
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui._stitching_form import StitchingForm
 
 # Index of the "Tokenless (by name)" entry in the Discovery combo.
@@ -68,6 +73,8 @@ class CompressDialog(QDialog):
         self.setMinimumWidth(740)
         self.resize(780, 700)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
         self._project_dir = project_dir
 
         self._datasets: list[DatasetSpec] = []

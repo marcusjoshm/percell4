@@ -58,7 +58,12 @@ from percell4.domain.io.models import LayerType
 from percell4.domain.io.naming import channel_display_name
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.gui._cellpose_settings_form import CellposeSettingsForm
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
 from percell4.gui.settings import app_settings
 from percell4.gui.workflows.single_cell.round_card import (
     METHOD_AUTO_EXTRACT,
@@ -424,6 +429,8 @@ class WorkflowConfigDialog(QDialog):
         self.setModal(True)
         self.resize(960, 860)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         # State
         self._pending_datasets: list[_PendingDataset] = []
@@ -2000,6 +2007,8 @@ class WorkflowConfigDialog(QDialog):
         dialog.setWindowTitle("Configure CSV Export Columns")
         dialog.setModal(True)
         dialog.resize(560, 720)
+        detach_window(dialog)
+        center_on_screen(dialog)
 
         # Outer layout holds the scroll area + the OK/Cancel button row.
         # Each section keeps its natural height inside the scroll area;
