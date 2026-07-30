@@ -154,6 +154,18 @@ def center_on_screen(popup: QWidget) -> None:
     popup.move(top_left)
 
 
+def make_freestanding(popup: QWidget) -> None:
+    """Size, detach, and centre ``popup`` -- the standard pre-show triplet.
+
+    Sizing first matters: an auto-sizing popup has no useful geometry until
+    its content is laid out, so centring before ``adjustSize`` would compute
+    from the wrong rectangle.
+    """
+    popup.adjustSize()
+    detach_window(popup)
+    center_on_screen(popup)
+
+
 def message_box(
     parent: QWidget | None,
     title: str,
@@ -182,11 +194,7 @@ def message_box(
         box.setStandardButtons(buttons)
     if default_button is not None:
         box.setDefaultButton(default_button)
-    # Size before centring: a QMessageBox has no useful geometry until its
-    # text and buttons are laid out.
-    box.adjustSize()
-    detach_window(box)
-    center_on_screen(box)
+    make_freestanding(box)
     return box.exec_()
 
 
@@ -209,9 +217,7 @@ def progress_dialog(
     """
     dialog = QProgressDialog(label, cancel_text, minimum, maximum, parent)
     dialog.setWindowModality(modality)
-    dialog.adjustSize()
-    detach_window(dialog)
-    center_on_screen(dialog)
+    make_freestanding(dialog)
     return dialog
 
 
@@ -231,9 +237,7 @@ def text_input(
     dialog.setWindowTitle(title)
     dialog.setLabelText(label)
     dialog.setTextValue(text)
-    dialog.adjustSize()
-    detach_window(dialog)
-    center_on_screen(dialog)
+    make_freestanding(dialog)
     accepted = dialog.exec_() == QDialog.Accepted
     return dialog.textValue(), accepted
 
@@ -256,9 +260,7 @@ def _prepare_file_dialog(
     dialog = QFileDialog(parent, caption, directory)
     if name_filter:
         dialog.setNameFilter(name_filter)
-    dialog.adjustSize()
-    detach_window(dialog)
-    center_on_screen(dialog)
+    make_freestanding(dialog)
     return dialog
 
 
