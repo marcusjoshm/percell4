@@ -102,25 +102,32 @@ def add_mask(self, data, name, color_dict=None, **kwargs):
 
 `add_labels()` tags `LAYER_TYPE_SEGMENTATION`; `add_mask()` tags `LAYER_TYPE_MASK`. Set via `metadata=` constructor kwarg for earliest availability (before events fire).
 
-### 3. Three-tier sync classification (`launcher.py`)
+### 3. Three-tier sync classification — SUPERSEDED, do not apply
 
-```
-1. Check layer.metadata["percell_type"] (fastest, survives renames)
-2. Fall back to store lookup (for legacy untagged layers)
-3. Unknown → DO NOTHING (safe default, replaces dangerous fallback)
-```
+This section described a napari -> session sync that classified layers as they
+were selected in the viewer. **That mechanism no longer exists** and applying it
+today would reintroduce an edge the architecture now forbids: a repo-wide search
+for `_sync_active_layers_from_viewer` or a `layers.selection.events` subscription
+returns nothing.
 
-### 4. Store-before-layer ordering (`launcher.py`)
+The replacement is a one-way push in the other direction — session state drives
+napari, never the reverse. See
+[`../architecture-patterns/session-to-napari-one-way-push.md`](../architecture-patterns/session-to-napari-one-way-push.md),
+which names this section's approach explicitly as the anti-pattern it removed.
+
+The rest of this document still holds; only this section was superseded.
+
+### 4. Store-before-layer ordering (`main_window.py`)
 
 Both `_on_phasor_mask_applied` and threshold accept write to HDF5 BEFORE calling `add_mask()`. The store write is inert (no Qt/napari signals), so this is safe.
 
-### 5. Metadata-based skip sets + leading-underscore convention (`viewer.py`, `launcher.py`)
+### 5. Metadata-based skip sets + leading-underscore convention (`viewer.py`, `main_window.py`)
 
 Replaced all `{"phasor_roi", "_phasor_roi_preview"}` with `layer.metadata.get(PERCELL_TYPE_KEY) == LAYER_TYPE_MASK`. Scales to future mask types.
 
 **Parallel safety mechanism:** all three classification consumers (`_hide_mask_layers`, `_get_active_labels_layer`, and the launcher's segmentation-fallback) check `layer.name.startswith("_")` *before* the metadata check. Layers whose names begin with `_` (e.g., `_phasor_roi_preview_<roi_name>` per [Phasor ROI preview layer ownership](phasor-roi-preview-layer-ownership-2026-05-03.md)) are treated as transient overlays and excluded from segmentation classification regardless of whether they carry `PERCELL_TYPE_KEY` metadata. This means transient overlay layers may legitimately bypass the `add_mask` / `add_labels` wrappers and call `viewer._viewer.add_labels` directly, *as long as* their name uses the `_` prefix convention.
 
-### 6. Mask filtering in dropdown population (`launcher.py`)
+### 6. Mask filtering in dropdown population (`main_window.py`, `hdf5_store.py`)
 
 ```python
 mask_set = set(store.list_masks())
@@ -131,7 +138,7 @@ for label_name in store.list_labels():
 
 Applied at: initial load, `_refresh_active_combos`. Management combos intentionally show ALL entries so users can delete stale data.
 
-### 7. Signal blocking during combo refresh (`launcher.py`)
+### 7. Re-entrancy guarding during combo refresh (`session_window.py`)
 
 ```python
 self._active_seg_combo.blockSignals(True)
@@ -176,8 +183,7 @@ When adding a new type of Labels layer (tracking overlay, classification mask, e
 - [ ] Use a new HDF5 group (e.g., `/tracking/`), not `/labels/`
 - [ ] Add to `_get_active_labels_layer()` skip logic
 - [ ] Add to `_hide_mask_layers()` logic if needed
-- [ ] Add to `_sync_active_layers_from_viewer()` metadata dispatch
-- [ ] Exclude from segmentation dropdown in `_refresh_active_combos()`
+- [ ] Exclude from the segmentation list where it is computed — see Section 6
 - [ ] Test: add twice by name — collision is surfaced (warning/refuse), never a silent `[1]` suffix
 - [ ] Test: pre-existing layer of a *different* type with the same name — collision is surfaced, no crash inside `intensity_mixin._update_thumbnail`
 - [ ] Test: click in napari — does NOT set `active_segmentation`
@@ -196,9 +202,13 @@ When adding a new type of Labels layer (tracking overlay, classification mask, e
 ## Files Modified
 
 - `src/percell4/gui/viewer.py` — Constants, collision-blocking `add_mask` (hard-blocks any same-name layer with `QMessageBox.warning`), metadata tagging in `add_labels`/`add_mask`, metadata-based skip sets in `_hide_mask_layers` and `_get_active_labels_layer`
-- `src/percell4/gui/launcher.py` — Three-tier sync, store-before-layer ordering (phasor + threshold), mask filtering in combo population, `blockSignals` in `_refresh_active_combos`, logging setup
+- `src/percell4/interfaces/gui/main_window.py` — store-before-layer ordering (phasor + threshold), mask filtering in list population, logging setup. (Was `src/percell4/gui/launcher.py`; that re-export shim was deleted in `ea94abb`.)
+- `src/percell4/adapters/hdf5_store.py` — the mask-filtering rule's primary home today: `segmentation_names` is computed as the label names *not* also present as masks.
+- `src/percell4/interfaces/gui/peer_views/session_window.py` — combo repopulation, now guarded by a re-entrancy flag rather than `blockSignals`.
 
 ## Related Documentation
+
+- [Session -> napari one-way push](../architecture-patterns/session-to-napari-one-way-push.md) — **supersedes Section 3.** The canonical rule for which direction state flows between the session and the viewer.
 
 - [add_mask cross-type name collision crash](add-mask-name-collision-image-layer-crash-2026-05-15.md) — The follow-on incident that motivated the hard-block collision policy in Section 1
 - [DirectLabelColormap rendering blocked by events](napari-direct-label-colormap-rendering-blocked-by-events.md) — Mask layer rendering and colormap assignment patterns
