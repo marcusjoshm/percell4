@@ -267,6 +267,22 @@ self-pumping loop going window-modal are both reported. It also asserts the
 split is not degenerate, so a refactor cannot collapse every dialog into one
 bucket and leave the other assertion vacuous.
 
+**Confirmed on macOS, 2026-07-30.** The progress windows float free rather
+than hanging from their parent's title bar, and Cancel still works on the
+three that keep modality. That second half was the real risk: a wrong split
+here fails silently -- the dialog still appears, it just never responds to
+Cancel -- so the inspection test above is the guard, and this is the
+observation behind it. The Cocoa reasoning is no longer only reasoning.
+
+## The conversion has a cost the diff does not show
+
+Moving call sites onto the wrappers silently invalidated every test that had
+patched the Qt static — 19 patch points across three test files in `edef8b1`,
+plus two more found later. Two of them *hung* the suite rather than failing it,
+and one asserted against an empty list while still reporting green. Budget for
+that sweep when converting further call sites:
+[`../conventions/retarget-test-patches-when-converting-call-sites.md`](../conventions/retarget-test-patches-when-converting-call-sites.md).
+
 ## Related
 
 - [`qt-setwindowflag-hides-visible-widget-2026-05-14.md`](qt-setwindowflag-hides-visible-widget-2026-05-14.md)

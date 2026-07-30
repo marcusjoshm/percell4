@@ -86,13 +86,14 @@ if name in self.viewer.layers:
     existing = self.viewer.layers[name]
     from qtpy.QtWidgets import QMessageBox
 
-    QMessageBox.warning(
+    message_box(                          # was QMessageBox.warning; see note below
         self._qt_window,
         "Mask name conflict",
         f"Can't add mask {name!r}: a "
         f"{type(existing).__name__} layer with that name already "
         f"exists. Rename the new mask or remove the existing "
         f"layer before retrying.",
+        icon=QMessageBox.Warning,
     )
     return
 
@@ -100,7 +101,7 @@ if name in self.viewer.layers:
 self.viewer.add_labels(data, name=name, colormap=cmap, ...)
 ```
 
-### Regression tests (`tests/test_gui_workflows/test_viewer_add_mask_collision.py`)
+### Regression tests (`tests_gui/test_viewer_add_mask_collision.py`)
 
 Three cases, all passing:
 
@@ -109,6 +110,19 @@ Three cases, all passing:
 - `test_add_mask_creates_labels_when_no_collision` — happy path.
 
 The full add_mask-consumer suite (64 tests) continues to pass.
+
+**This guard was asserting nothing for a window.** When `add_mask` was rerouted
+through `percell4.gui._dialog_utils.message_box`, the test's `_patch_warning`
+helper still patched `QMessageBox.warning` — so it captured nothing and
+`assert len(captured) == 1` read an empty list. The suite did not catch it
+(this tier is not collected by a bare `pytest`); a code-review pass did, and
+it was fixed in commit `2aad113`. If you rely on this test as the standing
+protection against the `DirectLabelColormap` crash, confirm its patch still
+targets the name the production code resolves — see
+[`../conventions/retarget-test-patches-when-converting-call-sites.md`](../conventions/retarget-test-patches-when-converting-call-sites.md).
+
+Note the file also moved from `tests/test_gui_workflows/` to `tests_gui/` in the
+headless-test-suite refactor (`f89cebb`).
 
 ### Data cleanup (one-off, for already-corrupted datasets)
 

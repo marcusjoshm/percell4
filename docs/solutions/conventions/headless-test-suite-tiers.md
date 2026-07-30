@@ -75,6 +75,22 @@ never be true and builds a canvas to find that out. Use
 tests — loading a dataset used to spawn the napari window whether or not the
 researcher had opened it.
 
+## A green bare `pytest` says nothing about `tests_gui/` patches
+
+Because `tests_gui/` is outside `testpaths`, a green bare `pytest` is silent
+about every stub and patch in that tree. That is not only a coverage gap — it
+is how a *broken* patch reaches main. When a production call site is rerouted
+(for example onto a wrapper), any test that patched the original symbol stops
+intercepting; a capture-style patch then asserts against an empty list and
+still reports green, and a suppression-style patch lets a real modal open and
+hangs instead of failing.
+
+This happened to `tests_gui/test_viewer_add_mask_collision.py`. Run
+`pytest tests_gui/` explicitly, or review the patch targets, after any change
+that moves what a call site calls. The full rule and its three failure modes
+are in
+[`retarget-test-patches-when-converting-call-sites.md`](retarget-test-patches-when-converting-call-sites.md).
+
 ## Preferences must go through `app_settings()`
 
 `percell4.gui.settings.app_settings()` is the only place a `QSettings` is
@@ -93,6 +109,10 @@ The redirect is consulted *inside* `app_settings()` rather than monkeypatched
 onto it, because call sites may `from ... import app_settings` and capture the
 function at import time. An isolation mechanism that silently covers only some
 call sites is the original bug.
+
+The same import-time binding governs test patches, from the other direction:
+patch the name the *importing* module resolves, not the upstream symbol. See
+[`retarget-test-patches-when-converting-call-sites.md`](retarget-test-patches-when-converting-call-sites.md).
 
 `tests_gui/conftest.py` duplicates the sandbox, the binding pins and the
 delete-drain rather than importing them. The pins must run before any `qtpy`
