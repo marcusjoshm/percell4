@@ -298,15 +298,27 @@ def test_center_on_screen_no_parent_does_not_raise(qtbot, monkeypatch):
     assert dialog.screen() is not None
 
 
-def test_center_on_screen_parent_without_screen_attr_does_not_raise(
-    qtbot, monkeypatch
-):
+def test_center_on_screen_parent_without_screen_attr_falls_back(qtbot, monkeypatch):
+    """The ``hasattr(parent, "screen")`` arm, actually exercised.
+
+    A parentless QDialog takes the ``parent is None`` arm instead, so this
+    substitutes a parent object that genuinely lacks ``screen`` and asserts
+    the popup was still placed -- via its own screen.
+    """
     _force_linux(monkeypatch)
     dialog = QDialog()
     qtbot.addWidget(dialog)
-    dialog.setParent(None)
+    dialog.resize(200, 150)
+
+    class _Bare:
+        pass
+
+    monkeypatch.setattr(dialog, "parent", lambda: _Bare())
 
     center_on_screen(dialog)
+
+    avail = dialog.screen().availableGeometry()
+    assert abs(dialog.frameGeometry().center().x() - avail.center().x()) <= 5
 
 
 def test_center_on_screen_swallows_screen_exception(qtbot, monkeypatch):
@@ -489,7 +501,9 @@ def test_text_input_reports_cancel(qtbot, monkeypatch):
     value, accepted = text_input(parent, "Name", "Enter a name:", text="default")
 
     assert accepted is False
-    assert value == "default"
+    # Matches QInputDialog.getText, which returns an empty string on cancel
+    # rather than whatever was in the field.
+    assert value == ""
 
 
 def test_text_input_is_freestanding(qtbot, monkeypatch):

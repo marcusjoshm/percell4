@@ -28,7 +28,7 @@ from qtpy.QtWidgets import (
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
-from percell4.gui._dialog_utils import center_on_screen, detach_window, save_file_name
+from percell4.gui._dialog_utils import make_freestanding, save_file_name
 from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
@@ -631,9 +631,7 @@ class AnalysisPanel(QWidget):
         # After the layout is populated so adjustSize() yields the real
         # size, and before exec() -- which is this dialog's first show(),
         # and both helpers must run before that.
-        dialog.adjustSize()
-        detach_window(dialog)
-        center_on_screen(dialog)
+        make_freestanding(dialog)
 
         if dialog.exec() != QDialog.Accepted:
             return None

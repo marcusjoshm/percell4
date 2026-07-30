@@ -46,13 +46,21 @@ def small_mask() -> np.ndarray:
 
 
 def _patch_warning(monkeypatch) -> list[tuple]:
-    """Capture ``QMessageBox.warning`` calls instead of opening a dialog."""
+    """Capture the collision popup instead of opening a real dialog.
+
+    Patched on the viewer module's own ``message_box`` name, not the Qt
+    static: ``add_mask`` routes through ``_dialog_utils.message_box`` so the
+    popup can be made freestanding, and patching ``QMessageBox.warning``
+    would no longer intercept -- leaving a real modal to block this tier.
+    """
     from qtpy.QtWidgets import QMessageBox
+
+    from percell4.gui import viewer as viewer_mod
 
     captured: list[tuple] = []
     monkeypatch.setattr(
-        QMessageBox,
-        "warning",
+        viewer_mod,
+        "message_box",
         lambda parent, title, text, *a, **kw: captured.append((title, text))
         or QMessageBox.StandardButton.Ok,
     )

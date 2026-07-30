@@ -190,8 +190,11 @@ def message_box(
     box.setText(text)
     if icon is not None:
         box.setIcon(icon)
-    if buttons is not None:
-        box.setStandardButtons(buttons)
+    # Always set buttons, even when the caller passed none: Qt otherwise
+    # adds the implicit OK at show time, i.e. after make_freestanding has
+    # measured and placed the box, which drifts it by half the button row on
+    # top of the title-bar bias center_on_screen documents.
+    box.setStandardButtons(buttons if buttons is not None else QMessageBox.Ok)
     if default_button is not None:
         box.setDefaultButton(default_button)
     make_freestanding(box)
@@ -231,7 +234,9 @@ def text_input(
     """A freestanding, centred text prompt shown modally.
 
     Returns the same ``(value, accepted)`` tuple as
-    ``QInputDialog.getText`` so call sites unpack unchanged.
+    ``QInputDialog.getText`` so call sites unpack unchanged -- including on
+    cancel, where the static returns an empty string rather than whatever
+    the user had typed.
     """
     dialog = QInputDialog(parent)
     dialog.setWindowTitle(title)
@@ -239,7 +244,7 @@ def text_input(
     dialog.setTextValue(text)
     make_freestanding(dialog)
     accepted = dialog.exec_() == QDialog.Accepted
-    return dialog.textValue(), accepted
+    return (dialog.textValue() if accepted else ""), accepted
 
 
 def _prepare_file_dialog(

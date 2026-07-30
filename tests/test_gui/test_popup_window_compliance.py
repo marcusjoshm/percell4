@@ -52,7 +52,11 @@ _EXEMPT_FILES = {_HELPERS, Path(__file__).resolve()}
 #: was deliberately left alone, never pre-emptively.
 EXEMPT_SITES: dict[str, str] = {}
 
-_DETACH = "detach_window"
+#: Either spelling satisfies the rules. ``make_freestanding`` is the
+#: module's own documented pre-show triplet and calls ``detach_window``
+#: internally, so requiring the inner name would report the recommended
+#: helper as non-compliant.
+_DETACH_NAMES = ("detach_window", "make_freestanding")
 
 #: A popup static that has no handle to set window flags on before showing.
 _POPUP_STATIC = re.compile(
@@ -68,11 +72,6 @@ _FILE_PICKER_STATIC = re.compile(
     r"\bQFileDialog\.(?:getOpenFileName|getOpenFileNames|getSaveFileName"
     r"|getExistingDirectory)\s*\("
 )
-
-#: Directly constructed popups. Neither class exposes a usable static
-#: convenience API in this codebase, so construction is the only shape.
-_POPUP_CONSTRUCTION = re.compile(r"\bQ(?:Dialog|ProgressDialog)\s*\(")
-
 
 def _py_files() -> list[Path]:
     files: list[Path] = []
@@ -108,6 +107,10 @@ def _calls_name(node: ast.AST, name: str) -> bool:
     return False
 
 
+def _calls_any(node: ast.AST, names) -> bool:
+    return any(_calls_name(node, n) for n in names)
+
+
 def _dialog_subclasses_missing_detach(source: str, rel: str) -> list[str]:
     """Rule 1: a ``QDialog`` subclass whose ``__init__`` forgets the helper."""
     hits: list[str] = []
@@ -129,33 +132,39 @@ def _dialog_subclasses_missing_detach(source: str, rel: str) -> list[str]:
             ),
             None,
         )
-        if init is None or not _calls_name(init, _DETACH):
+        if init is None or not _calls_any(init, _DETACH_NAMES):
             line = init.lineno if init is not None else node.lineno
             hits.append(f"{rel}:{line}: class {node.name}(QDialog) __init__")
     return hits
 
 
 def _constructions_missing_detach(
-    source: str, rel: str, *, skip_progress: bool = False
+    source: str, rel: str, *, nested_exempt: bool = False
 ) -> list[str]:
     """Rule 2: a directly built popup whose enclosing function skips the helper.
 
     Scoped to the enclosing function rather than the whole module: a module
     may legitimately build one popup through the helpers and another not.
 
-    ``skip_progress`` exempts ``QProgressDialog`` inside a converted dialog
-    module. Such a dialog is parented to a UTILITY window, so mutter never
-    attaches it, and it is transient enough that nobody repositions it. A
-    nested ``QDialog`` is *not* exempt: it is a substantial form a user may
-    want placed deliberately, so it still has to go through the helper.
+    ``nested_exempt`` covers the transient popup classes inside a converted
+    dialog module. Every one is parented to the converted dialog -- verified:
+    all four ``QMessageBox(self)`` sites and all seven
+    ``QProgressDialog(..., self)`` sites -- so their parent is UTILITY and
+    mutter never attaches them. A nested ``QDialog`` is *never* exempt: it is
+    a substantial form a user may want placed deliberately, so it still has
+    to go through the helper.
     """
-    built_types = {"QDialog"} if skip_progress else {"QDialog", "QProgressDialog"}
+    built_types = {"QDialog"}
+    if not nested_exempt:
+        built_types.update(
+            {"QProgressDialog", "QMessageBox", "QInputDialog", "QFileDialog"}
+        )
     hits: list[str] = []
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        if _calls_name(node, _DETACH):
+        if _calls_any(node, _DETACH_NAMES):
             continue
         for child in ast.walk(node):
             if not isinstance(child, ast.Call):
@@ -178,7 +187,7 @@ def _converted_dialog_modules() -> set[str]:
         if path in _EXEMPT_FILES:
             continue
         source = path.read_text(encoding="utf-8")
-        if _DETACH not in source:
+        if not any(n in source for n in _DETACH_NAMES):
             continue
         tree = ast.parse(source)
         for node in ast.walk(tree):
@@ -215,10 +224,10 @@ def test_every_dialog_subclass_detaches_its_window():
 
 
 def test_directly_built_popups_detach_their_window():
-    """Inside a converted dialog module only ``QProgressDialog`` is exempt.
+    """Inside a converted dialog module the transient popups are exempt.
 
-    All seven nested progress dialogs are parented to ``self`` -- a UTILITY
-    window mutter never attaches -- and none is ever repositioned. A nested
+    Every nested ``QMessageBox`` and ``QProgressDialog`` in those files is
+    parented to ``self`` -- a UTILITY window mutter never attaches. A nested
     ``QDialog`` stays checked, so an inline form surface cannot slip through
     just because its module happens to define a dialog subclass.
     """
@@ -230,7 +239,7 @@ def test_directly_built_popups_detach_their_window():
             _constructions_missing_detach(
                 path.read_text(encoding="utf-8"),
                 rel,
-                skip_progress=rel in converted,
+                nested_exempt=rel in converted,
             )
         )
     assert not offenders, (
@@ -337,6 +346,13 @@ def test_detectors_fire_on_synthetic_offenders():
     )
     assert _dialog_subclasses_missing_detach(bad_class, "x.py")
     assert not _dialog_subclasses_missing_detach(good_class, "x.py")
+    freestanding_class = (
+        "class Thing(QDialog):\n"
+        "    def __init__(self, parent=None):\n"
+        "        super().__init__(parent)\n"
+        "        make_freestanding(self)\n"
+    )
+    assert not _dialog_subclasses_missing_detach(freestanding_class, "x.py")
 
     bad_build = "def f(self):\n    d = QDialog(self)\n    d.exec_()\n"
     good_build = "def f(self):\n    d = QDialog(self)\n    detach_window(d)\n    d.exec_()\n"
@@ -345,11 +361,15 @@ def test_detectors_fire_on_synthetic_offenders():
 
     bad_progress = "def f(self):\n    p = QProgressDialog('x', None, 0, 1, self)\n"
     assert _constructions_missing_detach(bad_progress, "x.py")
-    # Exempt inside a converted dialog module, but only for progress dialogs.
+    # Exempt inside a converted dialog module, but only for the transient
+    # classes -- a nested QDialog form is still reported.
     assert not _constructions_missing_detach(
-        bad_progress, "x.py", skip_progress=True
+        bad_progress, "x.py", nested_exempt=True
     )
-    assert _constructions_missing_detach(bad_build, "x.py", skip_progress=True)
+    bad_msgbox = "def f(self):\n    m = QMessageBox(self)\n    m.exec_()\n"
+    assert _constructions_missing_detach(bad_msgbox, "x.py")
+    assert not _constructions_missing_detach(bad_msgbox, "x.py", nested_exempt=True)
+    assert _constructions_missing_detach(bad_build, "x.py", nested_exempt=True)
 
     assert _POPUP_STATIC.search('QMessageBox.warning(self, "t", "b")')
     assert _POPUP_STATIC.search("QMessageBox.question(self, t, b, btns)")
@@ -358,7 +378,9 @@ def test_detectors_fire_on_synthetic_offenders():
     assert not _POPUP_STATIC.search("from qtpy.QtWidgets import QMessageBox")
     assert not _POPUP_STATIC.search("buttons=QMessageBox.Yes | QMessageBox.No")
     assert not _POPUP_STATIC.search("if reply == QMessageBox.Cancel:")
-    assert not _POPUP_CONSTRUCTION.search("def f() -> QDialog:")
+    assert not _constructions_missing_detach(
+        "def f() -> QDialog:\n    return None\n", "x.py"
+    )
 
     assert _FILE_PICKER_STATIC.search('QFileDialog.getOpenFileName(self, "t")')
     assert _FILE_PICKER_STATIC.search("QFileDialog.getExistingDirectory(self)")

@@ -15,10 +15,17 @@ That check is manual and lives in the plan's U7.
 from __future__ import annotations
 
 import importlib
+import sys
 
 import pytest
 from qtpy.QtCore import Qt, QTimer
-from qtpy.QtWidgets import QApplication, QDialog, QMainWindow, QMessageBox
+from qtpy.QtWidgets import (
+    QApplication,
+    QDialog,
+    QMainWindow,
+    QMessageBox,
+    QWidget,
+)
 
 # The ten converted dialog classes that construct with no arguments.
 # The remaining three need fixtures and get their own tests below.
@@ -38,21 +45,72 @@ NO_ARG_DIALOGS = [
 IDS = [cls for _mod, cls in NO_ARG_DIALOGS]
 
 
-def _build(module_path: str, class_name: str) -> QDialog:
-    return getattr(importlib.import_module(module_path), class_name)()
+@pytest.fixture(autouse=True)
+def _linux_branch(monkeypatch):
+    """Exercise the Linux branch on any host.
+
+    ``detach_window`` and ``center_on_screen`` are deliberate no-ops off
+    Linux, so every assertion below would fail on macOS or Windows. CI is
+    Linux-only, which would hide that from everyone except a developer
+    running the suite locally on another platform. The production gate reads
+    ``sys.platform`` at call time precisely so this works.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+
+
+def _build(module_path: str, class_name: str, parent: QWidget | None = None):
+    """Construct a converted dialog, parented by default.
+
+    A parent matters for the centring assertions: ``cap_to_screen`` caps the
+    dialog to 90% of the work area only when it has one, and several of
+    these dialogs are wider than the 800x600 offscreen screen. Unparented,
+    they stay oversized and get clamped to the work-area origin, which is
+    indistinguishable from never having been centred at all.
+    """
+    cls = getattr(importlib.import_module(module_path), class_name)
+    return cls(parent) if parent is not None else cls()
+
+
+def _skip_if_larger_than_work_area(dialog: QDialog) -> None:
+    """Skip a geometry assertion the offscreen screen cannot support.
+
+    ``cap_to_screen`` cannot shrink a dialog below its own minimum size, and
+    several of these set a minimum wider than the 800x600 offscreen work
+    area. Such a dialog is clamped to the origin, which is exactly where an
+    un-placed dialog sits -- so geometry proves nothing. The call-site
+    recorder test covers these.
+    """
+    avail = dialog.screen().availableGeometry()
+    frame = dialog.frameGeometry()
+    if frame.width() > avail.width() or frame.height() > avail.height():
+        pytest.skip(
+            f"{dialog.__class__.__name__} minimum size "
+            f"({frame.width()}x{frame.height()}) exceeds the "
+            f"{avail.width()}x{avail.height()} offscreen work area; centring "
+            "is unassertable by geometry, see the call-site recorder test"
+        )
 
 
 def _assert_centred(dialog: QDialog) -> None:
+    """Assert real centring -- no escape clause.
+
+    An earlier version OR-ed this with "top-left sits at the work-area
+    origin", which an un-centred dialog at (0,0) satisfies unconditionally,
+    so the assertion could not fail. Six reviewers proved that by neutering
+    ``center_on_screen`` and still getting green.
+    """
+    _skip_if_larger_than_work_area(dialog)
     avail = dialog.screen().availableGeometry()
-    centre = dialog.frameGeometry().center()
-    # Offscreen synthesises a 2px frame per side. cap_to_screen may clamp a
-    # dialog larger than the 800x600 offscreen screen, so allow the clamp
-    # to win on either axis rather than asserting a hard centre.
-    assert abs(centre.x() - avail.center().x()) <= 5 or (
-        dialog.frameGeometry().x() <= avail.x() + 5
+    frame = dialog.frameGeometry()
+    centre = frame.center()
+    # Offscreen synthesises a 2px frame per side; a real WM adds a title bar.
+    assert abs(centre.x() - avail.center().x()) <= 5, (
+        f"{dialog.__class__.__name__} not horizontally centred: "
+        f"{centre.x()} vs {avail.center().x()}"
     )
-    assert abs(centre.y() - avail.center().y()) <= 5 or (
-        dialog.frameGeometry().y() <= avail.y() + 5
+    assert abs(centre.y() - avail.center().y()) <= 25, (
+        f"{dialog.__class__.__name__} not vertically centred: "
+        f"{centre.y()} vs {avail.center().y()}"
     )
 
 
@@ -77,12 +135,65 @@ def test_dialog_keeps_decorations(qtbot, module_path, class_name):
 
 
 @pytest.mark.parametrize(("module_path", "class_name"), NO_ARG_DIALOGS, ids=IDS)
+def test_dialog_calls_both_helpers_at_its_own_call_site(
+    qtbot, monkeypatch, module_path, class_name
+):
+    """R1 + R2 pinned at the call site, independent of geometry.
+
+    This is the assertion that cannot be satisfied by accident. Geometry
+    alone cannot prove ``center_on_screen`` ran: a dialog wider than the
+    800x600 offscreen work area gets clamped to the origin, which is exactly
+    where an un-centred dialog already sits. Recording the calls sidesteps
+    that entirely, and covers every dialog rather than only the ones that
+    happen to fit.
+    """
+    module = importlib.import_module(module_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        module, "detach_window", lambda popup: calls.append("detach")
+    )
+    monkeypatch.setattr(
+        module, "center_on_screen", lambda popup: calls.append("centre")
+    )
+
+    dialog = getattr(module, class_name)()
+    qtbot.addWidget(dialog)
+
+    assert calls == ["detach", "centre"], (
+        f"{class_name} must call detach_window then center_on_screen in "
+        f"__init__; recorded {calls}"
+    )
+
+
+@pytest.mark.parametrize(("module_path", "class_name"), NO_ARG_DIALOGS, ids=IDS)
 def test_dialog_opens_centred_on_screen(qtbot, module_path, class_name):
-    """R2 -- placement is deliberate, not inherited from the parent."""
-    dialog = _build(module_path, class_name)
+    """R2, asserted on real geometry where the dialog can fit.
+
+    Skipped for dialogs whose minimum size exceeds the offscreen work area:
+    ``cap_to_screen`` cannot shrink below a minimum, so they are clamped to
+    the origin and geometry cannot distinguish centred from never-placed.
+    ``test_dialog_calls_both_helpers_at_its_own_call_site`` covers those.
+    """
+    parent = QMainWindow()
+    qtbot.addWidget(parent)
+    parent.show()
+    dialog = _build(module_path, class_name, parent)
     qtbot.addWidget(dialog)
 
     _assert_centred(dialog)
+
+
+@pytest.mark.parametrize(("module_path", "class_name"), NO_ARG_DIALOGS, ids=IDS)
+def test_dialog_is_untouched_off_linux(qtbot, monkeypatch, module_path, class_name):
+    """R6 -- the platform gate is load-bearing, so prove it both ways.
+
+    Overrides the autouse Linux fixture for this case only.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    dialog = _build(module_path, class_name)
+    qtbot.addWidget(dialog)
+
+    assert dialog.windowType() == Qt.Dialog
 
 
 @pytest.mark.parametrize(("module_path", "class_name"), NO_ARG_DIALOGS, ids=IDS)
