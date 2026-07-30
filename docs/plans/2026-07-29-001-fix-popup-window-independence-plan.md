@@ -43,7 +43,7 @@ The behavior is not universal. It reproduces under mutter, metacity, and muffin.
 **Window independence and placement**
 
 - R1. Every parented modal popup opens as a window the user can drag independently of the launcher and of every other window.
-- R2. Modal workflow dialogs, alerts, and progress dialogs open centered on the available work area of the screen that owns their parent window.
+- R2. Popups this plan converts open centered on the available work area of the screen that owns their parent window.
 - R3. Popups keep the modal input blocking they have today. No popup becomes non-modal.
 - R4. Popups keep pointing `WM_TRANSIENT_FOR` at their intended parent, so they stay above it and do not gain a separate taskbar entry.
 - R5. Tool windows that are already independent keep their current open position. They are neither centered nor reflagged.
@@ -69,7 +69,9 @@ The behavior is not universal. It reproduces under mutter, metacity, and muffin.
 
 ### Scope Boundaries
 
-- Popups whose owner is one of the converted dialogs are freed by the parent-type gate in KTD2. They are in scope for verification, not for editing.
+- Convenience popups — message boxes, progress dialogs, prompts — whose owner is one of the converted dialogs are freed by the parent-type gate in KTD2. They are in scope for verification, not for editing.
+- Those nested popups are not separately centered. They inherit placement from the dialog that raised them, which is itself centered by U2.
+- A nested `QDialog` subclass is different. `_ConfigurePairDialog` is converted in U2 like any other dialog class, because the gate frees a dialog's children, not the dialog itself.
 - Non-modal tool windows are already independent. `CnrSegmenterWindow` (`src/percell4/gui/cnr_segmenter.py:88`), the segmentation QC window, multi-select, and the dilute-phase queue are parentless and stay untouched.
 
 #### Deferred to Follow-Up Work
@@ -92,13 +94,14 @@ The behavior is not universal. It reproduces under mutter, metacity, and muffin.
 ### Key Technical Decisions
 
 - KTD1. **Use `Qt.Tool` as the non-attaching window type.** (session-settled: user-approved — chosen over `Qt.Window`: `Qt.Window` maps to `_NET_WM_WINDOW_TYPE_NORMAL` and deletes `WM_TRANSIENT_FOR`, losing stay-above-parent and gaining a taskbar entry.) `Qt.Tool` maps to `_NET_WM_WINDOW_TYPE_UTILITY`, which fails mutter's type gate, and stays in qtbase's `isTransient()` list, so the transient parent survives. Measured: independent movement, screen-centered placement, `_NET_WM_STATE_MODAL` retained, `_NET_WM_STATE_SKIP_TASKBAR` retained. Governs R1, R4.
-- KTD2. **Convert the dialog classes only, and let the parent-type gate free everything nested inside them.** mutter attaches a window only when its transient parent's own type is `NORMAL`, `DIALOG`, or `MODAL_DIALOG`. Once a dialog is `UTILITY`, every popup parented to it is unattached with no edit to that popup. Measured on an unmodified modal child. Roughly half the convenience popups in `src/` are owned by one of the twelve dialogs and need no change. Governs R1.
+- KTD2. **Convert the dialog classes only, and let the parent-type gate free everything nested inside them.** mutter attaches a window only when its transient parent's own type is `NORMAL`, `DIALOG`, or `MODAL_DIALOG`. Once a dialog is `UTILITY`, every popup parented to it is unattached with no edit to that popup. Measured on an unmodified modal child. Roughly half the convenience popups in `src/` are owned by one of the thirteen dialog classes and need no change. Governs R1.
 - KTD3. **Set window flags and position before the first `show()`.** `setWindowFlags` on a visible widget hides it as a side effect, which this repo has already been bitten by and documented at `docs/solutions/ui-bugs/qt-setwindowflag-hides-visible-widget-2026-05-14.md`. `move()` before `show()` also sets `Qt.WA_Moved`, which suppresses `QDialog::adjustPosition` and is what makes deliberate placement stick. Both belong in `__init__`. Governs R2.
 - KTD4. **Gate on `sys.platform`, never on the Qt platform name or Wayland environment variables.** (session-settled: user-approved — chosen over covering macOS too: the researcher reports no problem there.) `src/percell4/gui/opengl_platform.py:81-89` establishes a `platformName()` gate for a different problem; copying it here would be wrong, because Qt 6.8 plus mutter 47 reintroduces attachment on native Wayland through `xdg-dialog-v1`, and this codebase is one `QT_API` change away from PyQt6. Governs R6.
 - KTD5. **Keep `exec_()` and modality untouched.** (session-settled: user-approved — chosen over converting dialogs to non-modal `show()`: that refactor is unnecessary once KTD1 is in place.) mutter's gate keys on window type and parent type, not on modality. Attempting to relax modality instead would be both more expensive and unreliable, because mutter latches its notion of modality when it first manages the window and Qt never clears `_NET_WM_STATE_MODAL`. Governs R3.
 - KTD6. **Put the helpers in `src/percell4/gui/_dialog_utils.py` and enforce them by inspection.** That module already owns `wrap_in_scroll` and `cap_to_screen`, and `docs/solutions/ui-bugs/dialog-scroll-when-tall.md` argues for adding a function there rather than introducing a dialog base class. The enforcement pattern is established three times over in `tests/test_gui/`. Governs R8, R9.
-- KTD7. **Do not unparent any popup to solve this.** Dropping the Qt parent would detach the window, but `cap_to_screen` early-returns when `dialog.parent()` is `None` (`src/percell4/gui/_dialog_utils.py:23-25`), which would silently disable the screen-height cap on all twelve dialogs. A flags change leaves the `QObject` parent intact. Governs R4, R10.
+- KTD7. **Do not unparent any popup to solve this.** Dropping the Qt parent would detach the window, but `cap_to_screen` early-returns when `dialog.parent()` is `None` (`src/percell4/gui/_dialog_utils.py:23-25`), which would silently disable the screen-height cap on every converted dialog. A flags change leaves the `QObject` parent intact. Governs R4, R10.
 - KTD8. **Scope the compliance scan to the whole GUI tree, not the dialog-filename globs.** `tests/test_gui/test_dialog_helper_compliance.py` discovers by `*Dialog.py` / `*_dialog.py`, which sees twelve files and misses the launcher, the peer views, and the workflow panels. Follow `tests/test_gui/test_settings_isolation_compliance.py`, which scans whole trees. Governs R9.
+- KTD10. **Reject an application-wide pre-show hook in favour of per-site constructors.** A single `QApplication` event filter or `notify()` override would apply the window type to every popup with no call-site edits. It is rejected because the type change must land before the first `show()` per KTD3, and a filter that observes show-time acts on a widget Qt has already begun showing — the hides-a-visible-widget trap that KTD3 exists to avoid. Per-site constructors also stay inspectable by U6's test, which an implicit global hook would not be. Governs R8.
 - KTD9. **Centering is X11 and XWayland only, by construction.** `xdg_shell` gives clients no absolute-positioning request, so Qt ignores `move()` for top-level windows on native Wayland regardless of modality. Document this rather than work around it. Qt currently refuses to auto-select the Wayland platform under GNOME, so the gate in KTD4 is sufficient today. Governs R2, R6.
 
 ### High-Level Technical Design
@@ -140,13 +143,13 @@ flowchart TB
 
 ### Sequencing
 
-U1 unblocks everything. U2 delivers most of the user-visible value and should be verified manually before the tail. U3 and U4 are independent of each other. U5 can land at any point after U2 but must land before the branch is considered green. U6 should land after U3 and U4, or its exemption map will be large and churn. U7 is last.
+U1 unblocks everything. U2 delivers most of the user-visible value and should be verified manually before the tail. U4 depends on U3 for the shared constructors, so U3 lands first; the pair is otherwise independent of U2. U5 lands after U2, U3, and U4 so the failure list is captured once. U6 follows U5, once the tree is stable and the exemption map can stay empty. U7 is last.
 
 ---
 
 ## Risks & Dependencies
 
-- **`Qt.Tool` carries `SKIP_TASKBAR` and `SKIP_PAGER`.** Converted popups get no taskbar entry and may not appear in the window switcher. This is acceptable only because they keep `WM_TRANSIENT_FOR` and therefore stay above their parent, so they cannot be buried. If a future change drops the transient parent, a modal popup could become unreachable. The U6 compliance test is the guard: it fails if a popup stops going through the helper.
+- **`Qt.Tool` carries `SKIP_TASKBAR` and `SKIP_PAGER`.** Converted popups get no taskbar entry and may not appear in the window switcher. This is acceptable only because they keep `WM_TRANSIENT_FOR` and therefore stay above their parent, so they cannot be buried. If a future change drops the transient parent, a modal popup could become unreachable. U2's `cap_to_screen` assertion is the guard against losing the Qt parent; U6 checks only that popups go through the helpers, not that they keep a transient parent. Neither catches a window-manager-level change, which is why U7's manual check names the property explicitly.
 - **`Qt.Tool` behaves differently off Linux.** On macOS, tool windows hide when the application deactivates; on Windows they get a thin title bar and no taskbar button. The KTD4 platform gate makes this moot, but removing the gate would regress both platforms. Any future attempt to bring macOS into scope must revisit the mechanism, not just widen the gate.
 - **Decoration is desktop-dependent.** Utility windows are decorated normally under mutter, but this is a window-manager choice, not a guarantee. R7 and the U7 manual check exist to catch a desktop that decorates utility windows differently.
 - **Centering fights saved geometry.** Any popup that restores a saved position will disagree with centering. U5 resolves this per test; the underlying rule is that this plan centers modal popups and does not persist their position. A future geometry-persistence feature must decide which wins.
@@ -175,6 +178,7 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 2. Add a helper that centers a popup on the available geometry of the screen that owns it, preferring the parent's screen and falling back to the popup's own. It returns early off Linux.
 3. Both helpers document that they must run before the first `show()`, and why — cite `docs/solutions/ui-bugs/qt-setwindowflag-hides-visible-widget-2026-05-14.md`.
 4. Keep the module free of new imports beyond `sys` and what `qtpy` already provides.
+5. Read `sys.platform` at call time, not at import time, so a test can exercise both branches with `monkeypatch.setattr(sys, "platform", ...)`. CI runs Linux only, so an import-time gate would leave every off-Linux scenario silently unexecuted.
 
 **Patterns to follow.** `src/percell4/gui/opengl_platform.py` for the shape of a platform-gated helper split into a pure decision function and a thin side-effecting wrapper — that split is what makes it testable off the target platform. `src/percell4/gui/_dialog_utils.py` for naming and the docstring convention that cites the owning learning doc.
 
@@ -223,16 +227,17 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 3. Leave `setModal(True)` at `config_dialog.py:424` and `:2001` in place. Modality is unchanged per KTD5.
 4. Do not change any `exec_()` call site.
 5. Do not unparent anything, per KTD7.
+6. `_ConfigurePairDialog` (`src/percell4/gui/flim_fret_dialog.py:793`) sets only `setMinimumWidth(720)` and never calls `resize()`. Give it an explicit size before the centering call, or centering computes from a pre-layout size and can push its title bar off-screen — the exact symptom this plan fixes.
 
-**Execution note.** Convert one dialog first, verify it manually on the real GNOME session against AE1, then apply the same edit across the rest. The mechanism is uniform, so a single manual confirmation de-risks the whole batch; batching first and discovering the mechanism was wrong would waste twelve edits.
+**Execution note.** Convert one dialog first, verify it manually on the real GNOME session against AE1, then apply the same edit across the rest. On that first dialog, check AE1 with the window-type change alone before adding the centering call, and record which of the two the fix actually needs. The mechanism is uniform, so a single manual confirmation de-risks the whole batch; batching first and discovering the mechanism was wrong would waste the whole batch.
 
-**Patterns to follow.** The uniform `__init__` shape these twelve already share. `src/percell4/gui/compress_dialog.py:59-63` is the clearest example.
+**Patterns to follow.** The uniform `__init__` shape these thirteen already share. `src/percell4/gui/compress_dialog.py:59-70` is the clearest example — that range runs through `resize(780, 700)` and `cap_to_screen(self)`, which are the two calls the new helper calls follow.
 
 **Test scenarios.**
 - Each of the thirteen dialog classes reports window type `Qt.Tool` after construction on Linux.
 - Each of the thirteen still reports `isModal()` as before when driven through `exec_()`. Drive it with `QTimer.singleShot(0, dlg.accept); dlg.exec_()`, which returns without hanging under the offscreen platform.
 - Each of the thirteen is centered on the screen work area after construction.
-- Each of the thirteen still contains exactly one outermost `QScrollArea`, so R10 holds. Extend the existing per-dialog assertions rather than writing new ones.
+- Each converted dialog keeps the scroll shape its own existing assertion already pins, so R10 holds. Most have one outermost `QScrollArea`; `AddLayerDialog` legitimately has three per-tab wrappers, asserted at `tests/test_gui/test_dialog_migrations.py:95`. Extend the existing per-dialog assertions rather than writing new ones.
 - Each of the thirteen still has its `maximumHeight` capped by `cap_to_screen`, proving the `QObject` parent survived the flags change.
 - Constructing a dialog and then showing it leaves it visible. This is the regression guard for the `setWindowFlags`-hides-a-visible-widget trap; the trap reproduces under the offscreen platform, so the test is meaningful.
 - A modal `QMessageBox` parented to a converted dialog reports the unchanged `Qt.Dialog` window type, documenting that KTD2 frees it without editing it.
@@ -250,15 +255,15 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 **Dependencies.** U1.
 
 **Files.**
-- `src/percell4/gui/_dialog_utils.py` — add the message-box and progress-dialog constructors.
+- `src/percell4/gui/_dialog_utils.py` — add the message-box, progress-dialog, and text-input constructors.
 - `src/percell4/interfaces/gui/main_window.py` — the message boxes and the two progress dialogs near `:1135` and `:1438`. The launcher raises no input dialogs; the only `QInputDialog.getText` sites are `src/percell4/interfaces/gui/task_panels/data_panel.py:367` and `:454` plus `src/percell4/gui/_resource_name_prompt.py:55`, all handled in U4.
 - `tests/test_gui/test_dialog_utils.py` — extend.
 
 **Approach.**
-1. The static convenience methods give no handle on which to set flags before showing, so add project-level constructors that build the widget, apply the U1 helpers, then show it. One for message boxes, one for progress dialogs.
+1. The static convenience methods give no handle on which to set flags before showing, so add project-level constructors that build the widget, apply the U1 helpers, then show it. Three of them: message box, progress dialog, and text-input prompt. U4 needs the text-input one, so it lands here with the others.
 2. Keep the return contract identical to the static method each replaces, so call sites that branch on the answer keep working.
 3. Replace the launcher's static calls with the new constructors.
-4. Leave the `Qt.WindowModal` setting on the progress dialogs as is. Modality is unchanged per KTD5.
+4. Make modality an explicit constructor parameter and have every call site pass what it uses today. The launcher's two progress dialogs differ — `main_window.py:1136` is `Qt.WindowModal`, `main_window.py:1440` is `Qt.ApplicationModal` — so one hardcoded default would downgrade the dataset-loading dialog and break R3.
 5. Leave `QFileDialog.get*` calls alone per the Assumptions.
 
 **Patterns to follow.** `src/percell4/gui/torch_error.py` and `src/percell4/gui/_resource_name_prompt.py` are existing examples of wrapping a popup behind a named project function.
@@ -266,7 +271,8 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 **Test scenarios.**
 - The message-box constructor returns the same value the corresponding static method returns for accept and for reject.
 - The message-box constructor produces a widget whose window type is `Qt.Tool` on Linux, and is centered.
-- The progress-dialog constructor preserves `windowModality()` as `Qt.WindowModal`.
+- The progress-dialog constructor preserves each call site's own modality: `Qt.WindowModal` for the compress dialog at `main_window.py:1136`, `Qt.ApplicationModal` for the dataset-loading dialog at `main_window.py:1440`.
+- The text-input constructor returns the same `(text, ok)` tuple shape as `QInputDialog.getText`, for both accept and cancel.
 - A launcher-raised warning is centered on the work area rather than on the launcher, with the launcher docked to a screen edge in the test fixture.
 - The launcher module contains no remaining direct `QMessageBox` static calls. Assert by inspection over the module source, in the style of the existing compliance tests.
 
@@ -282,26 +288,21 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 
 **Dependencies.** U1, U3.
 
-**Files.**
-- `src/percell4/interfaces/gui/peer_views/phasor_plot.py`
-- `src/percell4/interfaces/gui/peer_views/cell_table.py`
-- `src/percell4/interfaces/gui/task_panels/data_panel.py`
-- `src/percell4/interfaces/gui/task_panels/analysis_panel.py`
-- `src/percell4/interfaces/gui/task_panels/file_navigator.py`
-- `src/percell4/gui/workflows/single_cell/seg_qc.py`
-- `src/percell4/gui/torch_error.py`
-- `src/percell4/gui/_resource_name_prompt.py`
-- `src/percell4/gui/analysis_widgets.py`
-- `src/percell4/gui/viewer.py`
-- `src/percell4/gui/adaptive_clip_panel.py`
-- `src/percell4/gui/segmentation_panel.py`
-- `src/percell4/gui/grouped_seg_panel.py`
-- `src/percell4/gui/cnr_segmenter.py` — the name prompt it raises near `:414` only
-- `src/percell4/gui/multi_select.py`
-- `src/percell4/gui/threshold_qc.py`
+**Files — edit.**
+- `src/percell4/gui/_resource_name_prompt.py` — the highest-leverage file in this unit. Its `prompt_for_resource_name` wraps one `QInputDialog.getText` and one `QMessageBox.warning`, and is called from six sites across `phasor_plot.py`, `grouped_seg_panel.py`, `cnr_segmenter.py`, `adaptive_clip_panel.py`, and `segmentation_panel.py`. Fixing this function converts all six.
+- `src/percell4/interfaces/gui/peer_views/phasor_plot.py` — five message boxes of its own.
+- `src/percell4/interfaces/gui/task_panels/data_panel.py` — two message boxes and the two rename prompts.
+- `src/percell4/gui/workflows/single_cell/seg_qc.py` — two message boxes and one progress dialog.
+- `src/percell4/gui/torch_error.py` — two message boxes, already behind a project wrapper.
+- `src/percell4/gui/viewer.py` — one message box.
+
+**Files — verify only, no edit expected.** These reach popups either through `prompt_for_resource_name` or through `QFileDialog.get*`, which the Assumptions leave native. Confirm no direct popup construction has appeared, then move on. Two of them are tool-window modules that R5 protects from modification.
+- `src/percell4/interfaces/gui/peer_views/cell_table.py`, `src/percell4/interfaces/gui/task_panels/analysis_panel.py`, `src/percell4/interfaces/gui/task_panels/file_navigator.py`, `src/percell4/gui/analysis_widgets.py` — file pickers only.
+- `src/percell4/gui/adaptive_clip_panel.py`, `src/percell4/gui/segmentation_panel.py`, `src/percell4/gui/grouped_seg_panel.py`, `src/percell4/gui/cnr_segmenter.py` — reach the name prompt through the shared wrapper above.
+- `src/percell4/gui/multi_select.py`, `src/percell4/gui/threshold_qc.py` — no popup surface at all; R5-protected tool windows.
 
 **Approach.**
-1. Replace static popup calls with the U3 constructors.
+1. Replace direct static popup calls with the U3 constructors. Start with `_resource_name_prompt.py`, since one edit there converts six downstream call sites.
 2. A popup parented to a child widget resolves its transient parent to the nearest native ancestor window. For the task panels that is the launcher, so those popups need the treatment even though the panel is not itself a window.
 3. Do not touch the tool windows' own construction. `CnrSegmenterWindow`, the segmentation QC window, multi-select, and the dilute-phase queue are parentless and already independent; only the popups they raise are in scope. R5 is a constraint on this unit, not an aspiration.
 4. Leave the four existing `setWindowFlag(Qt.Window, ...)` promotions alone. They are already non-attaching.
@@ -312,7 +313,7 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 - Constructing the metric segmenter window leaves its position unset by this change. Assert it is not centered, which is the direct guard for R5 and AE4.
 - The segmentation QC window and multi-select still report the window type they had before this plan.
 - The name prompt raised from the metric segmenter is centered and independent, while the segmenter itself is not moved.
-- No module in `src/percell4/gui` or `src/percell4/interfaces/gui` calls a `QMessageBox` static directly. Assert by inspection; this becomes the seed for U6.
+- No module owned by a `NORMAL`-type window calls a popup static directly. Scope the assertion to modules outside the thirteen converted dialog classes, whose nested popups KTD2 frees without edits. This becomes the seed for U6.
 
 **Verification.** `pytest tests/test_gui tests/test_gui_workflows` and `pytest tests_gui/` pass. Manually, the metric segmenter opens where it always did.
 
@@ -324,7 +325,7 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 
 **Requirements.** R10.
 
-**Dependencies.** U2.
+**Dependencies.** U2, U3, U4. Sequenced last of the four so the failure list is captured once, against the whole change rather than a third of it.
 
 **Files.**
 - `tests/test_gui/test_dilute_phase_workflow_sidebar.py`
@@ -341,7 +342,7 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 - `tests/test_gui_workflows/test_session_window.py`
 
 **Approach.**
-1. Rewrite `_FakePanel` as a `QWidget`. It is currently a `QObject` that hand-stubs only `show`, `close`, `setWindowFlag`, `setWindowTitle`, `resize`, `raise_`, and `activateWindow`. A `QObject` has none of the geometry or window API, so any new call in the launcher's promotion block raises `AttributeError` and takes out six tests. The test that pins the `setWindowFlag(Qt.Window, True)` protocol needs its assertion re-expressed against the observable outcome rather than the exact call.
+1. Rewrite `_FakePanel` as a `QWidget` **only if** the launcher's panel-promotion block gains a call it cannot answer. It is a `QObject` that hand-stubs only `show`, `close`, `setWindowFlag`, `setWindowTitle`, `resize`, `raise_`, and `activateWindow`, so any new geometry or window call there raises `AttributeError` and takes out six tests. U4 step 4 currently leaves that block alone, so this may not fire at all — check before rewriting.
 2. Leave the modality assertion in `tests/test_gui_workflows/test_config_dialog.py` alone. Modality is preserved by KTD5, so it should still pass. If it fails, that is a real regression, not a test to update.
 3. Check the `cap_to_screen` no-parent tests before changing them. They assert `maximumHeight` stays at the Qt default when there is no parent. Every `QWidget` has a working `screen()` even unparented, so if U1 or U3 ever routes capping through the popup's own screen, these tests correctly fail. Do not "fix" them by relaxing the assertion; keep `cap_to_screen` parent-gated per KTD7.
 4. Re-express geometry assertions that conflict with centering. Where a test asserts a saved-or-default position, decide per test whether centering or the saved position should win, and record the choice in the test docstring.
@@ -372,9 +373,12 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 
 **Approach.**
 1. Scan `src/percell4/gui` and `src/percell4/interfaces/gui` as whole trees. Do not reuse the `*_dialog.py` globs; they miss the launcher, the peer views, and the workflow panels per KTD8.
-2. Flag two shapes: a `QDialog` subclass whose `__init__` does not call the U1 window-type helper, and a direct call to a `QMessageBox`, `QProgressDialog`, or `QInputDialog` static outside `_dialog_utils.py`.
+2. Flag three shapes:
+   - A `QDialog` subclass whose `__init__` does not call the U1 window-type helper.
+   - A direct `QDialog(...)` or `QProgressDialog(...)` construction outside `_dialog_utils.py` whose enclosing function does not also call the helper. Both are always constructed, never reached through a static — a static-only rule would let every progress dialog and both inline dialog surfaces escape R9.
+   - A direct `QMessageBox` or `QInputDialog` static call outside `_dialog_utils.py`, **restricted to modules that are not one of the thirteen converted dialog classes**. Popups nested inside those are freed by KTD2 and must not be edited, per AE5 — a tree-wide rule would flag roughly forty compliant call sites and make this test unpassable.
 3. Carry a path-keyed exemption map with a one-line reason per entry, in the shape `EXEMPT_DIALOGS` already uses.
-4. Seed the exemptions from the known set: the splash screen's frameless flags in `src/percell4/app.py:33-34`, the always-on-top toggle at `src/percell4/interfaces/gui/peer_views/session_window.py:317`, the four existing `Qt.Window` promotions, and the `QFileDialog` sites left native per the Assumptions.
+4. Start the exemption map empty, following `EXEMPT_DIALOGS`'s own comment — "Empty until a real exemption is justified" — and add an entry only when the three shapes above actually report a site U3 and U4 deliberately left alone. The splash flags, the always-on-top toggle, the four `Qt.Window` promotions, and the `QFileDialog` sites need no entry: none of them matches any of the three shapes, and one is outside the scan roots entirely.
 5. Ship a self-check that the detector fires on a non-compliant snippet and stays silent on a compliant one. Without it, a typo in a pattern makes the whole invariant unenforced while reading green.
 6. The failure message enumerates `path:lineno` and states the remedy.
 
@@ -388,7 +392,7 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 - Every path in the exemption map still exists in the tree, so the map cannot rot into stale entries.
 - The scan reaches at least one file under `src/percell4/interfaces/gui/`, which is the specific gap the filename globs have.
 
-**Verification.** `pytest tests/test_gui/test_popup_window_compliance.py` passes, and temporarily reverting one U2 edit makes it fail.
+**Verification.** `pytest tests/test_gui/test_popup_window_compliance.py` passes. Temporarily reverting one U2 edit makes it fail — check this against an inline dialog surface as well as a subclass, since the subclass rule alone cannot see the two inline surfaces.
 
 ---
 
@@ -431,7 +435,7 @@ U1 unblocks everything. U2 delivers most of the user-visible value and should be
 | Default suite | `pytest` | U1-U6 |
 | GL tier | `pytest tests_gui/` | U4, U5 |
 | Lint | `ruff check src tests tests_gui` | all |
-| Architecture contracts | `lint-imports` | U1, U3 |
+| Architecture contracts | `lint-imports` | all |
 | Manual GNOME check | see U7 Verification | U7 |
 
 The default suite is the blocking gate. Test selection lives in `pyproject.toml`; run a bare `pytest` and do not add `-m` on the command line, because an explicit `-m` silently replaces `addopts` and changes which tests run.
@@ -460,10 +464,10 @@ What the automated gates cannot prove: window-manager attachment, real decoratio
 |---|---|
 | U1 | Helpers exist, are platform-gated, and are covered including the off-Linux no-op path. |
 | U2 | Thirteen dialog classes (including `_ConfigurePairDialog`) plus the two inline dialogs report `Qt.Tool` and open centered; scroll and cap conventions intact. |
-| U3 | Launcher raises no popup through a `QMessageBox` or `QProgressDialog` static. |
-| U4 | Peer views, task panels, and tool-window popups are converted; the tool windows themselves are provably unmoved. |
-| U5 | `pytest` and `pytest tests_gui/` green; `_FakePanel` is a `QWidget`. |
-| U6 | Compliance test passes, fails when a U2 edit is reverted, and its detector self-check passes. |
+| U3 | Three constructors exist; each carries modality through from its call site; the launcher raises no popup through a `QMessageBox` or `QProgressDialog` static. |
+| U4 | The six edit-list files are converted, including the shared name prompt that covers six downstream sites; the ten verify-only files are confirmed unchanged; the tool windows themselves are provably unmoved. |
+| U5 | `pytest` and `pytest tests_gui/` green, with no existing assertion weakened; `_FakePanel` rewritten only if the launcher actually gained a call it cannot answer. |
+| U6 | Compliance test passes, fails when either a subclass or an inline-dialog U2 edit is reverted, its detector self-check passes, and the exemption map is empty or every entry names a site the detector actually reports. |
 | U7 | Learning doc committed; every manual check in U7 confirmed and the `QFileDialog` behavior recorded. |
 
 ---
@@ -483,7 +487,8 @@ Seven probes on the target machine: GNOME Shell under XWayland, `platformName` `
 | K | `Qt.Window`, non-modal | `NORMAL` | none | absent | yes |
 | J | default, non-modal | `DIALOG, NORMAL` | `SKIP_TASKBAR` | parent | yes |
 | M | `QWidget` + `Qt.Window` | `NORMAL` | none | absent | yes |
-| N, P | `Qt.Tool` | `UTILITY, NORMAL` | `MODAL, SKIP_PAGER, SKIP_TASKBAR` | parent | yes |
+| N | `Qt.Tool` + `move()` | `UTILITY, NORMAL` | `MODAL, SKIP_PAGER, SKIP_TASKBAR` | parent | yes |
+| P | `Qt.Tool` + `move()`, no decoration hints re-added | `UTILITY, NORMAL` | `MODAL, SKIP_PAGER, SKIP_TASKBAR` | parent | yes |
 | Q | default, parent is `NORMAL` | `DIALOG, NORMAL` | `MODAL, SKIP_TASKBAR` | parent | no |
 | R | default, parent is `UTILITY` | `DIALOG, NORMAL` | `MODAL, SKIP_TASKBAR` | parent | yes |
 
@@ -494,6 +499,7 @@ Readings that shaped the plan:
 - H is why detaching must come before placement. The application's `move()` is discarded while attached.
 - J shows non-modal windows were never affected, which is why the tool windows already behave correctly.
 - E and F show `QWindow.setTransientParent()` cannot restore the hint for a `Qt.Window`-type window, whether called after `create()`, after `winId()`, or after `show()`. The gate is window type, not timing.
+- Not measured: `Qt.Tool` **without** an explicit `move()`. Both `Qt.Tool` rows carry one, so the table cannot say whether the type change alone already lands the dialog on-screen. U2's execution note resolves this on the first converted dialog before the centering call is added everywhere.
 
 ### Corrections carried into this plan
 
