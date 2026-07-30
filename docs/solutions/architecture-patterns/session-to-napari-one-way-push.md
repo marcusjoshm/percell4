@@ -35,6 +35,8 @@ symptoms:
 
 **Allowed:** PerCell4-controlled writes *to* napari (`viewer.layers.selection.active = layer`), driven by session changes and guarded by an `_is_originator`-style re-entrancy flag.
 
+**Allowed:** the napari **timepoint slider** writing `session.active_timepoint`. Like the canvas click, a slider drag is the user acting directly, not the layer list echoing state back. This edge exists in the viewer today and is correct — do not remove it as a rule violation.
+
 **Allowed:** napari **canvas mouse callbacks** that write `session.selection` when the user clicks a cell. The canvas mouse callback IS the user genuinely picking a cell; this is not the napari event loop reflecting layer-list state. Selectors for `session.selection` live here (`gui/viewer.py`'s canvas-click forwarding chain).
 
 ## Canonical example — `_on_state_changed` push
