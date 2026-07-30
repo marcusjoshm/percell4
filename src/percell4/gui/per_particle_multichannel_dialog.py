@@ -612,7 +612,8 @@ class PerParticleMultichannelDialog(QDialog):
         progress = QProgressDialog(
             "Per-particle multi-channel analysis", "Cancel", 0, n_total, self
         )
-        progress.setWindowModality(Qt.WindowModal)
+        # Non-modal: the loop pumps events itself and the form is disabled.
+        progress.setWindowModality(Qt.NonModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
 

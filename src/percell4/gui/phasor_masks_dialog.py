@@ -1017,7 +1017,10 @@ class PhasorMasksDialog(QDialog):
             n_total,
             self,
         )
-        progress.setWindowModality(Qt.WindowModal)
+        # Non-modal: this loop calls processEvents() itself, and the form
+        # controls above are disabled for the duration, so modality adds
+        # nothing -- and on macOS it would make this a glued NSWindow sheet.
+        progress.setWindowModality(Qt.NonModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
 

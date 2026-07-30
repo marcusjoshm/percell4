@@ -172,11 +172,8 @@ different problem would be wrong here.
   sends it as of Qt 6.8. Native Wayland is safe here only because Qt 5.15's
   QtWayland cannot mark a surface modal — a Qt-version artifact, not a
   platform guarantee. A `qtpy` codebase is one `QT_API` change from PyQt6.
-- **macOS has a related defect.** `QCocoaWindow::setVisible` turns any
-  parented `Qt::WindowModal` window into a native `NSWindow` sheet, glued to
-  the parent's title area and unmovable. This repo has nine parented
-  `WindowModal` progress dialogs, i.e. exactly that case. Out of scope here
-  because the reporter sees no problem on macOS.
+- **macOS had the same defect for progress dialogs, now fixed.** See the
+  section below.
 - **Centring is X11/XWayland-only by construction.** xdg-shell gives clients
   no absolute-positioning request, so Qt ignores `move()` for top-levels on
   native Wayland regardless of modality.
@@ -229,6 +226,46 @@ widget dialog, the helpers make it freestanding.
 Twelve call sites were converted. The other twenty-nine live inside the
 converted dialog classes, parented to a UTILITY window, and are already
 free by the parent-type condition above.
+
+## macOS: the same symptom, a different mechanism
+
+`QCocoaWindow::setVisible` turns any **parented** window whose modality is
+`Qt::WindowModal` into a native `NSWindow` sheet -- glued to the parent's
+title bar and unmovable. All nine progress dialogs were exactly that case.
+
+**The `Qt.Tool` fix does not help here.** Cocoa keys on modality plus a
+native parent, not on the window type, so the escape hatch that works under
+mutter does nothing. The only levers are modality and the parent.
+
+That collides with a Qt detail worth knowing: **`QProgressDialog.setValue()`
+pumps the event loop only when `isModal()`.** A run loop that polls
+`wasCanceled()` without calling `processEvents()` itself therefore depends on
+modality for its own cancellation -- make it non-modal and the bar stops
+repainting and Cancel becomes permanently unreachable, silently.
+
+So the nine split in two, by whether the loop pumps events itself:
+
+| Run loop | Modality | Why |
+|---|---|---|
+| Phasor masks, per-particle multichannel, per-particle donut, dilute-from-mask, whole-field intensity | `Qt.NonModal` everywhere | each calls `processEvents()` in its own loop and disables its form controls for the duration, so modality bought nothing |
+| Segmentation QC re-run | `Qt.NonModal` everywhere | runs on a `Worker` thread and never polls `wasCanceled()` |
+| Compress, batch TCSPC, FLIM-FRET | `blocking_progress_modality()` | poll `wasCanceled()` with no `processEvents()` of their own -- they need the modal pump |
+
+`blocking_progress_modality()` returns `Qt.ApplicationModal` on macOS and
+`Qt.WindowModal` elsewhere. `ApplicationModal` routes through
+`beginModalSession` rather than `beginSheet`, so the dialog is a free-floating
+window while `isModal()` stays true and the pump survives. Blocking the whole
+application rather than just the parent costs nothing for these three: each is
+a synchronous loop on the GUI thread that already monopolises it.
+
+The launcher's dataset-load dialog was already `ApplicationModal` and needed
+no change.
+
+`tests/test_gui/test_progress_dialog_modality.py` pins the split by
+inspection, in both directions -- a pump-dependent loop going non-modal and a
+self-pumping loop going window-modal are both reported. It also asserts the
+split is not degenerate, so a refactor cannot collapse every dialog into one
+bucket and leave the other assertion vacuous.
 
 ## Related
 

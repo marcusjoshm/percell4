@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -60,6 +59,7 @@ from percell4.application.use_cases.flim_fret_discovery import (
 )
 from percell4.application.use_cases.run_flim_fret import run_flim_fret
 from percell4.gui._dialog_utils import (
+    blocking_progress_modality,
     cap_to_screen,
     center_on_screen,
     detach_window,
@@ -707,7 +707,11 @@ class FlimFretDialog(QDialog):
             len(config.pairs),
             self,
         )
-        progress.setWindowModality(Qt.WindowModal)
+        # Must stay modal: this loop polls wasCanceled() without pumping
+        # events itself, so it depends on setValue()'s modal-only
+        # processEvents. See blocking_progress_modality for why macOS
+        # needs ApplicationModal rather than WindowModal here.
+        progress.setWindowModality(blocking_progress_modality())
         progress.setMinimumDuration(0)
         n_pairs = len(config.pairs)
         completed = {"n": 0}

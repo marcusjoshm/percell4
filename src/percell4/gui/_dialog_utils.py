@@ -335,3 +335,33 @@ def existing_directory(
         return ""
     chosen = dialog.selectedFiles()
     return chosen[0] if chosen else ""
+
+
+def blocking_progress_modality():
+    """Modality for a progress dialog whose loop needs the modal event pump.
+
+    ``QProgressDialog.setValue()`` pumps the event loop only when
+    ``isModal()`` is true. A run loop that polls ``wasCanceled()`` without
+    calling ``processEvents()`` itself therefore depends on that pump: go
+    non-modal and the progress bar stops repainting and Cancel stops
+    responding entirely.
+
+    Those dialogs must stay modal, which collides with macOS. There,
+    ``QCocoaWindow::setVisible`` turns any parented ``Qt.WindowModal``
+    window into a native ``NSWindow`` sheet -- glued to the parent's title
+    bar and unmovable, the same complaint this module fixes on GNOME. The
+    window *type* is no help: Cocoa keys on modality plus a native parent,
+    so the ``Qt.Tool`` trick that works under mutter does nothing here.
+
+    ``Qt.ApplicationModal`` routes through ``beginModalSession`` instead of
+    ``beginSheet``, giving a free-floating window while keeping
+    ``isModal()`` true, so the pump and Cancel both survive. It blocks the
+    whole application rather than just the parent, which costs nothing for
+    these three: each is a synchronous loop on the GUI thread that already
+    monopolises it.
+
+    A dialog that pumps events itself, or runs its work on a worker thread,
+    does not need this -- use ``Qt.NonModal`` and guard re-entrancy by
+    disabling the form, which is what the other six progress dialogs do.
+    """
+    return Qt.ApplicationModal if sys.platform == "darwin" else Qt.WindowModal
