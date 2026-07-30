@@ -649,3 +649,53 @@ def test_file_dialog_does_not_force_the_qt_widget_dialog(qtbot, monkeypatch):
     qtbot.addWidget(dialog)
 
     assert dialog.testOption(QFileDialog.DontUseNativeDialog) is False
+
+
+# ── blocking_progress_modality ───────────────────────────────────────
+
+
+def test_blocking_progress_modality_is_window_modal_on_linux(monkeypatch):
+    from percell4.gui._dialog_utils import blocking_progress_modality
+
+    _force_linux(monkeypatch)
+
+    assert blocking_progress_modality() == Qt.WindowModal
+
+
+def test_blocking_progress_modality_is_application_modal_on_macos(monkeypatch):
+    """macOS turns a parented WindowModal window into a glued NSWindow sheet.
+
+    ApplicationModal routes through beginModalSession instead, which is a
+    free-floating window -- the macOS analogue of what Qt.Tool buys under
+    mutter. The Qt.Tool trick itself is no help here: Cocoa keys on modality
+    plus a native parent, not on the window type.
+    """
+    from percell4.gui._dialog_utils import blocking_progress_modality
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert blocking_progress_modality() == Qt.ApplicationModal
+
+
+def test_blocking_progress_modality_is_window_modal_on_windows(monkeypatch):
+    """Windows has no compositor-side attachment and no sheets."""
+    from percell4.gui._dialog_utils import blocking_progress_modality
+
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    assert blocking_progress_modality() == Qt.WindowModal
+
+
+def test_blocking_progress_modality_always_keeps_the_event_pump_alive(monkeypatch):
+    """The property the three pump-dependent loops actually depend on.
+
+    QProgressDialog.setValue() calls processEvents() only when isModal().
+    Whatever this helper returns on any platform, it must never be
+    NonModal -- that would stop the progress bar repainting and make
+    Cancel unreachable in compress, batch TCSPC, and FLIM-FRET.
+    """
+    from percell4.gui._dialog_utils import blocking_progress_modality
+
+    for platform in ("linux", "darwin", "win32"):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert blocking_progress_modality() != Qt.NonModal, platform

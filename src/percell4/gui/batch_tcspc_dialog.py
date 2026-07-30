@@ -69,6 +69,7 @@ from percell4.domain.io.models import (
     TokenConfig,
 )
 from percell4.gui._dialog_utils import (
+    blocking_progress_modality,
     cap_to_screen,
     center_on_screen,
     detach_window,
@@ -903,7 +904,11 @@ class BatchTCSPCDialog(QDialog):
         progress = QProgressDialog(
             "Running batch TCSPC append…", "Cancel", 0, len(items), self
         )
-        progress.setWindowModality(Qt.WindowModal)
+        # Must stay modal: this loop polls wasCanceled() without pumping
+        # events itself, so it depends on setValue()'s modal-only
+        # processEvents. See blocking_progress_modality for why macOS
+        # needs ApplicationModal rather than WindowModal here.
+        progress.setWindowModality(blocking_progress_modality())
         progress.setMinimumDuration(0)
 
         completed_index = {"n": 0}

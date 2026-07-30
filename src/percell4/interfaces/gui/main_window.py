@@ -32,6 +32,7 @@ from percell4.config import viewer_presets as vp
 from percell4.domain.io.layout import split_intensity_layers
 from percell4.gui import theme
 from percell4.gui._dialog_utils import (
+    blocking_progress_modality,
     existing_directory,
     message_box,
     open_file_name,
@@ -1113,7 +1114,6 @@ class LauncherWindow(QMainWindow):
 
     def _run_batch_compress(self, config, datasets) -> None:
         """Compress one or more datasets with a progress dialog."""
-        from qtpy.QtCore import Qt
         from qtpy.QtWidgets import QMessageBox
 
         from percell4.adapters.importer import import_dataset
@@ -1142,9 +1142,17 @@ class LauncherWindow(QMainWindow):
                     self.statusBar().showMessage("No datasets to compress")
                     return
 
-        # Window-modal progress dialog — blocks parent, prevents re-entrancy
+        # Must stay modal: this loop polls wasCanceled() without pumping
+        # events itself, so it depends on setValue()'s modal-only
+        # processEvents. See blocking_progress_modality for why macOS
+        # needs ApplicationModal rather than WindowModal here.
         progress = progress_dialog(
-            self, "Compressing...", "Cancel", 0, n, modality=Qt.WindowModal
+            self,
+            "Compressing...",
+            "Cancel",
+            0,
+            n,
+            modality=blocking_progress_modality(),
         )
         progress.setMinimumDuration(0)
 

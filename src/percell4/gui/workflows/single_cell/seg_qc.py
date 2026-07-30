@@ -645,7 +645,9 @@ class SegmentationQCController(QObject):
             "Cancel",
             0,
             0,
-            modality=Qt.WindowModal,
+            # Non-modal: the re-run happens on a Worker thread and the
+            # re-run buttons are disabled above, so nothing needs blocking.
+            modality=Qt.NonModal,
         )
         progress.setWindowTitle("Re-run Cellpose")
         progress.setMinimumDuration(0)
