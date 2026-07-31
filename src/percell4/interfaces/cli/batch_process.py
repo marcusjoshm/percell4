@@ -175,6 +175,13 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"Cell diameter in pixels, 0 = auto-detect "
                          f"(default: {defaults.diameter:g}).")
     cp.add_argument("--gpu", action="store_true", help="Use GPU for Cellpose.")
+    cp.add_argument(
+        "--device", default=None, metavar="DEVICE",
+        help="Explicit torch device for Cellpose (e.g. 'xpu', 'cuda:1'). "
+             "Overrides the device stored in the launcher's Advanced panel; "
+             "omit to use that stored setting. Only applies with --gpu. An "
+             "unusable device falls back to CPU with a warning on stderr.",
+    )
     cp.add_argument("--flow-threshold", type=float, default=defaults.flow_threshold,
                     help=f"Flow error threshold; higher = more permissive "
                          f"(default: {defaults.flow_threshold}).")
@@ -254,8 +261,18 @@ def main(argv: list[str] | None = None) -> int:
             print("--channel-names was empty after parsing.", file=sys.stderr)
             return 1
 
+    # Report the device before any work starts, so a fallback is visible at
+    # the top of a headless log rather than inferred from a slow run. stderr
+    # keeps stdout's per-dataset progress lines parseable.
+    if not args.skip_segmentation:
+        from percell4.adapters.torch_device import resolve_device
+
+        resolution = resolve_device(gpu_requested=args.gpu, override=args.device)
+        print(f"Cellpose device: {resolution.reason}", file=sys.stderr)
+
     report = batch_process_datasets(
         specs,
+        device=args.device,
         seg_channel=args.seg_channel,
         channel_names=channel_names,
         seg_name=args.seg_name,

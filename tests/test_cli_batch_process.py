@@ -90,3 +90,105 @@ def test_mixed_file_and_dir_preserve_order(tmp_path: Path) -> None:
         d / "a_first.h5",
         d / "b_second.h5",
     ]
+
+
+# ── --device flag ────────────────────────────────────────────────────
+#
+# The device reaches Cellpose through batch_process_datasets ->
+# SegmentCells.run_inference -> the Segmenter port. These assert the
+# argument plumbing without running Cellpose.
+
+
+def _intercept_run():
+    """Capture the kwargs the CLI hands to the batch runner, then stop.
+
+    Returns ``(captured, fake)``; patch ``fake`` over
+    ``batch_process_datasets`` and read ``captured["kwargs"]`` afterwards.
+    Raising SystemExit keeps the CLI from touching the empty .h5 files these
+    tests use as path stand-ins.
+    """
+    captured: dict = {}
+
+    def _fake_batch(specs, **kwargs):  # noqa: ARG001 - specs unused by design
+        captured["kwargs"] = kwargs
+        raise SystemExit(0)
+
+    return captured, _fake_batch
+
+
+def test_device_flag_defaults_to_none(tmp_path: Path, monkeypatch) -> None:
+    """Unset means 'use whatever the Advanced panel stored', not 'cpu'.
+    Defaulting to a concrete device here would silently override the
+    stored setting for every headless run."""
+    captured, fake = _intercept_run()
+    monkeypatch.setattr(cli, "batch_process_datasets", fake)
+    h5 = _touch(tmp_path / "a.h5")
+
+    try:
+        cli.main([str(h5)])
+    except SystemExit:
+        pass
+
+    assert captured["kwargs"]["device"] is None
+
+
+def test_device_flag_is_forwarded(tmp_path: Path, monkeypatch) -> None:
+    captured, fake = _intercept_run()
+    monkeypatch.setattr(cli, "batch_process_datasets", fake)
+    h5 = _touch(tmp_path / "a.h5")
+
+    try:
+        cli.main([str(h5), "--device", "cuda:1"])
+    except SystemExit:
+        pass
+
+    assert captured["kwargs"]["device"] == "cuda:1"
+
+
+def test_device_is_not_written_into_the_run_recipe(tmp_path: Path, monkeypatch) -> None:
+    """The device is a property of the machine, not the experiment. Putting
+    it in CellposeSettings would serialize one researcher's cuda:1 into
+    run_config.json and carry it onto a colleague's single-GPU box."""
+    from percell4.workflows.models import CellposeSettings
+
+    captured, fake = _intercept_run()
+    monkeypatch.setattr(cli, "batch_process_datasets", fake)
+    h5 = _touch(tmp_path / "a.h5")
+
+    try:
+        cli.main([str(h5), "--device", "cuda:1"])
+    except SystemExit:
+        pass
+
+    settings = captured["kwargs"]["settings"]
+    assert isinstance(settings, CellposeSettings)
+    assert not hasattr(settings, "device")
+    assert "cuda:1" not in repr(settings)
+
+
+def test_resolution_is_reported_on_stderr(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A fallback must be visible in a headless log. stderr, not stdout, so
+    the run's parseable output is unchanged."""
+    from percell4.adapters import torch_device
+
+    monkeypatch.setattr(torch_device, "_probe_device", lambda spec: f"no {spec}")
+    captured, fake = _intercept_run()
+    monkeypatch.setattr(cli, "batch_process_datasets", fake)
+    h5 = _touch(tmp_path / "a.h5")
+
+    try:
+        cli.main([str(h5), "--gpu"])
+    except SystemExit:
+        pass
+
+    streams = capsys.readouterr()
+    assert "CPU" in streams.err or "cpu" in streams.err
+    assert "cpu" not in streams.out.lower()
+
+
+def test_device_flag_appears_in_help(capsys) -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit):
+        cli.main(["--help"])
+    assert "--device" in capsys.readouterr().out
