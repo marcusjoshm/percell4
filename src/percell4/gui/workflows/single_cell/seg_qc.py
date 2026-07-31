@@ -155,6 +155,10 @@ class SegmentationQCController(QObject):
         # multi-second construction cost on every iteration. Lazy:
         # built on the first Re-run if not already provided.
         self._cellpose_model_cached = None
+        #: Device override the cached model was built with. A changed
+        #: Advanced setting invalidates the cache rather than being ignored
+        #: until the window is reopened.
+        self._cellpose_model_device = None
 
         # ── Modify Channel group (U3) ──────────────────────────────
         # In-memory clip-and-stretch preview of the segmentation
@@ -626,11 +630,26 @@ class SegmentationQCController(QObject):
         gpu = bool(self._cellpose_settings.gpu) if self._cellpose_settings else True
 
         # Lazy-build the Cellpose model on first Re-run and reuse it.
+        #
+        # The cache is also keyed on the stored device override: a model holds
+        # the device it was built on, so without this an Advanced-panel edit
+        # would appear to do nothing until the window was reopened.
+        from percell4.config.advanced import load_cellpose_device
+
+        override = load_cellpose_device()
+        if override != getattr(self, "_cellpose_model_device", None):
+            self._cellpose_model_cached = None
+
         if self._cellpose_model_cached is None:
             try:
                 self._cellpose_model_cached = build_cellpose_model(
                     model_type=model_type, gpu=gpu,
+                    # Attaches here, not to run_cellpose below: that call
+                    # receives the cached model and skips construction, so a
+                    # callback wired there would never fire on this surface.
+                    device_callback=self._on_device_resolved,
                 )
+                self._cellpose_model_device = override
             except Exception as e:
                 logger.exception("build_cellpose_model failed in QC Re-run")
                 self._set_rerun_status(f"model build failed: {e}")
@@ -740,6 +759,22 @@ class SegmentationQCController(QObject):
         """
         if self._cleanup_status_label is not None:
             self._cleanup_status_label.setText(text)
+
+    def _on_device_resolved(self, resolution) -> None:
+        """Report the device the QC re-run's model was built on.
+
+        Fires once per cached model rather than once per re-run, which is the
+        right cadence here: the device cannot change while a model is held,
+        and the cache is invalidated when the stored override changes.
+
+        Status line only, no dialog. The QC window is a tight iterate-and-look
+        loop, and a modal interruption in the middle of it would be worse than
+        the silence this feature replaces.
+        """
+        if resolution.fell_back:
+            self._set_rerun_status(resolution.reason)
+        else:
+            self._set_rerun_status(f"Cellpose running on {resolution.device}")
 
     # ── Modify Channel group (U3) ─────────────────────────────────
 
