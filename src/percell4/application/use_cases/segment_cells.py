@@ -64,6 +64,7 @@ class SegmentCells:
         flow_threshold: float = 0.4,
         cellprob_threshold: float = 0.0,
         min_size: int = 15,
+        device: str | None = None,
     ) -> NDArray[np.int32]:
         """Run segmentation inference (synchronous, CPU-heavy).
 
@@ -87,6 +88,7 @@ class SegmentCells:
             flow_threshold=flow_threshold,
             cellprob_threshold=cellprob_threshold,
             min_size=min_size,
+            device=device,
         )
         logger.debug(
             "cellpose: %d cells found in %.2f s",
@@ -104,6 +106,7 @@ class SegmentCells:
         cellprob_threshold: float = 0.0,
         min_size: int = 15,
         progress_callback=None,
+        device: str | None = None,
     ) -> NDArray[np.int32]:
         """Run segmentation on every timepoint of a ``(T, H, W)`` stack.
 
@@ -131,6 +134,7 @@ class SegmentCells:
                 flow_threshold=flow_threshold,
                 cellprob_threshold=cellprob_threshold,
                 min_size=min_size,
+                device=device,
             )
             logger.debug(
                 "cellpose frame %d/%d: %d cells found in %.2f s",

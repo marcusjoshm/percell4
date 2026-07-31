@@ -181,6 +181,27 @@ def _sandbox_app_settings(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _sandbox_advanced_settings(tmp_path_factory):
+    """Point every ``config_path()`` call at a throw-away directory.
+
+    The advanced-settings store is a second persistence surface with the same
+    failure mode as the QSettings one above: unredirected, a test that saves a
+    device override rewrites the researcher's real configuration, and nothing
+    announces it. Autouse rather than opt-in for exactly the reason the
+    QSettings sandbox is — the tests that most need isolation are the ones
+    that never think to ask for it.
+
+    A fresh directory per test so a load-after-save assertion sees only what
+    the current test wrote.
+    """
+    from percell4.config import advanced
+
+    advanced.redirect_to(tmp_path_factory.mktemp("advanced_settings"))
+    yield
+    advanced.clear_redirect()
+
+
+@pytest.fixture(autouse=True)
 def _flush_pending_qt_deletions():
     """Drain Qt's deferred-delete queue at the end of every test.
 

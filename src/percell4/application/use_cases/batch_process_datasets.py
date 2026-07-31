@@ -98,6 +98,7 @@ def batch_process_datasets(
     edge_margin: int = 0,
     skip_segmentation: bool = False,
     track: bool = True,
+    device: str | None = None,
     import_kwargs: dict | None = None,
     segmenter=None,
     tracker=None,
@@ -297,6 +298,7 @@ def batch_process_datasets(
                         flow_threshold=settings.flow_threshold,
                         cellprob_threshold=settings.cellprob_threshold,
                         min_size=settings.min_size,
+                        device=device,
                     )
                 else:
                     image = _preprocess(repo.read_channel_images(handle)[ch])
@@ -306,6 +308,7 @@ def batch_process_datasets(
                         flow_threshold=settings.flow_threshold,
                         cellprob_threshold=settings.cellprob_threshold,
                         min_size=settings.min_size,
+                        device=device,
                     )
                 logger.debug(
                     "%s: cellpose inference finished in %.1f s",

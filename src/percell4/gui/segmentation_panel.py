@@ -10,12 +10,13 @@ import logging
 import weakref
 
 import numpy as np
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -25,6 +26,7 @@ from qtpy.QtWidgets import (
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
 from percell4.gui._cellpose_settings_form import CellposeSettingsForm
+from percell4.gui._dialog_utils import message_box
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
 from percell4.workflows.models import CellposeSettings
@@ -91,6 +93,12 @@ class SegmentationPanel(QWidget):
     Communicates with the viewer and store via the launcher reference.
     """
 
+    #: Emitted with the ``DeviceResolution`` once Cellpose has chosen a
+    #: device. A plain signal rather than a direct call because the adapter
+    #: invokes its callback on the worker thread, and only the UI thread may
+    #: touch widgets — Qt marshals the payload across for us.
+    device_resolved = Signal(object)
+
     def __init__(
         self,
         data_model: CellDataModel,
@@ -99,6 +107,9 @@ class SegmentationPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.data_model = data_model
+        #: Fallback reasons already surfaced as a dialog this session.
+        self._seen_device_warnings: set[str] = set()
+        self.device_resolved.connect(self._on_device_resolved)
         self._launcher = launcher
 
         # Auto-save state: a single debounced timer + the most recently
@@ -338,6 +349,38 @@ class SegmentationPanel(QWidget):
         if self._launcher is not None:
             self._launcher.statusBar().showMessage(msg)
 
+    # ── Device reporting ──────────────────────────────────────
+    #
+    # Cellpose used to fall back to CPU without saying so, which on a laptop
+    # running the SAM backbone is indistinguishable from a hang. Every run
+    # now reports the device it actually used.
+    #
+    # The dialog fires once per distinct reason per session, then the report
+    # continues on the status line. A machine with no accelerator falls back
+    # on *every* run, and a dialog every run trains the user to dismiss it —
+    # which would rebuild the original blindness through a different door.
+
+    def _on_device_resolved(self, resolution) -> None:
+        """Report the resolved device. Runs on the UI thread via a signal."""
+        if not resolution.fell_back:
+            self._show_status(f"Cellpose running on {resolution.device}")
+            return
+
+        self._show_status(resolution.reason)
+
+        if resolution.reason in self._seen_device_warnings:
+            return
+        self._seen_device_warnings.add(resolution.reason)
+
+        message_box(
+            self,
+            "Cellpose is not using a GPU",
+            f"{resolution.reason}\n\n"
+            "Segmentation will continue on CPU, which is much slower for the "
+            "SAM-based models. This notice appears once per session.",
+            icon=QMessageBox.Warning,
+        )
+
     # ── Auto-save (manual edits → HDF5) ───────────────────────
     #
     # The Manual Editing group, napari's own paint/erase tools, and the
@@ -567,6 +610,9 @@ class SegmentationPanel(QWidget):
                 flow_threshold=s.flow_threshold,
                 cellprob_threshold=s.cellprob_threshold,
                 min_size=s.min_size,
+                # Emitting the signal is all the worker thread does here;
+                # the handler on the UI thread owns every widget touch.
+                device_callback=self.device_resolved.emit,
             )
         else:
             self._show_status(f"Running Cellpose ({model_type})...")
@@ -579,6 +625,7 @@ class SegmentationPanel(QWidget):
                 flow_threshold=s.flow_threshold,
                 cellprob_threshold=s.cellprob_threshold,
                 min_size=s.min_size,
+                device_callback=self.device_resolved.emit,
             )
         self._worker.finished.connect(self._on_cellpose_done)
         self._worker.error.connect(self._on_cellpose_error)

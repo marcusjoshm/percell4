@@ -13,8 +13,12 @@ branch here. Built-in 4.x models: ``cpsam_v2`` (default — improved CellposeSAM
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from numpy.typing import NDArray
+
+from percell4.adapters.torch_device import DeviceResolution
 
 # Default Cellpose 4.x model when a caller passes none. Mirrors the first entry
 # of ``percell4.workflows.models.CELLPOSE_MODELS``; duplicated as a plain string
@@ -25,8 +29,10 @@ _DEFAULT_MODEL = "cpsam_v2"
 def build_cellpose_model(
     model_type: str | None = None,
     gpu: bool = False,
+    device: str | None = None,
+    device_callback: Callable[[DeviceResolution], None] | None = None,
 ):
-    """Construct a Cellpose 4.x ``CellposeModel``.
+    """Construct a Cellpose 4.x ``CellposeModel`` on a resolved device.
 
     Useful for batch workflows that build the model once and reuse it across
     many images, avoiding the per-image construction cost. Returns the raw
@@ -36,12 +42,44 @@ def build_cellpose_model(
     ``pretrained_model``. Defaults to :data:`_DEFAULT_MODEL` (``cpsam_v2``) when
     unset. Valid values are the 4.x built-ins (``cpsam_v2``, ``cpsam``,
     ``cpdino``, ``cpdino-vitb``); requires ``cellpose>=4.2``.
+
+    ``device`` names an explicit torch device. When omitted, the override
+    stored by the Advanced panel applies, so a call site that knows nothing
+    about the setting still honors it. When a device resolves to something
+    other than CPU it is handed to Cellpose outright, which bypasses that
+    library's own CUDA-or-MPS-only resolver and reaches hardware it would
+    otherwise refuse.
+
+    ``device_callback`` receives the :class:`DeviceResolution` exactly once.
+    This is the only place it fires: callers that cache a model and pass it
+    back through ``run_cellpose(model=...)`` would never see it otherwise,
+    and a per-image callback would raise one warning per frame of a stack.
     """
     from cellpose import models
 
+    from percell4.adapters.torch_device import resolve_device
+    from percell4.config.advanced import load_cellpose_device
+
     if model_type is None:
         model_type = _DEFAULT_MODEL
-    return models.CellposeModel(gpu=gpu, pretrained_model=model_type)
+
+    override = device if device is not None else load_cellpose_device()
+    resolution = resolve_device(gpu_requested=gpu, override=override)
+
+    if device_callback is not None:
+        device_callback(resolution)
+
+    if resolution.device == "cpu":
+        # Preserve the historical call shape exactly. Every unconfigured
+        # install takes this path, and it must stay indistinguishable from
+        # the behavior that predates device resolution.
+        return models.CellposeModel(gpu=False, pretrained_model=model_type)
+
+    import torch
+
+    return models.CellposeModel(
+        device=torch.device(resolution.device), pretrained_model=model_type
+    )
 
 
 def run_cellpose(
@@ -54,6 +92,8 @@ def run_cellpose(
     cellprob_threshold: float = 0.0,
     min_size: int = 15,
     model=None,
+    device: str | None = None,
+    device_callback: Callable[[DeviceResolution], None] | None = None,
 ) -> NDArray[np.int32]:
     """Run Cellpose segmentation on a 2D image.
 
@@ -71,8 +111,14 @@ def run_cellpose(
     cellprob_threshold : cell probability threshold
     min_size : minimum cell size in pixels
     model : optional pre-built Cellpose model. When provided, model construction
-        is skipped and this model is reused; ``model_type`` and ``gpu`` are then
-        ignored. Use :func:`build_cellpose_model` for batch workflows.
+        is skipped and this model is reused; ``model_type``, ``gpu``, ``device``,
+        and ``device_callback`` are then all ignored -- that model already
+        chose its device at build time. Use :func:`build_cellpose_model` for
+        batch workflows.
+    device : explicit torch device, or None to use the stored override.
+        Ignored when ``model`` is supplied.
+    device_callback : receives the :class:`DeviceResolution` if this call
+        constructs the model. Ignored when ``model`` is supplied.
 
     Returns
     -------
@@ -80,7 +126,12 @@ def run_cellpose(
     Background is 0.
     """
     if model is None:
-        model = build_cellpose_model(model_type=model_type, gpu=gpu)
+        model = build_cellpose_model(
+            model_type=model_type,
+            gpu=gpu,
+            device=device,
+            device_callback=device_callback,
+        )
 
     # Cellpose 4.x CellposeModel.eval returns a 3-tuple (masks, flows, diams);
     # the 3.x ``channels`` argument is gone.
@@ -101,6 +152,8 @@ def run_cellpose_stack(
     diameter: float | None = None,
     gpu: bool = False,
     progress_callback=None,
+    device: str | None = None,
+    device_callback: Callable[[DeviceResolution], None] | None = None,
     **kwargs,
 ) -> NDArray[np.int32]:
     """Segment each timepoint of a ``(T, H, W)`` stack -> ``(T, H, W)`` int32.
@@ -113,8 +166,16 @@ def run_cellpose_stack(
 
     A ``(T, H, W)`` stack must NOT be passed to :func:`run_cellpose`
     directly: that function reads a 3D array as ``(H, W, C)`` multichannel.
+
+    ``device_callback`` fires once, at model construction -- not once per
+    frame. A hundred-frame stack reports its device once.
     """
-    model = build_cellpose_model(model_type=model_type, gpu=gpu)
+    model = build_cellpose_model(
+        model_type=model_type,
+        gpu=gpu,
+        device=device,
+        device_callback=device_callback,
+    )
     frames = []
     n = len(images)
     for t in range(n):
@@ -141,6 +202,7 @@ class CellposeSegmenter:
         flow_threshold: float = 0.4,
         cellprob_threshold: float = 0.0,
         min_size: int = 15,
+        device: str | None = None,
     ) -> NDArray[np.int32]:
         return run_cellpose(
             image,
@@ -150,4 +212,5 @@ class CellposeSegmenter:
             flow_threshold=flow_threshold,
             cellprob_threshold=cellprob_threshold,
             min_size=min_size,
+            device=device,
         )

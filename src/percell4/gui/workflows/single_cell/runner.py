@@ -753,7 +753,12 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             if self._cellpose_model is None:
                 try:
                     self._cellpose_model = build_cellpose_model(
-                        gpu=self._config.cellpose.gpu
+                        gpu=self._config.cellpose.gpu,
+                        # Attaches at construction, not to the run_cellpose
+                        # call below: that receives this cached model and
+                        # skips construction entirely, so a callback wired
+                        # there would never fire on this surface.
+                        device_callback=self._on_device_resolved,
                     )
                 except Exception as e:
                     logger.exception("build_cellpose_model failed")
@@ -827,7 +832,12 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             if self._cellpose_model is None:
                 try:
                     self._cellpose_model = build_cellpose_model(
-                        gpu=self._config.cellpose.gpu
+                        gpu=self._config.cellpose.gpu,
+                        # Attaches at construction, not to the run_cellpose
+                        # call below: that receives this cached model and
+                        # skips construction entirely, so a callback wired
+                        # there would never fire on this surface.
+                        device_callback=self._on_device_resolved,
                     )
                 except Exception as e:
                     logger.exception("build_cellpose_model failed")
@@ -1452,6 +1462,29 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 name,
             )
             return 0
+
+    def _on_device_resolved(self, resolution) -> None:
+        """Record which device the run's Cellpose model was built on.
+
+        Into the run log rather than a dialog: this runner drives long
+        unattended batches, and an interruption partway through one would
+        strand the whole run behind a modal nobody is there to dismiss. A
+        fallback becomes an artifact the run carries with it, which is also
+        what makes it explicable afterwards when the timings look wrong.
+
+        Fires once per run — the model is built once and reused.
+        """
+        self._log(
+            phase="segment",
+            event="device",
+            message=resolution.reason,
+            device=resolution.device,
+            fell_back=resolution.fell_back,
+        )
+        if resolution.fell_back:
+            logger.warning("cellpose device fallback: %s", resolution.reason)
+        else:
+            logger.info("cellpose running on %s", resolution.device)
 
     def _log(self, **fields) -> None:
         """Forward a structured log entry to the run's RunLog."""
