@@ -111,11 +111,14 @@ def test_sidebar_has_merged_workflows_and_batch_tools_tabs(qtbot):
     launcher = _make_launcher()
     qtbot.addWidget(launcher)
     names = [b.text() for b in launcher._sidebar_buttons]
-    assert len(names) == 8
+    assert len(names) == 9
     # No standalone "Scripts" tab; the merged tab is named "Workflows".
     assert "Scripts" not in names
     assert "Workflows" in names
     assert "Batch Tools" in names
+    # Expert-only settings live in their own tab, appended last so the
+    # positions above are unaffected.
+    assert names[-1] == "Advanced"
 
 
 def test_on_open_analysis_workflow_locked_short_circuits(qtbot, monkeypatch):

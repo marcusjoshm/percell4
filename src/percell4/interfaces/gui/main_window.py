@@ -221,6 +221,9 @@ class LauncherWindow(QMainWindow):
             ("Workflows", self._create_scripts_workflows_panel),
             ("Batch Tools", self._create_batch_tools_panel),
             ("Data", self._create_data_panel),
+            # Appended last: expert-only settings, and appending keeps every
+            # existing sidebar position unchanged.
+            ("Advanced", self._create_advanced_panel),
         ]
 
         self._sidebar_buttons: list[QPushButton] = []
@@ -922,6 +925,14 @@ class LauncherWindow(QMainWindow):
             show_status=lambda msg: self.statusBar().showMessage(msg),
         )
         return self._data_panel
+
+    def _create_advanced_panel(self) -> QWidget:
+        from percell4.interfaces.gui.task_panels.advanced_panel import AdvancedPanel
+
+        self._advanced_panel = AdvancedPanel(
+            show_status=lambda msg: self.statusBar().showMessage(msg),
+        )
+        return self._advanced_panel
 
     def _create_batch_tools_panel(self) -> QWidget:
         from percell4.interfaces.gui.task_panels.batch_tools_panel import (
