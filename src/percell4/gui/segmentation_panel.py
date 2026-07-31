@@ -368,12 +368,9 @@ class SegmentationPanel(QWidget):
 
         self._show_status(resolution.reason)
 
-        seen = getattr(self, "_seen_device_warnings", None)
-        if seen is None:
-            seen = self._seen_device_warnings = set()
-        if resolution.reason in seen:
+        if resolution.reason in self._seen_device_warnings:
             return
-        seen.add(resolution.reason)
+        self._seen_device_warnings.add(resolution.reason)
 
         message_box(
             self,
@@ -628,8 +625,6 @@ class SegmentationPanel(QWidget):
                 flow_threshold=s.flow_threshold,
                 cellprob_threshold=s.cellprob_threshold,
                 min_size=s.min_size,
-                # Emitting the signal is all the worker thread does here;
-                # the handler on the UI thread owns every widget touch.
                 device_callback=self.device_resolved.emit,
             )
         self._worker.finished.connect(self._on_cellpose_done)

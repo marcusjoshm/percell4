@@ -637,7 +637,7 @@ class SegmentationQCController(QObject):
         from percell4.config.advanced import load_cellpose_device
 
         override = load_cellpose_device()
-        if override != getattr(self, "_cellpose_model_device", None):
+        if override != self._cellpose_model_device:
             self._cellpose_model_cached = None
 
         if self._cellpose_model_cached is None:
