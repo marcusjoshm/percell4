@@ -108,10 +108,9 @@ request plus the established batch-CLI patterns in the repo.
 - **CLI pattern source:** `src/percell4/interfaces/cli/batch_export.py`
   and `src/percell4/interfaces/cli/batch_phasor.py` — `main(argv)`,
   `_resolve_paths`, `_format_item_line`, `_print_item_status`,
-  `--quiet`/`--verbose`, exit-code convention. Invoked via
-  `python -m percell4.interfaces.cli.<name>` (the repo exposes no
-  `[project.scripts]` console entry points — only the
-  `percell4-gui` gui-script).
+  `--quiet`/`--verbose`, exit-code convention. Every sibling is
+  registered as a `[project.scripts]` console entry point and is also
+  runnable via `python -m percell4.interfaces.cli.<name>`.
 - **Use-case pattern source:**
   `src/percell4/application/use_cases/batch_export_images.py` and
   `batch_compute_phasor.py` — frozen `…ItemResult` / `…Report`
@@ -664,8 +663,12 @@ documents the contract.
   CLAUDE.md that lists CLI entry points) to add the new
   `batch_export_phasor` command alongside `batch_export` and
   `batch_phasor`, current-state only.
-- No `[project.scripts]` entry to add — siblings are invoked via
-  `python -m percell4.interfaces.cli.<name>`; keep that convention.
+- Register `percell4-batch-export-phasor` in `[project.scripts]`. This
+  is required, not cosmetic: the Batch Tools Console
+  (`interfaces/cli/catalog.py`) enumerates tools *exclusively* from
+  `console_scripts` entry points, so an unregistered CLI is invisible
+  in-app. (This plan originally said no entry was needed — true when it
+  was written, superseded once the console shipped.)
 - No migration, no rollout flag, no monitoring concerns (additive
   read-only CLI).
 
