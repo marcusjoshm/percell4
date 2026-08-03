@@ -130,7 +130,7 @@ s_cal = g * m * sin(phi) + s * m * cos(phi)
 ## Reference: flimfret Pipeline (Ground Truth)
 
 The authoritative reference for the correct FLIM pipeline is:
-`/Users/leelab/flimfret/docs/phasor_plot_pipeline_reference.md`
+`~/flimfret/docs/phasor_plot_pipeline_reference.md`
 
 Key stages:
 1. `.bin` → TIFF (via ImageJ, bin_width=0.097 ns)

@@ -27,15 +27,28 @@ class FakeRepo:
 
     def __init__(self):
         self.arrays: dict[str, np.ndarray] = {}
+        self.attrs: dict[str, dict] = {}
         self.disk_metadata: dict = {}
 
     def write_array(self, handle, path, data, attrs=None):
         self.arrays[path] = data
+        if attrs:
+            self.attrs[path] = dict(attrs)
 
     def read_array(self, handle, path, view_bin=1):
         if path not in self.arrays:
             raise KeyError(f"Array not found: {path}")
         return self.arrays[path]
+
+    def read_decay(self, handle, channel, view_bin=1, timepoint=None):
+        path = f"decay/{channel}"
+        if path not in self.arrays:
+            raise KeyError(f"Array not found: {path}")
+        arr = self.arrays[path]
+        return arr if timepoint is None else arr[timepoint]
+
+    def read_array_attrs(self, handle, path):
+        return dict(self.attrs.get(path, {}))
 
     def read_metadata(self, handle):
         return dict(self.disk_metadata)
@@ -65,6 +78,7 @@ def _seed_full_cache(repo: FakeRepo, channel: str = "ch0", shape=(8, 8)):
     repo.arrays[f"phasor/{channel}/s"] = s
     repo.arrays[f"phasor/{channel}/g_filtered"] = gf
     repo.arrays[f"phasor/{channel}/s_filtered"] = sf
+    repo.attrs[f"phasor/{channel}/g_filtered"] = {"filter_level": 9}
     repo.arrays[f"decay/{channel}"] = decay
     return g, s, gf, sf, decay
 
@@ -118,6 +132,58 @@ def test_no_decay_returns_none_intensity(session, repo):
     assert result.s_map is not None
     assert result.intensity is None
     assert result.g_filtered is None
+
+
+# ── Cached filter level (wavelet recompute signal) ────────────
+
+
+def test_cached_filter_level_surfaced(session, repo):
+    """The DTCWT level stamped on g_filtered is read back so the panel can
+    detect a level change and recompute."""
+    _seed_full_cache(repo)  # stamps filter_level=9
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level == 9
+
+
+def test_cached_filter_level_none_without_attr(session, repo):
+    """Filtered cache present but no filter_level attr → None (so the caller
+    treats the level as unknown and recomputes)."""
+    _seed_full_cache(repo)
+    repo.attrs.pop("phasor/ch0/g_filtered", None)
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level is None
+
+
+def test_cached_filter_level_none_when_no_filtered_cache(session, repo):
+    """Raw-only cache (no wavelet) → cached_filter_level is None."""
+    rng = np.random.default_rng(0)
+    repo.arrays["phasor/ch0/g"] = rng.uniform(size=(4, 4)).astype(np.float32)
+    repo.arrays["phasor/ch0/s"] = rng.uniform(size=(4, 4)).astype(np.float32)
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level is None
+
+
+def test_cached_filter_level_none_when_repo_lacks_attr_reader(session):
+    """A repo without read_array_attrs (older fake) → None, no crash."""
+
+    class NoAttrRepo:
+        def __init__(self):
+            self.arrays: dict[str, np.ndarray] = {}
+
+        def read_array(self, handle, path, view_bin=1):
+            if path not in self.arrays:
+                raise KeyError(path)
+            return self.arrays[path]
+
+    repo = NoAttrRepo()
+    z = np.zeros((4, 4), dtype=np.float32)
+    repo.arrays["phasor/ch0/g"] = z
+    repo.arrays["phasor/ch0/s"] = z
+    repo.arrays["phasor/ch0/g_filtered"] = z
+    repo.arrays["phasor/ch0/s_filtered"] = z
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+    assert result.cached_filter_level is None
+    assert result.g_filtered is not None  # cache itself still loads
 
 
 # ── Error paths ───────────────────────────────────────────────
@@ -244,3 +310,44 @@ def test_load_cached_phasor_default_view_bin_is_one(session):
 
     LoadCachedPhasor(repo, session).execute("ch0")
     assert all(vb == 1 for _, vb in repo.reads)
+
+
+# ── Time-lapse: slice the active acquisition frame (U7) ───────────────────
+
+
+def test_timelapse_phasor_slices_active_frame(session, repo):
+    """4-D /decay → (T_acq,H,W) phasor: LoadCachedPhasor returns the 2-D map at
+    session.active_timepoint, with intensity from THAT decay frame."""
+    nt, h, w, tb = 3, 8, 8, 16
+    rng = np.random.default_rng(7)
+    g = rng.uniform(0.1, 0.9, (nt, h, w)).astype(np.float32)
+    s = rng.uniform(0.05, 0.5, (nt, h, w)).astype(np.float32)
+    gf = rng.uniform(0.1, 0.9, (nt, h, w)).astype(np.float32)
+    sf = rng.uniform(0.05, 0.5, (nt, h, w)).astype(np.float32)
+    decay = rng.uniform(1.0, 100.0, (nt, h, w, tb)).astype(np.float32)
+    repo.arrays["phasor/ch0/g"] = g
+    repo.arrays["phasor/ch0/s"] = s
+    repo.arrays["phasor/ch0/g_filtered"] = gf
+    repo.arrays["phasor/ch0/s_filtered"] = sf
+    repo.arrays["decay/ch0"] = decay
+
+    session.set_dataset(DatasetHandle(
+        path=Path("/tmp/t.h5"),
+        metadata={"n_timepoints": nt, "native_shape": (h, w)},
+    ))
+    session.set_active_timepoint(2)
+
+    result = LoadCachedPhasor(repo, session).execute("ch0")
+
+    assert result.g_map.shape == (h, w)
+    np.testing.assert_array_equal(result.g_map, g[2])
+    np.testing.assert_array_equal(result.s_map, s[2])
+    np.testing.assert_array_equal(result.g_filtered, gf[2])
+    np.testing.assert_array_equal(result.s_filtered, sf[2])
+    np.testing.assert_allclose(result.intensity, decay[2].sum(axis=-1), rtol=1e-6)
+
+    # Switching the active frame returns a different slice (tracks the slider).
+    session.set_active_timepoint(0)
+    result0 = LoadCachedPhasor(repo, session).execute("ch0")
+    np.testing.assert_array_equal(result0.g_map, g[0])
+    assert not np.array_equal(result0.g_map, result.g_map)

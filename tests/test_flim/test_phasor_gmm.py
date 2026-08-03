@@ -17,9 +17,9 @@ from percell4.domain.flim.phasor import (
     gmm_eigenstructure,
     gmm_fit_phasor,
     gmm_to_phasor_roi_geometry,
+    single_component_fit_phasor,
     universal_circle_gs,
 )
-
 
 # ── universal_circle_gs ───────────────────────────────────────────────
 
@@ -334,4 +334,100 @@ def test_phasor_module_does_not_import_sklearn_at_module_load():
         ]
         assert not loaded, (
             f"phasor.py module load pulled in sklearn: {loaded}"
+        )
+
+
+# ── single_component_fit_phasor ───────────────────────────────────────
+
+
+def test_single_component_recovers_intensity_weighted_mean():
+    rng = np.random.default_rng(42)
+    g = rng.normal(0.35, 0.05, size=10_000)
+    s = rng.normal(0.45, 0.05, size=10_000)
+    intensity = rng.integers(1, 1000, size=10_000).astype(np.float64)
+
+    fit = single_component_fit_phasor(g, s, intensity)
+
+    expected_mean_g = (intensity * g).sum() / intensity.sum()
+    expected_mean_s = (intensity * s).sum() / intensity.sum()
+    assert fit.means[0, 0] == pytest.approx(expected_mean_g, abs=1e-12)
+    assert fit.means[0, 1] == pytest.approx(expected_mean_s, abs=1e-12)
+    assert fit.chosen_n == 1
+    assert fit.criterion_value is None
+    assert fit.sampled_pixels == 10_000
+
+
+def test_single_component_recovers_weighted_covariance():
+    rng = np.random.default_rng(0)
+    g = rng.normal(0.30, 0.10, size=5_000)
+    s = rng.normal(0.50, 0.08, size=5_000)
+    intensity = rng.integers(1, 100, size=5_000).astype(np.float64)
+
+    fit = single_component_fit_phasor(g, s, intensity)
+
+    # np.cov(..., aweights=...) returns the same biased weighted-covariance
+    # formula (sum(w*dx*dy) / sum(w)) when ddof=0.
+    expected = np.cov(np.stack([g, s]), aweights=intensity, ddof=0)
+    assert fit.covariances[0] == pytest.approx(expected, abs=1e-12)
+
+
+def test_single_component_center_on_unimodal_blob_lands_on_peak():
+    # The motivating regression: GMM(n=2) on a unimodal blob straddles the
+    # peak (two centers ~equidistant from it). A 1-component fit must
+    # instead land ON the peak.
+    rng = np.random.default_rng(7)
+    n = 50_000
+    g = rng.normal(0.40, 0.04, size=n)
+    s = rng.normal(0.48, 0.04, size=n)
+    intensity = np.ones(n, dtype=np.float64)
+
+    fit = single_component_fit_phasor(g, s, intensity)
+    assert fit.means[0, 0] == pytest.approx(0.40, abs=0.01)
+    assert fit.means[0, 1] == pytest.approx(0.48, abs=0.01)
+
+
+def test_single_component_falls_back_to_uniform_for_zero_intensity():
+    g = np.array([0.1, 0.3, 0.5])
+    s = np.array([0.2, 0.4, 0.6])
+    intensity = np.zeros(3)
+
+    fit = single_component_fit_phasor(g, s, intensity)
+    assert fit.means[0, 0] == pytest.approx(g.mean())
+    assert fit.means[0, 1] == pytest.approx(s.mean())
+
+
+def test_single_component_rejects_mismatched_shapes():
+    with pytest.raises(ValueError, match="must share shape"):
+        single_component_fit_phasor(
+            np.zeros(10), np.zeros(10), np.zeros(9)
+        )
+
+
+def test_single_component_rejects_empty_input():
+    with pytest.raises(ValueError, match="empty"):
+        single_component_fit_phasor(
+            np.array([]), np.array([]), np.array([])
+        )
+
+
+def test_single_component_does_not_load_sklearn():
+    # The whole point of the closed-form path is avoiding EM. Calling it
+    # should not import sklearn (parallels the module-load test below).
+    sklearn_already_loaded = any(
+        name == "sklearn" or name.startswith("sklearn.")
+        for name in list(sys.modules)
+    )
+
+    g = np.array([0.3, 0.4, 0.5])
+    s = np.array([0.4, 0.5, 0.6])
+    intensity = np.array([1.0, 1.0, 1.0])
+    single_component_fit_phasor(g, s, intensity)
+
+    if not sklearn_already_loaded:
+        loaded = [
+            name for name in sys.modules
+            if name == "sklearn" or name.startswith("sklearn.")
+        ]
+        assert not loaded, (
+            f"single_component_fit_phasor pulled in sklearn: {loaded}"
         )

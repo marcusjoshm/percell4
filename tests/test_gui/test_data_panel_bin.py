@@ -10,8 +10,6 @@ SpinBox's responsibility (consolidate-canonical-state).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import h5py
 import numpy as np
 import pytest
@@ -75,12 +73,12 @@ def test_info_label_shows_native_shape(panel_with_real_store):
 
 def test_info_label_shows_creation_and_view_bin(panel_with_real_store):
     """Both creation_bin (from /metadata) and active_bin (from Session)
-    appear on the info label."""
+    appear on the info label, each under its own user-facing name."""
     panel, _session, _store = panel_with_real_store
     panel.refresh_dataset_info()
     text = panel._info_label.text()
-    assert "Creation bin: 1" in text
-    assert "View bin: 1" in text
+    assert "Imported at binning: 1" in text
+    assert "Pixel binning: 1" in text
 
 
 def test_info_label_updates_on_active_bin_change(panel_with_real_store):
@@ -88,11 +86,11 @@ def test_info_label_updates_on_active_bin_change(panel_with_real_store):
     change.bin in _on_state_changed."""
     panel, session, _store = panel_with_real_store
     panel.refresh_dataset_info()
-    assert "View bin: 1" in panel._info_label.text()
+    assert "Pixel binning: 1" in panel._info_label.text()
 
     session.set_active_bin(3)
     # _on_state_changed should have fired refresh_dataset_info.
-    assert "View bin: 3" in panel._info_label.text()
+    assert "Pixel binning: 3" in panel._info_label.text()
 
 
 # ── Layer-list annotation: [k=N] ────────────────────────────────────

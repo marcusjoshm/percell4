@@ -595,9 +595,9 @@ These are documented issues from `docs/solutions/` that directly apply:
 - `docs/solutions/ui-bugs/percell4-selection-filtering-multi-roi-patterns.md`
 
 ### PerCell3 Reference
-- TUI import flow: `/Users/leelab/percell3/src/percell3/cli/menu.py:1477-1657`
-- Auto-import: `/Users/leelab/percell3/src/percell3/cli/import_cmd.py`
-- Scanner with FOV derivation: `/Users/leelab/percell3/src/percell3/io/scanner.py`
+- TUI import flow: `~/percell3/src/percell3/cli/menu.py:1477-1657`
+- Auto-import: `~/percell3/src/percell3/cli/import_cmd.py`
+- Scanner with FOV derivation: `~/percell3/src/percell3/io/scanner.py`
 
 ### Brainstorm
 - `docs/brainstorms/2026-04-04-batch-compress-brainstorm.md`

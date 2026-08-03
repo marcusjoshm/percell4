@@ -10,7 +10,6 @@ and view_bin caller-wiring, not re-test the compute/wavelet engines.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import h5py
 import numpy as np
@@ -22,7 +21,7 @@ from percell4.application.use_cases.batch_compute_phasor import (
     BatchPhasorReport,
     batch_compute_phasor,
 )
-
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -385,12 +384,22 @@ def test_apply_wavelet_receives_configured_filter_level(
 
 
 def test_filter_level_out_of_range_raises(tmp_path: Path) -> None:
-    """filter_level outside [1, 9] is rejected upfront."""
+    """filter_level outside [1, MAX_FILTER_LEVEL] is rejected upfront."""
     h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
     with pytest.raises(ValueError, match=r"filter_level"):
         batch_compute_phasor([h5], filter_level=0)
     with pytest.raises(ValueError, match=r"filter_level"):
-        batch_compute_phasor([h5], filter_level=10)
+        batch_compute_phasor([h5], filter_level=MAX_FILTER_LEVEL + 1)
+
+
+def test_filter_level_above_legacy_cap_is_accepted(tmp_path: Path) -> None:
+    """A level above the old 9/15 caps (but within MAX_FILTER_LEVEL) passes
+    validation and returns a report instead of raising."""
+    h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
+    # 20 was rejected under the old [1, 9] cap; it must be accepted now.
+    report = batch_compute_phasor([h5], filter_level=20)
+    assert isinstance(report, BatchPhasorReport)
+    assert MAX_FILTER_LEVEL >= 20
 
 
 def test_empty_input_list_returns_empty_report() -> None:
@@ -399,3 +408,126 @@ def test_empty_input_list_returns_empty_report() -> None:
     assert report.items == ()
     assert report.total_succeeded == 0
     assert report.total_failed == 0
+
+
+# ── batch_remove_phasor ─────────────────────────────────────────────────
+
+
+def _has_phasor_group(h5_path: Path, channel: str) -> bool:
+    with h5py.File(h5_path, "r") as f:
+        return f"phasor/{channel}" in f
+
+
+def test_remove_deletes_phasor_group_for_every_channel_with_data(
+    tmp_path: Path,
+) -> None:
+    """All channels with /phasor/<ch>/ on disk are deleted."""
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        channels=["ch0", "ch1"],
+        with_phasor_for=["ch0", "ch1"],
+    )
+
+    report = bcp.batch_remove_phasor([h5])
+
+    assert len(report.items) == 1
+    item = report.items[0]
+    assert item.status == "succeeded"
+    assert set(item.processed) == {"ch0", "ch1"}
+    assert item.skipped == {}
+    assert item.errors == {}
+    assert not _has_phasor_group(h5, "ch0")
+    assert not _has_phasor_group(h5, "ch1")
+
+
+def test_remove_channels_without_phasor_are_skipped_not_failed(
+    tmp_path: Path,
+) -> None:
+    """Channels with no /phasor/<ch>/ on disk are reported as skipped."""
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        channels=["ch0", "ch1"],
+        with_phasor_for=["ch0"],  # ch1 has no phasor
+    )
+
+    report = bcp.batch_remove_phasor([h5])
+
+    item = report.items[0]
+    assert item.status == "partial"
+    assert item.processed == ("ch0",)
+    assert "ch1" in item.skipped
+    assert "no phasor" in item.skipped["ch1"].lower()
+
+
+def test_remove_all_channels_with_no_phasor_is_skipped_no_changes(
+    tmp_path: Path,
+) -> None:
+    """When nothing exists to delete, the dataset's status is skipped."""
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        channels=["ch0", "ch1"],
+        with_phasor_for=None,
+    )
+
+    report = bcp.batch_remove_phasor([h5])
+
+    item = report.items[0]
+    assert item.status == "skipped_no_changes"
+    assert item.processed == ()
+    assert set(item.skipped.keys()) == {"ch0", "ch1"}
+
+
+def test_remove_calls_progress_callback_per_dataset(tmp_path: Path) -> None:
+    """progress_callback fires once per dataset, in order."""
+    h5_a = _make_h5(
+        tmp_path / "a.h5", channels=["ch0"], with_phasor_for=["ch0"],
+    )
+    h5_b = _make_h5(
+        tmp_path / "b.h5", channels=["ch0"], with_phasor_for=["ch0"],
+    )
+    seen: list[Path] = []
+
+    def cb(item: BatchPhasorItemResult) -> None:
+        seen.append(item.h5_path)
+
+    bcp.batch_remove_phasor([h5_a, h5_b], progress_callback=cb)
+    assert seen == [h5_a, h5_b]
+
+
+def test_remove_isolates_per_dataset_failures(
+    tmp_path: Path,
+) -> None:
+    """A missing file fails one dataset without halting the batch."""
+    real = _make_h5(
+        tmp_path / "real.h5",
+        channels=["ch0"],
+        with_phasor_for=["ch0"],
+    )
+    missing = tmp_path / "nope.h5"
+
+    report = bcp.batch_remove_phasor([missing, real])
+
+    assert len(report.items) == 2
+    assert report.items[0].status == "failed"
+    assert "open failed" in (report.items[0].error or "")
+    assert report.items[1].status == "succeeded"
+    assert not _has_phasor_group(real, "ch0")
+
+
+def test_remove_does_not_touch_decay_or_metadata(tmp_path: Path) -> None:
+    """Deletion is scoped to /phasor/; /decay and /metadata are untouched."""
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        channels=["ch0"],
+        with_phasor_for=["ch0"],
+    )
+
+    bcp.batch_remove_phasor([h5])
+
+    with h5py.File(h5, "r") as f:
+        assert "decay/ch0" in f
+        assert "metadata" in f
+        assert "flim_frequency_mhz" in dict(f["metadata"].attrs)
+        assert "phasor/ch0" not in f
+        # /phasor parent group may or may not survive (h5py keeps empty
+        # groups by default). We only require the targeted children gone.

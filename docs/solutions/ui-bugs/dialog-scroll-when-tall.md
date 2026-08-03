@@ -54,3 +54,11 @@ Function-pair shape was chosen over a `ScrollableDialog(QDialog)` base because (
 ## Relationship to PerCell history
 
 Before 2026-04-30, the user had to issue this instruction ("add a QScrollArea when this gets too tall") explicitly across the project's lifetime; it was never compounded. The dialog-scroll-helper-rollout thread (closes 2026-04-30) consolidated five dialogs onto the helper and added the compliance test so the convention survives future code.
+
+## Related
+
+- [`gnome-attaches-parented-modal-dialogs-2026-07-29.md`](gnome-attaches-parented-modal-dialogs-2026-07-29.md)
+  — the sibling convention in `_dialog_utils.py`. It cites this doc's
+  "where it lives" argument for adding a function to the shared module
+  rather than introducing a `ScrollableDialog`-style base class, and it
+  reuses the same paired-compliance-test shape.

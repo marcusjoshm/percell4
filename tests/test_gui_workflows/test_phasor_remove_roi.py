@@ -35,7 +35,6 @@ from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
 
-
 # Standard "no per-ROI selection" status format emitted by _refresh_histogram.
 _STD_STATUS_RE = re.compile(r"Phasor: \d[\d,]* valid pixels")
 

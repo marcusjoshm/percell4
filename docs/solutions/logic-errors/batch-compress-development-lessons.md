@@ -114,6 +114,8 @@ def _derive_dataset_name(stem: str, config: TokenConfig) -> str:
 
 **Prevention:** Before exposing regex to users, ask: can the system derive the answer automatically from information it already has? In this case, the token config already contained all the patterns needed to identify and strip the variable parts of filenames.
 
+**Update 2026-07-23:** This "derive, don't expose regex" principle was extended to name-suffixed TIFFs (no `chXX` token) by `discover_tokenless`, which derives the channel vocabulary structurally, *synthesizes* a `TokenConfig` from it, and reuses this same `discover_flat` + `_derive_dataset_name` path — then returns the synthesized config so the importer re-parses the identical regex. See `docs/solutions/architecture-patterns/channel-name-contract-and-tokenless-discovery-2026-07-23.md`.
+
 ## Design Pivot 1: Semantic Selection Instead of File Tree
 
 **Problem:** Initial design used a `QTreeWidget` with checkboxes on individual files. With 30 tiles x 14 channels x N datasets, checking individual files (e.g., only ch00, ch08, ch09 from each dataset) was prohibitively tedious.

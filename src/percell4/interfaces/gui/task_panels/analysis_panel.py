@@ -10,14 +10,13 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -29,6 +28,8 @@ from qtpy.QtWidgets import (
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
+from percell4.gui._dialog_utils import make_freestanding, save_file_name
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
 
@@ -45,6 +46,7 @@ class AnalysisPanel(QWidget):
         show_window: Callable[[str], None],
         get_store: Callable[[], Any | None] = lambda: None,
         show_status: Callable[[str], None] = lambda _: None,
+        repopulate_viewer: Callable[[], None] = lambda: None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -55,6 +57,7 @@ class AnalysisPanel(QWidget):
         self._show_window_cb = show_window
         self._get_store = get_store
         self._show_status = show_status
+        self._repopulate_viewer_cb = repopulate_viewer
 
         # Threshold preview state
         self._thresh_working_image = None
@@ -75,42 +78,117 @@ class AnalysisPanel(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        title = QLabel("Analysis")
-        title.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; padding-bottom: 4px;"
-            f" border-bottom: 1px solid {theme.BORDER};"
+        layout.addWidget(theme.section_label("Analysis"))
+
+        # Module order is detection-first: the most-used detection tool
+        # (Adaptive Local Clipping) on top, paired with Particle Analysis
+        # (which consumes the mask it produces), then Measurements; the two
+        # thresholding modules sit at the bottom.
+
+        # ── Adaptive Local Clipping ──
+        from percell4.gui.adaptive_clip_panel import AdaptiveClipPanel
+
+        self._adaptive_clip_panel = AdaptiveClipPanel(
+            self.data_model,
+            get_repo=self._get_repo,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
         )
-        layout.addWidget(title)
+        adaptive_group = QGroupBox("Adaptive Local Clipping")
+        adaptive_layout = QVBoxLayout(adaptive_group)
+        adaptive_layout.addWidget(self._adaptive_clip_panel)
+        layout.addWidget(adaptive_group)
 
-        # ── Cell Filter group ──
-        filter_group = QGroupBox("Cell Filter")
-        filter_layout = QVBoxLayout(filter_group)
+        # ── Segment by Metric ──
+        from percell4.gui.metric_segmenter_panel import MetricSegmenterPanel
 
-        sel_btn_row = QHBoxLayout()
-        btn_clear_sel = QPushButton("Clear Selection")
-        btn_clear_sel.setToolTip("Deselect all cells and restore viewer to normal")
-        btn_clear_sel.clicked.connect(self._on_clear_selection)
-        sel_btn_row.addWidget(btn_clear_sel)
-        filter_layout.addLayout(sel_btn_row)
+        self._metric_segmenter_panel = MetricSegmenterPanel(
+            self.data_model,
+            get_repo=self._get_repo,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
+        )
+        metric_group = QGroupBox("Segment by Metric")
+        metric_layout = QVBoxLayout(metric_group)
+        metric_layout.addWidget(self._metric_segmenter_panel)
+        layout.addWidget(metric_group)
 
-        filter_btn_row = QHBoxLayout()
-        btn_filter = QPushButton("Filter to Selection")
-        btn_filter.setToolTip("Show only the currently selected cells in all windows")
-        btn_filter.clicked.connect(self._on_filter_to_selection)
-        filter_btn_row.addWidget(btn_filter)
+        # ── Particle Analysis ──
+        particle_group = QGroupBox("Particle Analysis")
+        particle_layout = QVBoxLayout(particle_group)
 
-        self._clear_filter_btn = QPushButton("Clear Filter")
-        self._clear_filter_btn.setEnabled(False)
-        self._clear_filter_btn.clicked.connect(self._on_clear_filter)
-        filter_btn_row.addWidget(self._clear_filter_btn)
-        filter_layout.addLayout(filter_btn_row)
+        particle_layout.addWidget(QLabel(
+            "Counts particles within each cell using\n"
+            "the active mask as the particle source."
+        ))
 
-        self._filter_status_label = QLabel("No filter active")
-        self._filter_status_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        filter_layout.addWidget(self._filter_status_label)
+        min_area_row = QHBoxLayout()
+        min_area_row.addWidget(QLabel("Min particle area (px²):"))
+        self._particle_min_area = QSpinBox()
+        self._particle_min_area.setRange(1, 10000)
+        self._particle_min_area.setValue(1)
+        min_area_row.addWidget(self._particle_min_area)
+        particle_layout.addLayout(min_area_row)
 
-        layout.addWidget(filter_group)
+        btn_particle = QPushButton("Analyze Particles")
+        btn_particle.clicked.connect(self._on_analyze_particles)
+        particle_layout.addWidget(btn_particle)
+
+        btn_export_particle = QPushButton("Export Particle Data to CSV...")
+        btn_export_particle.clicked.connect(self._on_export_particle_csv)
+        particle_layout.addWidget(btn_export_particle)
+
+        self._particle_result_label = QLabel("")
+        self._particle_result_label.setWordWrap(True)
+        particle_layout.addWidget(self._particle_result_label)
+
+        layout.addWidget(particle_group)
+
+        # ── Measurements group ──
+        meas_group = QGroupBox("Measurements")
+        meas_layout = QVBoxLayout(meas_group)
+
+        meas_layout.addWidget(QLabel(
+            "Measures per-cell metrics using the active\n"
+            "channel, segmentation, and mask from Data tab."
+        ))
+
+        self._meas_result_label = QLabel("")
+        self._meas_result_label.setWordWrap(True)
+        meas_layout.addWidget(self._meas_result_label)
+
+        btn_measure = QPushButton("Measure Cells")
+        btn_measure.clicked.connect(self._on_measure_cells)
+        meas_layout.addWidget(btn_measure)
+
+        btn_row = QHBoxLayout()
+        btn_plot = QPushButton("Open Data Plot")
+        btn_plot.clicked.connect(lambda: self._show_window("data_plot"))
+        btn_row.addWidget(btn_plot)
+
+        btn_table = QPushButton("Open Cell Table")
+        btn_table.clicked.connect(lambda: self._show_window("cell_table"))
+        btn_row.addWidget(btn_table)
+        meas_layout.addLayout(btn_row)
+
+        layout.addWidget(meas_group)
+
+        # ── Grouped Thresholding ──
+        from percell4.gui.grouped_seg_panel import GroupedSegPanel
+
+        self._grouped_seg_panel = GroupedSegPanel(
+            self.data_model,
+            get_store=self._get_store,
+            get_viewer_window=self._get_viewer_window,
+            show_status=self._show_status,
+            repopulate_viewer=self._repopulate_viewer_cb,
+        )
+        grouped_group = QGroupBox("Grouped Thresholding")
+        grouped_layout = QVBoxLayout(grouped_group)
+        grouped_layout.addWidget(self._grouped_seg_panel)
+        layout.addWidget(grouped_group)
 
         # ── Whole Field Thresholding group ──
         thresh_group = QGroupBox("Whole Field Thresholding")
@@ -179,80 +257,6 @@ class AnalysisPanel(QWidget):
 
         layout.addWidget(thresh_group)
 
-        # ── Grouped Thresholding ──
-        from percell4.gui.grouped_seg_panel import GroupedSegPanel
-
-        self._grouped_seg_panel = GroupedSegPanel(
-            self.data_model,
-            get_store=self._get_store,
-            get_viewer_window=self._get_viewer_window,
-            show_status=self._show_status,
-        )
-        grouped_group = QGroupBox("Grouped Thresholding")
-        grouped_layout = QVBoxLayout(grouped_group)
-        grouped_layout.addWidget(self._grouped_seg_panel)
-        layout.addWidget(grouped_group)
-
-        # ── Measurements group ──
-        meas_group = QGroupBox("Measurements")
-        meas_layout = QVBoxLayout(meas_group)
-
-        meas_layout.addWidget(QLabel(
-            "Measures per-cell metrics using the active\n"
-            "channel, segmentation, and mask from Data tab."
-        ))
-
-        self._meas_result_label = QLabel("")
-        self._meas_result_label.setWordWrap(True)
-        meas_layout.addWidget(self._meas_result_label)
-
-        btn_measure = QPushButton("Measure Cells")
-        btn_measure.clicked.connect(self._on_measure_cells)
-        meas_layout.addWidget(btn_measure)
-
-        btn_row = QHBoxLayout()
-        btn_plot = QPushButton("Open Data Plot")
-        btn_plot.clicked.connect(lambda: self._show_window("data_plot"))
-        btn_row.addWidget(btn_plot)
-
-        btn_table = QPushButton("Open Cell Table")
-        btn_table.clicked.connect(lambda: self._show_window("cell_table"))
-        btn_row.addWidget(btn_table)
-        meas_layout.addLayout(btn_row)
-
-        layout.addWidget(meas_group)
-
-        # ── Particle Analysis ──
-        particle_group = QGroupBox("Particle Analysis")
-        particle_layout = QVBoxLayout(particle_group)
-
-        particle_layout.addWidget(QLabel(
-            "Counts particles within each cell using\n"
-            "the active mask as the particle source."
-        ))
-
-        min_area_row = QHBoxLayout()
-        min_area_row.addWidget(QLabel("Min particle area (px):"))
-        self._particle_min_area = QSpinBox()
-        self._particle_min_area.setRange(1, 10000)
-        self._particle_min_area.setValue(1)
-        min_area_row.addWidget(self._particle_min_area)
-        particle_layout.addLayout(min_area_row)
-
-        btn_particle = QPushButton("Analyze Particles")
-        btn_particle.clicked.connect(self._on_analyze_particles)
-        particle_layout.addWidget(btn_particle)
-
-        btn_export_particle = QPushButton("Export Particle Data to CSV...")
-        btn_export_particle.clicked.connect(self._on_export_particle_csv)
-        particle_layout.addWidget(btn_export_particle)
-
-        self._particle_result_label = QLabel("")
-        self._particle_result_label.setWordWrap(True)
-        particle_layout.addWidget(self._particle_result_label)
-
-        layout.addWidget(particle_group)
-
         layout.addStretch()
 
     # ── Helpers ───────────────────────────────────────────────
@@ -277,41 +281,8 @@ class AnalysisPanel(QWidget):
     # ── State change routing ─────────────────────────────────
 
     def _on_state_changed(self, change) -> None:
-        if change.filter:
-            self._on_filter_state_changed()
         if change.data or change.channel:
             self._update_channel_display()
-
-    # ── Cell Filter ──────────────────────────────────────────
-
-    def _on_clear_selection(self) -> None:
-        self.data_model.set_selection([])
-
-    def _on_filter_to_selection(self) -> None:
-        selected = self.data_model.selected_ids
-        if not selected:
-            self._show_status("No cells selected to filter")
-            return
-        self.data_model.set_filter(list(selected))
-
-    def _on_clear_filter(self) -> None:
-        self.data_model.set_filter(None)
-
-    def _on_filter_state_changed(self) -> None:
-        if self.data_model.is_filtered:
-            n_filtered = len(self.data_model.filtered_df)
-            n_total = len(self.data_model.df)
-            self._filter_status_label.setText(
-                f"Showing {n_filtered} of {n_total} cells"
-            )
-            self._filter_status_label.setStyleSheet(
-                f"color: {theme.ACCENT}; font-weight: bold;"
-            )
-            self._clear_filter_btn.setEnabled(True)
-        else:
-            self._filter_status_label.setText("No filter active")
-            self._filter_status_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-            self._clear_filter_btn.setEnabled(False)
 
     # ── Whole Field Thresholding ─────────────────────────────
 
@@ -324,7 +295,7 @@ class AnalysisPanel(QWidget):
 
         # Get the image data from the viewer layer (still need viewer for the array)
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("Open the viewer first")
             return
 
@@ -344,6 +315,13 @@ class AnalysisPanel(QWidget):
         )
 
         image = active.data.astype(np.float32)
+
+        # Time-lapse: preview operates on the active timepoint's 2D frame so the
+        # threshold/ROI math never indexes the leading T axis as rows. Accept
+        # then re-thresholds every frame (per-frame auto threshold, U10).
+        session = self.data_model.session
+        if image.ndim == 3 and session.n_timepoints > 1:
+            image = image[session.active_timepoint]
 
         sigma = self._thresh_sigma.value()
         if sigma > 0:
@@ -414,7 +392,7 @@ class AnalysisPanel(QWidget):
 
     def _on_threshold_roi_changed(self, event=None) -> None:
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return
 
         image = self._thresh_working_image
@@ -473,7 +451,7 @@ class AnalysisPanel(QWidget):
 
     def _on_threshold_accept(self) -> None:
         viewer_win = self._get_viewer_window()
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("No preview to accept")
             return
 
@@ -491,9 +469,60 @@ class AnalysisPanel(QWidget):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
 
+        session = self.data_model.session
+        n_timepoints = session.n_timepoints
+
+        if n_timepoints > 1:
+            # Per-frame caller-loop (U10): read each timepoint's raw channel
+            # frame, recompute the threshold per frame for auto methods (manual
+            # broadcasts), stack to (T,H,W), and persist via the Creator steps.
+            # AcceptThreshold stays single-image/shape-transparent and is not
+            # used here (it cannot recompute per-frame auto thresholds).
+            from percell4.gui._threshold_logic import build_threshold_mask_stack
+
+            repo = self._get_repo()
+            handle = session.dataset
+            sigma = self._thresh_sigma.value()
+            try:
+                frames = [
+                    repo.read_channel_images(handle, timepoint=t)[channel_name]
+                    for t in range(n_timepoints)
+                ]
+                mask_stack, values = build_threshold_mask_stack(
+                    frames, sigma, method, value
+                )
+                mask_name = f"{method}_{channel_name}"
+                repo.write_mask(handle, mask_name, mask_stack)
+                session.refresh_resource_lists(mask_names=repo.list_masks(handle))
+                session.set_active_mask(mask_name)
+            except (ValueError, KeyError) as e:
+                self._show_status(str(e))
+                return
+
+            viewer_win.add_mask(mask_stack, name=mask_name)
+            n_pos = int(mask_stack.sum())
+            n_total = int(mask_stack.size)
+            pct = 100.0 * n_pos / n_total if n_total > 0 else 0
+            v_note = (
+                f"manual {value:.1f}"
+                if method == "manual"
+                else f"per-frame {min(values):.1f}–{max(values):.1f}"
+            )
+            self._thresh_result_label.setText(
+                f"Saved: {mask_name}\n"
+                f"Threshold: {v_note} | {n_pos:,} / {n_total:,} px ({pct:.1f}%)"
+            )
+            self._thresh_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
+            self._show_status(
+                f"Saved mask '{mask_name}' ({n_timepoints} timepoints, {v_note})"
+            )
+            self._thresh_working_image = None
+            self._thresh_channel_name = None
+            return
+
         try:
-            from percell4.application.use_cases.accept_threshold import AcceptThreshold
             from percell4.adapters.napari_viewer import NapariViewerAdapter
+            from percell4.application.use_cases.accept_threshold import AcceptThreshold
 
             repo = self._get_repo()
             viewer_adapter = NapariViewerAdapter(viewer_win)
@@ -557,6 +586,27 @@ class AnalysisPanel(QWidget):
         self._meas_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self._show_status(f"Measured {n_cells} cells, {n_cols} columns")
 
+        # U18a: draw the lineage Tracks overlay after a tracked time-lapse
+        # measure. track_id is attached by MeasureCells._join_lineage and does
+        # NOT exist at track time, so the overlay is triggered here (not in the
+        # Track Cells step). No-op for single-t or untracked segmentations.
+        session = self.data_model.session
+        if session.n_timepoints > 1 and "track_id" in df.columns:
+            viewer_win = self._get_viewer_window()
+            if viewer_win is not None and hasattr(
+                viewer_win, "show_tracks_from_measurements"
+            ):
+                try:
+                    lineage = repo.read_tracks(session.dataset, seg_name)
+                except KeyError:
+                    lineage = None
+                try:
+                    viewer_win.show_tracks_from_measurements(
+                        df, lineage_df=lineage, name=f"{seg_name}_tracks"
+                    )
+                except Exception as e:  # noqa: BLE001 — overlay is best-effort
+                    self._show_status(f"Measured; tracks overlay skipped: {e}")
+
     def _show_metric_config_dialog(self) -> list[str] | None:
         from percell4.domain.measure.metrics import BUILTIN_METRICS
 
@@ -578,6 +628,11 @@ class AnalysisPanel(QWidget):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
+        # After the layout is populated so adjustSize() yields the real
+        # size, and before exec() -- which is this dialog's first show(),
+        # and both helpers must run before that.
+        make_freestanding(dialog)
+
         if dialog.exec() != QDialog.Accepted:
             return None
 
@@ -591,7 +646,7 @@ class AnalysisPanel(QWidget):
     @staticmethod
     def _load_selected_metrics() -> list[str]:
         from percell4.domain.measure.metrics import BUILTIN_METRICS
-        settings = QSettings("LeeLabPerCell4", "PerCell4")
+        settings = app_settings()
         raw = settings.value("metrics/selected", defaultValue=None)
         if raw is None:
             return list(BUILTIN_METRICS.keys())
@@ -601,7 +656,7 @@ class AnalysisPanel(QWidget):
 
     @staticmethod
     def _save_selected_metrics(metrics: list[str]) -> None:
-        settings = QSettings("LeeLabPerCell4", "PerCell4")
+        settings = app_settings()
         settings.setValue("metrics/selected", metrics)
 
     def _get_phasor_roi_names(self) -> dict[int, str] | None:
@@ -632,7 +687,7 @@ class AnalysisPanel(QWidget):
         mask_name = self.data_model.session.active_mask or "unknown"
         self._particle_result_label.setText(
             f"{result.total_particles} particles in {result.n_cells} cells\n"
-            f"mask: {mask_name} | min area: {min_area} px"
+            f"mask: {mask_name} | min area: {min_area} px²"
         )
         self._particle_result_label.setStyleSheet(f"color: {theme.SUCCESS};")
         self._show_status(
@@ -645,7 +700,7 @@ class AnalysisPanel(QWidget):
             self._show_status("No particle data — run Analyze Particles first")
             return
 
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Export Particle Data", "particles.csv", "CSV (*.csv)"
         )
         if path:

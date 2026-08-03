@@ -26,7 +26,7 @@ import numpy as np
 from percell4 import __version__ as _percell4_version
 from percell4.adapters.importer import write_decay_streaming
 from percell4.adapters.readers import read_flim_bin
-from percell4.domain.io.assembler import _tile_positions
+from percell4.domain.io.assembler import _tile_positions, canvas_from_offsets
 from percell4.domain.io.cross_format import (
     IntensityChannel,
     match_bin_to_intensity,
@@ -39,6 +39,7 @@ from percell4.domain.io.models import (
     TileConfig,
     TokenConfig,
 )
+from percell4.domain.io.timepoints import ordered_timepoint_tokens
 from percell4.store import DatasetStore, LayerSizeMismatchError
 
 
@@ -120,11 +121,44 @@ def add_decay_to_dataset(
 
     store = DatasetStore(h5_path)
     metadata = store.metadata
+    # Read registered overlap-stitch geometry FRESH from the store (never a
+    # cached handle.metadata snapshot — same staleness-safe pattern as the
+    # native_shape read below). When the dataset was never registered (or
+    # predates the feature) this reads back ``registered=False`` /
+    # ``offsets=None`` and the existing grid path runs unchanged (R6/back-compat).
+    geom = store.read_stitch_geometry()
+    # AE4: a dataset flagged registered but missing its persisted offsets is a
+    # dataset-level corruption — refuse the whole append rather than silently
+    # falling back to grid placement (which would mis-align /decay against the
+    # registered /intensity). This is dataset-wide, so it raises before the
+    # per-channel loop (never swallowed into a per-channel report error).
+    if geom.registered and geom.offsets is None:
+        raise ValueError(
+            "dataset is flagged stitch_registered=True but stitch/tile_offsets "
+            "is absent; cannot place decay at the registered geometry. "
+            "Re-import via the Compress dialog to a fresh output path."
+        )
+    # The complementary corruption (FIX F): the offset array is present but the
+    # commit marker is absent — a partial/aborted registered import. Placing
+    # decay on either path (grid or registered) would risk mis-aligning against
+    # an /intensity that may itself be half-written. Refuse here too, before the
+    # per-channel loop, so the per-channel except can't swallow it.
+    if geom.offsets is not None and not geom.registered:
+        raise ValueError(
+            "stitch/tile_offsets present but stitch_registered is False — "
+            "partial/aborted registered import; re-import to a fresh path."
+        )
     channel_names = list(metadata.get("channel_names", []))
     if not channel_names:
         return AppendReport(
             errors={"intensity": "no /intensity channels in dataset (channel_names empty)"}
         )
+
+    # Acquisition-timepoint count (intensity-derived, authoritative). A
+    # time-lapse dataset (n_timepoints > 1) gets a 4-D (T_acq, H, W, T_bins)
+    # /decay, one .bin set per timepoint bound by its _t<N> token — see the
+    # per-timepoint binding in Phase 1. Single-timepoint stays 3-D, unchanged.
+    n_timepoints = int(metadata.get("n_timepoints", 1) or 1)
 
     # Build IntensityChannel records — caller-supplied list (from the
     # dialog's per-channel token overrides) wins over digit-suffix
@@ -191,56 +225,96 @@ def add_decay_to_dataset(
     for ch_name, bindings in by_channel.items():
         progress(f"Stitching {ch_name} ({len(bindings)} tile(s))")
         try:
-            # Build tile_idx → Path map (same logic compress uses)
-            tile_to_path: dict[int, Path] = {}
+            # ── Per-timepoint binding ───────────────────────────────────
+            # Group this channel's bindings by acquisition timepoint (one .bin
+            # set per timepoint; single-padded, 1-based _t<N> tokens). Numeric-
+            # sorted tokens map positionally to frame index 0..N-1 (so _t1 ->
+            # frame 0). Single-timepoint datasets keep one frame (token absent).
+            tp_groups: dict[str | None, list] = {}
             for b in bindings:
-                idx = _extract_tile_index(b.bin_path.stem, token_config)
-                if idx is None:
-                    raise ValueError(
-                        f"tile token missing from {b.bin_path.name}; cannot stitch"
-                    )
-                tile_to_path[idx] = b.bin_path
-            # Normalize 1-based → 0-based
-            if tile_to_path:
-                min_idx = min(tile_to_path.keys())
-                if min_idx > 0:
-                    tile_to_path = {k - min_idx: v for k, v in tile_to_path.items()}
+                tok = _extract_timepoint_token(b.bin_path.stem, token_config)
+                tp_groups.setdefault(tok, []).append(b)
 
-            # Read first tile to determine dimensions (compress does the same)
-            first_path = next(iter(tile_to_path.values()))
-            first_result = read_flim_bin(first_path, **bin_dims)
+            if n_timepoints > 1:
+                tokens = [t for t in tp_groups if t is not None]
+                ordered = ordered_timepoint_tokens(tokens)
+                if len(ordered) != n_timepoints:
+                    raise ValueError(
+                        f"found {len(ordered)} decay timepoint(s) {ordered} "
+                        f"but the dataset has {n_timepoints} timepoints; one "
+                        ".bin set per timepoint is required (no partial "
+                        "time-lapse decay)."
+                    )
+                frames = [
+                    (t_acq, _build_tile_map(tp_groups[tok], token_config))
+                    for t_acq, tok in enumerate(ordered)
+                ]
+            else:
+                all_bindings = [b for bs in tp_groups.values() for b in bs]
+                frames = [(0, _build_tile_map(all_bindings, token_config))]
+
+            # Dimensions + placement are computed ONCE from frame 0 and reused
+            # verbatim for every timepoint (single persisted geometry, zero
+            # stage drift) so /intensity[t] and /decay[t] resolve every overlap
+            # pixel to the same tile.
+            first_ttp = frames[0][1]
+            first_result = read_flim_bin(next(iter(first_ttp.values())), **bin_dims)
             tile_h, tile_w, n_bins = first_result["array"].shape
             del first_result
 
-            use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
-            if use_tiling:
-                out_h = tile_config.grid_rows * tile_h
-                out_w = tile_config.grid_cols * tile_w
-                positions = _tile_positions(
-                    tile_config.grid_rows,
-                    tile_config.grid_cols,
-                    tile_config.grid_type,
-                    tile_config.order,
-                )
+            # ── Placement: registered (overlap-aware) vs grid ──────────
+            # Registered: reuse the persisted offsets VERBATIM (never recompute,
+            # R5/R6/AE2); rotate_k is applied PER TILE so the mosaic lands at
+            # native_shape directly (odd rotate_k transposes each square tile, so
+            # the canvas uses the POST-rotation tile shape). Grid: the fixed
+            # edge-to-edge path, whole-image-rotated in Phase 2 (back-compat).
+            if geom.registered:
+                offsets = np.asarray(geom.offsets)
+                if (int(rotate_k) % 2) == 1:
+                    placed_h, placed_w = tile_w, tile_h
+                else:
+                    placed_h, placed_w = tile_h, tile_w
+                out_h, out_w = canvas_from_offsets(offsets, (placed_h, placed_w))
+                use_tiling = True
+                positions = {}
             else:
-                out_h, out_w = tile_h, tile_w
-                positions = {0: (0, 0)}
+                offsets = None
+                placed_h, placed_w = tile_h, tile_w
+                use_tiling = tile_config.grid_rows * tile_config.grid_cols > 1
+                if use_tiling:
+                    out_h = tile_config.grid_rows * tile_h
+                    out_w = tile_config.grid_cols * tile_w
+                    positions = _tile_positions(
+                        tile_config.grid_rows,
+                        tile_config.grid_cols,
+                        tile_config.grid_type,
+                        tile_config.order,
+                    )
+                else:
+                    out_h, out_w = tile_h, tile_w
+                    positions = {0: (0, 0)}
 
-            # Source-shape validation: the FINAL stored (H, W) must equal
-            # /metadata.native_shape. Phase 2 below rotates each stitched
-            # /decay in place; odd ``rotate_k`` values transpose (H, W).
-            # The validation must therefore check the POST-rotation shape
-            # so the canonical "stitch + rotate to fit native" workflow
-            # (e.g. .bin tiles stitched at (2048, 2560) with rotate_k=1
-            # to land at native (2560, 2048)) isn't rejected pre-rotation.
-            # flip_axis is shape-invariant -- only rotate_k matters here.
+            # Source-shape validation (once): the FINAL stored (H, W) must equal
+            # /metadata.native_shape. Registered -> per-tile rotate, compare
+            # directly; grid -> Phase-2 whole-image rotate, odd rotate_k
+            # transposes (H, W). flip_axis is shape-invariant.
             native_shape = metadata.get("native_shape")
             if native_shape is not None:
-                if (int(rotate_k) % 2) == 0:
+                if geom.registered or (int(rotate_k) % 2) == 0:
                     final_h, final_w = out_h, out_w
                 else:
                     final_h, final_w = out_w, out_h
                 if tuple(native_shape) != (final_h, final_w):
+                    if geom.registered:
+                        raise LayerSizeMismatchError(
+                            f"Registered decay canvas ({out_h}, {out_w}) from the "
+                            f"persisted tile offsets (rotate_k={rotate_k} applied "
+                            f"per tile) does not match dataset native_shape "
+                            f"{tuple(native_shape)}. The registered /intensity "
+                            "geometry disagrees with native_shape — re-import "
+                            "/intensity and /decay together so they share one "
+                            "canvas."
+                        )
                     raise LayerSizeMismatchError(
                         f"Source TCSPC stitched shape is ({out_h}, {out_w})"
                         + (
@@ -253,23 +327,49 @@ def add_decay_to_dataset(
                         "creation_bin, or pre-bin the .bin files externally."
                     )
 
-            # Delegate the actual decay write to the shared helper --
-            # compress and add-layer go through the SAME streaming write.
-            # spatial_bin defaults to 1; only the importer's compress
-            # path passes a larger value (see U7).
-            write_decay_streaming(
-                h5_path=h5_path,
-                channel_name=ch_name,
-                tile_bins=tile_to_path,
-                bin_dims=bin_dims,
-                tile_h=tile_h,
-                tile_w=tile_w,
-                n_bins=n_bins,
-                out_h=out_h,
-                out_w=out_w,
-                positions=positions,
-                use_tiling=use_tiling,
-            )
+            # Write each acquisition frame through the shared streamer with the
+            # SAME geometry. n_timepoints > 1 -> 4-D (T_acq, H, W, T_bins);
+            # n_timepoints == 1 -> legacy 3-D (byte-identical).
+            for t_acq, ttp in frames:
+                if geom.registered:
+                    # COMPLETENESS (FIX C): each frame must cover EVERY
+                    # registered tile, else its empty regions / mis-resolved
+                    # overlaps would misalign /decay[t] from /intensity[t].
+                    expected = set(range(len(offsets)))
+                    present = set(ttp)
+                    if present != expected:
+                        raise ValueError(
+                            f"registered decay append requires all "
+                            f"{len(offsets)} tiles per timepoint; frame {t_acq} "
+                            f"got {len(present)} (missing "
+                            f"{sorted(expected - present)}, extra "
+                            f"{sorted(present - expected)})."
+                        )
+                    pixel_offsets: dict[int, tuple[int, int]] | None = {
+                        idx: (int(offsets[idx][0]), int(offsets[idx][1]))
+                        for idx in ttp
+                    }
+                else:
+                    pixel_offsets = None
+                write_decay_streaming(
+                    h5_path=h5_path,
+                    channel_name=ch_name,
+                    tile_bins=ttp,
+                    bin_dims=bin_dims,
+                    tile_h=placed_h,
+                    tile_w=placed_w,
+                    n_bins=n_bins,
+                    out_h=out_h,
+                    out_w=out_w,
+                    positions=positions,
+                    use_tiling=use_tiling,
+                    pixel_offsets=pixel_offsets,
+                    disconnected=geom.disconnected if geom.registered else (),
+                    tile_rotate_k=int(rotate_k) if geom.registered else 0,
+                    tile_flip_axis=flip_axis if geom.registered else None,
+                    n_acq=n_timepoints,
+                    timepoint=t_acq,
+                )
 
         except Exception as e:  # noqa: BLE001
             errors[ch_name] = f"read/stitch failed: {e}"
@@ -285,7 +385,10 @@ def add_decay_to_dataset(
     # than on a partially-written or per-tile region. ONLY /decay is
     # rotated — never the user's existing /intensity channels (which may
     # be TIFF source data that must not be modified by an append flow).
-    if rotate_k:
+    # GRID PATH ONLY: the registered path already applied rotate_k PER TILE
+    # before placement (a whole-image rotate would transpose the registered
+    # mosaic off native_shape — the overlap shape-mismatch bug).
+    if rotate_k and not geom.registered:
         k = int(rotate_k) % 4
         for ch_name in list(written):
             progress(f"Rotating {ch_name} by {k * 90}° CCW")
@@ -300,8 +403,9 @@ def add_decay_to_dataset(
     # Mirror the (H, W) plane along the given axis (0 = vertical, 1 =
     # horizontal). T-axis preserved. Applied after rotation so users can
     # compose the two when their LASX export needs both. ONLY /decay
-    # — /intensity is never touched.
-    if flip_axis is not None:
+    # — /intensity is never touched. GRID PATH ONLY (the registered path
+    # flipped each tile before placement).
+    if flip_axis is not None and not geom.registered:
         for ch_name in list(written):
             progress(f"Flipping {ch_name} along axis {flip_axis}")
             try:
@@ -327,7 +431,11 @@ def add_decay_to_dataset(
         _write_provenance_attrs(h5_path, ch_name, prov)
 
     # Persist cross_format_rule to /metadata so subsequent flows can read it
-    if written and cross_format_rule is not None and not isinstance(cross_format_rule, ExplicitRule):
+    if (
+        written
+        and cross_format_rule is not None
+        and not isinstance(cross_format_rule, ExplicitRule)
+    ):
         from percell4.domain.io.cross_format import serialize_rule
         try:
             store.set_metadata({"cross_format_rule": serialize_rule(cross_format_rule)})
@@ -372,7 +480,10 @@ def _flip_decay_in_place(h5_path, ch_name: str, axis: int) -> None:
         if path not in f:
             return
         arr = f[path][...]
-        arr = np.flip(arr, axis=axis)
+        # 4-D time-lapse decay (T_acq, H, W, T_bins): the spatial H/W axes are at
+        # [1, 2]; legacy 3-D (H, W, T_bins) at [0, 1]. flip_axis is 0=H, 1=W.
+        flip_ax = axis + 1 if arr.ndim == 4 else axis
+        arr = np.flip(arr, axis=flip_ax)
         arr = np.ascontiguousarray(arr)
         attrs = dict(f[path].attrs)
         del f[path]
@@ -408,7 +519,10 @@ def _rotate_decay_in_place(h5_path, ch_name: str, k: int) -> None:
         if path not in f:
             return
         arr = f[path][...]
-        arr = np.rot90(arr, k=k, axes=(0, 1))
+        # 4-D time-lapse decay rotates its spatial plane at axes [1, 2]; legacy
+        # 3-D at [0, 1]. T_acq (leading) and T_bins (trailing) are preserved.
+        spatial = (1, 2) if arr.ndim == 4 else (0, 1)
+        arr = np.rot90(arr, k=k, axes=spatial)
         arr = np.ascontiguousarray(arr)
         attrs = dict(f[path].attrs)
         del f[path]
@@ -440,73 +554,6 @@ def _extract_channel_token(name: str, token_config: TokenConfig) -> str | None:
     return m.group(1) if m else None
 
 
-def _read_and_stitch_decay(
-    bindings: list,
-    tile_config: TileConfig,
-    flim_config: FlimConfig,
-    token_config: TokenConfig,
-) -> np.ndarray:
-    """Read each binding's .bin, place tiles in grid positions, return stitched (H, W, T)."""
-    bin_kwargs = {
-        "x_dim": flim_config.bin_x or 512,
-        "y_dim": flim_config.bin_y or 512,
-        "t_dim": flim_config.bin_t or 132,
-        "dtype": flim_config.bin_dtype or "uint16",
-        "dim_order": flim_config.bin_dim_order or "YXT",
-        "header_bytes": flim_config.bin_header_bytes or 0,
-    }
-
-    # Single-tile fast path
-    if tile_config.grid_rows == 1 and tile_config.grid_cols == 1:
-        result = read_flim_bin(bindings[0].bin_path, **bin_kwargs)
-        return np.asarray(result["array"])
-
-    # Multi-tile: read all tiles, place in grid via _tile_positions
-    tile_to_path: dict[int, Path] = {}
-    for b in bindings:
-        idx = _extract_tile_index(b.bin_path.stem, token_config)
-        if idx is None:
-            raise ValueError(
-                f"tile token missing from {b.bin_path.name}; cannot stitch"
-            )
-        tile_to_path[idx] = b.bin_path
-
-    # Normalize 1-based → 0-based (filenames may use _s1, _s2, …)
-    if tile_to_path:
-        min_idx = min(tile_to_path.keys())
-        if min_idx > 0:
-            tile_to_path = {k - min_idx: v for k, v in tile_to_path.items()}
-
-    # Read first tile to determine shape/dtype
-    first_path = next(iter(tile_to_path.values()))
-    first = read_flim_bin(first_path, **bin_kwargs)
-    first_arr = np.asarray(first["array"])
-    tile_h, tile_w = first_arr.shape[:2]
-    t_dim = first_arr.shape[2] if first_arr.ndim == 3 else 1
-
-    out_h = tile_config.grid_rows * tile_h
-    out_w = tile_config.grid_cols * tile_w
-    output = np.zeros((out_h, out_w, t_dim), dtype=first_arr.dtype)
-
-    positions = _tile_positions(
-        tile_config.grid_rows,
-        tile_config.grid_cols,
-        tile_config.grid_type,
-        tile_config.order,
-    )
-
-    for tile_idx, (row, col) in positions.items():
-        if tile_idx not in tile_to_path:
-            continue
-        result = read_flim_bin(tile_to_path[tile_idx], **bin_kwargs)
-        arr = np.asarray(result["array"])
-        y0 = row * tile_h
-        x0 = col * tile_w
-        output[y0 : y0 + tile_h, x0 : x0 + tile_w] = arr
-
-    return output
-
-
 def _extract_tile_index(stem: str, token_config: TokenConfig) -> int | None:
     if not token_config.tile:
         return None
@@ -517,6 +564,41 @@ def _extract_tile_index(stem: str, token_config: TokenConfig) -> int | None:
         return int(m.group(1))
     except ValueError:
         return None
+
+
+def _extract_timepoint_token(stem: str, token_config: TokenConfig) -> str | None:
+    """The timepoint token (e.g. ``"1"`` from ``_t1``) of a .bin stem, or None.
+
+    Single-padded, 1-based tokens are returned verbatim; numeric ordering and the
+    0-based frame-index mapping are done by the caller via
+    ``ordered_timepoint_tokens`` (positional), so ``_t1`` -> frame 0.
+    """
+    if not token_config.timepoint:
+        return None
+    m = re.search(token_config.timepoint, stem)
+    return m.group(1) if m else None
+
+
+def _build_tile_map(bindings, token_config: TokenConfig) -> dict[int, Path]:
+    """Map normalized 0-based tile index -> .bin Path for one frame's bindings.
+
+    Mirrors the compress path: extract the ``_s<idx>`` tile token, then shift the
+    minimum index to 0 so single-padded 1-based tile tokens align with the
+    persisted offsets / grid positions.
+    """
+    tile_to_path: dict[int, Path] = {}
+    for b in bindings:
+        idx = _extract_tile_index(b.bin_path.stem, token_config)
+        if idx is None:
+            raise ValueError(
+                f"tile token missing from {b.bin_path.name}; cannot stitch"
+            )
+        tile_to_path[idx] = b.bin_path
+    if tile_to_path:
+        min_idx = min(tile_to_path)
+        if min_idx > 0:
+            tile_to_path = {k - min_idx: v for k, v in tile_to_path.items()}
+    return tile_to_path
 
 
 def _sha256_file(path: Path) -> str:

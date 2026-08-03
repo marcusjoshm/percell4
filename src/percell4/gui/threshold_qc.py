@@ -13,12 +13,12 @@ from __future__ import annotations
 import enum
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
-from qtpy.QtCore import QObject, QTimer, Qt
+from qtpy.QtCore import QObject, QTimer
 from qtpy.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -29,15 +29,15 @@ from qtpy.QtWidgets import (
 )
 
 if TYPE_CHECKING:
-    import pandas as pd
 
-    from percell4.gui.viewer import ViewerWindow
     from percell4.domain.measure.grouper import GroupingResult
+    from percell4.gui.viewer import ViewerWindow
     from percell4.model import CellDataModel
     from percell4.store import DatasetStore
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
+from percell4.gui.settings import app_settings
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,14 @@ _LAYER_GROUP_PREVIEW = "_group_preview"
 _LAYER_GROUP_IMAGE = "_group_image"
 _LAYER_THRESHOLD_PREVIEW = "_group_threshold_preview"
 _LAYER_ROI = "_group_roi"
+
+# Geometry persistence for the per-group QC window. Without this, every
+# call to _build_qc_dock creates a fresh QMainWindow that Qt re-centers,
+# forcing the user to re-position once per group. Same QSettings org /
+# app namespace as every other persisted-geometry window in the
+# codebase (SessionWindow, PhasorPlot, DataPlot, CellTable, ...).
+_QC_GEOMETRY_KEY = "threshold_qc/geometry"
+_PREVIEW_GEOMETRY_KEY = "threshold_qc_preview/geometry"
 
 # File-local convenience alias — not exported. Source of truth lives in
 # percell4.config.viewer_presets.THRESHOLD_QC_GROUP_COLORS.
@@ -85,8 +93,14 @@ class ThresholdQCController(QObject):
         metric: str,
         sigma: float,
         mask_name: str,
-        on_complete: Callable[[bool, str], None] | None = None,
+        on_complete: (
+            Callable[[bool, str], None]
+            | Callable[[bool, str, NDArray | None], None]
+            | None
+        ) = None,
         write_measurements_to_store: bool = True,
+        persist_round_outputs: bool = True,
+        min_size_px: int = 0,
     ) -> None:
         super().__init__()
         self._viewer_win = viewer_win
@@ -100,10 +114,35 @@ class ThresholdQCController(QObject):
         self._sigma = sigma
         self._mask_name = mask_name
         self._on_complete = on_complete
-        # When False, /masks/<name> and /groups/<name> are still written,
-        # but /measurements is left alone. Used by the batch workflow runner,
-        # which owns measurement persistence separately.
+        # Method-agnostic post-mask size filter (px). Connected components below
+        # this area are dropped from the combined mask at finalize, matching the
+        # headless apply path (`phases._apply_threshold_frame`). 0 = keep all.
+        self._min_size_px = int(min_size_px)
+
+        # Two independent persistence switches:
+        #   - persist_round_outputs=False suppresses the full /masks/<name>,
+        #     /groups/<name>, viewer.add_mask, refresh_resource_lists, and
+        #     set_active_mask chain. Used by the dilute-phase workflow, which
+        #     captures each round's accepted mask in memory and decides
+        #     whether to persist anything only at workflow-Done.
+        #   - write_measurements_to_store=False suppresses only the
+        #     /measurements write while still writing the per-round /masks/
+        #     and /groups/ artifacts. Used by the multi-dataset batch
+        #     runner, which owns /measurements in its own run folder. See
+        #     docs/solutions/tech-debt/threshold-qc-measurements-write-owned-by-controller.md
         self._write_measurements_to_store = write_measurements_to_store
+        self._persist_round_outputs = persist_round_outputs
+
+        if on_complete is not None:
+            import inspect
+            try:
+                self._on_complete_arity = len(
+                    inspect.signature(on_complete).parameters
+                )
+            except (TypeError, ValueError):
+                self._on_complete_arity = 2
+        else:
+            self._on_complete_arity = 0
 
         # Build group states
         self._groups: list[GroupState] = []
@@ -195,6 +234,17 @@ class ThresholdQCController(QObject):
         win.setWindowTitle(f"Group Preview — {self._mask_name}")
         win.setMinimumSize(500, 450)
         win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
+
+        # Same geometry-persistence pattern as the per-group QC window.
+        # The preview opens once per workflow run, so the relevant
+        # scenario is run-to-run rather than group-to-group, but the
+        # mechanism is identical. Distinct settings key keeps the two
+        # windows independent.
+        geom = app_settings().value(
+            _PREVIEW_GEOMETRY_KEY,
+        )
+        if geom:
+            win.restoreGeometry(geom)
 
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -307,7 +357,8 @@ class ThresholdQCController(QObject):
         btn_row = QHBoxLayout()
         proceed_btn = QPushButton("Proceed to Thresholding")
         proceed_btn.setStyleSheet(
-            f"background-color: {theme.ACTION_GREEN}; color: white; padding: 6px; font-weight: bold;"
+            f"background-color: {theme.ACTION_GREEN}; color: white; "
+            "padding: 6px; font-weight: bold;"
         )
         proceed_btn.clicked.connect(self._on_proceed)
         btn_row.addWidget(proceed_btn)
@@ -405,9 +456,13 @@ class ThresholdQCController(QObject):
             ),
         )
 
-        # Compute initial threshold
+        # Compute initial threshold. Filter NaN before passing to skimage
+        # threshold methods — they raise on non-finite input. NaN pixels are
+        # not part of the cell's measurable area for the round (they were
+        # subtracted by a prior dilute-phase round).
         from percell4.domain.measure.thresholding import THRESHOLD_METHODS
         pixels = self._group_image_buffer[group_cell_mask]
+        pixels = pixels[np.isfinite(pixels)]
         if len(pixels) > 0 and pixels.max() > 0:
             _, value = THRESHOLD_METHODS["otsu"](pixels)
         else:
@@ -473,6 +528,16 @@ class ThresholdQCController(QObject):
         win.setMinimumSize(350, 300)
         win.setStyleSheet(f"background-color: {theme.BACKGROUND}; color: {theme.TEXT_BRIGHT};")
 
+        # Restore the window's last-known position so group-to-group
+        # advance and workflow-to-workflow restart both honor the user's
+        # placement. Falls through to Qt's default centering when no
+        # geometry has been saved yet (first ever run).
+        geom = app_settings().value(
+            _QC_GEOMETRY_KEY,
+        )
+        if geom:
+            win.restoreGeometry(geom)
+
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
@@ -511,7 +576,8 @@ class ThresholdQCController(QObject):
         row1 = QHBoxLayout()
         accept_btn = QPushButton("Accept")
         accept_btn.setStyleSheet(
-            f"background-color: {theme.ACTION_GREEN}; color: white; padding: 6px; font-weight: bold;"
+            f"background-color: {theme.ACTION_GREEN}; color: white; "
+            "padding: 6px; font-weight: bold;"
         )
         accept_btn.clicked.connect(self._on_accept)
         row1.addWidget(accept_btn)
@@ -587,7 +653,6 @@ class ThresholdQCController(QObject):
 
         # Extract pixels within ROI (if drawn) and group cell mask
         pixels_mask = group_cell_mask.copy()
-        roi_drawn = False
 
         for layer in viewer.layers:
             if layer.name == _LAYER_ROI and len(layer.data) > 0:
@@ -601,10 +666,10 @@ class ThresholdQCController(QObject):
                     x_max = min(group_cell_mask.shape[1], int(coords[:, 1].max()))
                     roi_mask[y_min:y_max, x_min:x_max] = True
                 pixels_mask = group_cell_mask & roi_mask
-                roi_drawn = True
                 break
 
         source_pixels = self._group_image_buffer[pixels_mask]
+        source_pixels = source_pixels[np.isfinite(source_pixels)]
         if len(source_pixels) == 0 or source_pixels.max() == 0:
             return
 
@@ -621,15 +686,27 @@ class ThresholdQCController(QObject):
             y_min, y_max = rows.min(), rows.max() + 1
             x_min, x_max = cols.min(), cols.max() + 1
             crop = self._group_image_buffer[y_min:y_max, x_min:x_max]
-            mask_crop, value = THRESHOLD_METHODS["adaptive"](crop)
+            # Adaptive thresholding (skimage) requires finite input; replace
+            # NaN with 0 only for the adaptive computation. The post-compose
+            # `(image > value) & np.isfinite(image)` (below) keeps NaN pixels
+            # out of the final mask regardless.
+            crop_finite = np.where(np.isfinite(crop), crop, 0)
+            mask_crop, value = THRESHOLD_METHODS["adaptive"](crop_finite)
             # Build full preview from crop
             preview = np.zeros_like(group_cell_mask, dtype=np.uint8)
             preview[y_min:y_max, x_min:x_max] = mask_crop
             preview[~group_cell_mask] = 0
+            # Exclude NaN-region pixels from the adaptive preview.
+            finite_full = np.isfinite(self._group_image_buffer)
+            preview[~finite_full] = 0
         else:
             _, value = THRESHOLD_METHODS[method](source_pixels)
             preview = np.where(
-                group_cell_mask & (self._group_image_buffer > value), 1, 0
+                group_cell_mask
+                & (self._group_image_buffer > value)
+                & np.isfinite(self._group_image_buffer),
+                1,
+                0,
             ).astype(np.uint8)
 
         self._current_threshold = value
@@ -649,7 +726,9 @@ class ThresholdQCController(QObject):
             return
         group_cell_mask = self._current_group_mask
         preview = (
-            group_cell_mask & (self._group_image_buffer > value)
+            group_cell_mask
+            & (self._group_image_buffer > value)
+            & np.isfinite(self._group_image_buffer)
         )
         n_pos = int(preview.sum())
         n_total = int(group_cell_mask.sum())
@@ -674,15 +753,22 @@ class ThresholdQCController(QObject):
                 y_min, y_max = rows.min(), rows.max() + 1
                 x_min, x_max = cols.min(), cols.max() + 1
                 crop = self._group_image_buffer[y_min:y_max, x_min:x_max]
-                mask_crop, _ = THRESHOLD_METHODS["adaptive"](crop)
+                crop_finite = np.where(np.isfinite(crop), crop, 0)
+                mask_crop, _ = THRESHOLD_METHODS["adaptive"](crop_finite)
                 mask = np.zeros_like(group_cell_mask, dtype=np.uint8)
                 mask[y_min:y_max, x_min:x_max] = mask_crop
                 mask[~group_cell_mask] = 0
+                # Exclude NaN-region pixels from the accepted mask.
+                mask[~np.isfinite(self._group_image_buffer)] = 0
             else:
                 mask = np.zeros_like(group_cell_mask, dtype=np.uint8)
         else:
             mask = np.where(
-                group_cell_mask & (self._group_image_buffer > value), 1, 0
+                group_cell_mask
+                & (self._group_image_buffer > value)
+                & np.isfinite(self._group_image_buffer),
+                1,
+                0,
             ).astype(np.uint8)
 
         gs.mask = mask
@@ -720,7 +806,7 @@ class ThresholdQCController(QObject):
     # ── Finalization ──
 
     def _finalize(self) -> None:
-        """Combine masks and store results."""
+        """Combine masks and (optionally) store results."""
         self._cleanup_all()
 
         # Combine masks (in-place union)
@@ -729,50 +815,69 @@ class ThresholdQCController(QObject):
             if gs.mask is not None:
                 np.maximum(combined, gs.mask, out=combined)
 
-        # Save mask to HDF5
-        if self._store is not None:
-            self._store.write_mask(self._mask_name, combined)
+        # Method-agnostic min particle size filter — drop connected components
+        # below the round's threshold before persisting / handing to the caller,
+        # so the interactive grouped-Otsu path matches the headless apply path.
+        if self._min_size_px > 1:
+            from percell4.workflows.phases import _filter_small_components
 
-            # Save group mapping for persistence across re-measurement
-            import pandas as pd
-            col_name = f"group_{self._channel}_{self._metric}"
-            group_df = self._result.group_assignments.reset_index()
-            group_df.columns = ["label", col_name]
-            self._store.write_dataframe(f"/groups/{self._mask_name}", group_df)
+            combined = _filter_small_components(combined, self._min_size_px)
 
-        # Add group column to DataFrame (only if the model has data with
-        # a 'label' column — in the batch workflow, the model may have been
-        # cleared at run start, so this is a no-op and that's fine).
-        col_name = f"group_{self._channel}_{self._metric}"
-        df = self._data_model.df
-        if df is not None and not df.empty and "label" in df.columns:
-            df = df.assign(
-                **{col_name: df["label"].map(self._result.group_assignments)}
-            )
-            self._data_model.set_measurements(df)
-
-            # Persist updated DataFrame (skipped by the batch workflow runner,
-            # which owns measurement persistence in its own run folder).
-            if self._store is not None and self._write_measurements_to_store:
-                self._store.write_dataframe("/measurements", df)
-
-        # Show final mask in viewer
-        viewer = self._viewer_win.viewer
-        if viewer is not None:
-            self._viewer_win.add_mask(combined, name=self._mask_name)
+        if self._persist_round_outputs:
+            # Save mask to HDF5
             if self._store is not None:
-                self._data_model.session.refresh_resource_lists(
-                    mask_names=self._store.list_masks(),
+                self._store.write_mask(self._mask_name, combined)
+
+                # Save group mapping for persistence across re-measurement
+                col_name = f"group_{self._channel}_{self._metric}"
+                group_df = self._result.group_assignments.reset_index()
+                group_df.columns = ["label", col_name]
+                self._store.write_dataframe(
+                    f"/groups/{self._mask_name}", group_df,
                 )
-            self._data_model.set_active_mask(self._mask_name)
+
+            # Add group column to DataFrame (only if the model has data with
+            # a 'label' column — in the batch workflow, the model may have been
+            # cleared at run start, so this is a no-op and that's fine).
+            col_name = f"group_{self._channel}_{self._metric}"
+            df = self._data_model.df
+            if df is not None and not df.empty and "label" in df.columns:
+                df = df.assign(
+                    **{col_name: df["label"].map(self._result.group_assignments)}
+                )
+                self._data_model.set_measurements(df)
+
+                # Persist updated DataFrame unless the caller owns
+                # /measurements (the multi-dataset workflow runner does).
+                if (
+                    self._store is not None
+                    and self._write_measurements_to_store
+                ):
+                    self._store.write_dataframe("/measurements", df)
+
+            # Show final mask in viewer
+            viewer = self._viewer_win.viewer
+            if viewer is not None:
+                self._viewer_win.add_mask(combined, name=self._mask_name)
+                if self._store is not None:
+                    self._data_model.session.refresh_resource_lists(
+                        mask_names=self._store.list_masks(),
+                    )
+                self._data_model.set_active_mask(self._mask_name)
 
         n_accepted = sum(1 for gs in self._groups if gs.status == GroupStatus.ACCEPTED)
         n_skipped = sum(1 for gs in self._groups if gs.status == GroupStatus.SKIPPED)
-        msg = (
-            f"Grouped thresholding complete: {n_accepted} accepted, "
-            f"{n_skipped} skipped. Mask saved as '{self._mask_name}'."
-        )
-        self._finish(True, msg)
+        if self._persist_round_outputs:
+            msg = (
+                f"Grouped thresholding complete: {n_accepted} accepted, "
+                f"{n_skipped} skipped. Mask saved as '{self._mask_name}'."
+            )
+        else:
+            msg = (
+                f"Round complete: {n_accepted} accepted, {n_skipped} skipped. "
+                f"Mask returned to caller; not persisted to /masks/."
+            )
+        self._finish(True, msg, combined)
 
     # ── Cleanup ──
 
@@ -805,6 +910,18 @@ class ThresholdQCController(QObject):
 
     def _close_preview_window(self) -> None:
         if hasattr(self, "_preview_window") and self._preview_window is not None:
+            # Persist geometry BEFORE close — see _remove_qc_dock for
+            # the platform-flakiness rationale.
+            try:
+
+                app_settings().setValue(
+                    _PREVIEW_GEOMETRY_KEY,
+                    self._preview_window.saveGeometry(),
+                )
+            except Exception:
+                logger.exception(
+                    "threshold_qc: failed to save preview window geometry"
+                )
             try:
                 self._preview_window.close()
             except Exception:
@@ -813,13 +930,38 @@ class ThresholdQCController(QObject):
 
     def _remove_qc_dock(self) -> None:
         if hasattr(self, "_qc_window") and self._qc_window is not None:
+            # Persist geometry BEFORE close — saveGeometry on a closed
+            # QMainWindow returns whatever Qt last knew, which on some
+            # platforms is stale or empty.
+            try:
+
+                app_settings().setValue(
+                    _QC_GEOMETRY_KEY, self._qc_window.saveGeometry(),
+                )
+            except Exception:
+                logger.exception(
+                    "threshold_qc: failed to save QC window geometry"
+                )
             try:
                 self._qc_window.close()
             except Exception:
                 pass
             self._qc_window = None
 
-    def _finish(self, success: bool, msg: str) -> None:
+    def _finish(
+        self,
+        success: bool,
+        msg: str,
+        mask: NDArray | None = None,
+    ) -> None:
         logger.info(msg)
-        if self._on_complete is not None:
+        if self._on_complete is None:
+            return
+        # Backward compat: legacy callbacks are 2-arg (success, msg).
+        # New callbacks (e.g. the dilute-phase workflow) take a third
+        # mask argument so the no-persist round can hand back the
+        # accepted union without going through the store.
+        if self._on_complete_arity >= 3:
+            self._on_complete(success, msg, mask)
+        else:
             self._on_complete(success, msg)

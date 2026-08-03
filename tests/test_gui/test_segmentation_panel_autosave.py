@@ -1,10 +1,11 @@
 """Regression tests for Manual Editing auto-save (segmentation_panel.py).
 
-Bug: edits made via the Manual Editing buttons (Delete Selected Label,
+Bug: edits made via the Edit Labels buttons (Delete Selected Label,
 Add New Label, Clean Up Labels, Relabel Sequential) and via napari's own
 brush/erase tools modified ``labels_layer.data`` only — they did not
 write to HDF5. Closing and reloading the dataset silently lost every
-edit unless the user clicked the separate "Save Labels to HDF5" button.
+edit. (The old manual "Save Labels to HDF5" button was removed once
+auto-save made it redundant — auto-save is now the only persistence path.)
 
 Fix: every button handler now calls ``_persist_labels_layer`` after its
 in-memory write, and napari ``Labels.events.paint`` strokes are wired to
@@ -58,7 +59,7 @@ class _FakeLayerList(list):
 def _make_fake_launcher(store: DatasetStore, layer):
     """Mimic the parts of ``LauncherWindow`` that ``SegmentationPanel`` uses."""
     fake_viewer = SimpleNamespace(layers=_FakeLayerList([layer]))
-    viewer_win = SimpleNamespace(viewer=fake_viewer)
+    viewer_win = SimpleNamespace(viewer=fake_viewer, existing_viewer=fake_viewer)
 
     status_messages: list[str] = []
     fake_status_bar = SimpleNamespace(
@@ -202,7 +203,6 @@ def test_paint_autosave_wires_when_viewer_appears_after_data_event(qtbot, tmp_pa
     the viewer (label visible) but disappears on close+reload.
     """
     from napari.layers import Labels
-    from qtpy.QtCore import QTimer
 
     from percell4.model import StateChange
 
@@ -232,8 +232,9 @@ def test_paint_autosave_wires_when_viewer_appears_after_data_event(qtbot, tmp_pa
     # (same order the real ``_load_h5_into_viewer`` uses).
     labels_layer = Labels(initial.copy(), name="cellpose")
     fake_layers = _FakeLayerList([labels_layer])
+    _late_viewer = SimpleNamespace(layers=fake_layers)
     launcher._windows["viewer"] = SimpleNamespace(
-        viewer=SimpleNamespace(layers=fake_layers)
+        viewer=_late_viewer, existing_viewer=_late_viewer
     )
 
     # Let the deferred wire run.

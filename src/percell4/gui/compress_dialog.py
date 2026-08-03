@@ -32,16 +32,25 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.domain.io.models import (
     CompressConfig,
     DatasetGuiState,
     DatasetSpec,
     LayerAssignment,
     LayerType,
-    TileConfig,
     TokenConfig,
 )
+from percell4.domain.io.naming import channel_display_name
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
+from percell4.gui._stitching_form import StitchingForm
+
+# Index of the "Tokenless (by name)" entry in the Discovery combo.
+_TOKENLESS_INDEX = 2
 
 
 class CompressDialog(QDialog):
@@ -55,9 +64,17 @@ class CompressDialog(QDialog):
     def __init__(self, parent=None, project_dir: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Compress TIFF Dataset")
-        self.setMinimumWidth(750)
-        self.resize(800, 700)
+        # 750 dated from when the stitching controls were one wide QHBoxLayout
+        # of eight widgets — and even 750 overflowed, forcing a horizontal
+        # scrollbar. StitchingForm plus its acquisition-order diagram needs
+        # ~692px of content, so 740 clears it once the vertical scrollbar and
+        # frame are accounted for. Measured under test, not guessed —
+        # test_compress_dialog_stitching_form.py fails if it stops fitting.
+        self.setMinimumWidth(740)
+        self.resize(780, 700)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
         self._project_dir = project_dir
 
         self._datasets: list[DatasetSpec] = []
@@ -66,6 +83,10 @@ class CompressDialog(QDialog):
         self._all_z_slices: list[str] = []
         self._all_timepoints: list[str] = []
         self._discovery_generation = 0
+        # In Tokenless mode, discovery synthesizes a channel regex from the
+        # derived names; cache it so _current_token_config threads the identical
+        # regex into import_dataset (discovery <-> importer parity).
+        self._tokenless_token_config: TokenConfig | None = None
 
         # Manual mode state: per-channel config (shared across datasets)
         self._channel_configs: dict[str, _ChannelConfig] = {}
@@ -118,11 +139,17 @@ class CompressDialog(QDialog):
         options_row = QHBoxLayout()
         options_row.addWidget(QLabel("Discovery:"))
         self._discovery_combo = QComboBox()
-        self._discovery_combo.addItems(["Subdirectory", "Flat Directory"])
+        self._discovery_combo.addItems(
+            ["Subdirectory", "Flat Directory", "Tokenless (by name)"]
+        )
         self._discovery_combo.setToolTip(
             "Subdirectory: each child folder = one dataset.\n"
             "Flat Directory: groups files by stripping token patterns\n"
-            "(channel, tile, etc.) from filenames."
+            "(channel, tile, etc.) from filenames.\n"
+            "Tokenless (by name): no chXX token needed — the shared leading\n"
+            "prefix becomes the .h5 name and the trailing name becomes the\n"
+            "channel (e.g. ..._DNA, ..._SG_mask). Use Manual mode to rename\n"
+            "a mis-derived channel or assign it as mask / segmentation."
         )
         self._discovery_combo.currentIndexChanged.connect(
             self._on_discovery_mode_changed
@@ -221,40 +248,29 @@ class CompressDialog(QDialog):
         row1.addStretch()
         settings_layout.addLayout(row1)
 
-        # Tile stitching
+        # Tile stitching — every control lives in the canonical StitchingForm.
+        # The checkbox already labels the section, so the form's own group
+        # title is suppressed to avoid saying "Tile Stitching" twice.
         self._stitch_check = QCheckBox("Tile Stitching")
         self._stitch_check.toggled.connect(self._on_stitch_toggled)
         settings_layout.addWidget(self._stitch_check)
 
-        self._stitch_widget = QWidget()
-        stitch_layout = QHBoxLayout(self._stitch_widget)
-        stitch_layout.setContentsMargins(20, 0, 0, 0)
-        stitch_layout.addWidget(QLabel("Rows:"))
-        self._stitch_rows = QSpinBox()
-        self._stitch_rows.setRange(1, 100)
-        self._stitch_rows.setValue(1)
-        stitch_layout.addWidget(self._stitch_rows)
-        stitch_layout.addWidget(QLabel("Cols:"))
-        self._stitch_cols = QSpinBox()
-        self._stitch_cols.setRange(1, 100)
-        self._stitch_cols.setValue(1)
-        stitch_layout.addWidget(self._stitch_cols)
-        stitch_layout.addWidget(QLabel("Pattern:"))
-        self._stitch_type = QComboBox()
-        self._stitch_type.addItems(
-            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
+        self._stitch_widget = StitchingForm(
+            show_registration=True, show_fusion=True, title=""
         )
-        stitch_layout.addWidget(self._stitch_type)
-        stitch_layout.addWidget(QLabel("Start:"))
-        self._stitch_order = QComboBox()
-        self._stitch_order.addItems(
-            [
-                "right_down", "right_up", "left_down", "left_up",
-                "top_left", "top_right", "bottom_left", "bottom_right",
-            ]
-        )
-        stitch_layout.addWidget(self._stitch_order)
-        stitch_layout.addStretch()
+        self._stitch_widget.setContentsMargins(20, 0, 0, 0)
+        # Thin aliases onto the shared form's widgets so the rest of this
+        # dialog (and its tests) keep their existing call sites. Mind the axis
+        # mapping: Grid size X is the COLUMN count, Grid size Y is the ROW
+        # count — swapping them would transpose every mosaic.
+        self._stitch_rows = self._stitch_widget.grid_y
+        self._stitch_cols = self._stitch_widget.grid_x
+        self._stitch_type = self._stitch_widget.grid_type
+        self._stitch_order = self._stitch_widget.order
+        self._stitch_overlap = self._stitch_widget.overlap
+        self._stitch_register = self._stitch_widget.register_check
+        self._stitch_reference = self._stitch_widget.reference
+        self._stitch_fusion = self._stitch_widget.fusion
         self._stitch_widget.setVisible(False)
         settings_layout.addWidget(self._stitch_widget)
 
@@ -420,17 +436,17 @@ class CompressDialog(QDialog):
                 if cfg.checkbox.isChecked():
                     layer_assignments[ch_id] = LayerAssignment(
                         layer_type=LayerType(cfg.type_combo.currentText().lower()),
-                        name=cfg.name_edit.text().strip() or f"ch{ch_id}",
+                        name=cfg.name_edit.text().strip() or channel_display_name(ch_id),
                     )
 
-        tile_config = None
-        if self._stitch_check.isChecked():
-            tile_config = TileConfig(
-                grid_rows=self._stitch_rows.value(),
-                grid_cols=self._stitch_cols.value(),
-                grid_type=self._stitch_type.currentText(),
-                order=self._stitch_order.currentText(),
-            )
+        # Unchecked means no stitching at all for this surface (Import agrees;
+        # the TCSPC tab instead uses a 1x1 config — that divergence is
+        # deliberate and not unified here).
+        tile_config = (
+            self._stitch_widget.tile_config()
+            if self._stitch_check.isChecked()
+            else None
+        )
 
         # Dataset check states + name overrides
         checked_names: set[str] = set()
@@ -454,7 +470,7 @@ class CompressDialog(QDialog):
         if self._flim_group.isChecked():
             channel_calibrations: dict[str, dict[str, float]] = {}
             for ch_id, cal in self._channel_calibrations.items():
-                ch_name = f"ch{ch_id}" if ch_id else "ch0"
+                ch_name = channel_display_name(ch_id)
                 channel_calibrations[ch_name] = {
                     "phase": cal.phase_spin.value(),
                     "modulation": cal.mod_spin.value(),
@@ -524,6 +540,9 @@ class CompressDialog(QDialog):
             self._output_edit.setText(path)
 
     def _on_discovery_mode_changed(self, index: int) -> None:
+        # Tokenless mode derives the channel regex itself — the free-text token
+        # patterns are irrelevant, so hide that group to avoid confusion.
+        self._token_group.setVisible(index != _TOKENLESS_INDEX)
         if self._source_edit.text().strip():
             self._run_discovery()
 
@@ -599,6 +618,13 @@ class CompressDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _current_token_config(self) -> TokenConfig:
+        # Tokenless mode: return the regex synthesized from the derived channel
+        # names so both discovery and import_dataset run the identical pattern.
+        if (
+            self._discovery_combo.currentIndex() == _TOKENLESS_INDEX
+            and self._tokenless_token_config is not None
+        ):
+            return self._tokenless_token_config
         return TokenConfig(
             channel=self._tok_channel.text().strip() or None,
             timepoint=self._tok_timepoint.text().strip() or None,
@@ -615,20 +641,43 @@ class CompressDialog(QDialog):
         gen = self._discovery_generation
 
         root = Path(source)
-        token_config = self._current_token_config()
         output_dir = None
         if self._output_edit.text().strip():
             output_dir = Path(self._output_edit.text().strip())
 
-        from percell4.domain.io.discovery import discover_by_subdirectory, discover_flat
+        from percell4.domain.io.discovery import (
+            discover_by_subdirectory,
+            discover_flat,
+            discover_tokenless,
+        )
 
+        mode_idx = self._discovery_combo.currentIndex()
         try:
-            if self._discovery_combo.currentIndex() == 0:
+            if mode_idx == _TOKENLESS_INDEX:
+                # Derives its own channel regex from the filenames; cache it so
+                # _current_token_config threads the identical pattern to import.
+                datasets, self._tokenless_token_config = discover_tokenless(
+                    root, output_dir
+                )
+                if not datasets:
+                    self._tokenless_token_config = None
+                    self._datasets = []
+                    self._aggregate_tokens()
+                    self._populate_lists()
+                    self._ds_count_label.setText(
+                        "No name-suffixed TIFFs found to group"
+                    )
+                    return
+            elif mode_idx == 0:
+                self._tokenless_token_config = None
                 datasets = discover_by_subdirectory(
-                    root, token_config, output_dir
+                    root, self._current_token_config(), output_dir
                 )
             else:
-                datasets = discover_flat(root, token_config, output_dir)
+                self._tokenless_token_config = None
+                datasets = discover_flat(
+                    root, self._current_token_config(), output_dir
+                )
         except Exception as e:
             self._ds_count_label.setText(f"Error: {e}")
             return
@@ -695,7 +744,7 @@ class CompressDialog(QDialog):
         self._ch_list.blockSignals(True)
         self._ch_list.clear()
         for ch in self._all_channels:
-            item = QListWidgetItem(f"ch{ch}")
+            item = QListWidgetItem(channel_display_name(ch))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             item.setData(Qt.UserRole, ch)
@@ -703,7 +752,13 @@ class CompressDialog(QDialog):
         self._ch_list.blockSignals(False)
 
         # ── Channels (manual mode panel) ──
+        # Built before the reference combo so the combo can read each
+        # channel's (possibly renamed) name from its name_edit.
         self._build_manual_channel_panel()
+
+        # ── Registration reference-channel combo ──
+        # Seeded from each channel's CURRENT name (see _refresh_reference_combo).
+        self._refresh_reference_combo()
 
         # ── FLIM per-channel calibration rows ──
         self._build_calibration_panel()
@@ -753,14 +808,17 @@ class CompressDialog(QDialog):
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 2, 0, 2)
 
-            cb = QCheckBox(f"ch{ch}")
+            cb = QCheckBox(channel_display_name(ch))
             cb.setChecked(True)
             cb.toggled.connect(self._update_compress_button)
             row.addWidget(cb)
 
-            name_edit = QLineEdit(f"ch{ch}")
+            name_edit = QLineEdit(channel_display_name(ch))
             name_edit.setPlaceholderText("Name")
             name_edit.setFixedWidth(100)
+            # A rename here is the name the importer keys its registration
+            # tiles by, so keep the reference-channel combo in sync live.
+            name_edit.textChanged.connect(self._refresh_reference_combo)
             row.addWidget(name_edit)
 
             type_combo = QComboBox()
@@ -774,6 +832,39 @@ class CompressDialog(QDialog):
             self._channel_configs[ch] = _ChannelConfig(
                 checkbox=cb, name_edit=name_edit, type_combo=type_combo
             )
+
+    def _refresh_reference_combo(self) -> None:
+        """Rebuild the registration reference-channel combo from each channel's
+        CURRENT name.
+
+        In Manual mode a channel may be renamed (ch00 -> "ER"); the importer
+        keys registration tiles by that renamed layer name, so the reference
+        must be selectable by the same name — the chXX id no longer exists
+        post-rename. Falls back to ``chXX`` for an unnamed channel (and in Auto
+        mode, where the name_edits hold their chXX defaults). itemData carries
+        the name verbatim (not an index), matching the round-trip convention.
+        Preserves the user's pick by channel position across a rename, or by
+        text for a free-typed entry. Wired to each name_edit's textChanged in
+        _build_manual_channel_panel so it stays live.
+        """
+        combo = self._stitch_reference
+        prev_text = combo.currentText().strip()
+        prev_idx = combo.currentIndex()  # -1 when the text was free-typed
+        combo.blockSignals(True)
+        combo.clear()
+        for ch in self._all_channels:
+            cfg = self._channel_configs.get(ch)
+            name = (cfg.name_edit.text().strip() if cfg else "") or channel_display_name(ch)
+            combo.addItem(name, name)
+        if 0 <= prev_idx < combo.count():
+            combo.setCurrentIndex(prev_idx)  # same channel position, new name
+        elif prev_text:
+            idx = combo.findText(prev_text)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setCurrentText(prev_text)  # genuine free-text pick
+        combo.blockSignals(False)
 
     def _build_calibration_panel(self) -> None:
         """Build per-channel phase/modulation widgets for FLIM calibration.
@@ -796,7 +887,7 @@ class CompressDialog(QDialog):
             return
 
         for ch in self._all_channels:
-            ch_name = f"ch{ch}" if ch else "ch0"
+            ch_name = channel_display_name(ch)
             group = QGroupBox(f"Channel {ch_name}")
             form = QFormLayout(group)
 

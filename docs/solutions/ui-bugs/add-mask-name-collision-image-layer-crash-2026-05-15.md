@@ -86,13 +86,14 @@ if name in self.viewer.layers:
     existing = self.viewer.layers[name]
     from qtpy.QtWidgets import QMessageBox
 
-    QMessageBox.warning(
+    message_box(                          # was QMessageBox.warning; see note below
         self._qt_window,
         "Mask name conflict",
         f"Can't add mask {name!r}: a "
         f"{type(existing).__name__} layer with that name already "
         f"exists. Rename the new mask or remove the existing "
         f"layer before retrying.",
+        icon=QMessageBox.Warning,
     )
     return
 
@@ -100,7 +101,7 @@ if name in self.viewer.layers:
 self.viewer.add_labels(data, name=name, colormap=cmap, ...)
 ```
 
-### Regression tests (`tests/test_gui_workflows/test_viewer_add_mask_collision.py`)
+### Regression tests (`tests_gui/test_viewer_add_mask_collision.py`)
 
 Three cases, all passing:
 
@@ -110,13 +111,26 @@ Three cases, all passing:
 
 The full add_mask-consumer suite (64 tests) continues to pass.
 
+**This guard was asserting nothing for a window.** When `add_mask` was rerouted
+through `percell4.gui._dialog_utils.message_box`, the test's `_patch_warning`
+helper still patched `QMessageBox.warning` — so it captured nothing and
+`assert len(captured) == 1` read an empty list. The suite did not catch it
+(this tier is not collected by a bare `pytest`); a code-review pass did, and
+it was fixed in commit `2aad113`. If you rely on this test as the standing
+protection against the `DirectLabelColormap` crash, confirm its patch still
+targets the name the production code resolves — see
+[`../conventions/retarget-test-patches-when-converting-call-sites.md`](../conventions/retarget-test-patches-when-converting-call-sites.md).
+
+Note the file also moved from `tests/test_gui_workflows/` to `tests_gui/` in the
+headless-test-suite refactor (`f89cebb`).
+
 ### Data cleanup (one-off, for already-corrupted datasets)
 
 ```python
 import h5py
 for p in [
-    "/Volumes/NX-01-A/NP_datasets/datasets/UT_WT_1B-Dcp2_Split_Halo_Sensor.h5",
-    "/Volumes/NX-01-A/NP_datasets/datasets/As_WT_1B-Dcp2_Split_Halo_Sensor.h5",
+    "/Volumes/<lab-server>/<datasets>/<dataset-1>.h5",
+    "/Volumes/<lab-server>/<datasets>/<dataset-2>.h5",
 ]:
     with h5py.File(p, "a") as f:
         del f["masks/CA-SiR"]   # collided with channel CA-SiR
@@ -138,11 +152,11 @@ Hard-blocking on any same-name layer surfaces the collision as a **naming confli
 - **In a flat namespace with heterogeneous types, `name in container` is not a substitute for type checking.** Either narrow with `isinstance(container[name], ExpectedType)` or refuse to operate on collisions at all. The strict name+type matcher in `src/percell4/gui/viewer.py:_find_layer_by_name_and_type` (used by the session → napari one-way push) is the precedent worth borrowing.
 - **Surface name collisions at creation time** with a clear message, rather than letting the operation crash deep inside third-party render code.
 - **Upstream improvement worth doing (not in this fix):** phasor-ROI naming prompts should pre-check candidate names against `channel_names` / `list_labels` / `list_masks` and reject collisions before the user commits. The defensive `add_mask` block is the last line of defense; a name-validation rule at the prompt level would mean users never reach it. The intended naming convention (visible in the unaffected sibling `CA-SiR_mask`) is `<channel>_mask`, not bare `<channel>`. (session history)
-- **Convention reminder:** `_populate_viewer_from_store` (`main_window.py:853`) iterates intensity channels first via `add_image`, then label sets, then masks via `add_mask`. Whichever layer type "wins" the namespace is determined by this order — useful to remember when adding new layer-creation paths.
+- **Convention reminder:** `_populate_viewer_from_store` (`main_window.py:1303`) iterates intensity channels first via `add_image`, then label sets, then masks via `add_mask`. Whichever layer type "wins" the namespace is determined by this order — useful to remember when adding new layer-creation paths.
 
 ## Related Issues
 
-- [`napari-mask-layer-misclassified-as-segmentation.md`](./napari-mask-layer-misclassified-as-segmentation.md) — earlier `add_mask` correctness work that established the in-place refresh pattern and `PERCELL_TYPE_KEY` tagging. The "Adding a New Layer Type" checklist in that doc predates this collision class and may need a refresh.
+- [`napari-mask-layer-misclassified-as-segmentation.md`](./napari-mask-layer-misclassified-as-segmentation.md) — earlier `add_mask` correctness work that established the in-place refresh pattern and `PERCELL_TYPE_KEY` tagging.
 - [`napari-direct-label-colormap-rendering-blocked-by-events.md`](./napari-direct-label-colormap-rendering-blocked-by-events.md) — sibling `DirectLabelColormap` failure (silent render stall), different root cause but same colormap class and same file.
 - [`phasor-roi-preview-layer-ownership-2026-05-03.md`](./phasor-roi-preview-layer-ownership-2026-05-03.md) — where colliding phasor-ROI names originate; the `_phasor_roi_preview_<name>` underscore prefix protects the preview layer but not the eventual saved mask name.
 - [`phasor-apply-visible-as-mask-ignored-filters-2026-05-03.md`](./phasor-apply-visible-as-mask-ignored-filters-2026-05-03.md) — the "Apply Visible as Mask" Action that ultimately calls `add_mask`.

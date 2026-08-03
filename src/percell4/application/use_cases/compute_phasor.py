@@ -7,12 +7,11 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.ndimage import median_filter
 
 from percell4.application.session import Session
-from percell4.domain.flim.phasor import compute_phasor
+from percell4.domain.errors import NoDatasetError
+from percell4.domain.flim.phasor import compute_phasor, resolve_calibration
 from percell4.ports.dataset_repository import DatasetRepository
-from percell4.domain.errors import NoDatasetError, NoMaskError, NoSegmentationError
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +30,9 @@ class PhasorResult:
 class ComputePhasor:
     """Compute phasor G/S from TCSPC decay data for a given channel.
 
-    Reads decay data from the repository, applies calibration and
-    median filtering, writes results to store.
+    Reads decay data from the repository, applies calibration, and writes
+    truly-unfiltered results to the store. Spatial filtering (median or
+    wavelet) is applied downstream as an opt-in view, not here.
     """
 
     def __init__(self, repo: DatasetRepository, session: Session) -> None:
@@ -57,91 +57,140 @@ class ComputePhasor:
         return dict(handle.metadata)
 
     def execute(
-        self, channel: str, harmonic: int = 1, view_bin: int = 1
+        self,
+        channel: str,
+        harmonic: int = 1,
+        view_bin: int = 1,
+        cal_phase_override: float | None = None,
+        cal_mod_override: float | None = None,
     ) -> PhasorResult:
         """Compute phasor G/S maps for ``channel``.
 
         ``view_bin`` is the session-level view bin (>= 1). Decay is read
         from the repository at the binned resolution. At k=1 behavior is
         byte-identical to before the binning model existed.
+
+        ``cal_phase_override`` / ``cal_mod_override`` are an optional,
+        non-persisted calibration override. When either is not None it
+        replaces the channel's stored ``flim_cal_phase_<ch>`` /
+        ``flim_cal_mod_<ch>`` for THIS computation only — the stored
+        calibration on disk is never touched. Their purpose is testing a
+        phasor at a harmonic other than the one the channel was calibrated
+        for (calibration φ/M are frequency-dependent, so the stored
+        harmonic-1 values misplace a harmonic-2 phasor). The effective
+        φ/M actually used are stamped on the written g/s arrays for
+        provenance.
         """
         handle = self._session.dataset
         if handle is None:
             raise NoDatasetError("No dataset loaded")
 
-        # Read decay data (view_bin applied by the store dispatch on
-        # /decay/* paths via sum_bin_decay).
+        # Whether /decay is time-lapse 4-D (Tacq, H, W, T_bins): read its dims
+        # attr (metadata-only, no decode). Each acquisition frame is phasor-
+        # computed independently and weighted by ITS OWN decay.sum — never a
+        # sibling /intensity[t] — the cross-layer alignment rule across the new
+        # axis. Legacy 3-D decay computes one 2-D phasor (byte-identical).
         decay_path = f"decay/{channel}"
         try:
-            decay = self._repo.read_array(handle, decay_path, view_bin=view_bin)
-        except KeyError:
-            try:
-                decay = self._repo.read_array(handle, "decay", view_bin=view_bin)
-            except KeyError:
-                raise ValueError(
-                    f"No TCSPC data found for '{channel}'. Import with FLIM enabled."
-                )
+            decay_attrs = self._repo.read_array_attrs(handle, decay_path)
+        except Exception:
+            decay_attrs = {}
+        decay_dims = decay_attrs.get("dims")
+        is_timelapse = decay_dims is not None and len(decay_dims) == 4
 
-        # Compute phasor
-        g_map, s_map = compute_phasor(decay, harmonic=harmonic)
-
-        # Zero out low-photon pixels
-        intensity_sum = decay.sum(axis=-1).astype(np.float32)
-        low_signal = intensity_sum <= 0
-        g_map[low_signal] = 0.0
-        s_map[low_signal] = 0.0
-
-        # Apply per-channel calibration if available.
-        # Read /metadata FRESH from disk rather than from handle.metadata —
-        # handle.metadata is a snapshot taken when the dataset was opened
-        # via set_dataset. If TCSPC data was appended in this session,
-        # the import wrote flim_cal_phase_<ch> / flim_cal_mod_<ch> /
-        # flim_frequency_mhz to /metadata AFTER the snapshot, so the
-        # snapshot has stale defaults (phase=0, mod=1). Without a fresh
-        # read here, calibration is silently skipped and the resulting
-        # phasor is wildly off — looks "fixed" only after app restart
-        # because the new snapshot picks up the disk values.
+        # Calibration + native shape are channel-wide and time-invariant; read
+        # once FRESH from disk (handle.metadata may be a stale snapshot that
+        # predates an in-session TCSPC append's flim_cal_* writes).
         meta = self._read_fresh_metadata(handle)
-        cal_phase = float(meta.get(f"flim_cal_phase_{channel}", 0.0))
-        cal_mod = float(meta.get(f"flim_cal_mod_{channel}", 1.0))
+        # Per-harmonic calibration: flim_cal_{phase,mod}_<ch>_h<n>, falling
+        # back to the legacy single-value keys for harmonic 1 and to the
+        # identity (0.0, 1.0) for an uncalibrated higher harmonic.
+        cal_phase, cal_mod = resolve_calibration(meta, channel, harmonic)
 
-        if cal_phase != 0.0 or cal_mod != 1.0:
-            cos_phi = np.cos(cal_phase)
-            sin_phi = np.sin(cal_phase)
-            g_cal = g_map * cal_mod * cos_phi - s_map * cal_mod * sin_phi
-            s_cal = g_map * cal_mod * sin_phi + s_map * cal_mod * cos_phi
-            g_map = g_cal.astype(np.float32)
-            s_map = s_cal.astype(np.float32)
+        # Non-persisted override for testing off-calibration harmonics.
+        # Replaces the stored calibration for this run only; disk is
+        # untouched. Either field may be overridden independently.
+        if cal_phase_override is not None:
+            cal_phase = float(cal_phase_override)
+        if cal_mod_override is not None:
+            cal_mod = float(cal_mod_override)
 
-        # Spatial median filter (3x3)
-        g_map = median_filter(g_map, size=3).astype(np.float32)
-        s_map = median_filter(s_map, size=3).astype(np.float32)
+        def _frame_gs(decay_frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            """Phasor (g, s) for one 3-D (H, W, T_bins) decay frame: compute,
+            zero low-photon pixels (intensity from THIS frame's decay.sum),
+            calibrate, then bin-aware upsample to native_shape."""
+            g_map, s_map = compute_phasor(decay_frame, harmonic=harmonic)
+            intensity_sum = decay_frame.sum(axis=-1).astype(np.float32)
+            low_signal = intensity_sum <= 0
+            g_map[low_signal] = 0.0
+            s_map[low_signal] = 0.0
+            if cal_phase != 0.0 or cal_mod != 1.0:
+                cos_phi = np.cos(cal_phase)
+                sin_phi = np.sin(cal_phase)
+                g_cal = g_map * cal_mod * cos_phi - s_map * cal_mod * sin_phi
+                s_cal = g_map * cal_mod * sin_phi + s_map * cal_mod * cos_phi
+                g_map = g_cal
+                s_map = s_cal
+            if view_bin > 1:
+                from percell4.domain.io.view_bin import nn_upsample_2d
+                native = meta.get("native_shape")
+                if native is None:
+                    raise ValueError(
+                        "Cannot write a binned phasor: /metadata.native_shape "
+                        "is missing. Re-compress the dataset to populate it."
+                    )
+                target = (int(native[0]), int(native[1]))
+                g_map = nn_upsample_2d(g_map, view_bin, target_hw=target)
+                s_map = nn_upsample_2d(s_map, view_bin, target_hw=target)
+            return (g_map.astype(np.float32, copy=False),
+                    s_map.astype(np.float32, copy=False))
 
-        # Bin-aware write: upsample to native_shape so the canonical
-        # /phasor/<ch>/{g,s} stays at native regardless of the bin the
-        # caller computed at. The created_at_bin attr records which bin
-        # was used so a downstream toggle to a different bin can still
-        # surface 'this phasor was produced at k=3' to the UI.
+        # The canonical /phasor/<ch>/{g,s} are unfiltered; median/wavelet are
+        # opt-in derived views (median_filter_gs / ApplyWavelet). created_at_bin
+        # records the bin the phasor was computed at.
         write_attrs: dict = {
-            "dims": ["H", "W"], "channel": channel, "harmonic": harmonic,
+            "channel": channel,
+            "harmonic": harmonic,
+            # Effective calibration actually applied (stored φ/M, or the
+            # override when one was supplied) — provenance for off-harmonic
+            # test runs where these differ from the channel's stored values.
+            "cal_phase": cal_phase,
+            "cal_mod": cal_mod,
         }
         if view_bin > 1:
-            from percell4.domain.io.view_bin import nn_upsample_2d
-            meta_for_shape = self._read_fresh_metadata(handle)
-            native = meta_for_shape.get("native_shape")
-            if native is None:
-                raise ValueError(
-                    "Cannot write a binned phasor: /metadata.native_shape "
-                    "is missing. Re-compress the dataset to populate it."
-                )
-            target = (int(native[0]), int(native[1]))
-            g_map = nn_upsample_2d(g_map, view_bin, target_hw=target).astype(
-                np.float32, copy=False
-            )
-            s_map = nn_upsample_2d(s_map, view_bin, target_hw=target).astype(
-                np.float32, copy=False
-            )
             write_attrs["created_at_bin"] = int(view_bin)
+
+        if is_timelapse:
+            # One (g, s) plane per acquisition frame -> (T_acq, H, W) stacks.
+            nt = int(meta.get("n_timepoints", 1) or 1)
+            g_frames, s_frames = [], []
+            for t in range(nt):
+                frame = self._repo.read_decay(
+                    handle, channel, view_bin=view_bin, timepoint=t
+                )
+                g_t, s_t = _frame_gs(frame)
+                g_frames.append(g_t)
+                s_frames.append(s_t)
+            g_map = np.stack(g_frames, axis=0)
+            s_map = np.stack(s_frames, axis=0)
+            write_attrs["dims"] = ["Tacq", "H", "W"]
+        else:
+            # Single-timepoint: read the whole 3-D decay via read_array (the
+            # store dispatch applies view_bin's sum_bin_decay on /decay/* paths).
+            try:
+                decay = self._repo.read_array(handle, decay_path, view_bin=view_bin)
+            except KeyError:
+                try:
+                    decay = self._repo.read_array(
+                        handle, "decay", view_bin=view_bin
+                    )
+                except KeyError:
+                    raise ValueError(
+                        f"No TCSPC data found for '{channel}'. Import with FLIM "
+                        "enabled."
+                    )
+            g_map, s_map = _frame_gs(decay)
+            write_attrs["dims"] = ["H", "W"]
 
         # Write to store
         self._repo.write_array(

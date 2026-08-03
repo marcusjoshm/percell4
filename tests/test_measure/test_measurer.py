@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from percell4.domain.measure.measurer import measure_cells, measure_multichannel
-
 
 # ── Basic measurement ─────────────────────────────────────────
 
@@ -186,3 +184,16 @@ def test_measure_with_nan_image():
     df = measure_cells(image, labels, metrics=["mean_intensity"])
     # nanmean of mixed NaN and 42.0 within the cell
     assert df.iloc[0]["mean_intensity"] == 42.0
+
+
+# ── 2D contract guard (U4) ────────────────────────────────────
+
+
+def test_measure_cells_rejects_3d_image_against_2d_labels():
+    """Handing a (T,H,W) stack to the 2D measurer fails loud with an actionable
+    message instead of a cryptic boolean-index mismatch (U4)."""
+    image = np.ones((6, 20, 20), dtype=np.float32)  # a (T,H,W) stack
+    labels = np.zeros((20, 20), dtype=np.int32)
+    labels[5:15, 5:15] = 1
+    with pytest.raises(ValueError, match="same 2D shape"):
+        measure_cells(image, labels, metrics=["mean_intensity"])

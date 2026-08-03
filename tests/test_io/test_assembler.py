@@ -5,7 +5,35 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from percell4.domain.io.assembler import assemble_channels, assemble_tiles, project_z
+from percell4.domain.io.assembler import (
+    assemble_channels,
+    assemble_tiles,
+    project_z,
+    stack_timepoints,
+)
+
+# ── Timepoint stacking ────────────────────────────────────────
+
+
+def test_stack_timepoints_adds_leading_axis():
+    """Three 2D planes stack into a (T, H, W) array preserving dtype."""
+    planes = [np.full((4, 5), t, dtype=np.uint16) for t in range(3)]
+    out = stack_timepoints(planes)
+    assert out.shape == (3, 4, 5)
+    assert out.dtype == np.uint16
+    assert out[0, 0, 0] == 0
+    assert out[2, 0, 0] == 2
+
+
+def test_stack_timepoints_mismatched_shapes_raises():
+    planes = [np.zeros((4, 5)), np.zeros((4, 6))]
+    with pytest.raises(ValueError, match="different shapes"):
+        stack_timepoints(planes)
+
+
+def test_stack_timepoints_empty_raises():
+    with pytest.raises(ValueError, match="No timepoints"):
+        stack_timepoints([])
 
 
 # ── Tile stitching ────────────────────────────────────────────

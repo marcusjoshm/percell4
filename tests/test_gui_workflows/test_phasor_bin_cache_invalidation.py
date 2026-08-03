@@ -8,12 +8,10 @@ enumerated cache list; this file exercises every enumerated member.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
 
@@ -64,9 +62,10 @@ def _hydrate_all_caches(win, shape=(8, 8)):
     gets cleared by _invalidate_for_bin_change."""
     flat_size = shape[0] * shape[1]
     win._g_map = np.zeros(shape, dtype=np.float32)
-    win._g_map_unfiltered = np.zeros(shape, dtype=np.float32)
+    win._g_map_wavelet = np.zeros(shape, dtype=np.float32)
     win._s_map = np.zeros(shape, dtype=np.float32)
-    win._s_map_unfiltered = np.zeros(shape, dtype=np.float32)
+    win._s_map_wavelet = np.zeros(shape, dtype=np.float32)
+    win._median_cache = (3, np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32))
     win._intensity = np.zeros(shape, dtype=np.float32)
     win._labels = np.zeros(shape, dtype=np.int32)
     win._labels_flat = np.zeros(flat_size, dtype=np.int32)
@@ -86,9 +85,10 @@ def test_invalidate_clears_every_enumerated_cache(window):
     window._invalidate_for_bin_change()
 
     assert window._g_map is None
-    assert window._g_map_unfiltered is None
+    assert window._g_map_wavelet is None
     assert window._s_map is None
-    assert window._s_map_unfiltered is None
+    assert window._s_map_wavelet is None
+    assert window._median_cache is None
     assert window._intensity is None
     assert window._labels is None
     assert window._labels_flat is None

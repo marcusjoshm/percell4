@@ -31,13 +31,27 @@ import sys
 from pathlib import Path
 
 import percell4._compat  # noqa: F401 — NumPy 2.0 shims
-
 from percell4.application.use_cases.batch_export_images import (
     BatchExportItemResult,
     batch_export_images,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_int(raw: str) -> int:
+    """argparse type=... validator for --view-bin. Rejects N < 1."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected an integer, got {raw!r}"
+        ) from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be >= 1, got {value}"
+        )
+    return value
 
 
 def _resolve_paths(args: list[str]) -> list[Path]:
@@ -100,6 +114,13 @@ def main(argv: list[str] | None = None) -> int:
             "  percell4-batch-export dish_1.h5 dish_2.h5 --output-dir /tmp/exports\n"
             "  percell4-batch-export /scratch/dishes/ --output-dir ~/exports/\n"
             "  percell4-batch-export *.h5 --output-dir out/ --quiet\n"
+            "  percell4-batch-export *.h5 --output-dir out/ --view-bin 4\n"
+            "\n"
+            "View-bin: --view-bin N applies the same sum/majority-vote\n"
+            "downsampling the GUI uses for view_bin=N, producing TIFFs\n"
+            "at the binned resolution. Default 1 (native). Filenames\n"
+            "are unchanged regardless of bin -- track the value\n"
+            "yourself if you mix outputs from different runs.\n"
         ),
     )
     parser.add_argument(
@@ -129,6 +150,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--view-bin",
+        type=_positive_int,
+        default=1,
+        metavar="N",
+        help=(
+            "Bin factor applied to every layer at read time. Default 1 "
+            "(native resolution -- the established export contract). "
+            "Values > 1 produce downsampled TIFFs using the same lens "
+            "the GUI applies for view_bin=N (sum_bin_2d for intensity, "
+            "mode_labels for /labels, majority_vote_mask for /masks). "
+            "Output filenames are unchanged regardless of bin."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -155,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     report = batch_export_images(
         paths,
         output_dir=args.output_dir,
+        view_bin=args.view_bin,
         progress_callback=cb,
     )
 

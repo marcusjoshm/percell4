@@ -40,6 +40,10 @@ _hidden = collect_submodules("percell4") + [
     "skimage.morphology",
     "cellpose",
     "cellpose.models",
+    # diptest is a compiled C-extension; collect_submodules("percell4") will not
+    # pull it in, so it must be listed explicitly (PyInstaller then collects the
+    # binary). Backs the CNR subpopulation gap test.
+    "diptest",
     # Optional extras (include if installed)
     "dtcwt",
     "roifile",
@@ -52,7 +56,14 @@ _datas = (
     collect_data_files("napari")
     + collect_data_files("cellpose")
     + collect_data_files("skimage")
+    # Bundle our own icon resources so app_icon_path() resolves when frozen
+    + collect_data_files("percell4.resources", includes=["*.png", "*.ico", "*.icns"])
 )
+
+# Platform-native application icons (built from src/percell4/resources)
+_res_dir = Path("src") / "percell4" / "resources"
+_win_icon = str(_res_dir / "percell4.ico")
+_mac_icon = str(_res_dir / "percell4.icns")
 
 a = Analysis(
     [str(Path("src") / "percell4" / "app.py")],
@@ -69,6 +80,12 @@ a = Analysis(
         "notebook",
         "sphinx",
         "docutils",
+        # App targets PyQt5; exclude other Qt bindings so PyInstaller does not
+        # abort on "multiple Qt bindings packages" (PyQt6/PySide6 are installed
+        # in this env but unused).
+        "PyQt6",
+        "PySide6",
+        "PySide2",
     ],
 )
 
@@ -86,6 +103,7 @@ exe = EXE(
     upx=False,
     console=False,
     windowed=True,
+    icon=_win_icon,  # Windows .exe icon (ignored on other platforms)
 )
 
 coll = COLLECT(
@@ -103,7 +121,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="PerCell4.app",
-        icon=None,
+        icon=_mac_icon,
         bundle_identifier="com.leelab.percell4",
         info_plist={
             "CFBundleName": "PerCell4",

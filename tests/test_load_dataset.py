@@ -14,7 +14,6 @@ from percell4.application.session import Event, Session
 from percell4.application.use_cases.load_dataset import LoadDataset
 from percell4.domain.dataset import DatasetHandle, DatasetView
 
-
 # ── Fakes ────────────────────────────────────────────────────
 
 

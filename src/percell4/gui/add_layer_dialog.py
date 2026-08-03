@@ -41,7 +41,6 @@ from percell4.application.use_cases.add_decay_to_dataset import (
     AppendReport,
     add_decay_to_dataset,
 )
-from percell4.gui._dialog_utils import cap_to_screen, wrap_in_scroll
 from percell4.domain.io.cross_format import (
     IntensityChannel,
     match_bin_to_intensity,
@@ -51,6 +50,19 @@ from percell4.domain.io.models import (
     TileConfig,
     TokenConfig,
 )
+from percell4.gui._add_layer_logic import (
+    build_added_channel_intensity,
+    coerce_added_array,
+    is_time_invariant_add,
+)
+from percell4.gui._dialog_utils import (
+    cap_to_screen,
+    center_on_screen,
+    detach_window,
+    wrap_in_scroll,
+)
+from percell4.gui._stitch_order import normalize_order
+from percell4.gui._stitching_form import StitchingForm
 from percell4.gui.tcspc_tab_state import TcspcTabState
 
 
@@ -67,6 +79,8 @@ class AddLayerDialog(QDialog):
         self.setMinimumWidth(700)
         self.resize(800, 700)
         cap_to_screen(self)
+        detach_window(self)
+        center_on_screen(self)
 
         self._store = store
         self._data_model = data_model
@@ -148,11 +162,21 @@ class AddLayerDialog(QDialog):
         try:
             import tifffile
             array = tifffile.imread(path)
-            if array.ndim > 2:
-                array = array[0] if array.ndim == 3 else array[0, 0]
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            # Time-aware coercion: on a time-lapse dataset a multi-frame TIFF is
+            # kept as a (T,H,W) stack (validated against n_timepoints) instead of
+            # being flattened to frame 0; a 2D source is a time-invariant layer.
+            time_invariant = is_time_invariant_add(array, n_timepoints)
+            array = coerce_added_array(array, n_timepoints)
             self._write_layer(name, layer_type, array)
             self._refresh_viewer()
-            self.statusBar_msg(f"Added {layer_type.lower()} '{name}'")
+            if time_invariant:
+                self.statusBar_msg(
+                    f"Added {layer_type.lower()} '{name}' as a time-invariant "
+                    "layer (same plane for every timepoint)"
+                )
+            else:
+                self.statusBar_msg(f"Added {layer_type.lower()} '{name}'")
             self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed:\n{e}")
@@ -267,35 +291,29 @@ class AddLayerDialog(QDialog):
         )
         settings_layout.addWidget(self._batch_stitch_check)
 
-        self._batch_stitch_widget = QWidget()
-        stitch_layout = QHBoxLayout(self._batch_stitch_widget)
-        stitch_layout.setContentsMargins(20, 0, 0, 0)
-        stitch_layout.addWidget(QLabel("Rows:"))
-        self._batch_stitch_rows = QSpinBox()
-        self._batch_stitch_rows.setRange(1, 100)
-        self._batch_stitch_rows.setValue(1)
-        stitch_layout.addWidget(self._batch_stitch_rows)
-        stitch_layout.addWidget(QLabel("Cols:"))
-        self._batch_stitch_cols = QSpinBox()
-        self._batch_stitch_cols.setRange(1, 100)
-        self._batch_stitch_cols.setValue(1)
-        stitch_layout.addWidget(self._batch_stitch_cols)
-        stitch_layout.addWidget(QLabel("Pattern:"))
-        self._batch_stitch_type = QComboBox()
-        self._batch_stitch_type.addItems(
-            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
+        # Controls live in the canonical StitchingForm. No registration or
+        # fusion on this append surface — that is a compress-time concern; the
+        # reuse affordance below covers persisted geometry instead.
+        self._batch_stitch_widget = StitchingForm(
+            show_registration=False, show_fusion=False, title=""
         )
-        stitch_layout.addWidget(self._batch_stitch_type)
-        stitch_layout.addWidget(QLabel("Start:"))
-        self._batch_stitch_order = QComboBox()
-        self._batch_stitch_order.addItems(
-            ["right_down", "right_up", "left_down", "left_up",
-             "top_left", "top_right", "bottom_left", "bottom_right"]
-        )
-        stitch_layout.addWidget(self._batch_stitch_order)
-        stitch_layout.addStretch()
+        self._batch_stitch_widget.setContentsMargins(20, 0, 0, 0)
+        # Thin aliases. Grid size X is the COLUMN count, Grid size Y the ROW
+        # count — swapping them would transpose the mosaic.
+        self._batch_stitch_rows = self._batch_stitch_widget.grid_y
+        self._batch_stitch_cols = self._batch_stitch_widget.grid_x
+        self._batch_stitch_type = self._batch_stitch_widget.grid_type
+        self._batch_stitch_order = self._batch_stitch_widget.order
         self._batch_stitch_widget.setVisible(False)
         settings_layout.addWidget(self._batch_stitch_widget)
+
+        # ── Read-only "reuse persisted geometry" affordance (R13) ──
+        # When the open dataset carries registered stitch geometry, decay /
+        # layer placement reuses the persisted per-tile offsets verbatim
+        # (no registration controls here — that's a compress-time concern).
+        self._batch_reuse_label = QLabel("")
+        self._seed_reuse_geometry_label(self._batch_reuse_label)
+        settings_layout.addWidget(self._batch_reuse_label)
 
         layout.addWidget(settings_group)
 
@@ -501,24 +519,46 @@ class AddLayerDialog(QDialog):
         if not selected_ds_names or not selected:
             return
 
-        tile_config = None
-        if self._batch_stitch_check.isChecked():
-            tile_config = TileConfig(
-                grid_rows=self._batch_stitch_rows.value(),
-                grid_cols=self._batch_stitch_cols.value(),
-                grid_type=self._batch_stitch_type.currentText(),
-                order=self._batch_stitch_order.currentText(),
-            )
+        tile_config = (
+            self._batch_stitch_widget.tile_config()
+            if self._batch_stitch_check.isChecked()
+            else None
+        )
 
         token_config = self._batch_token_config()
 
         from qtpy.QtWidgets import QApplication
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            from collections import defaultdict
+
             import tifffile
 
-            from percell4.domain.io.assembler import assemble_tiles
+            from percell4.domain.io.assembler import (
+                assemble_tiles,
+                stack_timepoints,
+            )
             from percell4.domain.io.scanner import FileScanner
+            from percell4.domain.io.timepoints import ordered_timepoint_tokens
+
+            def _stitch_plane(plane_files: list) -> np.ndarray:
+                """Stitch one timepoint's tiles into a 2D plane (today's logic)."""
+                tile_groups: dict[int, np.ndarray] = {}
+                for f in plane_files:
+                    tile_idx = int(f.tokens.get("tile", "0"))
+                    img = tifffile.imread(str(f.path))
+                    if img.ndim > 2:
+                        img = img[0] if img.ndim == 3 else img[0, 0]
+                    tile_groups[tile_idx] = img
+                if tile_config and len(tile_groups) > 1:
+                    return assemble_tiles(
+                        tile_groups,
+                        grid_rows=tile_config.grid_rows,
+                        grid_cols=tile_config.grid_cols,
+                        grid_type=tile_config.grid_type,
+                        order=tile_config.order,
+                    )
+                return next(iter(tile_groups.values()))
 
             imported_count = 0
             for ds in self._batch_datasets:
@@ -528,12 +568,15 @@ class AddLayerDialog(QDialog):
                 # Scan this dataset's files
                 scanner = FileScanner(token_config)
                 if ds.files:
-                    scan = scanner.scan(files=[str(f.path) if hasattr(f, "path") else str(f) for f in ds.files])
+                    scan = scanner.scan(
+                        files=[
+                            str(f.path) if hasattr(f, "path") else str(f) for f in ds.files
+                        ]
+                    )
                 else:
                     scan = scanner.scan(path=ds.source_dir)
 
                 # Group by channel
-                from collections import defaultdict
                 by_channel: dict[str, list] = defaultdict(list)
                 for f in scan.files:
                     ch = f.tokens.get("channel", "")
@@ -546,25 +589,24 @@ class AddLayerDialog(QDialog):
                     files = by_channel[ch_id]
                     name, layer_type = selected[ch_id]
 
-                    # Group by tile, load and stitch
-                    tile_groups: dict[int, np.ndarray] = {}
+                    # Group this channel's files by timepoint token, then
+                    # assemble one stitched plane per timepoint and stack on a
+                    # leading T axis. A single (or absent) timepoint collapses
+                    # to one 2D plane -- byte-identical to the old behavior.
+                    tp_groups: dict[str, list] = defaultdict(list)
                     for f in files:
-                        tile_idx = int(f.tokens.get("tile", "0"))
-                        img = tifffile.imread(str(f.path))
-                        if img.ndim > 2:
-                            img = img[0] if img.ndim == 3 else img[0, 0]
-                        tile_groups[tile_idx] = img
+                        tp_groups[f.tokens.get("timepoint", "")].append(f)
+                    # Only real (non-empty) _t tokens drive stacking; token-less
+                    # files share the "" key and stay a single plane (matching
+                    # the importer, which gates on count_timepoints > 1).
+                    real_tokens = [t for t in tp_groups if t != ""]
 
-                    if tile_config and len(tile_groups) > 1:
-                        array = assemble_tiles(
-                            tile_groups,
-                            grid_rows=tile_config.grid_rows,
-                            grid_cols=tile_config.grid_cols,
-                            grid_type=tile_config.grid_type,
-                            order=tile_config.order,
-                        )
+                    if len(real_tokens) > 1:
+                        tp_tokens = ordered_timepoint_tokens(real_tokens)
+                        planes = [_stitch_plane(tp_groups[tp]) for tp in tp_tokens]
+                        array = stack_timepoints(planes)
                     else:
-                        array = next(iter(tile_groups.values()))
+                        array = _stitch_plane(files)
 
                     self._write_layer(name, layer_type, array)
                     imported_count += 1
@@ -639,7 +681,17 @@ class AddLayerDialog(QDialog):
             seg_names = [n for n in self._store.list_labels() if n not in mask_set]
             self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
             self._data_model.set_active_segmentation(name)
-            self.statusBar_msg(f"Imported {n_cells} ROIs as '{name}'")
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            if n_timepoints > 1:
+                # ImageJ ROIs rasterize to one 2D plane; on a time-lapse dataset
+                # that is stored as a time-invariant gate (per-frame ROI import
+                # is deferred).
+                self.statusBar_msg(
+                    f"Imported {n_cells} ROIs as '{name}' (time-invariant — "
+                    "same ROIs for every timepoint)"
+                )
+            else:
+                self.statusBar_msg(f"Imported {n_cells} ROIs as '{name}'")
             self.accept()
         except ImportError:
             QMessageBox.warning(
@@ -696,6 +748,19 @@ class AddLayerDialog(QDialog):
         try:
             from percell4.adapters.roi_import import import_cellpose_seg
             labels = import_cellpose_seg(path)
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
+            # Explicit rank policy: a 2D mask is a time-invariant gate; a 3D
+            # mask must match the dataset's timepoint count (write_labels
+            # enforces this too, but a clear up-front message is friendlier).
+            time_invariant = labels.ndim == 2 and n_timepoints > 1
+            if labels.ndim == 3 and labels.shape[0] != n_timepoints:
+                QMessageBox.warning(
+                    self, "Error",
+                    f"Cellpose .npy has {labels.shape[0]} frame(s) but the "
+                    f"dataset has {n_timepoints} timepoint(s). A per-frame "
+                    "segmentation must cover every timepoint.",
+                )
+                return
             n_cells = int(labels.max())
             name = self._cp_name_edit.text().strip() or f"cellpose_import_{n_cells}"
             self._store.write_labels(name, labels)
@@ -705,7 +770,13 @@ class AddLayerDialog(QDialog):
             seg_names = [n for n in self._store.list_labels() if n not in mask_set]
             self._data_model.session.refresh_resource_lists(segmentation_names=seg_names)
             self._data_model.set_active_segmentation(name)
-            self.statusBar_msg(f"Imported {n_cells} cells as '{name}'")
+            if time_invariant:
+                self.statusBar_msg(
+                    f"Imported {n_cells} cells as '{name}' (time-invariant — "
+                    "same segmentation for every timepoint)"
+                )
+            else:
+                self.statusBar_msg(f"Imported {n_cells} cells as '{name}'")
             self.accept()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Import error:\n{e}")
@@ -718,33 +789,28 @@ class AddLayerDialog(QDialog):
         """Write an array to the store as the specified layer type and
         notify subscribers of the inventory change."""
         if layer_type == "Channel":
-            array = array.astype(np.float32)
+            n_timepoints = int(self._store.metadata.get("n_timepoints", 1) or 1)
             try:
                 existing = self._store.read_array("intensity")
-                if existing.ndim == 2:
-                    stacked = np.stack([existing, array], axis=0)
-                else:
-                    stacked = np.concatenate(
-                        [existing, array[np.newaxis]], axis=0
-                    )
-                self._store.write_array(
-                    "intensity", stacked, attrs={"dims": ["C", "H", "W"]},
-                )
-                meta = self._store.metadata
-                names = list(meta.get("channel_names", []))
-                names.append(name)
-                self._store.set_metadata({
-                    "channel_names": names,
-                    "n_channels": len(names),
-                })
             except KeyError:
-                self._store.write_array(
-                    "intensity", array, attrs={"dims": ["H", "W"]},
-                )
-                self._store.set_metadata({
-                    "channel_names": [name],
-                    "n_channels": 1,
-                })
+                existing = None
+            # Time-aware concat: on a time-lapse dataset the new channel is
+            # coerced to (T,H,W) and concatenated on the C axis -> (T,C,H,W),
+            # never along the time axis (the silent-corruption fix).
+            stacked, dims = build_added_channel_intensity(
+                existing, array, n_timepoints
+            )
+            self._store.write_array("intensity", stacked, attrs={"dims": dims})
+            meta = self._store.metadata
+            names = list(meta.get("channel_names", []))
+            names.append(name)
+            self._store.set_metadata({
+                "channel_names": names,
+                "n_channels": len(names),
+            })
+            # U4 caller-side guard: confirm the write kept /intensity's dims
+            # consistent (catches a regressed time-vs-channel mis-stack).
+            self._store.check_intensity_dims_consistency()
             new_channel_names = list(self._store.metadata.get("channel_names", []))
             self._data_model.session.refresh_resource_lists(channel_names=new_channel_names)
         elif layer_type == "Segmentation":
@@ -791,6 +857,30 @@ class AddLayerDialog(QDialog):
     def statusBar_msg(self, msg: str) -> None:
         if hasattr(self._launcher, "statusBar"):
             self._launcher.statusBar().showMessage(msg)
+
+    def _seed_reuse_geometry_label(self, label: QLabel) -> None:
+        """Show "Reusing registered stitch geometry (N tiles)" when applicable.
+
+        Read-only affordance for the append surfaces (R13): when the open
+        dataset carries registered overlap-stitch geometry, decay / layer
+        placement reuses the persisted per-tile offsets verbatim, so the
+        user knows the grid controls are a fallback hint only. When the
+        dataset is not registered (or predates the feature), the label is
+        hidden. Never mutates session/state — purely informational.
+        """
+        try:
+            geom = self._store.read_stitch_geometry()
+        except Exception:
+            geom = None
+        if geom is not None and geom.registered and geom.offsets is not None:
+            n_tiles = int(len(geom.offsets))
+            label.setText(
+                f"Reusing registered stitch geometry ({n_tiles} tiles)"
+            )
+            label.setVisible(True)
+        else:
+            label.setText("")
+            label.setVisible(False)
 
     # ------------------------------------------------------------------
     # Tab: TCSPC (.bin) append
@@ -854,47 +944,41 @@ class AddLayerDialog(QDialog):
         # .bin scan order is independent of how the TIFF was stitched.
         self._tcspc_stitching_user_edited = False
 
-        self._tcspc_stitch_widget = QWidget()
-        stitch_layout = QHBoxLayout(self._tcspc_stitch_widget)
-        stitch_layout.setContentsMargins(20, 0, 0, 0)
-        stitch_layout.addWidget(QLabel("Rows:"))
-        self._tcspc_stitch_rows = QSpinBox()
-        self._tcspc_stitch_rows.setRange(1, 100)
-        self._tcspc_stitch_rows.setValue(1)
-        stitch_layout.addWidget(self._tcspc_stitch_rows)
-        stitch_layout.addWidget(QLabel("Cols:"))
-        self._tcspc_stitch_cols = QSpinBox()
-        self._tcspc_stitch_cols.setRange(1, 100)
-        self._tcspc_stitch_cols.setValue(1)
-        stitch_layout.addWidget(self._tcspc_stitch_cols)
-        stitch_layout.addWidget(QLabel("Pattern:"))
-        self._tcspc_stitch_type = QComboBox()
-        self._tcspc_stitch_type.addItems(
-            ["row_by_row", "column_by_column", "snake_by_row", "snake_by_column"]
+        # Controls live in the canonical StitchingForm. No registration or
+        # fusion here (append surface); persisted geometry is surfaced by the
+        # read-only reuse label below.
+        self._tcspc_stitch_widget = StitchingForm(
+            show_registration=False, show_fusion=False, title=""
         )
-        stitch_layout.addWidget(self._tcspc_stitch_type)
-        stitch_layout.addWidget(QLabel("Start:"))
-        self._tcspc_stitch_order = QComboBox()
-        self._tcspc_stitch_order.addItems(
-            [
-                "right_down", "right_up", "left_down", "left_up",
-                "top_left", "top_right", "bottom_left", "bottom_right",
-            ]
-        )
-        stitch_layout.addWidget(self._tcspc_stitch_order)
-        stitch_layout.addStretch()
+        self._tcspc_stitch_widget.setContentsMargins(20, 0, 0, 0)
+        # Thin aliases. Grid size X is the COLUMN count, Grid size Y the ROW
+        # count — swapping them would transpose the mosaic.
+        self._tcspc_stitch_rows = self._tcspc_stitch_widget.grid_y
+        self._tcspc_stitch_cols = self._tcspc_stitch_widget.grid_x
+        self._tcspc_stitch_type = self._tcspc_stitch_widget.grid_type
+        self._tcspc_stitch_order = self._tcspc_stitch_widget.order
         self._tcspc_stitch_widget.setVisible(False)
         layout.addWidget(self._tcspc_stitch_widget)
 
         # Mark stitching as user-edited as soon as any stitch control changes.
         # Connected AFTER the initial setValue/addItems calls so the seed
         # values above don't trip the flag at construction time.
+        # One wire now that the form owns every control, including the
+        # Type->Order repopulation (which emits ``changed`` too). Seeding is
+        # bracketed by a save/restore of this flag, so the extra emission a
+        # programmatic Type change produces cannot mark the form user-edited.
         def _mark_user_edited(*_):
             self._tcspc_stitching_user_edited = True
-        self._tcspc_stitch_rows.valueChanged.connect(_mark_user_edited)
-        self._tcspc_stitch_cols.valueChanged.connect(_mark_user_edited)
-        self._tcspc_stitch_type.currentIndexChanged.connect(_mark_user_edited)
-        self._tcspc_stitch_order.currentIndexChanged.connect(_mark_user_edited)
+        self._tcspc_stitch_widget.changed.connect(_mark_user_edited)
+
+        # ── Read-only "reuse persisted geometry" affordance (R13) ──
+        # When the open dataset carries registered stitch geometry, the
+        # appended decay reuses the persisted per-tile offsets verbatim —
+        # the grid controls above are then only a fallback hint. No
+        # registration controls on this append surface (compress-time only).
+        self._tcspc_reuse_label = QLabel("")
+        self._seed_reuse_geometry_label(self._tcspc_reuse_label)
+        layout.addWidget(self._tcspc_reuse_label)
 
         # ── Rotation + Flip (LASX vs TIFF orientation) ──────────────
         # Both transforms apply to /decay/<ch> only (never /intensity).
@@ -1146,18 +1230,31 @@ class AddLayerDialog(QDialog):
         self._tcspc_stitch_cols.setValue(cols)
         grid_type = meta.get("stitch_grid_type")
         if grid_type:
-            idx = self._tcspc_stitch_type.findText(str(grid_type))
+            idx = self._tcspc_stitch_type.findData(str(grid_type))
             if idx >= 0:
                 self._tcspc_stitch_type.setCurrentIndex(idx)
         order = meta.get("stitch_order")
         if order:
-            idx = self._tcspc_stitch_order.findText(str(order))
-            if idx >= 0:
-                self._tcspc_stitch_order.setCurrentIndex(idx)
+            # The combo carries only the four canonical corners, while
+            # /metadata may hold either accepted vocabulary (a dataset written
+            # with ``right_up`` must still select ``Right & Up``). Normalize
+            # first; an unrecognized value leaves the default standing rather
+            # than raising mid-Scan.
+            try:
+                corner = normalize_order(str(order))
+            except ValueError:
+                corner = None
+            if corner is not None:
+                idx = self._tcspc_stitch_order.findData(corner)
+                if idx >= 0:
+                    self._tcspc_stitch_order.setCurrentIndex(idx)
         self._tcspc_stitching_user_edited = was_edited
+        # Report what the user can actually see in the combos, not the raw
+        # stored strings.
         self.statusBar_msg(
             f"Pre-filled stitching from dataset metadata: "
-            f"{rows}×{cols} {grid_type or ''} {order or ''}".strip()
+            f"{rows}×{cols} {self._tcspc_stitch_type.currentText()} "
+            f"{self._tcspc_stitch_order.currentText()}".strip()
         )
 
     def _tcspc_discover_bin_tokens(self, bin_files: list[Path]) -> list[str]:
@@ -1467,13 +1564,10 @@ class AddLayerDialog(QDialog):
     def _on_tcspc_accept(self) -> None:
         rule = self._tcspc_state.build_selected_rule()
         if self._tcspc_stitch_check.isChecked():
-            tile_config = TileConfig(
-                grid_rows=self._tcspc_stitch_rows.value(),
-                grid_cols=self._tcspc_stitch_cols.value(),
-                grid_type=self._tcspc_stitch_type.currentText(),
-                order=self._tcspc_stitch_order.currentText(),
-            )
+            tile_config = self._tcspc_stitch_widget.tile_config()
         else:
+            # A 1x1 config, NOT None — this surface differs from Compress and
+            # Import on purpose. Do not unify.
             tile_config = TileConfig(grid_rows=1, grid_cols=1)
         flim_config = self._tcspc_build_flim_config()
         rotate_k = int(self._tcspc_rotation_combo.currentData() or 0)
@@ -1838,10 +1932,13 @@ class AddLayerDialog(QDialog):
 
     def _phasor_npz_add_row(self, npz_path: Path) -> None:
         """Probe the .npz at file-add time; populate one table row."""
-        from percell4.application.use_cases.import_phasor_npz import (
-            _validate_npz, _sanitize_channel_name, _decode_metadata,
-        )
         import re
+
+        from percell4.application.use_cases.import_phasor_npz import (
+            _decode_metadata,
+            _sanitize_channel_name,
+            _validate_npz,
+        )
 
         row = self._phasor_npz_table.rowCount()
         self._phasor_npz_table.insertRow(row)

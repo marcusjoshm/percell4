@@ -119,6 +119,7 @@ class RunPhasorGMM:
             gmm_eigenstructure,
             gmm_fit_phasor,
             gmm_to_phasor_roi_geometry,
+            single_component_fit_phasor,
             universal_circle_gs,
         )
         from percell4.domain.flim.phasor_display import compute_valid_phasor_pixels
@@ -159,16 +160,42 @@ class RunPhasorGMM:
                     f"Phasor data not found for channel '{channel}'. Compute Phasor first."
                 )
 
+        # Time-lapse: /phasor/<ch>/{g,s} are (T_acq, H, W). Slice the active
+        # acquisition frame so g/s are 2-D and align with the (active-frame)
+        # labels/mask read below. Single-timepoint phasor is already 2-D.
+        if g.ndim == 3:
+            t_idx = max(
+                0, min(int(self._session.active_timepoint), g.shape[0] - 1)
+            )
+            g = g[t_idx]
+            s = s[t_idx]
+
+        # The active acquisition frame (time-lapse) or None (single-timepoint),
+        # used for the decay-derived intensity AND the labels/mask reads so all
+        # ravel to the SAME H*W and never mismatch T*H*W vs H*W.
+        tp = (
+            self._session.active_timepoint
+            if self._session.n_timepoints > 1
+            else None
+        )
+
         # ── Derive intensity from decay (NEVER /intensity[ch_idx]) ─
         # The cross-layer alignment learning forbids reading /intensity
         # because /decay and /intensity can drift out of alignment after
         # a later add-layer or rotation pass. ``dtype=np.float64`` on the
         # sum prevents precision loss for high-photon-count pixels (sums
-        # > 2^24 ≈ 1.7e7 lose precision in float32).
+        # > 2^24 ≈ 1.7e7 lose precision in float32). On a time-lapse dataset
+        # read the active 4-D decay frame (the same frame as g/s above).
         try:
-            decay = self._repo.read_array(
-                handle, f"decay/{channel}", view_bin=view_bin
-            )
+            reader = getattr(self._repo, "read_decay", None)
+            if tp is not None and reader is not None:
+                decay = reader(handle, channel, view_bin=view_bin, timepoint=tp)
+            else:
+                decay = self._repo.read_array(
+                    handle, f"decay/{channel}", view_bin=view_bin
+                )
+                if decay.ndim == 4 and tp is not None:
+                    decay = decay[tp]
         except KeyError:
             raise ValueError(
                 f"No /decay/{channel} layer — cannot derive intensity weights."
@@ -180,7 +207,7 @@ class RunPhasorGMM:
         if mask_filter_active and self._session.active_mask is not None:
             try:
                 mask_array = self._repo.read_mask(
-                    handle, self._session.active_mask, view_bin=view_bin
+                    handle, self._session.active_mask, view_bin=view_bin, timepoint=tp
                 )
             except (KeyError, ValueError, OSError):
                 mask_array = None  # silent bypass — pure helper handles None
@@ -194,7 +221,9 @@ class RunPhasorGMM:
         seg_name = self._session.active_segmentation
         if seg_name:
             try:
-                labels_array = self._repo.read_labels(handle, seg_name)
+                labels_array = self._repo.read_labels(
+                    handle, seg_name, view_bin=view_bin, timepoint=tp
+                )
             except (KeyError, ValueError, OSError):
                 labels_array = None
 
@@ -228,14 +257,21 @@ class RunPhasorGMM:
         s_valid = s.ravel()[valid].astype(np.float64)
         intensity_valid = intensity.ravel()[valid].astype(np.float64)
 
-        # ── Fit GMM ──────────────────────────────────────────────
-        fit = gmm_fit_phasor(
-            g_valid, s_valid, intensity_valid,
-            n_components=n_components,
-            criterion=criterion,
-            n_min=2,
-            n_max=n_max,
-        )
+        # ── Fit ──────────────────────────────────────────────────
+        # n=1 is a closed-form intensity-weighted mean/covariance — no EM,
+        # no subsampling, no criterion. Anything else goes through the
+        # multi-component GMM path (fixed n if n_components is set,
+        # BIC/AIC sweep when n_components is None).
+        if n_components == 1:
+            fit = single_component_fit_phasor(g_valid, s_valid, intensity_valid)
+        else:
+            fit = gmm_fit_phasor(
+                g_valid, s_valid, intensity_valid,
+                n_components=n_components,
+                criterion=criterion,
+                n_min=2,
+                n_max=n_max,
+            )
 
         # ── Map components → PhasorROIGeometry ───────────────────
         geometries: list[PhasorROIGeometry] = []

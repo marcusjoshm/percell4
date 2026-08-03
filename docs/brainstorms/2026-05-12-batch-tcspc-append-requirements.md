@@ -182,7 +182,7 @@ A per-dataset failure (missing files, mismatched dimensions, write error) record
 │  └────────────────────────────────────────────────────────────────────┘  │
 │  [Add datasets…]                                                         │
 │                                                                          │
-│  2. .bin source root  [/Volumes/NX-01-A/2026-05-06_export/A549 mTQ2…  ▾] │
+│  2. .bin source root  [/Volumes/<lab-server>/<export>/<dataset>…  ▾] │
 │     Discovered groups: 3   [Auto-pair by name]                           │
 │                                                                          │
 │  3. Pairing                       Calibration                            │
@@ -253,7 +253,7 @@ A reviewer can verify the feature end-to-end by:
 - `DatasetStore.set_metadata({...})` accepts `flim_frequency_mhz` (scalar) and `channel_calibrations` (tuple of `(phase, modulation)` aligned to `channel_names`). Verified by reading `src/percell4/domain/io/models.py:204–207` (`FlimConfig`).
 - `ProjectIndex` exposes the list of `.h5` files in the current project; the dialog can read it directly. (Verified: `src/percell4/project.py`.)
 - The CSV reader can be a small pure-Python helper using `csv.DictReader` — no new dependency.
-- LAS X export layout for the typical experiment is **parent / one-subfolder-per-dish / flat `.bin` files inside** (verified against `/Volumes/NX-01-A/2026-05-06_export/A549 mTQ2-4A-4B sensor As + Noco Images FLIM/`). Deeper nesting is handled transparently by `rglob`.
+- LAS X export layout for the typical experiment is **parent / one-subfolder-per-dish / flat `.bin` files inside** (verified against `/Volumes/<lab-server>/<export>/<dataset>/`). Deeper nesting is handled transparently by `rglob`.
 - All datasets in a single batch share the same channel count and channel name set (R4's CSV cross-check enforces this at validate time).
 
 ## Files likely touched (planning input, not implementation design)

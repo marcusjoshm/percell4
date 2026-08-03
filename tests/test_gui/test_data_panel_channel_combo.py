@@ -12,10 +12,8 @@ first (canonical), then union with napari Image layers for orphan support.
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from percell4.application.session import Session
@@ -88,7 +86,7 @@ def test_channels_combo_unions_napari_orphans_with_metadata(qtbot, tmp_path):
         def __init__(self, name): self.name = name
     layers = [Image("CA-SiR"), Image("ch5")]
     fake_viewer = SimpleNamespace(layers=layers)
-    fake_viewer_win = SimpleNamespace(viewer=fake_viewer)
+    fake_viewer_win = SimpleNamespace(viewer=fake_viewer, existing_viewer=fake_viewer)
 
     p = DataPanel(
         data_model=model,

@@ -665,3 +665,95 @@ class TestStateChangeBridge:
         assert not bin_changes[0].selection
         assert not bin_changes[0].segmentation
 
+
+
+class TestSessionActiveTimepoint:
+    """active_timepoint mirrors active_bin: a Selector-only session field."""
+
+    def _timelapse(self, t=3):
+        return DatasetHandle(path="/tmp/movie.h5", metadata={"n_timepoints": t})
+
+    def test_initial_active_timepoint_is_zero(self):
+        assert Session().active_timepoint == 0
+
+    def test_n_timepoints_defaults_to_one_without_dataset(self):
+        assert Session().n_timepoints == 1
+
+    def test_n_timepoints_from_dataset_metadata(self):
+        session = Session()
+        session.set_dataset(self._timelapse(t=5))
+        assert session.n_timepoints == 5
+
+    def test_set_active_timepoint_emits_event(self):
+        session = Session()
+        session.set_dataset(self._timelapse(t=3))
+        events = []
+        session.subscribe(Event.ACTIVE_TIMEPOINT_CHANGED, lambda: events.append(1))
+        session.set_active_timepoint(2)
+        assert session.active_timepoint == 2
+        assert events == [1]
+
+    def test_set_same_timepoint_no_event(self):
+        session = Session()
+        session.set_dataset(self._timelapse(t=3))
+        session.set_active_timepoint(2)
+        events = []
+        session.subscribe(Event.ACTIVE_TIMEPOINT_CHANGED, lambda: events.append(1))
+        session.set_active_timepoint(2)
+        assert events == []
+
+    def test_set_active_timepoint_out_of_range_raises(self):
+        session = Session()
+        session.set_dataset(self._timelapse(t=3))
+        with pytest.raises(ValueError, match=r"\[0, 2\]"):
+            session.set_active_timepoint(3)
+        with pytest.raises(ValueError, match=r"\[0, 2\]"):
+            session.set_active_timepoint(-1)
+
+    def test_single_timepoint_dataset_rejects_nonzero(self):
+        session = Session()
+        session.set_dataset(self._timelapse(t=1))
+        assert session.active_timepoint == 0
+        with pytest.raises(ValueError):
+            session.set_active_timepoint(1)
+
+    def test_set_dataset_resets_timepoint_and_emits(self):
+        session = Session()
+        session.set_dataset(self._timelapse(t=3))
+        session.set_active_timepoint(2)
+        events = []
+        session.subscribe(Event.ACTIVE_TIMEPOINT_CHANGED, lambda: events.append(1))
+        session.set_dataset(self._timelapse(t=3))
+        assert session.active_timepoint == 0
+        assert events == [1]  # 2 -> 0 fires
+
+    def test_set_dataset_no_timepoint_event_when_already_zero(self):
+        session = Session()
+        events = []
+        session.subscribe(Event.ACTIVE_TIMEPOINT_CHANGED, lambda: events.append(1))
+        session.set_dataset(self._timelapse(t=3))
+        assert events == []
+
+    def test_clear_resets_timepoint(self):
+        session = Session()
+        session.set_dataset(self._timelapse(t=3))
+        session.set_active_timepoint(2)
+        session.clear()
+        assert session.active_timepoint == 0
+
+    def test_state_change_bridge_timepoint(self):
+        from percell4.model import CellDataModel, StateChange
+
+        session = Session()
+        session.set_dataset(self._timelapse(t=3))
+        model = CellDataModel(session=session)
+        received: list[StateChange] = []
+        model.state_changed.connect(received.append)
+
+        session.set_active_timepoint(1)
+
+        tp_changes = [c for c in received if c.timepoint]
+        assert len(tp_changes) == 1
+        assert not tp_changes[0].bin
+        assert not tp_changes[0].data
+        assert not tp_changes[0].selection

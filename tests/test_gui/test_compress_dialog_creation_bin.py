@@ -6,8 +6,6 @@ materialized CompressConfig.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_creation_bin_default_is_one(qtbot) -> None:
     """The spinner starts at k=1 (no binning) by default."""

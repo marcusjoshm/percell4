@@ -1,13 +1,57 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
-last_updated: 2026-05-13
+last_updated: 2026-07-28
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 205
+total_widgets: 215
 counts:
   selector: 16
-  creator: 17
-  action: 172
+  creator: 19
+  action: 180
+# 2026-07-28 update (refactor/canonical-stitching-form U8):
+#   Collapses 13 per-surface stitching widget entries (compress.stitch_*,
+#   add_layer.batch_tab.stitch_*, add_layer.tcspc_tab.stitch_*,
+#   batch_tcspc.stitching.*) into 9 canonical stitching_form.* entries, because
+#   all four surfaces now embed ONE StitchingForm. The host-owned enable
+#   checkboxes stay with their own surfaces.
+#   Net -13 +9. CLASSIFICATION IS UNCHANGED: every stitching control was and
+#   remains an Action — a pre-run configuration operand touching no Session
+#   selection field. The consolidation moved code, not contracts.
+#   Also ADDS entries that were never recorded at all: overlap, register,
+#   reference and fusion (compress had none of them), plus the new read-only
+#   order-preview widget.
+#   NOTE: total_widgets/counts were already stale before this pass — the header
+#   read 208/16/17/175 while the file actually held 215 widgets. Corrected here
+#   to the real figures rather than adjusted by the delta.
+# 2026-07-23 update (feat/cellpose-diameter-reference-circle U3):
+#   +1 widget: segmentation_panel.cellpose_diameter_circle_checkbox => ACTION.
+#   Toggles a magenta `_diameter_reference` Shapes layer sized to the Cellpose
+#   Diameter (px) field. It adds a napari layer but writes no session field and
+#   no dataset resource — a transient display overlay, never persisted to the
+#   .h5 — so it is an Action, not a Creator. Notable interaction: the handler
+#   captures and restores viewer.layers.selection.active around the add,
+#   because napari activates every newly added layer and would otherwise pull
+#   selection off the user's Labels layer (which also disarms the `M`
+#   multi-select keystroke bound on Labels keymaps). That restore keeps the
+#   widget's contract exhaustive — it leaves layer selection exactly as it
+#   found it.
+#   No new Action writers of session fields.
+# 2026-05-21 update (feat/time-lapse-tracking-lineage U4, U10):
+#   Adds a sixth session selection field, active_timepoint, and two new
+#   classified GUI elements:
+#     - ViewerWindow timepoint dims slider (napari dims.events.current_step)
+#       => SELECTOR. It is the sole writer of session.active_timepoint. This
+#       is a dims event, NOT a layer-list-selection event, so it does not
+#       violate the "napari -> session forbidden for layer-list events" rule.
+#       Guarded by a dedicated _timepoint_originator flag (separate from
+#       _is_originator) so it cannot collide with selection/active-layer
+#       pushes. session -> napari is the one-way push in
+#       ViewerWindow._push_timepoint_to_napari.
+#     - segmentation_panel "Track Cells Across Timepoints" button => CREATOR.
+#       Runs TrackCells, which writes /labels/<seg>_tracked + /tracks/<seg>,
+#       refreshes the segmentation inventory, and set_active_segmentation()s
+#       the tracked resource (Creator four-step; viewer add done by the panel).
+#   No new Action writers of session fields.
 # 2026-05-13 update (feat/session-selection-window):
 #   Retires the per-panel channel-override pattern (PR #11 era) and the
 #   three Data-tab Selector combos in favor of a single canonical
@@ -39,6 +83,24 @@ counts:
 #   No new Selectors or Creators. The downstream Apply ROIs as Masks remains
 #   the existing Creator that writes /masks/<roi_name> when GMM-origin ROIs are
 #   committed.
+# 2026-06-08 update (feat/existing-mask-reuse-and-threshold-clis U3):
+#   WorkflowConfigDialog gains a "Use existing masks (skip thresholding
+#   rounds)" checkable group with a per-dataset multi-select mask picker
+#   (_build_mask_selection_group / _refresh_mask_picker /
+#   existing_mask_selections). Like the existing per-dataset segmentation
+#   combos in the same dialog, these are PRE-RUN CONFIG controls, NOT
+#   session Selectors/Creators/Actions: the dialog runs around a batch run
+#   and writes only dialog-local state (later folded into the frozen
+#   WorkflowConfig). It never touches session.active_* / filter_ids /
+#   selection. No new Selectors, Creators, or session mutations.
+# 2026-07-24 update (feat/batch-tools-dedicated-window U2):
+#   Batch Tools moved from an inline stacked-content console to a dedicated
+#   top-level window (peer_views/batch_tools_window.py). The sidebar page is now
+#   BatchToolsPanel with two Action buttons (open_button, hide_button); selecting
+#   the Batch Tools tab also auto-opens that window via
+#   main_window._on_sidebar_click (navigation Action — reads/writes no session
+#   field). The relocated BatchConsolePanel stays Action-class (writes none of
+#   the five session fields). No new Selectors, Creators, or session mutations.
 
 # Three-class taxonomy:
 #   Selector — reads session, writes session selection fields, no resource write
@@ -162,40 +224,64 @@ widgets:
     keystroke: null
     notes: "I1 candidate per plan §Problem Frame: line 545-546 calls session.set_active_channel(None) when the deleted channel was active. Plan's Open Questions §Deferred-to-Implementation explicitly defers the Creator-cleanup vs Action-with-side-effect verdict to U3. Flag for U3."
 
-  # ── analysis_panel.py ────────────────────────────────────────
-  - id: analysis_panel.clear_selection_button
+  # ── viewer_panel.py (Cell Filter — relocated from analysis_panel.py) ──
+  - id: viewer_panel.clear_selection_button
     class: Selector
-    path: src/percell4/interfaces/gui/task_panels/analysis_panel.py
-    lines: "90-93, 286-287"
+    path: src/percell4/interfaces/gui/task_panels/viewer_panel.py
+    lines: "88-92, 131-132"
     widget_type: QPushButton
     handler: _on_clear_selection
     reads: [selection]
     writes: [selection]
     keystroke: null
-    notes: "Selector for `selection` — sets selection to []. Per plan I1 scope extension, selection is in scope."
+    notes: "Selector for `selection` — sets selection to []. `selection` is intentionally multi-writer (viewer canvas, cell table, data plot, multi-select, threshold-QC); single-writer applies only to filter_ids."
 
-  - id: analysis_panel.filter_to_selection_button
+  - id: viewer_panel.filter_to_selection_button
     class: Selector
-    path: src/percell4/interfaces/gui/task_panels/analysis_panel.py
-    lines: "97-100, 289-294"
+    path: src/percell4/interfaces/gui/task_panels/viewer_panel.py
+    lines: "94-105, 134-139"
     widget_type: QPushButton
     handler: _on_filter_to_selection
     reads: [selection, filter_ids]
     writes: [filter_ids]
     keystroke: null
-    notes: "Per plan Key Technical Decisions: Filter / Clear-Filter buttons reclassify as Selectors for filter_ids. Reads selection, writes filter_ids."
+    notes: "Canonical Selector for filter_ids — reads selection as the operand, writes filter_ids. Relocated to the Viewer tab; exactly one filter_ids writer."
 
-  - id: analysis_panel.clear_filter_button
+  - id: viewer_panel.clear_filter_button
     class: Selector
-    path: src/percell4/interfaces/gui/task_panels/analysis_panel.py
-    lines: "102-105, 296-297"
+    path: src/percell4/interfaces/gui/task_panels/viewer_panel.py
+    lines: "99-105, 141-142"
     widget_type: QPushButton
     handler: _on_clear_filter
     reads: [filter_ids]
     writes: [filter_ids]
     keystroke: null
-    notes: "Per plan Key Technical Decisions: Selector for filter_ids. Disabled when no filter active."
+    notes: "Selector for filter_ids (writes None). Disabled when no filter active."
 
+  # ── batch_tools_panel.py (Open/Hide the dedicated Batch Tools window) ──
+  - id: batch_tools_panel.open_button
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/batch_tools_panel.py
+    lines: "55-58"
+    widget_type: QPushButton
+    handler: "lambda -> show_window('batch_tools')"
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Shows/raises the Batch Tools window. Manual reopen path after a hide; selecting the tab also auto-opens via main_window._on_sidebar_click. No session write."
+
+  - id: batch_tools_panel.hide_button
+    class: Action
+    path: src/percell4/interfaces/gui/task_panels/batch_tools_panel.py
+    lines: "60-63, 69-73"
+    widget_type: QPushButton
+    handler: _on_hide
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Hides the Batch Tools window (stays alive). No-op when the window was never created. No session write."
+
+  # ── analysis_panel.py ────────────────────────────────────────
   - id: analysis_panel.threshold_method_combo
     class: Action
     path: src/percell4/interfaces/gui/task_panels/analysis_panel.py
@@ -250,6 +336,17 @@ widgets:
     writes: [active_mask]
     keystroke: null
     notes: "Creator: AcceptThreshold use case writes a new mask resource (HDF5) and auto-selects it via session.set_active_mask at use_cases/accept_threshold.py:70."
+
+  - id: adaptive_clip_panel.run_button
+    class: Creator
+    path: src/percell4/gui/adaptive_clip_panel.py
+    lines: "99, 123"
+    widget_type: QPushButton
+    handler: _on_run
+    reads: [active_channel]
+    writes: [active_mask]
+    keystroke: null
+    notes: "Creator: runs the adaptive detector whole-frame and writes a new /masks resource via the AcceptPunctaMask use case, auto-selecting it via session.set_active_mask. Reads active_channel; no other session writes. Embedded in the Analysis tab after Grouped Thresholding."
 
   - id: analysis_panel.measure_cells_button
     class: Creator
@@ -703,16 +800,35 @@ widgets:
     keystroke: null
     notes: "No callback connected. Display-only operand carried by the window state."
 
-  - id: phasor_plot.filtered_checkbox
+  - id: phasor_plot.median_checkbox
     class: Action
     path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
-    lines: "192-196, 621-625"
     widget_type: QCheckBox
-    handler: _on_filtered_toggled
+    handler: _on_median_toggled
     reads: []
     writes: []
     keystroke: null
-    notes: "Switches between filtered and unfiltered g/s maps; internal to the phasor window. No session write."
+    notes: "Shows an on-demand median view of the unfiltered g/s (kernel from median_kernel_spin). Mutually exclusive with wavelet_checkbox. Internal to the phasor window; no session write."
+
+  - id: phasor_plot.median_kernel_spin
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QSpinBox
+    handler: _on_median_kernel_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Median window side length (odd, 3-15). Re-derives the median view when changed. Display-only operand; no session write."
+
+  - id: phasor_plot.wavelet_checkbox
+    class: Action
+    path: src/percell4/interfaces/gui/peer_views/phasor_plot.py
+    widget_type: QCheckBox
+    handler: _on_wavelet_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Shows the DTCWT wavelet-filtered g/s when present (enabled only after Apply Wavelet). Mutually exclusive with median_checkbox. Internal to the phasor window; no session write."
 
   - id: phasor_plot.mask_filter_checkbox
     class: Action
@@ -907,38 +1023,71 @@ widgets:
   # ╚══════════════════════════════════════════════════════════════╝
 
   # ── gui/segmentation_panel.py ────────────────────────────────
-  - id: segmentation_panel.cellpose_model_combo
+  - id: segmentation_panel.cellpose_settings_form
     class: Action
-    path: src/percell4/gui/segmentation_panel.py
-    lines: "87-89"
-    widget_type: QComboBox
+    path: src/percell4/gui/_cellpose_settings_form.py
+    lines: "42-145"
+    widget_type: CellposeSettingsForm
     handler: null
     reads: []
     writes: []
     keystroke: null
-    notes: "Operand for Run Cellpose."
+    notes: >-
+      Operand for Run Cellpose. Shared widget (also consumed by
+      WorkflowConfigDialog) holding Model, Diameter (0 = auto-detect), Use GPU,
+      Flow threshold, Cellprob threshold, Min cell size, Saturation, and Blur
+      (sigma). All are Action operands read at run time via
+      CellposeSettingsForm.settings(); none write session. Saturation and Blur
+      preprocess the in-memory Cellpose input only — the on-disk /intensity is
+      never modified.
 
-  - id: segmentation_panel.cellpose_diameter_spin
+  - id: segmentation_panel.cellpose_remove_edges_checkbox
     class: Action
     path: src/percell4/gui/segmentation_panel.py
-    lines: "94-98"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Operand for Run Cellpose; 0 means auto-detect."
-
-  - id: segmentation_panel.cellpose_gpu_checkbox
-    class: Action
-    path: src/percell4/gui/segmentation_panel.py
-    lines: "101-103"
+    lines: "121-128"
     widget_type: QCheckBox
     handler: null
     reads: []
     writes: []
     keystroke: null
-    notes: "Operand for Run Cellpose."
+    notes: "Operand for Run Cellpose; gates the post-segmentation edge filter."
+
+  - id: segmentation_panel.cellpose_edge_margin_spin
+    class: Action
+    path: src/percell4/gui/segmentation_panel.py
+    lines: "130-142"
+    widget_type: QSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: >-
+      Operand for Run Cellpose. Feeds SegmentCells.finalize(edge_margin=...) →
+      filter_edge_cells; only effective when 'Remove edge cells' is ticked.
+      0 = strict border-touching cells only.
+
+  - id: segmentation_panel.cellpose_diameter_circle_checkbox
+    class: Action
+    path: src/percell4/gui/segmentation_panel.py
+    lines: "186-206, 700-780"
+    widget_type: QCheckBox
+    handler: _on_diameter_circle_toggled / _sync_diameter_circle
+    reads: [active_channel]
+    writes: []
+    keystroke: null
+    notes: >-
+      Toggles the `_diameter_reference` napari Shapes layer — a magenta disc at
+      the image's bottom-left whose diameter equals the Cellpose Diameter (px)
+      field, for sizing that value against real cells. Action, not Creator: it
+      adds a napari layer but writes no session selection field and no dataset
+      resource; the overlay is transient and never persisted to the .h5. Reads
+      active_channel only indirectly, via _get_image_shape, to size the circle.
+      Three triggers converge on the idempotent remove-before-add
+      _sync_diameter_circle: this checkbox, CellposeSettingsForm.diameter_changed,
+      and the state_changed.data branch (deferred one tick, same reason as
+      _wire_paint_autosave). Diameter (px) == 0 is auto-detect and draws
+      nothing. The handler restores viewer.layers.selection.active around the
+      add so the overlay cannot steal the active Labels layer.
 
   - id: segmentation_panel.run_cellpose_button
     class: Creator
@@ -1455,50 +1604,6 @@ widgets:
     keystroke: null
     notes: "Toggles tile stitching widgets visibility."
 
-  - id: add_layer.batch_tab.stitch_rows_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "273-276"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch grid rows operand."
-
-  - id: add_layer.batch_tab.stitch_cols_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "278-281"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch grid cols operand."
-
-  - id: add_layer.batch_tab.stitch_type_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "283-287"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch pattern operand."
-
-  - id: add_layer.batch_tab.stitch_order_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "288-294"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch starting corner operand."
-
   - id: add_layer.batch_tab.token_group
     class: Action
     path: src/percell4/gui/add_layer_dialog.py
@@ -1554,50 +1659,6 @@ widgets:
     writes: []
     keystroke: null
     notes: "Toggles TCSPC stitch widgets visibility."
-
-  - id: add_layer.tcspc_tab.stitch_rows_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "826-829"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch rows operand."
-
-  - id: add_layer.tcspc_tab.stitch_cols_spin
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "831-834"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch cols operand."
-
-  - id: add_layer.tcspc_tab.stitch_type_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "836-840"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch pattern operand."
-
-  - id: add_layer.tcspc_tab.stitch_order_combo
-    class: Action
-    path: src/percell4/gui/add_layer_dialog.py
-    lines: "842-849"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "TCSPC stitch starting corner operand."
 
   - id: add_layer.tcspc_tab.rotation_combo
     class: Action
@@ -1768,17 +1829,6 @@ widgets:
     writes: []
     keystroke: null
     notes: "Loads a long-format calibration CSV via parse_calibration_csv. Shows row-numbered errors on failure."
-
-  - id: batch_tcspc.stitching.grid_rows_spin
-    class: Action
-    path: src/percell4/gui/batch_tcspc_dialog.py
-    lines: "262-269"
-    widget_type: QSpinBox
-    handler: valueChanged → _invalidate_run
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "One of several stitching/orientation controls (grid_cols_spin, grid_type_combo, order_combo, rotate_combo, flip_combo). All are Action and re-disable Run on change."
 
   - id: batch_tcspc.conflict_policy_radios
     class: Action
@@ -2070,6 +2120,119 @@ widgets:
     keystroke: null
     notes: "Z-projection method operand."
 
+  # ── Canonical stitching form ────────────────────────────────────────
+  # Every tiling surface embeds ONE StitchingForm (see
+  # docs/solutions/architecture-patterns/canonical-stitching-form.md). The
+  # per-surface stitch_rows/cols/type/order entries that used to sit under
+  # compress.*, add_layer.batch_tab.*, add_layer.tcspc_tab.* and
+  # batch_tcspc.stitching.* are collapsed here — they were five copies of one
+  # widget set, and their line numbers were already stale. The host-owned
+  # enable checkboxes stay listed with their own surfaces, since those belong
+  # to the dialog, not the form.
+  #
+  # Classification is unchanged by the consolidation: every control is an
+  # Action — a pre-run configuration operand that neither reads nor writes any
+  # of the five Session selection fields.
+
+  - id: stitching_form.grid_size_x_spin
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "93-98"
+    widget_type: QSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Tile-grid COLUMN count (TileConfig.grid_cols). Labelled 'Grid size X' per Fiji's grid_size_x."
+
+  - id: stitching_form.grid_size_y_spin
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "112-118"
+    widget_type: QSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Tile-grid ROW count (TileConfig.grid_rows). Labelled 'Grid size Y'."
+
+  - id: stitching_form.pattern_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "100-110"
+    widget_type: QComboBox
+    handler: _on_grid_type_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Acquisition scan pattern (TileConfig.grid_type). Value in itemData; the display label is Fiji wording and is NOT the persisted string. Changing it repopulates the Order combo with the matching label set, preserving the selected corner."
+
+  - id: stitching_form.order_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "120-130"
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Start corner + travel directions (TileConfig.order). Options are keyed to the selected Pattern. Value in itemData is one of the four canonical corners; the row-centric aliases remain accepted on input via normalize_order."
+
+  - id: stitching_form.overlap_spin
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "133-142"
+    widget_type: QDoubleSpinBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Tile overlap. Shown as a percentage; TileConfig stores a fraction. Hidden when show_registration=False, in which case tile_config() forces 0.0."
+
+  - id: stitching_form.register_check
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "144-145"
+    widget_type: QCheckBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Opts into the phase-correlation path. The gate (register AND overlap>0 AND grid>1x1) is enforced at the importer, not here. Hidden when show_registration=False, which forces False."
+
+  - id: stitching_form.reference_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "148-154"
+    widget_type: QComboBox (editable)
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Registration reference channel, identified by NAME (itemData carries the name verbatim, not an index). Editable so a free-text name is accepted. Populated via set_reference_channels(preserve='text'|'index')."
+
+  - id: stitching_form.fusion_combo
+    class: Action
+    path: src/percell4/gui/_stitching_form.py
+    lines: "156-169"
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Overlap fusion (none / linear_blending). Compress-only; hidden when show_fusion=False, which forces 'none'. The importer additionally forces 'none' on datasets carrying FLIM decay."
+
+  - id: stitching_form.order_preview
+    class: Action
+    path: src/percell4/gui/_tile_order_preview.py
+    lines: "36-140"
+    widget_type: QWidget (custom paintEvent)
+    handler: _sync_preview
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Read-only 3x3 diagram of the acquisition path for the selected Pattern/Order. Derives its path from assembler._tile_positions so it cannot disagree with real tile placement. No user input."
+
   - id: compress.stitch_check
     class: Action
     path: src/percell4/gui/compress_dialog.py
@@ -2080,50 +2243,6 @@ widgets:
     writes: []
     keystroke: null
     notes: "Toggles stitch-widgets visibility."
-
-  - id: compress.stitch_rows_spin
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "223-226"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch rows operand."
-
-  - id: compress.stitch_cols_spin
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "228-231"
-    widget_type: QSpinBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch cols operand."
-
-  - id: compress.stitch_type_combo
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "233-237"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch pattern operand."
-
-  - id: compress.stitch_order_combo
-    class: Action
-    path: src/percell4/gui/compress_dialog.py
-    lines: "239-247"
-    widget_type: QComboBox
-    handler: null
-    reads: []
-    writes: []
-    keystroke: null
-    notes: "Tile-stitch starting-corner operand."
 
   - id: compress.flim_group_toggle
     class: Action
@@ -2310,7 +2429,7 @@ widgets:
     reads: []
     writes: []
     keystroke: null
-    notes: "Zero `bind_key` registrations exist in gui/viewer.py today (grep -n 'bind_key' /Users/leelab/percell4/src/percell4/gui/viewer.py returns empty). Recorded as an explicit absence per U2 task spec; matches plan §Problem Frame point 3 ('PerCell4 has zero `viewer.bind_key` registrations'). U11 will add a `Labels.bind_key('M', …)` here."
+    notes: "Zero `bind_key` registrations exist in gui/viewer.py today (grep -n 'bind_key' ~/percell4/src/percell4/gui/viewer.py returns empty). Recorded as an explicit absence per U2 task spec; matches plan §Problem Frame point 3 ('PerCell4 has zero `viewer.bind_key` registrations'). U11 will add a `Labels.bind_key('M', …)` here."
 
   # ── interfaces/gui/main_window.py — events.active closure (out of tree) ──
   # Note: the _wire_viewer_layer_selection / _on_layer_selection_changed
@@ -2364,3 +2483,87 @@ widgets:
     writes: []
     keystroke: null
     notes: "User-facing toggle for Qt.WindowStaysOnTopHint. Pure window-state operation; no session write. Persisted via QSettings('LeeLabPerCell4','PerCell4') key 'session_window/pin_on_top'."
+
+  # ── Segment by Metric module (feat/interactive-metric-segmenter U3/U4) ──
+  # A new AnalysisPanel QGroupBox. Only the shared segmenter window's Save is a
+  # Creator; the panel's combos + button and the window's interactive controls
+  # are Actions writing no session field.
+  - id: metric_segmenter_panel.source_combo
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QComboBox
+    handler: null
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Picks the /masks source to split. Populated from store.list_masks() on showEvent; reads/writes no session field."
+
+  - id: metric_segmenter_panel.metric_combo
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QComboBox
+    handler: _on_metric_changed
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Picks the per-particle metric. currentIndexChanged closes any open (stale-unit) window and sets a status note; writes no session field."
+
+  - id: metric_segmenter_panel.restrict_checkbox
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QCheckBox
+    handler: null
+    reads: [filter_ids, active_segmentation]
+    writes: []
+    keystroke: null
+    notes: "When checked, _on_segment confines the source mask to the active segmentation's cells before measuring — to the filtered cells when a cell filter is active, else every labelled cell. Read at segment time (no toggle handler); writes no session field."
+
+  - id: metric_segmenter_panel.segment_button
+    class: Action
+    path: src/percell4/gui/metric_segmenter_panel.py
+    widget_type: QPushButton
+    handler: _on_segment
+    reads: [active_channel, active_segmentation, filter_ids]
+    writes: []
+    keystroke: null
+    notes: "Measures the metric off-thread and opens the MetricSegmenterWindow. Reads active_channel/active_segmentation for the measurement inputs, plus filter_ids when the Restrict checkbox is on; writes NO session field (the window's Save is the sole Creator)."
+
+  - id: cnr_segmenter.save_button
+    class: Creator
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: QPushButton
+    handler: _on_save
+    reads: []
+    writes: [active_mask]
+    keystroke: null
+    notes: "The sole Creator of the shared segmenter window (used by both 'Segment by CNR' and 'Segment by Metric'). Writes each non-empty segment as a /masks resource via AcceptPunctaMask; sets active_mask exactly once (metric low/high mode via active_segment + AcceptPunctaMask(select=False); CNR mode keeps last-wins)."
+
+  - id: cnr_segmenter.divider_lines
+    class: Action
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: pg.InfiniteLine
+    handler: _on_divider_moved
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Draggable threshold divider(s). Drive the live preview overlay (pushed to napari one-way) and the readout; write no session field."
+
+  - id: cnr_segmenter.log_axis_check
+    class: Action
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: QCheckBox
+    handler: _on_log_toggled
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Toggles the histogram x-axis linear/log; preserves divider values. No session write."
+
+  - id: cnr_segmenter.add_remove_divider_buttons
+    class: Action
+    path: src/percell4/gui/cnr_segmenter.py
+    widget_type: QPushButton
+    handler: "_add_divider / _remove_divider"
+    reads: []
+    writes: []
+    keystroke: null
+    notes: "Add/remove dividers (CNR N-segment mode only; hidden in the metric single-divider mode). Preview-only; no session write."

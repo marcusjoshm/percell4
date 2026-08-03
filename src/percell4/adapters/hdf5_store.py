@@ -13,6 +13,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from percell4.domain.dataset import DatasetHandle, DatasetView
+from percell4.domain.io.layout import split_channels_2d, split_intensity_layers
 from percell4.store import DatasetStore
 
 
@@ -59,6 +60,9 @@ class Hdf5DatasetRepository:
         store = DatasetStore(path)
         if not store.exists():
             raise FileNotFoundError(f"Dataset not found: {path}")
+        # Detect a dims-corrupted dataset at open rather than silently treating
+        # a mis-stamped (T,H,W) array as single-timepoint (U4).
+        store.check_intensity_dims_consistency()
         return DatasetHandle(path=path, metadata=_build_handle_metadata(store))
 
     def build_view(self, handle: DatasetHandle) -> DatasetView:
@@ -70,16 +74,14 @@ class Hdf5DatasetRepository:
         with store.open_read() as s:
             intensity = s.read_array("intensity")
             channel_names = list(handle.metadata.get("channel_names", []))
+            n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)
 
-            if intensity.ndim == 2:
-                name = channel_names[0] if channel_names else "Intensity"
-                channel_images[name] = intensity.astype(np.float32)
-            elif intensity.ndim == 3 and intensity.shape[0] <= 20:
-                for i in range(intensity.shape[0]):
-                    name = channel_names[i] if i < len(channel_names) else f"ch{i}"
-                    channel_images[name] = intensity[i].astype(np.float32)
-            else:
-                channel_images["Intensity"] = intensity.astype(np.float32)
+            # Keep any leading time axis so napari builds a single dims
+            # slider; disambiguate T-vs-C via n_timepoints.
+            for name, arr in split_intensity_layers(
+                intensity, channel_names, n_timepoints
+            ):
+                channel_images[name] = arr.astype(np.float32)
 
             mask_names = set(s.list_masks())
             for label_name in s.list_labels():
@@ -101,30 +103,52 @@ class Hdf5DatasetRepository:
         self,
         handle: DatasetHandle,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> dict[str, NDArray[np.float32]]:
+        """Return ``{channel_name: 2D plane}`` for compute consumers.
+
+        For a time-lapse dataset a single timepoint is selected (``timepoint``,
+        defaulting to frame 0) and split into 2D per-channel planes, so the
+        ``{name: (H, W)}`` contract holds regardless of the time axis.
+        """
         store = self._store(handle)
+        n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)
+        channel_names = list(handle.metadata.get("channel_names", []))
         result: dict[str, np.ndarray] = {}
         with store.open_read() as s:
-            intensity = s.read_array("intensity", view_bin=view_bin)
-            channel_names = list(handle.metadata.get("channel_names", []))
-
-            if intensity.ndim == 2:
-                name = channel_names[0] if channel_names else "Intensity"
-                result[name] = intensity.astype(np.float32)
-            elif intensity.ndim == 3:
-                for i in range(intensity.shape[0]):
-                    name = channel_names[i] if i < len(channel_names) else f"ch{i}"
-                    result[name] = intensity[i].astype(np.float32)
+            if n_timepoints > 1:
+                t = 0 if timepoint is None else int(timepoint)
+                plane = s.read_array_frame("intensity", t, view_bin=view_bin)
             else:
-                result["Intensity"] = intensity.astype(np.float32)
+                plane = s.read_array("intensity", view_bin=view_bin)
+            for name, arr in split_channels_2d(plane, channel_names):
+                result[name] = arr.astype(np.float32)
         return result
+
+    def read_channel(
+        self,
+        handle: DatasetHandle,
+        path: str,
+        channel_idx: int,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        return self._store(handle).read_channel(
+            path, channel_idx, view_bin=view_bin, timepoint=timepoint
+        )
 
     # ── Segmentation labels ──────────────────────────────────
 
     def read_labels(
-        self, handle: DatasetHandle, name: str, view_bin: int = 1
+        self,
+        handle: DatasetHandle,
+        name: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.int32]:
-        return self._store(handle).read_labels(name, view_bin=view_bin)
+        return self._store(handle).read_labels(
+            name, view_bin=view_bin, timepoint=timepoint
+        )
 
     def write_labels(
         self,
@@ -135,15 +159,30 @@ class Hdf5DatasetRepository:
     ) -> None:
         self._store(handle).write_labels(name, data, attrs=attrs)
 
+    def write_labels_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        self._store(handle).write_labels_frame(name, frame, timepoint)
+
     def list_labels(self, handle: DatasetHandle) -> list[str]:
         return self._store(handle).list_labels()
 
     # ── Masks ────────────────────────────────────────────────
 
     def read_mask(
-        self, handle: DatasetHandle, name: str, view_bin: int = 1
+        self,
+        handle: DatasetHandle,
+        name: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.uint8]:
-        return self._store(handle).read_mask(name, view_bin=view_bin)
+        return self._store(handle).read_mask(
+            name, view_bin=view_bin, timepoint=timepoint
+        )
 
     def write_mask(
         self,
@@ -153,6 +192,15 @@ class Hdf5DatasetRepository:
         attrs: dict[str, Any] | None = None,
     ) -> None:
         self._store(handle).write_mask(name, data, attrs=attrs)
+
+    def write_mask_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        self._store(handle).write_mask_frame(name, frame, timepoint)
 
     def list_masks(self, handle: DatasetHandle) -> list[str]:
         return self._store(handle).list_masks()
@@ -167,6 +215,19 @@ class Hdf5DatasetRepository:
             return self._store(handle).read_dataframe("measurements")
         except KeyError:
             return None
+
+    # ── Tracks (lineage tables) ──────────────────────────────
+
+    def write_tracks(
+        self, handle: DatasetHandle, name: str, df: pd.DataFrame
+    ) -> None:
+        self._store(handle).write_tracks(name, df)
+
+    def read_tracks(self, handle: DatasetHandle, name: str) -> pd.DataFrame:
+        return self._store(handle).read_tracks(name)
+
+    def list_tracks(self, handle: DatasetHandle) -> list[str]:
+        return self._store(handle).list_tracks()
 
     # ── Generic arrays ───────────────────────────────────────
 
@@ -184,9 +245,36 @@ class Hdf5DatasetRepository:
     ) -> NDArray:
         return self._store(handle).read_array(path, view_bin=view_bin)
 
+    def read_decay(
+        self,
+        handle: DatasetHandle,
+        channel: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        return self._store(handle).read_decay(
+            channel, view_bin=view_bin, timepoint=timepoint
+        )
+
+    def array_exists(self, handle: DatasetHandle, path: str) -> bool:
+        """True if ``path`` is a dataset. Metadata only — no decompression."""
+        return self._store(handle).array_exists(path)
+
+    def read_array_attrs(self, handle: DatasetHandle, path: str) -> dict[str, Any]:
+        """Read a dataset's HDF5 attrs (e.g. the wavelet ``filter_level`` on
+        ``/phasor/<ch>/g_filtered``). Metadata only — no decompression.
+        Returns ``{}`` when ``path`` is absent or names a group."""
+        return self._store(handle).read_array_attrs(path)
+
     def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
         """Read /metadata attrs fresh from disk (not the handle's snapshot)."""
         return self._store(handle).metadata
+
+    def write_metadata(
+        self, handle: DatasetHandle, attrs: dict[str, Any]
+    ) -> None:
+        """Merge attrs into /metadata on disk. Delegates to DatasetStore."""
+        self._store(handle).set_metadata(attrs)
 
     def delete_path(self, handle: DatasetHandle, path: str) -> bool:
         return self._store(handle).delete_item(path)

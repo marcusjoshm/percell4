@@ -44,6 +44,7 @@ from percell4.adapters.hdf5_store import Hdf5DatasetRepository
 from percell4.application.session import Session
 from percell4.application.use_cases.apply_wavelet import ApplyWavelet
 from percell4.application.use_cases.compute_phasor import ComputePhasor
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.store import DatasetStore
 
 logger = logging.getLogger(__name__)
@@ -164,8 +165,8 @@ def batch_compute_phasor(
             calibration attrs (``flim_cal_phase_<ch>``,
             ``flim_cal_mod_<ch>``, ``flim_frequency_mhz``). Datasets
             missing these are reported as skipped, not as failures.
-        filter_level: Wavelet filter level (1..9). Same value applied
-            to every channel of every dataset.
+        filter_level: Wavelet filter level (1..MAX_FILTER_LEVEL). Same
+            value applied to every channel of every dataset.
         overwrite: If False (default), channels with an existing
             ``/phasor/<ch>/g`` are skipped. If True, recompute and
             overwrite. ``ComputePhasor`` itself already invalidates
@@ -178,9 +179,9 @@ def batch_compute_phasor(
         A :class:`BatchPhasorReport` with one
         :class:`BatchPhasorItemResult` per input path.
     """
-    if not (1 <= filter_level <= 9):
+    if not (1 <= filter_level <= MAX_FILTER_LEVEL):
         raise ValueError(
-            f"filter_level must be in [1, 9], got {filter_level}"
+            f"filter_level must be in [1, {MAX_FILTER_LEVEL}], got {filter_level}"
         )
 
     repo = Hdf5DatasetRepository()
@@ -281,6 +282,123 @@ def _process_one_dataset(
             errors[channel] = f"apply_wavelet: {exc}"
             continue
 
+        processed.append(channel)
+
+    status = _classify_status(
+        channels=channels, processed=processed, errors=errors, skipped=skipped,
+    )
+
+    return BatchPhasorItemResult(
+        h5_path=h5_path,
+        status=status,
+        processed=tuple(processed),
+        skipped=skipped,
+        errors=errors,
+    )
+
+
+def batch_remove_phasor(
+    h5_paths: list[Path],
+    *,
+    progress_callback: Callable[[BatchPhasorItemResult], None] | None = None,
+) -> BatchPhasorReport:
+    """Delete ``/phasor/<channel>/`` for every channel of every dataset.
+
+    Mirror of :func:`batch_compute_phasor` for the inverse operation —
+    strips computed phasor + wavelet outputs from a batch of ``.h5``
+    files. Useful for re-running a pipeline cleanly after a calibration
+    change, or for shrinking archived datasets that no longer need
+    cached phasor maps.
+
+    Per dataset:
+
+    1. Opens the ``.h5`` via :class:`Hdf5DatasetRepository`.
+    2. Enumerates channels under ``/decay/*`` via ``store.list_groups("decay")``
+       — the same canonical channel list that :func:`batch_compute_phasor`
+       walks, so the two operations are symmetric. Orphaned ``/phasor/<ch>/``
+       entries without a matching ``/decay/<ch>`` are NOT touched.
+    3. For each channel, deletes ``/phasor/<channel>/`` if present.
+       Channels with no phasor on disk are recorded as skipped, not as
+       failures.
+
+    Args:
+        h5_paths: Datasets to clean up.
+        progress_callback: Invoked once per dataset after its
+            :class:`BatchPhasorItemResult` is classified.
+
+    Returns:
+        A :class:`BatchPhasorReport` with one
+        :class:`BatchPhasorItemResult` per input path. ``processed``
+        lists channels whose ``/phasor/<ch>/`` was removed; ``skipped``
+        lists channels that had no phasor to remove; ``errors`` lists
+        per-channel deletion failures.
+    """
+    repo = Hdf5DatasetRepository()
+    results: list[BatchPhasorItemResult] = []
+
+    for h5_path in h5_paths:
+        result = _remove_one_dataset(h5_path=h5_path, repo=repo)
+        results.append(result)
+        if progress_callback is not None:
+            progress_callback(result)
+
+    return BatchPhasorReport(items=tuple(results))
+
+
+def _remove_one_dataset(
+    *,
+    h5_path: Path,
+    repo: Hdf5DatasetRepository,
+) -> BatchPhasorItemResult:
+    """Delete ``/phasor/<channel>/`` for every channel of one dataset.
+
+    Catches dataset-level exceptions (missing file, bad HDF5) and
+    per-channel exceptions independently. Returns a classified
+    :class:`BatchPhasorItemResult`.
+    """
+    try:
+        repo.open(h5_path)
+    except Exception as exc:  # noqa: BLE001 — orchestrator never raises per-item
+        return BatchPhasorItemResult(
+            h5_path=h5_path,
+            status="failed",
+            error=f"open failed: {exc}",
+        )
+
+    store = DatasetStore(h5_path)
+
+    try:
+        channels = store.list_groups("decay")
+    except Exception as exc:  # noqa: BLE001
+        return BatchPhasorItemResult(
+            h5_path=h5_path,
+            status="failed",
+            error=f"decay enumeration failed: {exc}",
+        )
+
+    if not channels:
+        return BatchPhasorItemResult(
+            h5_path=h5_path,
+            status="skipped_no_changes",
+            skipped={"_dataset": "no decay channels"},
+        )
+
+    processed: list[str] = []
+    skipped: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    for channel in channels:
+        if not _phasor_exists(store, channel):
+            skipped[channel] = "no phasor to remove"
+            continue
+        try:
+            # delete_item targets the whole /phasor/<channel>/ group,
+            # which sweeps g, s, g_filtered, s_filtered, lifetime_filtered,
+            # and any other per-channel byproducts together.
+            store.delete_item(f"phasor/{channel}")
+        except Exception as exc:  # noqa: BLE001 — per-channel isolation
+            errors[channel] = f"delete failed: {exc}"
+            continue
         processed.append(channel)
 
     status = _classify_status(

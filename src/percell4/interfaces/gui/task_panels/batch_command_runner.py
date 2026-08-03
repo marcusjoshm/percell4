@@ -1,0 +1,177 @@
+"""QProcess-backed runner for the Batch Tools Console.
+
+Runs one batch-tool argv as a child process, streaming merged stdout/stderr
+live on the main thread — QProcess emits its signals on the event loop, so
+there is no manual threading and no cross-thread GUI writes (the class of
+cross-thread-GUI-write bug documented under ``docs/solutions/``).
+
+Output bytes are decoded through a *stateful* incremental UTF-8 decoder, so a
+multibyte glyph (e.g. the ``█`` progress-bar block) split across QProcess read
+boundaries is not corrupted into replacement characters.
+
+Cancellation reaps the whole process group **on POSIX**: the child is launched
+as its own session leader (``os.setsid`` via the Qt child-process modifier where
+the binding supports it), so torch/Cellpose worker grandchildren are signalled
+too rather than orphaned. On Windows — which has no ``setsid`` / ``getpgid`` /
+``killpg`` — that machinery is skipped entirely and cancellation falls back to
+``QProcess.terminate()`` / ``kill()`` on the child (calling the POSIX-only
+``os`` / ``signal`` APIs there raises ``AttributeError``, so they are guarded).
+"""
+
+from __future__ import annotations
+
+import codecs
+import os
+import signal
+
+from qtpy.QtCore import (
+    QObject,
+    QProcess,
+    QProcessEnvironment,
+    QTimer,
+    Signal,
+)
+
+# The process-group machinery (setsid / getpgid / killpg / SIGKILL) is POSIX
+# only. On Windows these os/signal members do not exist, so gate every use.
+_POSIX = os.name == "posix"
+
+
+class BatchCommandRunner(QObject):
+    """Run a batch-tool argv, streaming decoded output; cancellable."""
+
+    started = Signal()
+    output = Signal(str)
+    finished = Signal(int)  # child exit code
+    cancelled = Signal()  # emitted when the user cancels, before ``finished``
+
+    _KILL_GRACE_MS = 3000
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._proc: QProcess | None = None
+        self._decoder: codecs.IncrementalDecoder | None = None
+        self._pgid: int | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return (
+            self._proc is not None
+            and self._proc.state() != QProcess.ProcessState.NotRunning
+        )
+
+    def run(self, argv: list[str], cwd: str | None = None) -> None:
+        """Start ``argv`` (``[program, *args]``) in ``cwd`` (default: inherit)."""
+        if self.is_running or not argv:
+            return
+        program, *args = argv
+        self._pgid = None
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+        proc = QProcess(self)
+        self._proc = proc
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        if cwd:
+            proc.setWorkingDirectory(cwd)
+        proc.setProgram(program)
+        proc.setArguments(args)
+        # Force the child to emit UTF-8 so it matches the console's UTF-8
+        # decoder: on Windows a child's piped stdout otherwise defaults to the
+        # ANSI code page (cp1252), garbling µm / × glyphs into replacement chars.
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
+        proc.setProcessEnvironment(env)
+        # POSIX only: launch the child in its own session/process group so cancel
+        # can signal the whole tree. Available on Qt6 bindings; harmless no-op
+        # where the modifier API is absent (we verify success in _on_started
+        # before ever using killpg — see there). Skipped on Windows, which has
+        # neither setsid nor the process-group model.
+        set_modifier = getattr(proc, "setChildProcessModifier", None)
+        if set_modifier is not None and _POSIX and hasattr(os, "setsid"):
+            set_modifier(lambda: os.setsid())
+
+        proc.readyReadStandardOutput.connect(self._on_ready_read)
+        proc.started.connect(self._on_started)
+        proc.finished.connect(self._on_finished)
+        proc.start()
+
+    def cancel(self) -> None:
+        """Terminate the running command, then hard-kill after a grace period."""
+        if not self.is_running:
+            return
+        self.cancelled.emit()
+        self._terminate()
+        QTimer.singleShot(self._KILL_GRACE_MS, self._hard_kill)
+
+    # ── QProcess slots ──────────────────────────────────────────────────
+
+    def _on_started(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        # Close the child's stdin so a hypothetical prompt hits EOF and aborts
+        # rather than hanging (catalog tools are non-interactive by assumption).
+        proc.closeWriteChannel()
+        # POSIX only: adopt a process group for killpg when we can PROVE the
+        # child is its own group leader (setsid ran → getpgid == pid). Otherwise
+        # the child shares our group, and killpg would signal the whole parent
+        # process group (up to and including this app). In that case leave _pgid
+        # None and fall back to terminating just the child. On Windows there is
+        # no getpgid/process group, so this stays None and cancel uses
+        # QProcess.terminate()/kill().
+        pid = int(proc.processId())
+        if pid and _POSIX and hasattr(os, "getpgid"):
+            try:
+                if os.getpgid(pid) == pid:
+                    self._pgid = pid
+            except OSError:
+                self._pgid = None
+        self.started.emit()
+
+    def _on_ready_read(self) -> None:
+        if self._proc is None or self._decoder is None:
+            return
+        data = self._proc.readAllStandardOutput().data()
+        if data:
+            text = self._decoder.decode(data)
+            if text:
+                self.output.emit(text)
+
+    def _on_finished(self, *args: object) -> None:
+        # QProcess.finished emits (exitCode, exitStatus); tolerate either arity.
+        exit_code = int(args[0]) if args else 0
+        if self._decoder is not None:
+            tail = self._decoder.decode(b"", final=True)
+            if tail:
+                self.output.emit(tail)
+        self._proc = None
+        self._decoder = None
+        self._pgid = None
+        self.finished.emit(exit_code)
+
+    # ── termination ─────────────────────────────────────────────────────
+
+    def _terminate(self) -> None:
+        """Graceful stop: SIGTERM to the group on POSIX, else QProcess.terminate."""
+        if _POSIX and self._pgid is not None:
+            try:
+                os.killpg(self._pgid, signal.SIGTERM)
+                return
+            except OSError:
+                pass
+        if self._proc is not None:
+            self._proc.terminate()
+
+    def _hard_kill(self) -> None:
+        """Hard stop: SIGKILL to the group on POSIX, else QProcess.kill."""
+        if not self.is_running:
+            return
+        if _POSIX and self._pgid is not None:
+            try:
+                os.killpg(self._pgid, signal.SIGKILL)
+                return
+            except OSError:
+                pass
+        if self._proc is not None:
+            self._proc.kill()

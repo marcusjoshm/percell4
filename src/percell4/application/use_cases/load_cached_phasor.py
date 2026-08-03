@@ -37,12 +37,20 @@ class CachedPhasorResult:
     """Result of reading cached phasor data for one channel.
 
     Fields are scoped to what the two consumers (FlimPanel buttons,
-    PhasorPlot auto-load) actually use. Other attrs that
-    compute_phasor / apply_wavelet write (harmonic, filter_level,
-    flim_frequency_mhz) are not surfaced here — the existing repo port
-    does not expose array-attr reads, and neither consumer needs them
-    for cache correctness. If a future caller needs them, the right
-    move is to extend the repo port, not to bolt on a separate read.
+    PhasorPlot auto-load) actually use. ``cached_filter_level`` is the
+    DTCWT level ApplyWavelet stamped on ``g_filtered``, surfaced via the
+    repo port's ``read_array_attrs`` so the Apply-Wavelet handler can
+    recompute when the user picks a different level instead of serving a
+    stale cache. It is ``None`` when there is no filtered cache, when the
+    attr is absent (pre-attr files), or when the repo does not implement
+    ``read_array_attrs`` (test fakes). ``cached_harmonic`` is the Fourier
+    harmonic ComputePhasor stamped on the raw ``g`` array, surfaced the
+    same way so the Compute-Phasor handler can recompute when the user
+    picks a different harmonic instead of serving a stale cache computed
+    at another harmonic. It is ``None`` when the attr is absent (pre-attr
+    files) or the repo lacks ``read_array_attrs`` (test fakes). Remaining
+    writer attrs (flim_frequency_mhz) stay unsurfaced — no consumer needs
+    them.
     """
 
     g_map: NDArray[np.float32]
@@ -51,6 +59,8 @@ class CachedPhasorResult:
     s_filtered: NDArray[np.float32] | None
     intensity: NDArray[np.float32] | None
     channel: str
+    cached_filter_level: int | None = None
+    cached_harmonic: int | None = None
 
 
 class LoadCachedPhasor:
@@ -127,16 +137,86 @@ class LoadCachedPhasor:
             g_filtered = None
             s_filtered = None
 
+        # Time-lapse: /phasor/<ch>/{g,s,...} are (T_acq, H, W). Slice the active
+        # acquisition frame (clamped) so consumers get a 2-D map matching the
+        # napari dims slider — never a combined-all-timepoints cloud. Legacy 2-D
+        # phasor passes through unchanged.
+        is_timelapse = g_map.ndim == 3
+        t_acq = 0
+        if is_timelapse:
+            nt = int(g_map.shape[0])
+            t_acq = max(0, min(int(self._session.active_timepoint), nt - 1))
+            g_map = g_map[t_acq]
+            s_map = s_map[t_acq]
+            if g_filtered is not None and g_filtered.ndim == 3:
+                g_filtered = g_filtered[t_acq]
+            if s_filtered is not None and s_filtered.ndim == 3:
+                s_filtered = s_filtered[t_acq]
+
+        # Filter level stamped on g_filtered by ApplyWavelet — lets the
+        # Apply-Wavelet handler detect a level change and recompute rather
+        # than serving a stale cache. Read defensively: a repo without
+        # read_array_attrs (test fakes) or a pre-attr file leaves this None,
+        # which the caller treats as "level unknown → recompute".
+        cached_filter_level: int | None = None
+        if g_filtered is not None and s_filtered is not None:
+            attr_reader = getattr(self._repo, "read_array_attrs", None)
+            if attr_reader is not None:
+                try:
+                    attrs = attr_reader(handle, f"phasor/{channel}/g_filtered")
+                    level = attrs.get("filter_level")
+                    if level is not None:
+                        cached_filter_level = int(level)
+                except Exception:
+                    logger.debug(
+                        "Failed to read cached wavelet filter_level for %s",
+                        channel, exc_info=True,
+                    )
+
+        # Harmonic stamped on the raw g array by ComputePhasor — lets the
+        # Compute-Phasor handler detect a harmonic change and recompute
+        # rather than serving a cache computed at a different harmonic.
+        # Same defensive read as filter_level: a repo without
+        # read_array_attrs (test fakes) or a pre-attr file leaves this
+        # None, which the caller treats as "harmonic unknown → serve cache".
+        cached_harmonic: int | None = None
+        attr_reader = getattr(self._repo, "read_array_attrs", None)
+        if attr_reader is not None:
+            try:
+                attrs = attr_reader(handle, f"phasor/{channel}/g")
+                harm = attrs.get("harmonic")
+                if harm is not None:
+                    cached_harmonic = int(harm)
+            except Exception:
+                logger.debug(
+                    "Failed to read cached phasor harmonic for %s",
+                    channel, exc_info=True,
+                )
+
         # Decay-derived intensity for the intensity-weighted histogram.
         # Per the cross-layer-alignment learning, intensity MUST come
         # from decay.sum(axis=-1), NOT from /intensity[ch_idx]. None is
         # acceptable — the phasor window's set_phasor_data accepts None.
         intensity: NDArray[np.float32] | None = None
         try:
-            decay = self._repo.read_array(
-                handle, f"decay/{channel}", view_bin=view_bin
-            )
-            intensity = decay.sum(axis=-1).astype(np.float32)
+            if is_timelapse:
+                # Active decay frame (4-D /decay) — the SAME frame as the phasor
+                # sliced above (cross-layer alignment across the new axis).
+                reader = getattr(self._repo, "read_decay", None)
+                if reader is not None:
+                    decay_frame = reader(
+                        handle, channel, view_bin=view_bin, timepoint=t_acq
+                    )
+                else:
+                    decay_frame = self._repo.read_array(
+                        handle, f"decay/{channel}", view_bin=view_bin
+                    )[t_acq]
+                intensity = decay_frame.sum(axis=-1).astype(np.float32)
+            else:
+                decay = self._repo.read_array(
+                    handle, f"decay/{channel}", view_bin=view_bin
+                )
+                intensity = decay.sum(axis=-1).astype(np.float32)
         except KeyError:
             pass
 
@@ -153,4 +233,6 @@ class LoadCachedPhasor:
             ),
             intensity=intensity,
             channel=channel,
+            cached_filter_level=cached_filter_level,
+            cached_harmonic=cached_harmonic,
         )

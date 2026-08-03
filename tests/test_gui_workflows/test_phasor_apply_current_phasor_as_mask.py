@@ -13,8 +13,10 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from qtpy.QtWidgets import QInputDialog, QMessageBox
+from qtpy.QtWidgets import QMessageBox
 
+from percell4.gui import _resource_name_prompt as rnp
+from percell4.interfaces.gui.peer_views import phasor_plot as pp
 from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
 
 # Shared fixtures (`session_with_dataset`, `phasor_window`) and helpers
@@ -24,11 +26,21 @@ from .conftest import _add_wide_roi, _wide_phasor_maps  # noqa: F401
 
 
 def _accept_default_name(monkeypatch) -> None:
-    """Patch QInputDialog.getText to OK whatever default it received."""
+    """OK whatever default the name prompt received.
+
+    Patched on the prompt module's own ``text_input`` name rather than the
+    Qt static: the prompt now routes through ``_dialog_utils`` so its popup
+    can be made freestanding, and patching ``QInputDialog.getText`` would
+    silently stop intercepting -- leaving a real modal dialog to hang the
+    suite.
+    """
     monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(lambda *args, **kwargs: (kwargs.get("text", args[3] if len(args) > 3 else ""), True)),
+        rnp,
+        "text_input",
+        lambda *args, **kwargs: (
+            kwargs.get("text", args[3] if len(args) > 3 else ""),
+            True,
+        ),
     )
 
 
@@ -231,9 +243,9 @@ def test_apply_respects_cleared_mask(phasor_window, monkeypatch):
 def test_cancel_emits_nothing(phasor_window, monkeypatch):
     """Cancel from the name dialog → no signal."""
     monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(lambda *args, **kwargs: ("", False)),
+        rnp,
+        "text_input",
+        lambda *args, **kwargs: ("", False),
     )
     captured = _capture_phasor_apply(phasor_window)
     assert captured == []
@@ -243,9 +255,9 @@ def test_empty_name_then_cancel_emits_nothing(phasor_window, monkeypatch):
     """Submit blank, then cancel — no signal, no exception."""
     sequence = iter([("   ", True), ("", False)])
     monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(lambda *args, **kwargs: next(sequence)),
+        rnp,
+        "text_input",
+        lambda *args, **kwargs: next(sequence),
     )
     captured = _capture_phasor_apply(phasor_window)
     assert captured == []
@@ -268,7 +280,7 @@ def test_empty_name_reprompts_with_original_default(
             return ("   ", True)  # blank, OK → must re-prompt
         return ("phasor_NADH_1", True)  # accept the default
 
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(fake_get_text))
+    monkeypatch.setattr(rnp, "text_input", fake_get_text)
     captured = _capture_phasor_apply(phasor_window)
 
     assert captured, "expected emission after the second prompt"
@@ -295,11 +307,9 @@ def test_collision_warns_and_reprompts_with_typed_name(
         return ("phasor_X", True)  # accept second prompt
 
     warned: list[bool] = []
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(fake_get_text))
+    monkeypatch.setattr(rnp, "text_input", fake_get_text)
     monkeypatch.setattr(
-        QMessageBox,
-        "warning",
-        staticmethod(lambda *args, **kwargs: warned.append(True)),
+        rnp, "message_box", lambda *args, **kwargs: warned.append(True)
     )
 
     captured = _capture_phasor_apply(phasor_window)
@@ -324,12 +334,11 @@ def test_collision_then_cancel_emits_nothing(
     session_with_dataset.dataset.metadata["mask_names"] = ["nucleus"]
 
     sequence = iter([("nucleus", True), ("", False)])
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(lambda *args, **kwargs: next(sequence)),
-    )
-    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    # Patched on the prompt module's own names: the name prompt and its
+    # collision warning now route through _dialog_utils so they can be
+    # made freestanding, so the Qt statics no longer intercept.
+    monkeypatch.setattr(rnp, "text_input", lambda *args, **kwargs: next(sequence))
+    monkeypatch.setattr(rnp, "message_box", lambda *a, **k: None)
 
     captured = _capture_phasor_apply(phasor_window)
     assert captured == []
@@ -343,9 +352,9 @@ def test_empty_mask_no_emits_nothing(phasor_window, monkeypatch):
 
     _accept_default_name(monkeypatch)
     monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *args, **kwargs: QMessageBox.No),
+        pp,
+        "message_box",
+        lambda *args, **kwargs: QMessageBox.No,
     )
 
     captured = _capture_phasor_apply(phasor_window)
@@ -359,9 +368,9 @@ def test_empty_mask_yes_emits_zero_binary(phasor_window, monkeypatch):
 
     _accept_default_name(monkeypatch)
     monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *args, **kwargs: QMessageBox.Yes),
+        pp,
+        "message_box",
+        lambda *args, **kwargs: QMessageBox.Yes,
     )
 
     captured = _capture_phasor_apply(phasor_window)
@@ -692,9 +701,9 @@ def test_cancel_does_not_invoke_launcher(
     reaches the HDF5 write or active_mask transition.
     """
     monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(lambda *args, **kwargs: ("", False)),
+        rnp,
+        "text_input",
+        lambda *args, **kwargs: ("", False),
     )
 
     initial_active = launcher.data_model.session.active_mask

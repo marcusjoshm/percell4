@@ -47,6 +47,7 @@ def _build_panel(qtbot, *, channel="ch0", active_seg="seg", existing_masks=None)
     viewer.layers = [channel_layer, seg_layer]
     viewer_win = MagicMock()
     viewer_win.viewer = viewer
+    viewer_win.existing_viewer = viewer
 
     panel = GroupedSegPanel(
         data_model=model,
@@ -137,10 +138,14 @@ def test_on_run_inline_overwrite_dialog_is_gone(qtbot, monkeypatch) -> None:
         gsp_module, "prompt_for_resource_name", lambda *a, **kw: "grouped_v2"
     )
 
-    # QMessageBox.question should not be called from _on_run anymore.
+    # QMessageBox.question should not be called from _on_run anymore. Patch it
+    # on its qtpy source (the panel no longer imports QMessageBox at all now
+    # that the inline overwrite dialog is gone).
+    from qtpy.QtWidgets import QMessageBox
+
     qm_calls = []
     monkeypatch.setattr(
-        gsp_module.QMessageBox,
+        QMessageBox,
         "question",
         staticmethod(lambda *a, **kw: qm_calls.append(1)),
     )

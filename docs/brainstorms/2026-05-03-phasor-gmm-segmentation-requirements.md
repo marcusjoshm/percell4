@@ -8,15 +8,15 @@ related:
   - docs/brainstorms/2026-04-30-phasor-mask-filter-requirements.md
   - docs/plans/2026-03-27-feat-multi-roi-phasor-masks-plan.md
 reference_implementations:
-  - /Users/leelab/ComplexWaveletFilter/Circular_ROI_lifetime.py
-  - /Users/leelab/ComplexWaveletFilter/CondensedPhaseGMM.py
+  - ~/ComplexWaveletFilter/Circular_ROI_lifetime.py
+  - ~/ComplexWaveletFilter/CondensedPhaseGMM.py
 ---
 
 # Phasor segmentation — intensity / reference-circle filters + GMM ROI placement
 
 ## Problem
 
-The phasor plot already supports manually-drawn elliptical ROIs that the user nudges with the mouse and a spinbox. For datasets with many overlapping populations — condensed vs. dilute phase, autofluorescence vs. label, multiple metabolic states — manual placement is slow, subjective, and hard to reproduce. The reference scripts in `/Users/leelab/ComplexWaveletFilter/` show the intended automation: filter the phasor (by intensity, by a circular ROI anchored to a target lifetime on the universal circle, or by a binary mask), fit a Gaussian mixture, and place ROIs whose center, axes, and angle come from each component's mean and covariance. Users can then refine each ROI by stretching it (cov_f scaling on eigenvalues) and shifting it along its own principal axis. None of this exists in PerCell4 today; users currently drag rectangles by hand and eyeball where they should be.
+The phasor plot already supports manually-drawn elliptical ROIs that the user nudges with the mouse and a spinbox. For datasets with many overlapping populations — condensed vs. dilute phase, autofluorescence vs. label, multiple metabolic states — manual placement is slow, subjective, and hard to reproduce. The reference scripts in `~/ComplexWaveletFilter/` show the intended automation: filter the phasor (by intensity, by a circular ROI anchored to a target lifetime on the universal circle, or by a binary mask), fit a Gaussian mixture, and place ROIs whose center, axes, and angle come from each component's mean and covariance. Users can then refine each ROI by stretching it (cov_f scaling on eigenvalues) and shifting it along its own principal axis. None of this exists in PerCell4 today; users currently drag rectangles by hand and eyeball where they should be.
 
 ## User outcome
 

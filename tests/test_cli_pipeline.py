@@ -183,3 +183,61 @@ class TestCliPipeline:
                 skip_segmentation=True,
                 threshold_channel="NONEXISTENT",
             )
+
+
+class TestTimelapsePipeline:
+    """Per-frame segmentation/threshold on a time-lapse dataset (U15)."""
+
+    @pytest.fixture
+    def timelapse_h5(self, tmp_path: Path) -> Path:
+        h5 = tmp_path / "movie.h5"
+        store = DatasetStore(h5)
+        store.create(metadata={"channel_names": ["GFP"]})
+        # 2 timepoints, single channel; a bright cell region in both frames.
+        intensity = np.zeros((2, 20, 20), dtype=np.float32)
+        intensity[:, 5:10, 5:10] = 100.0
+        store.write_array("intensity", intensity, attrs={"dims": ["T", "H", "W"]})
+        # Pre-existing (T,H,W) segmentation so we can skip Cellpose.
+        labels = np.zeros((2, 20, 20), dtype=np.int32)
+        labels[:, 5:10, 5:10] = 1
+        store.write_labels("cp", labels)
+        return h5
+
+    def test_threshold_writes_thw_mask_and_measures_per_frame(self, timelapse_h5):
+        from percell4.interfaces.cli.run_pipeline import run_pipeline
+
+        result = run_pipeline(
+            timelapse_h5,
+            skip_segmentation=True,
+            threshold_channel="GFP",
+            threshold_value=50.0,
+            metrics=["area"],
+        )
+
+        # One cell x 2 frames = 2 measurement rows.
+        assert result.n_cells == 2
+
+        store = DatasetStore(timelapse_h5)
+        # The threshold mask was written per-frame as (T,H,W).
+        assert store.read_mask(result.mask_name).shape == (2, 20, 20)
+        # Measurements carry a timepoint column.
+        df = store.read_dataframe("measurements")
+        assert "timepoint" in df.columns
+        assert sorted(df["timepoint"].unique().tolist()) == [0, 1]
+
+    def test_manual_threshold_broadcasts_across_frames(self, timelapse_h5):
+        from percell4.interfaces.cli.run_pipeline import run_pipeline
+
+        result = run_pipeline(
+            timelapse_h5,
+            skip_segmentation=True,
+            threshold_channel="GFP",
+            threshold_value=50.0,
+            skip_threshold=False,
+            metrics=["area"],
+        )
+        store = DatasetStore(timelapse_h5)
+        mask = store.read_mask(result.mask_name)
+        # Both frames flagged the same bright region.
+        assert mask[0, 6, 6] == 1 and mask[1, 6, 6] == 1
+        assert mask[0, 0, 0] == 0

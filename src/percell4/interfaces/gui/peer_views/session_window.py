@@ -13,7 +13,7 @@ Session events so its combos always reflect Session truth.
 
 from __future__ import annotations
 
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,10 +25,9 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
-_QSETTINGS_ORG = "LeeLabPerCell4"
-_QSETTINGS_APP = "PerCell4"
 _GEOMETRY_KEY = "session_window/geometry"
 _PIN_KEY = "session_window/pin_on_top"
 _NO_DATASET_TEXT = "(no dataset)"
@@ -116,20 +115,22 @@ class SessionWindow(QMainWindow):
         self._seg_combo.currentTextChanged.connect(self._on_seg_combo_changed)
         row.addWidget(self._seg_combo)
 
-        # View-bin selector. The canonical (and only) Selector for
+        # Pixel-binning selector. The canonical (and only) Selector for
         # session.active_bin. DataPanel mirrors the value display but
         # never writes it (consolidate-canonical-state).
         row.addSpacing(6)
-        row.addWidget(QLabel("View bin (k):"))
+        row.addWidget(QLabel("Pixel Binning:"))
         self._bin_spin = QSpinBox()
         self._bin_spin.setRange(1, 16)
         self._bin_spin.setValue(1)
         self._bin_spin.setMinimumWidth(60)
         self._bin_spin.setToolTip(
-            "Session-level view bin: every store read downsamples by "
-            "k×k at this setting (sum for intensity/decay, mean for "
-            "phasor, majority-vote for masks, mode for labels). "
-            "Native (k=1) storage is unchanged. Resets to 1 on dataset switch."
+            "Combine each N×N block of pixels into one when reading this "
+            "dataset (summed for intensity and decay, averaged for phasor, "
+            "majority vote for masks and labels).\n\n"
+            "This affects what you view and measure only — the stored image "
+            "and the binning it was imported at are never changed. Set it to "
+            "1 for no binning. Resets to 1 when you switch datasets."
         )
         self._bin_spin.valueChanged.connect(self._on_bin_spin_changed)
         row.addWidget(self._bin_spin)
@@ -293,7 +294,7 @@ class SessionWindow(QMainWindow):
     # ── Pin-on-top ──────────────────────────────────────────────────
 
     def _restore_pin_on_top(self) -> None:
-        qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        qs = app_settings()
         raw = qs.value(_PIN_KEY, True)
         # QSettings stores booleans as strings on some backends.
         if isinstance(raw, str):
@@ -323,17 +324,17 @@ class SessionWindow(QMainWindow):
 
     def _on_pin_toggled(self, pinned: bool) -> None:
         self._apply_pin_on_top(pinned)
-        QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(_PIN_KEY, pinned)
+        app_settings().setValue(_PIN_KEY, pinned)
 
     # ── Geometry persistence ────────────────────────────────────────
 
     def _save_geometry(self) -> None:
-        QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).setValue(
+        app_settings().setValue(
             _GEOMETRY_KEY, self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP).value(_GEOMETRY_KEY)
+        geom = app_settings().value(_GEOMETRY_KEY)
         if geom:
             self.restoreGeometry(geom)
         else:

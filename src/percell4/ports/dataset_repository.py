@@ -34,12 +34,33 @@ class DatasetRepository(Protocol):
         self,
         handle: DatasetHandle,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> dict[str, NDArray[np.float32]]:
-        """Read all channel images from the dataset.
+        """Read channel images from the dataset as ``{name: 2D plane}``.
 
         ``view_bin`` (>= 1) downsamples each channel via ``sum_bin_2d``
         on the trailing two axes. At k=1 the arrays are byte-identical
         to what was written. See ``src/percell4/domain/io/view_bin.py``.
+
+        For a time-lapse dataset, ``timepoint`` selects the frame (default
+        frame 0) so the returned planes are always 2D.
+        """
+        ...
+
+    def read_channel(
+        self,
+        handle: DatasetHandle,
+        path: str,
+        channel_idx: int,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        """Read a single channel plane from a 2D/3D/time-stacked array.
+
+        On a time-stacked array (leading ``dims[0] == 'T'``), ``timepoint`` is
+        required: the frame is sliced first, then ``channel_idx`` is indexed on
+        the resulting plane, returning a 2D ``(H, W)`` array. See
+        :meth:`DatasetStore.read_channel`.
         """
         ...
 
@@ -50,10 +71,13 @@ class DatasetRepository(Protocol):
         handle: DatasetHandle,
         name: str,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.int32]:
         """Read a segmentation label array by name.
 
-        ``view_bin`` downsamples via block mode (ties resolve to 0).
+        ``view_bin`` downsamples via block mode (ties resolve to 0). When
+        ``timepoint`` is given, returns that single frame of a time-stacked
+        ``(T, H, W)`` labels resource.
         """
         ...
 
@@ -71,6 +95,21 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def write_labels_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        """Write a single timepoint's 2D ``frame`` into a labels resource.
+
+        Per-frame counterpart to :meth:`read_labels` with a ``timepoint``;
+        allocates / promotes / splices as needed. See
+        :meth:`DatasetStore.write_labels_frame`.
+        """
+        ...
+
     def list_labels(self, handle: DatasetHandle) -> list[str]:
         """List all segmentation label names."""
         ...
@@ -82,10 +121,14 @@ class DatasetRepository(Protocol):
         handle: DatasetHandle,
         name: str,
         view_bin: int = 1,
+        timepoint: int | None = None,
     ) -> NDArray[np.uint8]:
         """Read a mask array by name.
 
-        ``view_bin`` downsamples via majority vote.
+        ``view_bin`` downsamples via majority vote. When ``timepoint`` is given,
+        returns that single frame of a time-stacked ``(T, H, W)`` mask; a 2D
+        (time-invariant) mask broadcasts the same plane for every timepoint
+        (mirrors :meth:`read_labels`). See :meth:`DatasetStore.read_mask`.
         """
         ...
 
@@ -103,6 +146,21 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def write_mask_frame(
+        self,
+        handle: DatasetHandle,
+        name: str,
+        frame: NDArray,
+        timepoint: int,
+    ) -> None:
+        """Write a single timepoint's 2D ``frame`` into a mask resource.
+
+        Per-frame counterpart to :meth:`read_mask` with a ``timepoint``;
+        allocates / promotes / splices as needed. See
+        :meth:`DatasetStore.write_mask_frame`.
+        """
+        ...
+
     def list_masks(self, handle: DatasetHandle) -> list[str]:
         """List all mask names."""
         ...
@@ -115,6 +173,22 @@ class DatasetRepository(Protocol):
 
     def read_measurements(self, handle: DatasetHandle) -> pd.DataFrame | None:
         """Read the measurements DataFrame, or None if not present."""
+        ...
+
+    # ── Tracks (lineage tables) ──────────────────────────────
+
+    def write_tracks(
+        self, handle: DatasetHandle, name: str, df: pd.DataFrame
+    ) -> None:
+        """Write a per-track lineage table at /tracks/<name>."""
+        ...
+
+    def read_tracks(self, handle: DatasetHandle, name: str) -> pd.DataFrame:
+        """Read the lineage table from /tracks/<name>. Raises KeyError if missing."""
+        ...
+
+    def list_tracks(self, handle: DatasetHandle) -> list[str]:
+        """List all lineage-table names under /tracks/."""
         ...
 
     # ── Generic arrays (phasor maps, decay, etc.) ────────────
@@ -143,6 +217,36 @@ class DatasetRepository(Protocol):
         """
         ...
 
+    def read_decay(
+        self,
+        handle: DatasetHandle,
+        channel: str,
+        view_bin: int = 1,
+        timepoint: int | None = None,
+    ) -> NDArray:
+        """Read ``/decay/<channel>`` with optional per-timepoint slice + view-bin.
+
+        ``timepoint`` slices one acquisition frame of a time-lapse 4-D decay
+        ``(T_acq, H, W, T_bins)`` **on disk** (returning ``(H, W, T_bins)``);
+        ``None`` returns the whole array (``view_bin > 1`` is then rejected on a
+        4-D decay). The frame-slicing chokepoint for every FLIM consumer — never
+        full-decode a 4-D decay to read one frame. See
+        :meth:`DatasetStore.read_decay`.
+        """
+        ...
+
+    def read_array_attrs(
+        self, handle: DatasetHandle, path: str
+    ) -> dict[str, Any]:
+        """Read a dataset's HDF5 attrs without decompressing the array.
+
+        Returns ``{}`` when ``path`` is absent or names a group. Used to
+        read writer-stamped scalars such as the wavelet ``filter_level``
+        on ``/phasor/<ch>/g_filtered`` (so a changed level can trigger a
+        recompute instead of serving a stale cache).
+        """
+        ...
+
     def read_metadata(self, handle: DatasetHandle) -> dict[str, Any]:
         """Read /metadata attrs FRESH from disk.
 
@@ -150,6 +254,18 @@ class DatasetRepository(Protocol):
         reflect later writes. Consumers that need post-write metadata
         (e.g., FLIM calibration values written by an in-session TCSPC
         import) must call this method instead of reading the snapshot.
+        """
+        ...
+
+    def write_metadata(
+        self, handle: DatasetHandle, attrs: dict[str, Any]
+    ) -> None:
+        """Merge ``attrs`` into the dataset's /metadata group on disk.
+
+        Existing keys are overwritten; unrelated keys are preserved. Used
+        by Creators that need to persist inventory updates (e.g.,
+        ``channel_names`` / ``n_channels`` when a use case appends a
+        derived channel).
         """
         ...
 

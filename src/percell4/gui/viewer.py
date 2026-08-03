@@ -9,9 +9,11 @@ from __future__ import annotations
 import logging
 import weakref
 
-from qtpy.QtCore import QObject, QSettings, Signal
+from qtpy.QtCore import QObject, Signal
 
 from percell4.config import viewer_presets as vp
+from percell4.gui._dialog_utils import message_box
+from percell4.gui.settings import app_settings
 from percell4.model import CellDataModel
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ CHANNEL_COLORMAPS = vp.CHANNEL_COLORMAPS
 # A WeakSet — not a dict — so closed-then-GC'd ViewerWindows drop out
 # without bookkeeping. Resolution is O(N_viewers); the launcher creates
 # one ViewerWindow, so N is effectively 1.
-_VIEWER_WINDOWS: "weakref.WeakSet[ViewerWindow]" = weakref.WeakSet()
+_VIEWER_WINDOWS: weakref.WeakSet[ViewerWindow] = weakref.WeakSet()
 # Subscribers (typically LauncherWindow) interested in `M` events.
 # Each is a callable taking the originating `ViewerWindow`.
 # Stored as a list of weak method refs so a closed launcher drops out.
@@ -59,7 +61,7 @@ def _prune_dead_subscribers() -> None:
     _M_SUBSCRIBERS[:] = [r for r in _M_SUBSCRIBERS if r() is not None]
 
 
-def _dispatch_multi_select_for_viewer(vw: "ViewerWindow") -> None:
+def _dispatch_multi_select_for_viewer(vw: ViewerWindow) -> None:
     """Emit the `multi_select_requested` signal and run module-level
     subscribers. Shared by the Labels-active and viewer-level paths.
 
@@ -159,6 +161,10 @@ class ViewerWindow(QObject):
         self._qt_window = None
         self._color_index = 0
         self._is_originator = False
+        # Dedicated guard for the timepoint-slider <-> session sync. Kept
+        # separate from _is_originator so a dims event can never collide
+        # with an in-flight label-selection or active-layer push.
+        self._timepoint_originator = False
         self._selected_label_forwarding_suspended = False
         self._original_colormaps: dict[str, object] = {}  # {layer_name: colormap}
         self._hidden_mask_layers: dict[str, float] = {}  # {layer_name: original_opacity}
@@ -206,12 +212,33 @@ class ViewerWindow(QObject):
         # Single signal replaces the old coalescing timer — no rapid-fire to coalesce.
         self.data_model.state_changed.connect(self._on_state_changed)
 
+        # Wire the napari timepoint slider → session.active_timepoint. This
+        # is a dims event (distinct from the forbidden layer-list-selection
+        # events) and acts as the timepoint Selector.
+        self._viewer.dims.events.current_step.connect(self._on_dims_current_step)
+
         self._restore_geometry()
 
     @property
     def viewer(self):
         """Access the napari viewer (creates it if needed)."""
         self._ensure_viewer()
+        return self._viewer
+
+    @property
+    def existing_viewer(self):
+        """The napari viewer if one has been built, else ``None``.
+
+        Use this to *ask whether* a viewer exists; use :attr:`viewer` to show
+        the user something. The distinction matters because ``viewer`` builds
+        one on access, so ``if win.viewer is None:`` is a test that can never
+        be true and that constructs a full OpenGL canvas in order to fail.
+
+        Cleanup and refresh paths want this one. There is nothing to remove
+        from a viewer that was never opened, and forcing it into existence to
+        find that out means loading a dataset spawns the napari window even
+        when the researcher never asked for it.
+        """
         return self._viewer
 
     def set_subtitle(self, subtitle: str) -> None:
@@ -337,13 +364,14 @@ class ViewerWindow(QObject):
             existing = self.viewer.layers[name]
             from qtpy.QtWidgets import QMessageBox
 
-            QMessageBox.warning(
+            message_box(
                 self._qt_window,
                 "Mask name conflict",
                 f"Can't add mask {name!r}: a "
                 f"{type(existing).__name__} layer with that name already "
                 f"exists. Rename the new mask or remove the existing "
                 f"layer before retrying.",
+                icon=QMessageBox.Warning,
             )
             return
 
@@ -363,6 +391,41 @@ class ViewerWindow(QObject):
             metadata={PERCELL_TYPE_KEY: LAYER_TYPE_MASK},
             **kwargs,
         )
+
+    def add_tracks(self, data, graph: dict | None = None, name: str = "tracks", **kwargs) -> None:
+        """Add (or replace) a napari Tracks layer for lineage visualization.
+
+        ``data`` is an ``(N, 4)`` array ``[track_id, t, y, x]``; ``graph`` is
+        the ``{child_track_id: [parent_track_id]}`` division map. A no-op for
+        empty data (napari rejects an empty Tracks layer). Any existing layer
+        of the same name is removed first so re-tracking refreshes cleanly.
+        """
+        import numpy as np
+
+        self._ensure_viewer()
+        if name in self._viewer.layers:
+            del self._viewer.layers[name]
+        if data is None or len(np.asarray(data)) == 0:
+            return
+        self._viewer.add_tracks(np.asarray(data), graph=graph or {}, name=name, **kwargs)
+
+    def show_tracks_from_measurements(
+        self, measurements, lineage_df=None, name: str = "tracks"
+    ) -> None:
+        """Build a Tracks layer + division graph from measurements and show it.
+
+        Convenience for Creators: builds the ``[track_id, t, y, x]`` array from
+        the measurements frame and the ``{child: [parent]}`` division graph
+        from a stored lineage table (optional), then calls :meth:`add_tracks`.
+        """
+        from percell4.domain.tracking.lineage import (
+            build_graph_from_lineage,
+            build_tracks_array,
+        )
+
+        data = build_tracks_array(measurements)
+        graph = build_graph_from_lineage(lineage_df) if lineage_df is not None else {}
+        self.add_tracks(data, graph=graph, name=name)
 
     def clear(self) -> None:
         """Remove all layers."""
@@ -425,6 +488,56 @@ class ViewerWindow(QObject):
                 self.data_model.session.active_segmentation,
                 LAYER_TYPE_SEGMENTATION,
             )
+        if change.timepoint:
+            self._push_timepoint_to_napari(
+                self.data_model.session.active_timepoint
+            )
+
+    def _on_dims_current_step(self, event=None) -> None:
+        """Forward a napari timepoint-slider move to session.active_timepoint.
+
+        The leading axis of our ``(T, ...)`` layers is the time axis, so
+        ``dims.current_step[0]`` is the timepoint. No-op for non-time-lapse
+        datasets. Guarded by the dedicated ``_timepoint_originator`` flag so
+        the session→napari push below cannot loop back.
+        """
+        if self._timepoint_originator or self._is_originator:
+            return
+        if self._viewer is None:
+            return
+        session = self.data_model.session
+        if session.n_timepoints <= 1:
+            return
+        step = self._viewer.dims.current_step
+        if not step:
+            return
+        t = max(0, min(int(step[0]), session.n_timepoints - 1))
+        if t == session.active_timepoint:
+            return
+        self._timepoint_originator = True
+        try:
+            session.set_active_timepoint(t)
+        finally:
+            self._timepoint_originator = False
+
+    def _push_timepoint_to_napari(self, t: int) -> None:
+        """Reflect session.active_timepoint into the napari dims slider (axis 0).
+
+        One-way push: no-op when the viewer is torn down or carries no time
+        slider, and guarded so the resulting dims event is ignored.
+        """
+        if not self._is_alive() or self._viewer is None:
+            return
+        dims = self._viewer.dims
+        if dims.ndim < 3:
+            return  # no time slider present
+        if int(dims.current_step[0]) == int(t):
+            return
+        self._timepoint_originator = True
+        try:
+            dims.set_current_step(0, int(t))
+        finally:
+            self._timepoint_originator = False
 
     def _push_active_layer_to_napari(
         self, layer_name: str | None, percell_type: str
@@ -527,10 +640,25 @@ class ViewerWindow(QObject):
                     else:
                         color_dict[lid] = list(vp.SELECTION_DIM_NONSELECTED)
             elif visible_ids:
-                # Filter only: show filtered, hide rest
+                # Filter only: show filtered in their original palette colors
+                # (so cells stay distinguishable), hide rest.
+                import numpy as np
+
                 color_dict[None] = list(vp.TRANSPARENT_RGBA)
-                for lid in visible_ids:
-                    color_dict[lid] = list(vp.FILTER_ONLY_VISIBLE_RGBA)
+                ids = list(visible_ids)
+                orig_cmap = self._original_colormaps.get(labels_layer.name)
+                colors = None
+                if orig_cmap is not None and hasattr(orig_cmap, "map"):
+                    try:
+                        colors = orig_cmap.map(np.asarray(ids, dtype=np.int64))
+                    except Exception:
+                        colors = None
+                for i, lid in enumerate(ids):
+                    color_dict[lid] = (
+                        list(colors[i])
+                        if colors is not None
+                        else list(vp.FILTER_ONLY_VISIBLE_RGBA)
+                    )
             elif highlight_ids:
                 # Selection only: highlight selected, dim rest
                 color_dict[None] = list(vp.TRANSPARENT_RGBA)
@@ -618,12 +746,12 @@ class ViewerWindow(QObject):
 
     def _save_geometry(self) -> None:
         if self._is_alive():
-            QSettings("LeeLabPerCell4", "PerCell4").setValue(
+            app_settings().setValue(
                 "viewer/geometry", self._qt_window.saveGeometry()
             )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("viewer/geometry")
+        geom = app_settings().value("viewer/geometry")
         if geom and self._is_alive():
             self._qt_window.restoreGeometry(geom)
 

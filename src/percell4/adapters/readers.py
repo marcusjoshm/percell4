@@ -12,6 +12,55 @@ from typing import Any
 
 import numpy as np
 
+# TIFF ResolutionUnit values (TIFF 6.0 spec):
+#   1 = no unit (resolution is pixel aspect ratio, not physical)
+#   2 = inch
+#   3 = centimeter
+# We convert any of these to µm/px (the workflow's native unit).
+_TIFF_UNIT_TO_UM = {
+    2: 25400.0,  # 1 inch = 25400 µm
+    3: 10000.0,  # 1 cm   = 10000 µm
+}
+
+
+def _pixel_size_um_from_tags(page) -> float | None:
+    """Decode µm/px from a TIFF page's XResolution + ResolutionUnit tags.
+
+    TIFF stores XResolution as a (numerator, denominator) rational
+    representing pixels per ResolutionUnit. Unit-per-pixel is the
+    reciprocal, scaled to µm using the ResolutionUnit tag.
+
+    Returns ``None`` when:
+      - XResolution is missing or zero,
+      - ResolutionUnit is missing or 1 (no physical unit), or
+      - the value is non-positive (defensive).
+    """
+    tags = page.tags
+    xres_tag = tags.get("XResolution")
+    if xres_tag is None:
+        return None
+    xres = xres_tag.value
+    # tifffile gives a (numerator, denominator) tuple for rational tags.
+    try:
+        num, den = xres
+    except Exception:
+        return None
+    if not num or num <= 0 or den <= 0:
+        return None
+
+    unit_tag = tags.get("ResolutionUnit")
+    unit = int(unit_tag.value) if unit_tag is not None else 0
+    scale = _TIFF_UNIT_TO_UM.get(unit)
+    if scale is None:
+        # Unit is missing, "no unit" (1), or unsupported — can't
+        # convert to physical µm.
+        return None
+
+    # Pixels-per-unit = num / den, so unit-per-pixel = den / num.
+    # Then scale unit (cm or in) → µm.
+    pixel_size = (den / num) * scale
+    return pixel_size if pixel_size > 0 else None
+
 
 def read_tiff(filepath: str | Path) -> dict[str, Any]:
     """Read a TIFF file.
@@ -28,14 +77,12 @@ def read_tiff(filepath: str | Path) -> dict[str, Any]:
         "dtype": str(img.dtype),
     }
 
-    # Try to extract pixel size from TIFF metadata
     try:
         with tifffile.TiffFile(str(filepath)) as tif:
-            if tif.pages and tif.pages[0].tags.get("XResolution"):
-                xres = tif.pages[0].tags["XResolution"].value
-                if xres and xres[0] > 0:
-                    # Resolution is in pixels-per-unit; invert for unit-per-pixel
-                    metadata["pixel_size_um"] = xres[1] / xres[0]
+            if tif.pages:
+                px = _pixel_size_um_from_tags(tif.pages[0])
+                if px is not None:
+                    metadata["pixel_size_um"] = px
     except Exception:
         pass
 
@@ -52,10 +99,9 @@ def read_tiff_metadata(filepath: str | Path) -> dict[str, Any]:
             page = tif.pages[0]
             metadata["shape"] = page.shape
             metadata["dtype"] = str(page.dtype)
-            if page.tags.get("XResolution"):
-                xres = page.tags["XResolution"].value
-                if xres and xres[0] > 0:
-                    metadata["pixel_size_um"] = xres[1] / xres[0]
+            px = _pixel_size_um_from_tags(page)
+            if px is not None:
+                metadata["pixel_size_um"] = px
     except Exception:
         pass
     return metadata

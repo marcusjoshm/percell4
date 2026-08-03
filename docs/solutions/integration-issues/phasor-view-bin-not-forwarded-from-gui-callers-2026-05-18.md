@@ -1,6 +1,7 @@
 ---
 title: View bin parameter accepted by use cases but not forwarded by GUI callers
 date: 2026-05-18
+last_updated: 2026-05-19
 category: integration-issues
 module: src/percell4/interfaces/gui/task_panels/flim_panel.py, src/percell4/interfaces/gui/peer_views/phasor_plot.py, src/percell4/application/use_cases/load_cached_phasor.py
 problem_type: integration_issue
@@ -22,6 +23,9 @@ tags:
   - flim
   - session-active-bin
   - cache-invalidation
+  - opt-in-toggle
+  - cli-gui-parity
+  - export-tools
 related_components:
   - assistant
   - documentation
@@ -300,6 +304,117 @@ the worker is constructed. Never read `session.foo` inside the worker.
 This is the U12 pattern (Cellpose) and now the same pattern for the GMM
 worker — make it a rule across the codebase. A mid-flight toggle must
 not be able to retroactively change the meaning of an in-flight result.
+
+**User-facing surface parity (added 2026-05-19).** The forward-at-every-
+caller rule above governs the *plumbing* — what flows between use case
+and call site. A separate but complementary rule governs the *user-
+facing surface* when an Action tool (export, save, copy, …) is given an
+*opt-in* to honor a live GUI lens (`view_bin`, contrast, color map,
+…) rather than implicitly inheriting it. The pattern has four parts.
+
+This came up in `feat: Optional view-bin export for TIFFs (GUI + CLI)`
+(2026-05-19 — commits `387e19b`, `2278740`, `214e6f4`, `c32b7fd`,
+merged in `28301f8`) when the Export Images dialog and the
+`percell4-batch-export` CLI both gained a `--view-bin` opt-in. The
+forwarding rule alone wasn't enough — there were upstream UX questions
+the existing learning didn't answer.
+
+1. **Default = the established contract.** Existing callers and scripts
+   must keep working with zero change. For TIFF exports, the contract
+   is "exports are an archive, at native resolution". The opt-in lands
+   with the no-op value as default (`view_bin: int = 1` on
+   `ExportRequest`). The R7 zero-regression invariant in the feature
+   plan pinned this — all 17 pre-existing batch-export tests and 15
+   pre-existing CLI tests passed unchanged.
+
+2. **Opt-in via single toggle that names the live source.**
+   - GUI: a `QCheckBox` whose label includes the live value, e.g.
+     `"Apply current view bin (k=4) to exports"`. The k=N is rendered
+     from the session at the time the dialog draws, refreshed on
+     `Event.ACTIVE_BIN_CHANGED`.
+   - CLI: a positive-int flag with an explicit default, e.g.
+     `--view-bin N` (default `1`), with a validator that rejects N<1.
+
+   Naming the live source in the label avoids "use whatever the system
+   feels like" surprises.
+
+3. **Live read at action-time, not at construct-time.** The dialog's
+   accessor reads `session.active_bin` at the moment the launcher calls
+   it (post-Accept), not when the dialog opens:
+
+   ```python
+   def selected_view_bin(self) -> int:
+       if not self._view_bin_check.isChecked():
+           return 1
+       return int(self._session.active_bin)
+   ```
+
+   While the dialog is open, the user can change the SessionWindow
+   SpinBox and the label updates immediately via
+   `Event.ACTIVE_BIN_CHANGED`. The final export honors whatever value
+   is current at click-time. Subscribe on construct; unsubscribe in
+   `accept()`, `reject()`, AND `closeEvent()` via a `_bin_unsubscribe`
+   sentinel — idempotent teardown is non-negotiable here, same
+   discipline as the napari-modal-tool-overlay pattern.
+
+4. **CLI surface parity.** Whatever the GUI exposes as a checkbox, the
+   CLI exposes as a flag with the same default and same validator
+   semantics. A GUI-only toggle creates a two-tier user base
+   (interactive vs scripted); the CLI flag closes that gap and means
+   the use-case layer has exactly one knob both surfaces drive.
+
+   ```python
+   def _positive_int(raw: str) -> int:
+       value = int(raw)
+       if value < 1:
+           raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+       return value
+
+   parser.add_argument(
+       "--view-bin", type=_positive_int, default=1, metavar="N", ...,
+   )
+   ```
+
+**Out-of-scope decisions deliberately rejected (worth recording):**
+
+- **No filename suffix encoding.** Output filenames stay
+  `<stem>_<layer>.tif` regardless of bin. Encoding `_binN` would make
+  downstream scripts fragile against the toggle's presence/absence —
+  the user knowingly opts in per export run.
+- **Disabled, not hidden, at the no-op state.** When `active_bin == 1`
+  the checkbox is `setEnabled(False)` with the label still showing
+  `"(k=1) — no effect at native"`. Hiding it would let users miss that
+  the feature exists; disabling teaches the affordance.
+
+**Canonical callsites for the user-facing pattern** (added with this
+extension; the forward-at-every-caller examples above remain the
+canonical reference for the underlying wiring rule):
+
+- `src/percell4/application/use_cases/export_images.py`
+  (`ExportRequest.view_bin: int = 1` field; `ExportImages.execute`
+  forwards to all three `repo.read_*` calls).
+- `src/percell4/application/use_cases/batch_export_images.py`
+  (orchestrator `view_bin` kwarg threaded into `ExportRequest`).
+- `src/percell4/interfaces/cli/batch_export.py` (`--view-bin N` flag
+  with `_positive_int` validator).
+- `src/percell4/gui/export_images_dialog.py` (`QCheckBox` with live
+  ACTIVE_BIN_CHANGED subscription, `selected_view_bin()` accessor).
+- `src/percell4/interfaces/gui/main_window.py:1407-1450`
+  (`_on_export_images` passes `session=self.data_model.session`,
+  reads `dlg.selected_view_bin()`, threads into `ExportRequest`,
+  status-bar message includes "at k=N" when `view_bin > 1`).
+
+When to apply: adding a user-facing option to an **Action** tool
+(per `gui-action-contract-exhaustiveness.md`'s Selector/Creator/Action
+taxonomy) that should optionally honor a live GUI lens
+(`active_bin`, contrast, color map, blend mode, …). The lens must be
+session-owned with an `Event.*_CHANGED` event the dialog can subscribe
+to. There must be an established "archive" or "native" default to
+preserve. The tool already has, or should have, a CLI surface.
+
+Do NOT apply when the lens IS the data (e.g. segmentation choice — a
+Selector concern, not opt-in), or when there is no native default to
+preserve (then the lens should just always apply).
 
 ## Related Issues
 

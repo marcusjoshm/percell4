@@ -43,12 +43,37 @@ Thumbs.db
 *.csv
 *.xlsx
 *.xls
+# ...but test-fixture CSVs are committed parity baselines the suite reads.
+!tests/fixtures/**/*.csv
 
 # R
 .Rhistory
 .Rdata
 .Rproj.user/
 
-# Claude — ignore everything except the project-scoped settings.json
-.claude/*
-!.claude/settings.json
+# Local agent context — kept on disk but never pushed to the remote
+# repo. Agent-generated DOCUMENTATION (docs/solutions/, docs/audits/,
+# etc.) is still tracked; only the per-developer context-engineering
+# files and tool hooks are excluded here.
+.claude/
+.cursor/
+CLAUDE.md
+compound-engineering.local.md
+.worktrees
+
+# Developer scratch: one-off data-propagation scripts, ImageJ macros, and
+# tool hooks. Kept on disk for reuse but never part of the tracked platform.
+scripts/
+
+# Retired development artifact (adaptive SG puncta recipe), archived but untracked.
+docs/archive/locked_SG.json
+
+# Agent / tool context caches
+.context/
+
+# Scratch SVG exports at repo root (analysis runs).
+# docs/**/*.svg and src/**/*.svg remain trackable.
+/*.svg
+
+# Separate Tauri/Node desktop-app project living in the repo dir (incl. node_modules).
+/desktop/

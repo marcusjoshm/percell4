@@ -10,7 +10,6 @@ is the end-to-end CLI check.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import h5py
@@ -20,7 +19,6 @@ import tifffile
 
 from percell4.interfaces.cli import batch_export as cli
 from percell4.store import DatasetStore
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -263,3 +261,82 @@ def test_cli_module_imports_without_qt() -> None:
     importlib.reload(cli)
     assert hasattr(cli, "main")
     assert hasattr(cli, "batch_export_images")
+
+
+# ── --view-bin flag ────────────────────────────────────────────────────
+
+
+def test_view_bin_default_omitted_is_one(tmp_path: Path) -> None:
+    """Omitting --view-bin keeps the default 1 (native). R7."""
+    out = tmp_path / "out"
+    h5 = _make_h5(
+        tmp_path / "ds.h5",
+        channels=["ch0"],
+    )
+
+    exit_code = cli.main([str(h5), "-o", str(out)])
+    assert exit_code == 0
+    # 2 TIFFs from _make_h5's default (2,4,4); native shape (4,4).
+    data = tifffile.imread(out / "ds_ch0.tif")
+    assert data.shape == (4, 4)
+
+
+def test_view_bin_two_produces_downsampled_tiffs(tmp_path: Path) -> None:
+    """--view-bin 2 on a (2, 8, 8) intensity yields (4, 4) TIFFs."""
+    out = tmp_path / "out"
+    # Override intensity shape to 8x8 so view_bin=2 gives a clean 4x4.
+    from percell4.store import DatasetStore
+
+    h5 = tmp_path / "ds.h5"
+    store = DatasetStore(h5)
+    store.create(metadata={"channel_names": ["ch0"]})
+    store.write_array("intensity", np.zeros((2, 8, 8), dtype=np.uint16))
+
+    exit_code = cli.main([str(h5), "-o", str(out), "--view-bin", "2"])
+    assert exit_code == 0
+    data = tifffile.imread(out / "ds_ch0.tif")
+    assert data.shape == (4, 4)
+
+
+def test_view_bin_zero_rejected(tmp_path: Path) -> None:
+    """--view-bin 0 is rejected by the positive-int validator."""
+    h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
+    with pytest.raises(SystemExit):
+        cli.main([str(h5), "-o", str(tmp_path / "out"), "--view-bin", "0"])
+
+
+def test_view_bin_negative_rejected(tmp_path: Path) -> None:
+    """--view-bin -1 is also rejected."""
+    h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
+    with pytest.raises(SystemExit):
+        cli.main([str(h5), "-o", str(tmp_path / "out"), "--view-bin", "-1"])
+
+
+def test_view_bin_non_integer_rejected(tmp_path: Path) -> None:
+    """--view-bin foo (non-integer) is rejected by argparse."""
+    h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
+    with pytest.raises(SystemExit):
+        cli.main([str(h5), "-o", str(tmp_path / "out"), "--view-bin", "foo"])
+
+
+def test_view_bin_one_explicit_is_noop(tmp_path: Path) -> None:
+    """--view-bin 1 explicitly is equivalent to omitting the flag."""
+    out = tmp_path / "out"
+    h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
+
+    exit_code = cli.main([str(h5), "-o", str(out), "--view-bin", "1"])
+    assert exit_code == 0
+    data = tifffile.imread(out / "ds_ch0.tif")
+    assert data.shape == (4, 4)
+
+
+def test_help_mentions_view_bin(
+    capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--help mentions --view-bin and its default."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--help"])
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "--view-bin" in captured.out
+    assert "native" in captured.out.lower() or "default 1" in captured.out.lower()

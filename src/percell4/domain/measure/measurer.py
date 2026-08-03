@@ -7,8 +7,8 @@ Uses scipy.ndimage.find_objects for O(1) bounding box lookup per cell.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
 import numpy as np
 import pandas as pd
@@ -156,6 +156,17 @@ def measure_cells(
         If mask provided, additional {metric}_mask_inside and {metric}_mask_outside columns.
     """
     metric_names = _validate_metrics(metrics)
+
+    # Pure 2D contract (time-handling contract D): the caller must slice to a
+    # single timepoint before measuring. Handing a (T,H,W) stack against 2D
+    # labels otherwise surfaces as a cryptic boolean-index mismatch deep inside
+    # the crop loop -- fail loud with an actionable message instead.
+    if image.shape != labels.shape:
+        raise ValueError(
+            f"measure_cells expects image and labels to share the same 2D shape; "
+            f"got image {image.shape} vs labels {labels.shape}. Slice to a single "
+            "timepoint before measuring (pure domain functions stay 2D)."
+        )
 
     if labels.max() == 0:
         columns = _build_column_list(metric_names, has_mask=mask is not None)

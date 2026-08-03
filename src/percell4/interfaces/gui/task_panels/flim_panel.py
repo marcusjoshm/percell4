@@ -24,7 +24,12 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event
-from percell4.config import viewer_presets as vp
+from percell4.domain.flim.phasor import (
+    cal_mod_key,
+    cal_phase_key,
+    resolve_calibration,
+)
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.gui import theme
 from percell4.model import CellDataModel
 
@@ -63,6 +68,26 @@ class FlimPanel(QWidget):
             Event.DATASET_CHANGED, self._refresh_ref_circle_enabled
         )
         self._refresh_ref_circle_enabled()
+        # Gate the lifetime Wavelet source on whether a wavelet result
+        # exists for the active channel. Refresh on dataset and channel
+        # switches (the long-lived panel doesn't bother unsubscribing).
+        self.data_model.session.subscribe(
+            Event.DATASET_CHANGED, self._refresh_lifetime_source_enabled
+        )
+        self.data_model.session.subscribe(
+            Event.ACTIVE_CHANNEL_CHANGED, self._refresh_lifetime_source_enabled
+        )
+        self._refresh_lifetime_source_enabled()
+        # Reflect the stored per-harmonic calibration into the φ/M spinboxes
+        # when the dataset or active channel switches (harmonic changes are
+        # wired directly on the combo in _build_ui).
+        self.data_model.session.subscribe(
+            Event.DATASET_CHANGED, self._load_harmonic_cal_into_spinboxes
+        )
+        self.data_model.session.subscribe(
+            Event.ACTIVE_CHANNEL_CHANGED, self._load_harmonic_cal_into_spinboxes
+        )
+        self._load_harmonic_cal_into_spinboxes()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -70,13 +95,7 @@ class FlimPanel(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        title = QLabel("FLIM")
-        title.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; padding-bottom: 4px;"
-            f" border-bottom: 1px solid {theme.BORDER};"
-        )
-        layout.addWidget(title)
+        layout.addWidget(theme.section_label("FLIM"))
 
         # ── Phasor Analysis ──
         phasor_group = QGroupBox("Phasor Analysis")
@@ -88,6 +107,53 @@ class FlimPanel(QWidget):
         self._phasor_harmonic.addItems(["1", "2", "3"])
         harm_row.addWidget(self._phasor_harmonic)
         phasor_layout.addLayout(harm_row)
+
+        # Per-harmonic calibration. Calibration φ/M are frequency-dependent,
+        # so each harmonic needs its own values; the phasor lands off the
+        # universal circle if computed at a harmonic it wasn't calibrated
+        # for. The spinboxes show the stored calibration for the selected
+        # harmonic (editable). "Override" applies them for the NEXT Compute
+        # Phasor only (non-persisted preview, forces a recompute); "Save"
+        # persists them to /metadata as this channel+harmonic's calibration.
+        cal_row = QHBoxLayout()
+        cal_row.addWidget(QLabel("Cal φ:"))
+        self._cal_override_phase = QDoubleSpinBox()
+        self._cal_override_phase.setRange(-6.283, 6.283)
+        self._cal_override_phase.setDecimals(4)
+        self._cal_override_phase.setValue(0.0)
+        self._cal_override_phase.setSuffix(" rad")
+        cal_row.addWidget(self._cal_override_phase)
+        cal_row.addWidget(QLabel("M:"))
+        self._cal_override_mod = QDoubleSpinBox()
+        self._cal_override_mod.setRange(0.0, 10.0)
+        self._cal_override_mod.setDecimals(4)
+        self._cal_override_mod.setValue(1.0)
+        cal_row.addWidget(self._cal_override_mod)
+        phasor_layout.addLayout(cal_row)
+
+        cal_btn_row = QHBoxLayout()
+        self._cal_override_enable = QCheckBox("Override (this run)")
+        self._cal_override_enable.setToolTip(
+            "Apply the φ/M above instead of the stored calibration for the\n"
+            "next Compute Phasor only. Nothing is saved to disk; enabling\n"
+            "this forces a recompute."
+        )
+        cal_btn_row.addWidget(self._cal_override_enable)
+        self._btn_save_cal = QPushButton("Save as harmonic cal")
+        self._btn_save_cal.setToolTip(
+            "Persist the φ/M above to /metadata as this channel's calibration\n"
+            "for the selected harmonic (flim_cal_{phase,mod}_<ch>_h<n>). Later\n"
+            "computes at this harmonic use it automatically — no override needed."
+        )
+        self._btn_save_cal.clicked.connect(self._on_save_harmonic_cal)
+        cal_btn_row.addWidget(self._btn_save_cal)
+        phasor_layout.addLayout(cal_btn_row)
+
+        # Load the stored calibration for the selected harmonic into the
+        # spinboxes, and reload whenever the harmonic changes.
+        self._phasor_harmonic.currentTextChanged.connect(
+            self._load_harmonic_cal_into_spinboxes
+        )
 
         btn_phasor = QPushButton("Compute Phasor")
         btn_phasor.setToolTip(
@@ -110,7 +176,7 @@ class FlimPanel(QWidget):
         level_row = QHBoxLayout()
         level_row.addWidget(QLabel("Filter Level:"))
         self._wavelet_level = QSpinBox()
-        self._wavelet_level.setRange(1, 15)
+        self._wavelet_level.setRange(1, MAX_FILTER_LEVEL)
         self._wavelet_level.setValue(9)
         level_row.addWidget(self._wavelet_level)
         wavelet_layout.addLayout(level_row)
@@ -228,6 +294,35 @@ class FlimPanel(QWidget):
         # ── Lifetime ──
         lifetime_group = QGroupBox("Lifetime Map")
         lifetime_layout = QVBoxLayout(lifetime_group)
+
+        # Source selector: which phasor maps feed the lifetime. The combo
+        # item order matches ComputeLifetime.LIFETIME_SOURCES.
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Source:"))
+        self._lifetime_source_combo = QComboBox()
+        self._lifetime_source_combo.addItems(["Unfiltered", "Median", "Wavelet"])
+        self._lifetime_source_combo.setToolTip(
+            "Phasor maps used for the lifetime: raw (Unfiltered), a spatial "
+            "median of the raw maps (Median), or the DTCWT result (Wavelet, "
+            "available after Apply Wavelet Filter)."
+        )
+        self._lifetime_source_combo.currentIndexChanged.connect(
+            self._on_lifetime_source_changed
+        )
+        source_row.addWidget(self._lifetime_source_combo)
+        source_row.addWidget(QLabel("Kernel"))
+        self._lifetime_median_kernel = QSpinBox()
+        self._lifetime_median_kernel.setRange(3, 15)
+        self._lifetime_median_kernel.setSingleStep(2)
+        self._lifetime_median_kernel.setValue(3)
+        self._lifetime_median_kernel.setEnabled(False)
+        self._lifetime_median_kernel.setToolTip(
+            "Median window side length k (odd, 3–15); total pixels = k². "
+            "Used only when Source is Median."
+        )
+        source_row.addWidget(self._lifetime_median_kernel)
+        lifetime_layout.addLayout(source_row)
+
         btn_lifetime = QPushButton("Compute Lifetime")
         btn_lifetime.clicked.connect(self._on_compute_lifetime)
         lifetime_layout.addWidget(btn_lifetime)
@@ -253,6 +348,46 @@ class FlimPanel(QWidget):
 
     # ── Helpers ──────────────────────────────────────────────
 
+    def _active_tp_or_none(self) -> int | None:
+        """Active acquisition-frame index on a time-lapse dataset, else None."""
+        session = self.data_model.session
+        return int(session.active_timepoint) if session.n_timepoints > 1 else None
+
+    def _frame_map(self, arr):
+        """Slice a time-lapse (T_acq, H, W) phasor map to the active frame.
+
+        2-D maps (single-timepoint, or already a frame) pass through, so the
+        phasor window always receives a 2-D map matching the napari slider —
+        never a combined-all-timepoints (T_acq, H, W) cloud.
+        """
+        tp = self._active_tp_or_none()
+        if arr is not None and getattr(arr, "ndim", 0) == 3 and tp is not None:
+            return arr[max(0, min(tp, arr.shape[0] - 1))]
+        return arr
+
+    def _decay_intensity(self, handle, channel, view_bin: int = 1):
+        """Active-frame ``decay.sum(axis=-1)`` (2-D) for the intensity histogram.
+
+        Reads the active 4-D /decay frame on disk (read_decay) on a time-lapse
+        dataset so the weights match the displayed phasor frame; legacy 3-D
+        decay is read whole. Returns None when no /decay layer exists.
+        """
+        repo = self._get_repo()
+        tp = self._active_tp_or_none()
+        try:
+            reader = getattr(repo, "read_decay", None)
+            if tp is not None and reader is not None:
+                decay = reader(handle, channel, view_bin=view_bin, timepoint=tp)
+            else:
+                decay = repo.read_array(
+                    handle, f"decay/{channel}", view_bin=view_bin
+                )
+                if getattr(decay, "ndim", 0) == 4 and tp is not None:
+                    decay = decay[max(0, min(tp, decay.shape[0] - 1))]
+            return decay.sum(axis=-1).astype(np.float32)
+        except KeyError:
+            return None
+
     def _shift_held(self) -> bool:
         """Read Shift modifier at handler entry to detect force-recompute intent.
 
@@ -268,14 +403,109 @@ class FlimPanel(QWidget):
 
     # ── Phasor ───────────────────────────────────────────────
 
+    def _load_harmonic_cal_into_spinboxes(self, *_args) -> None:
+        """Reflect the stored calibration for the active channel + selected
+        harmonic into the φ/M spinboxes.
+
+        No-ops gracefully when there is no dataset or no active channel
+        (leaves whatever the spinboxes currently show). Reads metadata via
+        the repo when available, else falls back to the session handle's
+        snapshot; an uncalibrated harmonic resolves to (0.0, 1.0).
+        """
+        channel = self._get_active_channel()
+        if channel is None:
+            return
+        handle = self.data_model.session.dataset
+        if handle is None:
+            return
+        try:
+            harmonic = int(self._phasor_harmonic.currentText())
+        except (ValueError, AttributeError):
+            return
+
+        meta: dict = {}
+        try:
+            repo = self._get_repo()
+            reader = getattr(repo, "read_metadata", None)
+            meta = dict(reader(handle)) if reader is not None else dict(
+                handle.metadata
+            )
+        except Exception:
+            meta = dict(getattr(handle, "metadata", {}) or {})
+
+        phase, mod = resolve_calibration(meta, channel, harmonic)
+        # Block signals in case future edits wire spinbox change handlers.
+        self._cal_override_phase.blockSignals(True)
+        self._cal_override_mod.blockSignals(True)
+        self._cal_override_phase.setValue(float(phase))
+        self._cal_override_mod.setValue(float(mod))
+        self._cal_override_phase.blockSignals(False)
+        self._cal_override_mod.blockSignals(False)
+
+    def _on_save_harmonic_cal(self) -> None:
+        """Persist the φ/M spinbox values as this channel's calibration for
+        the selected harmonic (``flim_cal_{phase,mod}_<ch>_h<n>``)."""
+        channel = self._get_active_channel()
+        if channel is None:
+            self._show_status("Select a channel in the viewer first")
+            return
+        handle = self.data_model.session.dataset
+        if handle is None:
+            self._show_status("No dataset loaded")
+            return
+        harmonic = int(self._phasor_harmonic.currentText())
+        phase = float(self._cal_override_phase.value())
+        mod = float(self._cal_override_mod.value())
+
+        try:
+            repo = self._get_repo()
+            writer = getattr(repo, "write_metadata", None)
+            if writer is None:
+                self._show_status(
+                    "This dataset store cannot save calibration metadata"
+                )
+                return
+            writer(
+                handle,
+                {
+                    cal_phase_key(channel, harmonic): phase,
+                    cal_mod_key(channel, harmonic): mod,
+                },
+            )
+        except Exception as e:
+            self._show_status(f"Failed to save calibration: {e}")
+            return
+
+        self._show_status(
+            f"Saved calibration for {channel} harmonic {harmonic}: "
+            f"φ={phase:.4f} rad  M={mod:.4f}"
+        )
+
     def _on_compute_phasor(self) -> None:
         active_channel = self._get_active_channel()
         if active_channel is None:
             self._show_status("Select a channel in the viewer first")
             return
 
-        # Cache-check unless Shift forces recompute.
-        if not self._shift_held():
+        # Selected harmonic — read up front so the cache check below can
+        # detect a harmonic change and recompute rather than serving a
+        # cache computed at a different harmonic.
+        harmonic = int(self._phasor_harmonic.currentText())
+
+        # Temporary calibration override (non-persisted). When enabled it
+        # both feeds the new φ/M into ComputePhasor and forces a recompute:
+        # the phasor cache is keyed only on harmonic, so without bypassing
+        # it a same-harmonic override would be masked by a stale cache.
+        cal_override = self._cal_override_enable.isChecked()
+        cal_phase_override = (
+            float(self._cal_override_phase.value()) if cal_override else None
+        )
+        cal_mod_override = (
+            float(self._cal_override_mod.value()) if cal_override else None
+        )
+
+        # Cache-check unless Shift or a calibration override forces recompute.
+        if not self._shift_held() and not cal_override:
             try:
                 from percell4.application.use_cases.load_cached_phasor import (
                     LoadCachedPhasor,
@@ -299,23 +529,33 @@ class FlimPanel(QWidget):
                 self._show_status(str(e))
                 return
             else:
-                # Cache hit — push to phasor window with the unfiltered call
-                # shape (raw g/s, no g_unfiltered/s_unfiltered).
-                self._show_window("phasor_plot")
-                seg_labels = self._get_active_seg_labels()
-                phasor_win = self._get_phasor_window()
-                if phasor_win is not None:
-                    phasor_win.set_phasor_data(
-                        cached.g_map, cached.s_map,
-                        intensity=cached.intensity, labels=seg_labels,
-                    )
-                self._show_status(
-                    f"Loaded cached phasor (channel: {active_channel})"
+                # Serve the cache only when it was computed at the selected
+                # harmonic. A mismatch falls through to recompute so the
+                # harmonic dropdown actually takes effect; an unknown cached
+                # harmonic (pre-attr file / test fake) is served as before.
+                harmonic_matches = (
+                    cached.cached_harmonic is None
+                    or cached.cached_harmonic == harmonic
                 )
-                self._refresh_ref_circle_enabled()
-                return
+                if harmonic_matches:
+                    # Cache hit — push to phasor window with the unfiltered call
+                    # shape (raw g/s, no g_unfiltered/s_unfiltered).
+                    self._show_window("phasor_plot")
+                    seg_labels = self._get_active_seg_labels()
+                    phasor_win = self._get_phasor_window()
+                    if phasor_win is not None:
+                        phasor_win.set_phasor_data(
+                            cached.g_map, cached.s_map,
+                            intensity=cached.intensity, labels=seg_labels,
+                        )
+                    self._show_status(
+                        f"Loaded cached phasor (channel: {active_channel})"
+                    )
+                    self._refresh_ref_circle_enabled()
+                    self._refresh_lifetime_source_enabled()
+                    return
+                # Harmonic changed — fall through to recompute below.
 
-        harmonic = int(self._phasor_harmonic.currentText())
         recompute_prefix = (
             "Recomputing phasor (Shift)" if self._shift_held()
             else f"Computing phasor for {active_channel}"
@@ -330,6 +570,8 @@ class FlimPanel(QWidget):
             active_bin = self.data_model.session.active_bin
             result = uc.execute(
                 channel=active_channel, harmonic=harmonic, view_bin=active_bin,
+                cal_phase_override=cal_phase_override,
+                cal_mod_override=cal_mod_override,
             )
         except ValueError as e:
             self._show_status(str(e))
@@ -342,36 +584,33 @@ class FlimPanel(QWidget):
         handle = self.data_model.session.dataset
         phasor_intensity = None
         if handle is not None:
-            # Intensity for the phasor plot's intensity-weighted histogram
-            # MUST be spatially aligned with g_map / s_map. Both g_map and
-            # s_map are computed from /decay/<channel>, so derive the
-            # intensity weights from /decay/<channel>.sum(axis=-1) too —
-            # NOT from the /intensity stack, which can drift out of
-            # alignment with /decay (different stitching, rotation,
-            # different acquisition source). Misaligned weights produce
-            # wildly wrong histograms even though the per-pixel (g, s)
-            # values are correct.
-            try:
-                repo = self._get_repo()
-                decay = repo.read_array(
-                    handle, f"decay/{active_channel}", view_bin=active_bin,
-                )
-                phasor_intensity = decay.sum(axis=-1).astype(np.float32)
-            except KeyError:
-                phasor_intensity = None
+            # Intensity weights MUST come from /decay/<ch>.sum(axis=-1) (NOT the
+            # /intensity stack, which can drift out of alignment with /decay) so
+            # they match g/s per pixel — and from the SAME acquisition frame on
+            # a time-lapse dataset.
+            phasor_intensity = self._decay_intensity(
+                handle, active_channel, view_bin=active_bin
+            )
 
         seg_labels = self._get_active_seg_labels()
         self._show_window("phasor_plot")
         phasor_win = self._get_phasor_window()
         if phasor_win is not None:
+                # _frame_map slices the active acquisition frame on a time-lapse
+                # dataset (ComputePhasor returns (T_acq, H, W) g/s); 2-D passes.
                 phasor_win.set_phasor_data(
-                    result.g_map, result.s_map,
+                    self._frame_map(result.g_map), self._frame_map(result.s_map),
                     intensity=phasor_intensity, labels=seg_labels,
                 )
 
         freq = handle.metadata.get("flim_frequency_mhz", "unknown") if handle else "unknown"
         verb = "Recomputed" if self._shift_held() else "Phasor computed:"
         suffix = " (Shift)" if self._shift_held() else ""
+        if cal_override:
+            suffix += (
+                f" | cal override φ={cal_phase_override:.4f} rad "
+                f"M={cal_mod_override:.4f}"
+            )
         self._show_status(
             f"{verb} {result.n_valid:,} valid pixels | "
             f"channel: {active_channel} | harmonic: {harmonic} | freq: {freq} MHz{suffix}"
@@ -380,6 +619,9 @@ class FlimPanel(QWidget):
         # flim_frequency_mhz; refresh the reference-circle checkbox state
         # so the user can engage it without re-loading the dataset.
         self._refresh_ref_circle_enabled()
+        # Recomputing phasor invalidated any prior wavelet result → the
+        # Wavelet lifetime source should reflect that it's now unavailable.
+        self._refresh_lifetime_source_enabled()
 
     # ── Wavelet Filter ───────────────────────────────────────
 
@@ -389,8 +631,15 @@ class FlimPanel(QWidget):
             self._show_status("Select a channel in the viewer first")
             return
 
+        filter_level = self._wavelet_level.value()
+
         # Cache-check unless Shift forces recompute. We check g_filtered
-        # specifically — wavelet's cache distinct from raw phasor cache.
+        # specifically — wavelet's cache is distinct from the raw phasor
+        # cache. The cached wavelet is reused ONLY when it was computed at
+        # the requested filter level; a different level (or an unknown /
+        # absent cached level) falls through and recomputes, overwriting the
+        # stale result. Without this gate, changing the Filter Level spinbox
+        # would silently no-op against the cache.
         if not self._shift_held():
             try:
                 from percell4.application.use_cases.load_cached_phasor import (
@@ -407,28 +656,35 @@ class FlimPanel(QWidget):
                     active_channel, view_bin=active_bin,
                 )
             except NoCachedPhasorError:
-                pass  # No raw phasor either — fall through to compute (will fail in apply_wavelet with a clear ValueError)
+                # No raw phasor either — fall through to compute
+                # (will fail in apply_wavelet with a clear ValueError)
+                pass
             except NoDatasetError as e:
                 self._show_status(str(e))
                 return
             else:
-                if cached.g_filtered is not None and cached.s_filtered is not None:
+                if (
+                    cached.g_filtered is not None
+                    and cached.s_filtered is not None
+                    and cached.cached_filter_level == filter_level
+                ):
                     seg_labels = self._get_active_seg_labels()
                     phasor_win = self._get_phasor_window()
                     if phasor_win is not None:
                         phasor_win.set_phasor_data(
-                            cached.g_filtered, cached.s_filtered,
+                            cached.g_map, cached.s_map,
                             intensity=cached.intensity,
-                            g_unfiltered=cached.g_map, s_unfiltered=cached.s_map,
+                            g_wavelet=cached.g_filtered, s_wavelet=cached.s_filtered,
                             labels=seg_labels,
                         )
                     self._show_status(
-                        f"Loaded cached wavelet (channel: {active_channel})"
+                        f"Loaded cached wavelet (level {filter_level}, "
+                        f"channel: {active_channel})"
                     )
                     return
-                # Raw cache exists but no wavelet — fall through to compute.
+                # No filtered cache, or it was computed at a different level
+                # — fall through to (re)compute at filter_level and overwrite.
 
-        filter_level = self._wavelet_level.value()
         recompute_prefix = (
             "Recomputing wavelet (Shift)" if self._shift_held()
             else f"Applying wavelet filter (level {filter_level}) to {active_channel}"
@@ -474,27 +730,40 @@ class FlimPanel(QWidget):
         repo = self._get_repo()
         intensity = None
         if handle is not None and repo is not None:
-            try:
-                decay = repo.read_array(handle, f"decay/{active_channel}")
-                intensity = decay.sum(axis=-1).astype(np.float32)
-            except KeyError:
-                pass
+            intensity = self._decay_intensity(handle, active_channel)
 
         g_unfiltered = s_unfiltered = None
         if handle is not None and repo is not None:
             try:
-                g_unfiltered = repo.read_array(handle, f"phasor/{active_channel}/g")
-                s_unfiltered = repo.read_array(handle, f"phasor/{active_channel}/s")
+                # _frame_map slices the active acquisition frame (time-lapse
+                # phasor is (T_acq, H, W)); 2-D single-timepoint passes through.
+                g_unfiltered = self._frame_map(
+                    repo.read_array(handle, f"phasor/{active_channel}/g")
+                )
+                s_unfiltered = self._frame_map(
+                    repo.read_array(handle, f"phasor/{active_channel}/s")
+                )
             except KeyError:
                 pass
+
+        # The unfiltered g/s are the canonical maps the window stores; the
+        # wavelet result is the optional view. Raw maps should always exist
+        # after a successful wavelet run (wavelet reads them), but fall back
+        # to the filtered maps as the base if the read somehow failed.
+        if g_unfiltered is None or s_unfiltered is None:
+            base_g = self._frame_map(result.g_filtered)
+            base_s = self._frame_map(result.s_filtered)
+        else:
+            base_g, base_s = g_unfiltered, s_unfiltered
 
         seg_labels = self._get_active_seg_labels()
         phasor_win = self._get_phasor_window()
         if phasor_win is not None:
                 phasor_win.set_phasor_data(
-                    result.g_filtered, result.s_filtered,
+                    base_g, base_s,
                     intensity=intensity.astype(np.float32) if intensity is not None else None,
-                    g_unfiltered=g_unfiltered, s_unfiltered=s_unfiltered,
+                    g_wavelet=self._frame_map(result.g_filtered),
+                    s_wavelet=self._frame_map(result.s_filtered),
                     labels=seg_labels,
                 )
 
@@ -504,6 +773,8 @@ class FlimPanel(QWidget):
             f"{verb} level {filter_level} | "
             f"{result.n_valid:,} valid pixels | channel: {active_channel}{suffix}"
         )
+        # A wavelet result now exists → enable the Wavelet lifetime source.
+        self._refresh_lifetime_source_enabled()
 
     # ── Lifetime ─────────────────────────────────────────────
 
@@ -513,13 +784,26 @@ class FlimPanel(QWidget):
             self._show_status("Select a channel in the viewer first")
             return
 
+        # Read the source + kernel from the widgets at click time and pass
+        # them explicitly into the use case (no silent default). The combo
+        # order matches LIFETIME_SOURCES = (unfiltered, median, wavelet).
+        source = ("unfiltered", "median", "wavelet")[
+            self._lifetime_source_combo.currentIndex()
+        ]
+        median_size = int(self._lifetime_median_kernel.value())
+
         try:
             from percell4.application.use_cases.compute_lifetime import ComputeLifetime
 
             repo = self._get_repo()
             uc = ComputeLifetime(repo, self.data_model.session)
             active_bin = self.data_model.session.active_bin
-            result = uc.execute(channel=active_channel, view_bin=active_bin)
+            result = uc.execute(
+                channel=active_channel,
+                source=source,
+                median_size=median_size,
+                view_bin=active_bin,
+            )
         except ValueError as e:
             self._show_status(str(e))
             return
@@ -527,19 +811,15 @@ class FlimPanel(QWidget):
             self._show_status(f"Lifetime computation error: {e}")
             return
 
-        # Add lifetime layer to viewer
+        # Add lifetime layer to viewer. The use case registered the
+        # lifetime as a /intensity channel and refreshed channel_names;
+        # push the freshly computed plane through the normal channel
+        # render path so the colormap resolution (turbo via the
+        # "lifetime" CHANNEL_COLORMAPS entry) and add_image defaults match
+        # what a later reload from disk produces.
         viewer_win = self._get_viewer_window()
         if viewer_win is not None:
-                viewer_win.viewer.add_image(
-                    result.lifetime,
-                    name=f"Lifetime ({active_channel})",
-                    colormap=vp.FLIM_LIFETIME_COLORMAP,
-                    blending=vp.FLIM_LIFETIME_BLENDING,
-                    **vp._optional_kwargs(
-                        opacity=vp.FLIM_LIFETIME_OPACITY,
-                        contrast_limits=vp.FLIM_LIFETIME_CONTRAST_OVERRIDE,
-                    ),
-                )
+            viewer_win.add_image(result.lifetime, name=result.channel_name)
 
         if result.mean_tau is not None:
             self._show_status(
@@ -548,6 +828,48 @@ class FlimPanel(QWidget):
             )
         else:
             self._show_status("Lifetime: no valid pixels")
+
+    def _on_lifetime_source_changed(self, _index: int) -> None:
+        """Enable the median kernel spin only when Source is Median."""
+        is_median = self._lifetime_source_combo.currentText() == "Median"
+        self._lifetime_median_kernel.setEnabled(is_median)
+
+    def _refresh_lifetime_source_enabled(self, *_args) -> None:
+        """Gate the Wavelet lifetime source on a present wavelet result.
+
+        The Wavelet item is disabled (not hidden) unless
+        ``phasor/<ch>/g_filtered`` exists for the active channel — mirrors
+        the phasor plot's wavelet-checkbox enablement so the user can't pick
+        a source the use case would reject. If the active selection becomes
+        disabled, fall back to Unfiltered.
+        """
+        from qtpy.QtCore import Qt
+        from qtpy.QtGui import QStandardItemModel
+
+        has_wavelet = False
+        channel = self._get_active_channel()
+        handle = self.data_model.session.dataset
+        repo = self._get_repo()
+        if channel is not None and handle is not None and repo is not None:
+            # Existence check only — must not decompress the map (this fires on
+            # every dataset/channel change). array_exists reads metadata only.
+            has_wavelet = repo.array_exists(handle, f"phasor/{channel}/g_filtered")
+
+        model = self._lifetime_source_combo.model()
+        wavelet_idx = 2  # ("Unfiltered", "Median", "Wavelet")
+        item = None
+        if isinstance(model, QStandardItemModel):
+            item = model.item(wavelet_idx)
+        if item is not None:
+            item.setEnabled(has_wavelet)
+        tip = (
+            "" if has_wavelet
+            else "Apply the wavelet filter first to enable this source."
+        )
+        self._lifetime_source_combo.setItemData(wavelet_idx, tip, Qt.ToolTipRole)
+
+        if not has_wavelet and self._lifetime_source_combo.currentIndex() == wavelet_idx:
+            self._lifetime_source_combo.setCurrentIndex(0)  # Unfiltered
 
     # ── Phasor Filters (U6) ──────────────────────────────────
 
@@ -681,7 +1003,10 @@ class FlimPanel(QWidget):
                 else None
             ),
             mask_filter_active=phasor_win._mask_filter_check.isChecked(),
-            use_filtered_gs=phasor_win._filtered_check.isChecked(),
+            # GMM reads persisted maps from HDF5: wavelet view → g_filtered,
+            # otherwise the raw g/s. The on-demand median view is not a
+            # persisted resource, so GMM runs on raw g/s when it is active.
+            use_filtered_gs=phasor_win._wavelet_check.isChecked(),
             harmonic=int(phasor_win._harmonic_combo.currentText()),
             # Capture session.active_bin at worker-construction (race-safe
             # per the U12 capture pattern) so a mid-flight bin toggle

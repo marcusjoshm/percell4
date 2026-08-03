@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import h5py
 import numpy as np
 import pytest
@@ -12,6 +14,7 @@ from percell4.domain.io.models import (
     CompositeRule,
     ExplicitRule,
     ProvenanceRecord,
+    StitchProvenanceRecord,
     ZeroPadOffsetRule,
 )
 from percell4.store import (
@@ -257,3 +260,54 @@ def test_rule_serialization_roundtrip(rule):
     assert isinstance(s, str)
     rt = deserialize_rule(s)
     assert rt == rule
+
+
+# ── Stitch geometry persistence (U4) ────────────────────────────────────
+
+
+def _stitch_provenance() -> StitchProvenanceRecord:
+    quality = {
+        "correlations": [0.9, 0.85],
+        "disconnected": [],
+        "accepted_pair_fraction": 1.0,
+        "coverage_fraction": 0.99,
+        "regression_threshold": 0.3,
+        "n_peaks": 5,
+    }
+    return StitchProvenanceRecord(
+        reference_channel="ch00",
+        overlap="0.1",
+        library="grid_stitching@vendored",
+        quality_json=json.dumps(quality),
+        n_tiles="2",
+        importer_version="0.1.0",
+        timestamp_utc="2026-06-24T12:00:00+00:00",
+    )
+
+
+def test_stitch_geometry_roundtrip_alongside_intensity(tmp_path):
+    """Geometry round-trips on a store that already carries /intensity + decay."""
+    store = _make_store_with_intensity(tmp_path)
+    offsets = np.array([[0, 0], [0, 28]], dtype=np.int32)
+
+    store.write_stitch_geometry(
+        offsets, _stitch_provenance(), reference_channel="ch00", overlap=0.1
+    )
+
+    geo = DatasetStore(store.path).read_stitch_geometry()
+    assert geo.registered is True
+    assert np.array_equal(geo.offsets, offsets)
+    assert geo.reference_channel == "ch00"
+    assert geo.overlap == 0.1
+    # native_shape / channel_names from the prior intensity write are intact.
+    meta = store.metadata
+    assert meta["native_shape"] == (32, 32)
+    assert meta["channel_names"] == ["ch00", "ch01"]
+
+
+def test_stitch_geometry_absent_reads_unregistered(tmp_path):
+    """A store with intensity but no stitch geometry reads back unregistered."""
+    store = _make_store_with_intensity(tmp_path)
+    geo = store.read_stitch_geometry()
+    assert geo.registered is False
+    assert geo.offsets is None

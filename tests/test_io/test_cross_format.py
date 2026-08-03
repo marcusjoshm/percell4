@@ -81,11 +81,76 @@ def test_zero_pad_offset_no_bin_match_yields_unmatched():
     assert result.unmatched == (bins[0],)
 
 
-def test_zero_pad_offset_bin_without_channel_token_unmatched():
-    """A .bin file whose stem doesn't carry a channel token is unmatched (under pure ZeroPad)."""
+def test_zero_pad_offset_bin_without_channel_token_unmatched_when_transform_invalid():
+    """A .bin with no ``_chN`` token defaults to channel token "0".
+
+    Under ``ZeroPadOffsetRule(pad_width=2, offset=1)`` the transform on
+    token "0" is ``0 - 1 = -1``, which is invalid — so the .bin still ends
+    up unmatched. The reasoning changed (token is now "0" instead of None)
+    but the outcome under this rule is the same. See the companion test
+    below for the case where the default-to-"0" fallback DOES pair.
+    """
     rule = ZeroPadOffsetRule(pad_width=2, offset=1)
     bins = [Path("/data/Dataset_A.bin")]  # no _ch token
     intensity = _channels(("ch00", "00"))
+
+    result = match_bin_to_intensity(bins, intensity, rule, TokenConfig())
+
+    assert result.bindings == ()
+    assert result.unmatched == (bins[0],)
+
+
+def test_bin_without_token_defaults_to_zero_and_pairs_under_no_transform():
+    """Single-channel FLIM: LASX omits ``_chN`` when there's only one channel.
+
+    With ``ZeroPadOffsetRule(pad_width=0, offset=0)`` (exact equality, no
+    transform), a token-less .bin file should default to token "0" and
+    pair with a channel whose token is "0". The user provides the channel
+    token override via the Batch TCSPC dialog's Section 4 table.
+    """
+    rule = ZeroPadOffsetRule(pad_width=0, offset=0)
+    bins = [Path("/data/decay.bin")]  # no _ch token
+    intensity = _channels(("ch0", "0"))
+
+    result = match_bin_to_intensity(bins, intensity, rule, TokenConfig())
+
+    bindings = {b.bin_path: b.channel_name for b in result.bindings}
+    assert bindings == {bins[0]: "ch0"}
+    assert result.unmatched == ()
+    assert result.ambiguous == ()
+
+
+def test_multiple_bins_without_token_all_collapse_to_zero():
+    """Multiple token-less .bins (e.g., stitched tiles) all use token "0".
+
+    All bins collapse to the same channel; if exactly one channel has
+    token "0", every bin pairs with it. The stitching logic upstream then
+    assembles them.
+    """
+    rule = ZeroPadOffsetRule(pad_width=0, offset=0)
+    bins = [
+        Path("/data/tile1.bin"),
+        Path("/data/tile2.bin"),
+        Path("/data/tile3.bin"),
+    ]
+    intensity = _channels(("ch0", "0"))
+
+    result = match_bin_to_intensity(bins, intensity, rule, TokenConfig())
+
+    assert {b.channel_name for b in result.bindings} == {"ch0"}
+    assert len(result.bindings) == 3
+    assert result.unmatched == ()
+
+
+def test_bin_without_token_does_not_pair_when_no_zero_channel():
+    """If no channel has token "0", the token-less .bin remains unmatched.
+
+    The default-to-"0" rule only triggers a pairing when the user has
+    explicitly assigned token "0" to one of their channels.
+    """
+    rule = ZeroPadOffsetRule(pad_width=0, offset=0)
+    bins = [Path("/data/decay.bin")]
+    intensity = _channels(("ch0", "1"), ("ch1", "2"))  # neither has "0"
 
     result = match_bin_to_intensity(bins, intensity, rule, TokenConfig())
 

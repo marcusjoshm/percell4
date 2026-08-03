@@ -10,15 +10,14 @@ CLI behavior, not the FLIM math.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pytest
 
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.interfaces.cli import batch_phasor as cli
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -229,12 +228,13 @@ def test_main_overwrite_flag_threads_through(
 def test_main_filter_level_out_of_range_errors(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """--filter-level 0 or 10 is rejected via argparse error path."""
+    """--filter-level below 1 or above MAX_FILTER_LEVEL is rejected via the
+    argparse error path."""
     h5 = _make_h5(tmp_path / "ds.h5", channels=["ch0"])
     with pytest.raises(SystemExit):
         cli.main([str(h5), "--filter-level", "0"])
     with pytest.raises(SystemExit):
-        cli.main([str(h5), "--filter-level", "10"])
+        cli.main([str(h5), "--filter-level", str(MAX_FILTER_LEVEL + 1)])
 
 
 def test_main_filter_level_threads_through_to_wavelet(
@@ -334,14 +334,101 @@ def test_help_includes_description_and_examples(
 # ── Seam: CLI imports without Qt / napari ──────────────────────────────
 
 
+# ── --remove flag ──────────────────────────────────────────────────────
+
+
+def _has_phasor(h5_path: Path, channel: str) -> bool:
+    with h5py.File(h5_path, "r") as f:
+        return f"phasor/{channel}" in f
+
+
+def test_remove_flag_deletes_phasor_groups(tmp_path: Path, capsys) -> None:
+    """--remove deletes /phasor/<ch>/ for every channel with data."""
+    h5 = tmp_path / "ds.h5"
+    _make_h5(h5, channels=["ch0", "ch1"])
+    # Plant phasor data so there's something to remove.
+    with h5py.File(h5, "a") as f:
+        phasor = f.create_group("phasor")
+        for ch in ("ch0", "ch1"):
+            grp = phasor.create_group(ch)
+            grp.create_dataset("g", data=np.zeros((4, 4), dtype=np.float32))
+            grp.create_dataset("s", data=np.zeros((4, 4), dtype=np.float32))
+
+    exit_code = cli.main([str(h5), "--remove"])
+
+    assert exit_code == 0
+    assert not _has_phasor(h5, "ch0")
+    assert not _has_phasor(h5, "ch1")
+    captured = capsys.readouterr()
+    # Output uses the removal verb, not "processed".
+    assert "removed" in captured.out
+    assert "[succeeded]" in captured.out
+
+
+def test_remove_skips_channels_with_no_phasor(tmp_path: Path, capsys) -> None:
+    """Channels without /phasor/<ch>/ on disk are reported as skipped."""
+    h5 = tmp_path / "ds.h5"
+    _make_h5(h5, channels=["ch0", "ch1"])
+    # Only plant phasor data for ch0; ch1 should be skipped.
+    with h5py.File(h5, "a") as f:
+        grp = f.create_group("phasor/ch0")
+        grp.create_dataset("g", data=np.zeros((4, 4), dtype=np.float32))
+
+    exit_code = cli.main([str(h5), "--remove"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    # ch0 removed, ch1 skipped → status "partial"
+    assert "[partial]" in captured.out
+    assert "1 removed" in captured.out
+    assert "1 skipped" in captured.out
+
+
+def test_remove_and_overwrite_mutually_exclusive(tmp_path: Path) -> None:
+    """argparse rejects --remove + --overwrite together."""
+    h5 = tmp_path / "ds.h5"
+    _make_h5(h5, channels=["ch0"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main([str(h5), "--remove", "--overwrite"])
+    assert exc.value.code != 0
+
+
+def test_remove_ignores_filter_level_validation(tmp_path: Path) -> None:
+    """--filter-level out-of-range is allowed when --remove is set."""
+    h5 = tmp_path / "ds.h5"
+    _make_h5(h5, channels=["ch0"])
+    with h5py.File(h5, "a") as f:
+        grp = f.create_group("phasor/ch0")
+        grp.create_dataset("g", data=np.zeros((4, 4), dtype=np.float32))
+
+    # filter_level=0 would normally error in compute mode. With --remove
+    # it's irrelevant; main() should not validate it.
+    exit_code = cli.main([str(h5), "--remove", "--filter-level", "0"])
+    assert exit_code == 0
+    assert not _has_phasor(h5, "ch0")
+
+
+def test_remove_all_clean_returns_exit_1(tmp_path: Path) -> None:
+    """When no dataset had phasor to remove, exit code signals no-progress."""
+    h5 = tmp_path / "ds.h5"
+    _make_h5(h5, channels=["ch0"])  # no /phasor/ group at all
+    exit_code = cli.main([str(h5), "--remove"])
+    assert exit_code == 1
+
+
+def test_remove_help_text_present(capsys) -> None:
+    """--remove appears in the CLI help."""
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    captured = capsys.readouterr()
+    assert "--remove" in captured.out
+    assert "delete" in captured.out.lower()
+
+
 def test_cli_module_imports_without_qt() -> None:
     """Importing the batch_phasor CLI must not pull in Qt or napari."""
     # The module is already imported at test-collection time; check
     # whether Qt / napari leaked in via that import.
-    qt_modules = {
-        m for m in sys.modules
-        if "PyQt" in m or "qtpy" in m or m.startswith("napari")
-    }
     # Some Qt may be in sys.modules from OTHER tests in the same
     # session. The test is meaningful only on a clean import. Just
     # verify the CLI module is loaded without crashing -- the import

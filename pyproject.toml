@@ -31,6 +31,7 @@ dependencies = [
 
     # Data storage
     "h5py>=3.10,<4",
+    "hdf5plugin>=4.0",  # Blosc filter for fast-decoding image/label compression
     "pandas>=2.0,<3",
     "pyarrow>=14",
 
@@ -40,9 +41,17 @@ dependencies = [
     "scipy>=1.12",
     "tifffile>=2024.1",
 
-    # Segmentation
-    "cellpose>=3.0,<5.0",
+    # Segmentation — >=4.2 ships the cpsam_v2 / cpdino built-in models
+    # (selected via CellposeModel(pretrained_model=...)); the 3.x Cellpose
+    # class is gone, so the wrapper is 4.x-only.
+    "cellpose>=4.2,<5.0",
     "scikit-learn>=1.3,<2.0",
+
+    # Statistics — Hartigan's dip test for CNR subpopulation gap detection
+    "diptest>=0.7,<0.12",
+
+    # Cell tracking + lineage (time-lapse)
+    "laptrack>=0.16,<0.18",
 
     # FLIM I/O
     "sdtfile>=2024.1",
@@ -62,8 +71,15 @@ flim = [
 imagej = [
     "roifile>=2024.1",
 ]
+# Phasor-calibration OCR helper (tools/png_to_csv/). Also needs the Tesseract
+# OCR engine, a system binary pip cannot install (brew / apt / Windows installer).
+ocr = [
+    "pytesseract>=0.3",
+    "Pillow>=10",
+    "openpyxl>=3.1",
+]
 all = [
-    "percell4[gpu,flim,imagej]",
+    "percell4[gpu,flim,imagej,ocr]",
 ]
 dev = [
     "pytest>=7.4",
@@ -76,16 +92,59 @@ dev = [
 [project.gui-scripts]
 percell4-gui = "percell4.app:main"
 
+[project.scripts]
+percell4-batch-cellpose-laptrack = "percell4.interfaces.cli.batch_process:main"
+percell4-batch-export       = "percell4.interfaces.cli.batch_export:main"
+percell4-batch-rename       = "percell4.interfaces.cli.batch_rename_resource:main"
+percell4-batch-delete       = "percell4.interfaces.cli.batch_delete_resource:main"
+percell4-batch-phasor       = "percell4.interfaces.cli.batch_phasor:main"
+percell4-batch-phasor-masks = "percell4.interfaces.cli.batch_phasor_masks:main"
+percell4-batch-whole-field  = "percell4.interfaces.cli.batch_whole_field:main"
+percell4-batch-validate-puncta = "percell4.interfaces.cli.batch_validate_puncta:main"
+percell4-window-bakeoff     = "percell4.interfaces.cli.window_bakeoff:main"
+percell4-batch-threshold    = "percell4.interfaces.cli.batch_threshold:main"
+percell4-batch-measure      = "percell4.interfaces.cli.batch_measure:main"
+percell4-inspect            = "percell4.interfaces.cli.inspect_dataset:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"percell4.resources" = ["*.png", "*.ico", "*.icns"]
+
 [tool.pytest.ini_options]
+# tests/ only. The GL-dependent GUI tests live in tests_gui/, which is
+# deliberately outside this list -- see tests_gui/README.md. Separating them by
+# directory rather than by marker is what makes the default run headless: a
+# marker relies on addopts, and any explicit -m on the command line silently
+# overrides addopts. That is exactly how CI ended up running a different,
+# larger suite than a local run for months.
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-v --tb=short"
+# This is the single source of test selection. CI's blocking job runs a bare
+# `pytest` and inherits it, so a local green and a CI green mean the same
+# thing. Do not move any part of the selection onto a command line.
+#
+# tests/test_scripts exercises the gitignored scripts/ developer-scratch dir,
+# which is not part of a clean checkout, so it is excluded here rather than
+# with --ignore on CI.
+addopts = "-v --tb=short -m 'not slow' --ignore=tests/test_scripts"
+# Pin the Qt binding for pytest-qt. A dev machine can easily end up with
+# PyQt5, PyQt6, and PySide6 all installed (napari and its plugins pull
+# different ones), and without this pytest-qt picks whichever it finds first —
+# so the same suite passes, fails, or segfaults from run to run depending on
+# which binding won. CI installs only PyQt5; pinning here makes a local run
+# reproduce CI instead of testing a configuration nobody ships.
+# The matching QT_API for qtpy is set in tests/conftest.py, which has to run
+# before the first qtpy import.
+qt_api = "pyqt5"
+# One marker, and it is actually applied. A declared-but-unused marker is not
+# harmless: `gui` was declared here and applied to zero tests, so CI's
+# `-m 'not slow and not gui'` deselected nothing while reading as though it
+# excluded the GUI suite. `napari_viewer` is likewise retired -- those tests
+# now live in tests_gui/, so the directory is the selection.
 markers = [
-    "slow: marks tests as slow (requires cellpose model download, deselect with '-m \"not slow\"')",
-    "gui: marks tests requiring Qt/napari (deselect with '-m \"not gui\"')",
+    "slow: requires a cellpose model download; deselected by default in addopts",
 ]
 
 # ── Import-linter: hexagonal architecture contracts ──────────
@@ -104,10 +163,17 @@ forbidden_modules = [
     "PyQt5",
     "napari",
     "h5py",
+    "laptrack",
     "percell4.adapters",
     "percell4.interfaces",
     "percell4.application",
 ]
+
+[[tool.importlinter.contracts]]
+name = "domain/analysis must not import domain/measure"
+type = "forbidden"
+source_modules = ["percell4.domain.analysis"]
+forbidden_modules = ["percell4.domain.measure"]
 
 [[tool.importlinter.contracts]]
 name = "application/ must not import Qt, napari, or concrete adapters"
@@ -142,10 +208,23 @@ forbidden_modules = [
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+# Vendored third-party code (numpy-only grid_stitching core) is kept verbatim to
+# its upstream source; do not lint it against house style.
+extend-exclude = ["src/percell4/domain/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# Qt overrides use camelCase (closeEvent, showEvent, etc.)
+# Qt overrides use camelCase (closeEvent, showEvent, dropEvent, etc.)
 "src/percell4/gui/*.py" = ["N802"]
+# Qt overrides (N802) + Qt signals are mixedCase by convention (N815).
+"src/percell4/interfaces/gui/**/*.py" = ["N802", "N815"]
+# scikit-learn convention: `X` / `X_sample` is the standard feature-matrix name.
+"src/percell4/domain/measure/grouper.py" = ["N803", "N806"]
+# Tests use requirement-ID / shape-acronym function names (test_AE2_*, test_*_THW,
+# test_compose_with_AND) and scientific / mock locals (H, W, X, A, B, MockUC).
+# Glob covers tests/ and tests_gui/ alike — the relocated GL modules use the
+# same shape-acronym locals (H = W = 48) and would fail the moment the lint
+# job started scanning them.
+"tests*/**/*.py" = ["N802", "N803", "N806"]

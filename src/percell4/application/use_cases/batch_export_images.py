@@ -95,6 +95,7 @@ class BatchExportReport:
 def _enumerate_channels(
     intensity_shape: tuple[int, ...] | None,
     channel_names: list[str],
+    n_timepoints: int = 1,
 ) -> list[tuple[str, int]]:
     """Build the (name, idx) tuples ExportRequest.channels expects.
 
@@ -103,14 +104,23 @@ def _enumerate_channels(
     (single channel) and a 3D (C, H, W) intensity both yield the
     canonical channel naming. Missing names default to ``"Intensity"``
     for the 2D case and ``f"ch{i}"`` for missing 3D slots.
+
+    On a time-lapse dataset (``n_timepoints > 1``) the leading T axis is
+    stripped first, so a ``(T, H, W)`` intensity enumerates ONE channel and a
+    ``(T, C, H, W)`` intensity enumerates C channels — the index is the C
+    index, which ``ExportImages`` slices per timepoint via
+    ``read_channel(..., timepoint=t)``.
     """
     if intensity_shape is None:
         return []
-    if len(intensity_shape) == 2:
+    shape = tuple(intensity_shape)
+    if int(n_timepoints or 1) > 1 and len(shape) >= 3:
+        shape = shape[1:]  # drop the leading T axis -> (H,W) or (C,H,W)
+    if len(shape) == 2:
         name = channel_names[0] if channel_names else "Intensity"
         return [(name, 0)]
-    if len(intensity_shape) == 3:
-        n_channels = intensity_shape[0]
+    if len(shape) == 3:
+        n_channels = shape[0]
         return [
             (
                 channel_names[i] if i < len(channel_names) else f"ch{i}",
@@ -133,6 +143,7 @@ def batch_export_images(
     *,
     output_dir: Path,
     overwrite: bool = True,
+    view_bin: int = 1,
     progress_callback: Callable[[BatchExportItemResult], None] | None = None,
 ) -> BatchExportReport:
     """Export every channel, label, and mask from each ``.h5`` to TIFFs.
@@ -152,6 +163,12 @@ def batch_export_images(
             unused -- ``tifffile.imwrite`` always overwrites. Kept as
             a kwarg so a future ``--no-overwrite`` flag can be wired
             without changing the call shape.
+        view_bin: Bin factor applied to every layer at read time.
+            ``1`` (default) writes at native resolution -- the
+            established export contract. ``>1`` routes each layer
+            through the repository's view-bin lens (sum_bin_2d for
+            intensity, mode_labels for /labels, majority_vote_mask
+            for /masks), producing downsampled TIFFs.
         progress_callback: Invoked once per dataset after its
             :class:`BatchExportItemResult` is classified.
 
@@ -172,6 +189,7 @@ def batch_export_images(
             repo=repo,
             export_uc=export_uc,
             output_dir=output_dir,
+            view_bin=view_bin,
         )
         results.append(result)
         if progress_callback is not None:
@@ -186,6 +204,7 @@ def _process_one_dataset(
     repo: Hdf5DatasetRepository,
     export_uc: ExportImages,
     output_dir: Path,
+    view_bin: int = 1,
 ) -> BatchExportItemResult:
     """Export every layer of one dataset. Catches per-dataset failures."""
     try:
@@ -200,8 +219,10 @@ def _process_one_dataset(
     store = DatasetStore(h5_path)
 
     try:
-        # Read intensity shape via the store (read-only, no view_bin
-        # needed for the batch -- export always at native).
+        # Read intensity shape via h5py directly (bin-independent --
+        # we only need the channel-axis dimension to enumerate
+        # channel names; the actual export reads inside ExportImages
+        # honor the requested view_bin).
         import h5py
 
         with h5py.File(h5_path, "r") as f:
@@ -209,9 +230,16 @@ def _process_one_dataset(
                 tuple(f["intensity"].shape) if "intensity" in f else None
             )
         channel_names = list(handle.metadata.get("channel_names", []))
-        channels = _enumerate_channels(intensity_shape, channel_names)
+        n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)
+        channels = _enumerate_channels(
+            intensity_shape, channel_names, n_timepoints
+        )
         labels = store.list_labels()
         masks = store.list_masks()
+        # Fresh metadata read so TCSPC-import or compress-side updates
+        # to pixel_size_um are picked up without re-opening the handle.
+        fresh_meta = repo.read_metadata(handle)
+        pixel_size_um = fresh_meta.get("pixel_size_um")
     except Exception as exc:  # noqa: BLE001
         return BatchExportItemResult(
             h5_path=h5_path,
@@ -232,6 +260,8 @@ def _process_one_dataset(
         channels=channels,
         labels=labels,
         masks=masks,
+        view_bin=view_bin,
+        pixel_size_um=pixel_size_um,
     )
 
     try:

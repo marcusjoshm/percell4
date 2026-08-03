@@ -11,8 +11,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 import percell4
 
 GUI_ROOT = Path(percell4.__file__).parent / "gui"

@@ -13,8 +13,6 @@ the store write — same pattern the Single TIFF tab path uses at
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import h5py
 import numpy as np
 import pytest

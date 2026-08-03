@@ -8,6 +8,23 @@ deliverable_of_plan: docs/plans/2026-05-01-refactor-gui-state-handling-audit-pla
 
 # Session Mutation Graph
 
+> **2026-05-21 update (feat/time-lapse-tracking-lineage).** Adds a sixth
+> selection field, `session.active_timepoint` (int, the displayed timepoint
+> of a time-lapse stack). Writers:
+> - **Selector** — `ViewerWindow._on_dims_current_step` (the napari dims
+>   slider) is the sole UI writer, via `session.set_active_timepoint`. It is a
+>   `dims.events.current_step` subscription, distinct from the forbidden
+>   layer-list-selection path, guarded by a dedicated `_timepoint_originator`
+>   flag. The reverse direction (`session` → napari `dims.current_step`) is a
+>   one-way push in `ViewerWindow._push_timepoint_to_napari`.
+> - **Lifecycle** — `Session.set_dataset` / `Session.clear` reset
+>   `active_timepoint` to 0 (change-gated emit), mirroring `active_bin`.
+>
+> Tracking adds a **Creator** (`segmentation_panel._on_track_cells` →
+> `TrackCells`) that writes `active_segmentation` to the new tracked
+> resource — the standard Creator four-step, no new rule.
+>
+
 > **2026-05-13 update.** The Data-tab Selector combos and the per-panel
 > channel-override combos were retired in favor of a single canonical
 > SessionWindow. The Selector entries below for `active_channel`,
@@ -102,8 +119,8 @@ coupling). No new todos are filed in this unit.
 
 | File:line | Caller | YAML id | Class | Verdict | Notes |
 |---|---|---|---|---|---|
-| `src/percell4/interfaces/gui/task_panels/analysis_panel.py:294` | `_on_filter_to_selection` (Filter to Selection button) | `analysis_panel.filter_to_selection_button` | Selector | Compliant | Reclassified as Selector for `filter_ids` per Key Technical Decision "I1 scope extension". See "Borderline: filter / clear-filter buttons" below. |
-| `src/percell4/interfaces/gui/task_panels/analysis_panel.py:297` | `_on_clear_filter` (Clear Filter button) | `analysis_panel.clear_filter_button` | Selector | Compliant | Same reclassification rationale. |
+| `src/percell4/interfaces/gui/task_panels/viewer_panel.py` `_on_filter_to_selection` | `_on_filter_to_selection` (Filter to Selection button) | `viewer_panel.filter_to_selection_button` | Selector | Compliant | Canonical Selector for `filter_ids` (reads `selection` as the operand). Relocated to the Viewer tab; the sole `filter_ids` writer. See "Borderline: filter / clear-filter buttons" below. |
+| `src/percell4/interfaces/gui/task_panels/viewer_panel.py` `_on_clear_filter` | `_on_clear_filter` (Clear Filter button) | `viewer_panel.clear_filter_button` | Selector | Compliant | Same reclassification rationale; relocated to the Viewer tab. |
 | `src/percell4/application/session.py:146, 180, 217` | `Session.set_dataset` (reset) / `Session.set_measurements` (prune stale filter) / `Session.clear` | (n/a — application layer) | Lifecycle handler | Compliant | Three non-UI-driven writes triggered by lifecycle events (dataset switch, measurement update, dataset close). Permitted because they're internal to Session, not the result of a UI invocation. |
 | (no other GUI writers) | — | — | — | — | The Filter/Clear-Filter pair are the only GUI-side writers. |
 
@@ -111,7 +128,7 @@ coupling). No new todos are filed in this unit.
 
 | File:line | Caller | YAML id | Class | Verdict | Notes |
 |---|---|---|---|---|---|
-| `src/percell4/interfaces/gui/task_panels/analysis_panel.py:287` | `_on_clear_selection` | `analysis_panel.clear_selection_button` | Selector | Compliant | Explicit Clear-Selection button. |
+| `src/percell4/interfaces/gui/task_panels/viewer_panel.py` `_on_clear_selection` | `_on_clear_selection` | `viewer_panel.clear_selection_button` | Selector | Compliant | Explicit Clear-Selection button (relocated to the Viewer tab). `selection` is intentionally multi-writer. |
 | `src/percell4/interfaces/gui/peer_views/data_plot.py:314, 316` | `_on_scatter_clicked` (left-click and Ctrl-click toggle) | `data_plot.scatter_point_click` | Selector | Compliant | Scatter plot click → set selection. |
 | `src/percell4/interfaces/gui/peer_views/data_plot.py:330` | `_on_rect_selected` (Shift+drag rect select) | `data_plot.shift_drag_rect_select` | Selector | Compliant | Rect-select → set selection. |
 | `src/percell4/interfaces/gui/peer_views/data_plot.py:339` | `eventFilter` Esc handler | `data_plot.escape_clear_selection` | Selector | Compliant | Esc clears selection. |
@@ -162,7 +179,7 @@ channel would point at a key that no longer exists. The
 `if session.active_channel == old_name:` guard means the write only fires
 when needed.
 
-### `analysis_panel.filter_to_selection_button` and `analysis_panel.clear_filter_button` — Selectors for `filter_ids`
+### `viewer_panel.filter_to_selection_button` and `viewer_panel.clear_filter_button` — Selectors for `filter_ids`
 
 **Verdict.** Classified as **Selectors for `filter_ids`**, per the plan's
 Key Technical Decision "I1 scope extension". Cleared by I1.
@@ -322,3 +339,22 @@ only its `metadata` dict — which is a mutable field on the frozen
 dataclass — is updated in place.
 
 No new edges in this mutation graph.
+
+## 2026-07-14 — Segment by Metric module
+
+`MetricSegmenterPanel` (`gui/metric_segmenter_panel.py`, plan
+`docs/plans/2026-07-14-002-feat-interactive-metric-segmenter-plan.md`) adds
+one new session-mutation edge, and only from the shared segmenter window's
+**Save**:
+
+| Writer | File | Field | Notes |
+|---|---|---|---|
+| `CnrSegmenterWindow._on_save` | `gui/cnr_segmenter.py` | `active_mask` | Creator: writes each non-empty segment as a `/masks` resource via `AcceptPunctaMask` and calls `refresh_resource_lists`; sets `active_mask` **exactly once** across the two writes (metric low/high mode uses `active_segment` + `AcceptPunctaMask(select=False)` for the non-active mask; CNR mode keeps its last-wins select). |
+
+Everything else in the module writes **no** session field: the panel's
+source-mask combo, metric combo, and Segment button (it reads
+`active_channel` / `active_segmentation` for measurement inputs only), and
+the window's draggable divider(s), log-axis toggle, and add/remove-divider
+buttons (preview-only, pushed to napari one-way). The live preview layer is
+a transient overlay cleared on window close and on re-measure; it is never
+read back into `active_mask` (session → napari stays one-way).

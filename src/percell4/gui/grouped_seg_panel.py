@@ -17,19 +17,13 @@ from typing import Any
 import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
-    QGroupBox,
-    QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from percell4.domain.measure.metrics import BUILTIN_METRICS
+from percell4.gui._grouped_threshold_settings import GroupedThresholdSettingsWidget
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
 
@@ -46,6 +40,7 @@ class GroupedSegPanel(QWidget):
         get_store: Callable[[], Any | None] = lambda: None,
         get_viewer_window: Callable[[], Any | None] = lambda: None,
         show_status: Callable[[str], None] = lambda _: None,
+        repopulate_viewer: Callable[[], None] = lambda: None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -53,8 +48,14 @@ class GroupedSegPanel(QWidget):
         self._get_store = get_store
         self._get_viewer_window = get_viewer_window
         self._show_status_cb = show_status
+        # Restores the dataset's viewer layers after the per-timepoint QC (which
+        # clears the viewer between frames). Wired from the launcher's
+        # _populate_viewer_from_store.
+        self._repopulate_viewer_cb = repopulate_viewer
         self._worker = None
         self._qc_controller = None
+        self._tl_qc_entry = None  # holds the per-timepoint QC driver (anti-GC)
+        self._tl_qc_mask_name: str | None = None
 
         self._build_ui()
 
@@ -64,74 +65,10 @@ class GroupedSegPanel(QWidget):
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignTop)
 
-        # ── Metric selector ──
-        metric_row = QHBoxLayout()
-        metric_row.addWidget(QLabel("Metric:"))
-        self._metric_combo = QComboBox()
-        self._metric_combo.addItems(list(BUILTIN_METRICS.keys()))
-        self._metric_combo.setCurrentText("mean_intensity")
-        metric_row.addWidget(self._metric_combo)
-        layout.addLayout(metric_row)
-
-        # ── Algorithm selector ──
-        algo_row = QHBoxLayout()
-        algo_row.addWidget(QLabel("Algorithm:"))
-        self._algo_combo = QComboBox()
-        self._algo_combo.addItems(["GMM", "K-means"])
-        self._algo_combo.currentTextChanged.connect(self._on_algorithm_changed)
-        algo_row.addWidget(self._algo_combo)
-        layout.addLayout(algo_row)
-
-        # ── GMM Options ──
-        self._gmm_group = QGroupBox("GMM Options")
-        gmm_layout = QVBoxLayout(self._gmm_group)
-
-        crit_row = QHBoxLayout()
-        crit_row.addWidget(QLabel("Criterion:"))
-        self._criterion_combo = QComboBox()
-        self._criterion_combo.addItems(["BIC", "Silhouette"])
-        crit_row.addWidget(self._criterion_combo)
-        gmm_layout.addLayout(crit_row)
-
-        max_row = QHBoxLayout()
-        max_row.addWidget(QLabel("Max components:"))
-        self._max_components = QSpinBox()
-        self._max_components.setRange(2, 20)
-        self._max_components.setValue(10)
-        max_row.addWidget(self._max_components)
-        gmm_layout.addLayout(max_row)
-
-        layout.addWidget(self._gmm_group)
-
-        # ── K-means Options ──
-        self._kmeans_group = QGroupBox("K-means Options")
-        km_layout = QVBoxLayout(self._kmeans_group)
-
-        k_row = QHBoxLayout()
-        k_row.addWidget(QLabel("Number of groups:"))
-        self._n_clusters = QSpinBox()
-        self._n_clusters.setRange(2, 20)
-        self._n_clusters.setValue(3)
-        k_row.addWidget(self._n_clusters)
-        km_layout.addLayout(k_row)
-
-        layout.addWidget(self._kmeans_group)
-        self._kmeans_group.setVisible(False)
-
-        # ── Threshold Options ──
-        thresh_group = QGroupBox("Threshold Options")
-        thresh_layout = QVBoxLayout(thresh_group)
-
-        sigma_row = QHBoxLayout()
-        sigma_row.addWidget(QLabel("Gaussian \u03c3:"))
-        self._sigma = QDoubleSpinBox()
-        self._sigma.setRange(0.0, 20.0)
-        self._sigma.setValue(0.0)
-        self._sigma.setSingleStep(0.5)
-        sigma_row.addWidget(self._sigma)
-        thresh_layout.addLayout(sigma_row)
-
-        layout.addWidget(thresh_group)
+        # ── Settings (metric / algorithm / GMM-or-K-means / Gaussian sigma) ──
+        # Single source of truth shared with the dilute-phase workflow.
+        self._settings_widget = GroupedThresholdSettingsWidget(self)
+        layout.addWidget(self._settings_widget)
 
         # ── Run button ──
         self._run_btn = QPushButton("Run Grouped Thresholding")
@@ -153,10 +90,6 @@ class GroupedSegPanel(QWidget):
         layout.addStretch()
 
     # ── Slots ──
-
-    def _on_algorithm_changed(self, text: str) -> None:
-        self._gmm_group.setVisible(text == "GMM")
-        self._kmeans_group.setVisible(text == "K-means")
 
     def _show_status(self, msg: str) -> None:
         self._status.setText(msg)
@@ -182,8 +115,9 @@ class GroupedSegPanel(QWidget):
             self._show_status("Select a channel in the Session window first")
             return
 
-        metric = self._metric_combo.currentText()
-        sigma = self._sigma.value()
+        config = self._settings_widget.current_config()
+        metric = config.metric
+        sigma = config.sigma
 
         # Get the channel image
         channel_image = None
@@ -225,6 +159,18 @@ class GroupedSegPanel(QWidget):
         if mask_name is None:
             return
 
+        # Time-lapse: threshold EVERY timepoint. Drive one interactive QC per
+        # timepoint (the user QCs each frame's groups in turn) and stack the
+        # accepted per-frame masks into a (T,H,W) /masks/<name> resource -- the
+        # same artifact the batch single-cell workflow produces. The single-
+        # timepoint path below is unchanged.
+        n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+        if n_timepoints > 1:
+            self._run_timelapse_grouped(
+                store, viewer_win, channel, seg_name, mask_name, config
+            )
+            return
+
         # Check if measurement exists, auto-compute if needed
         col_name = f"{channel}_{metric}"
         df = self.data_model.df
@@ -249,8 +195,8 @@ class GroupedSegPanel(QWidget):
     def _auto_measure_then_group(
         self, channel, channel_image, seg_labels, metric, sigma, mask_name,
     ) -> None:
-        from percell4.gui.workers import Worker
         from percell4.domain.measure.measurer import measure_cells
+        from percell4.gui.workers import Worker
 
         self._pending = {
             "channel": channel,
@@ -315,7 +261,8 @@ class GroupedSegPanel(QWidget):
             self._show_status("No valid measurements to group")
             return
 
-        algo = self._algo_combo.currentText()
+        config = self._settings_widget.current_config()
+        algo = config.algorithm
         self._show_status(f"Grouping {len(values)} cells with {algo}...")
 
         self._grouping_context = {
@@ -330,17 +277,16 @@ class GroupedSegPanel(QWidget):
 
         if algo == "GMM":
             from percell4.domain.measure.grouper import group_cells_gmm
-            criterion = self._criterion_combo.currentText().lower()
-            max_comp = self._max_components.value()
             self._worker = Worker(
                 group_cells_gmm, values, cell_labels,
-                criterion=criterion, max_components=max_comp,
+                criterion=config.gmm_criterion,
+                max_components=config.gmm_max_components,
             )
         else:
             from percell4.domain.measure.grouper import group_cells_kmeans
-            n_clusters = self._n_clusters.value()
             self._worker = Worker(
-                group_cells_kmeans, values, cell_labels, n_clusters=n_clusters,
+                group_cells_kmeans, values, cell_labels,
+                n_clusters=config.kmeans_n_clusters,
             )
 
         self._worker.finished.connect(self._on_grouping_done)
@@ -384,3 +330,117 @@ class GroupedSegPanel(QWidget):
     def _on_qc_complete(self, success: bool, msg: str) -> None:
         self._show_status(msg)
         self._qc_controller = None
+
+    # ── Time-lapse: per-timepoint grouped thresholding ────────
+
+    def _run_timelapse_grouped(
+        self, store, viewer_win, channel, seg_name, mask_name, config
+    ) -> None:
+        """Threshold every timepoint via one interactive QC per frame.
+
+        Builds the per-timepoint groupings (per-frame measure + cluster) and
+        drives :class:`TimelapseThresholdQCQueueEntry`, which runs the single-
+        frame QC controller once per timepoint and stacks the accepted per-frame
+        masks into a ``(T, H, W)`` ``/masks/<name>`` resource (the same artifact
+        the batch single-cell workflow produces).
+        """
+        from percell4.gui.workflows.single_cell.threshold_qc_queue import (
+            TimelapseThresholdQCQueueEntry,
+        )
+        from percell4.workflows.models import (
+            DatasetSource,
+            GmmCriterion,
+            ThresholdAlgorithm,
+            ThresholdingRound,
+            WorkflowDatasetEntry,
+        )
+        from percell4.workflows.phases import threshold_compute_one
+
+        algo = (
+            ThresholdAlgorithm.GMM
+            if config.algorithm == "GMM"
+            else ThresholdAlgorithm.KMEANS
+        )
+        try:
+            round_spec = ThresholdingRound(
+                name=mask_name,
+                channel=channel,
+                metric=config.metric,
+                algorithm=algo,
+                gmm_criterion=GmmCriterion(str(config.gmm_criterion).lower()),
+                gmm_max_components=config.gmm_max_components,
+                kmeans_n_clusters=config.kmeans_n_clusters,
+                gaussian_sigma=config.sigma,
+            )
+        except ValueError as e:
+            self._show_status(
+                f"Cannot threshold per timepoint with these settings: {e}"
+            )
+            return
+
+        # Per-frame measure + cluster -> dict[timepoint, GroupingResult].
+        self._show_status("Grouping each timepoint…")
+        grouping_by_timepoint, failure, msg = threshold_compute_one(
+            store, round_spec, seg_name
+        )
+        if failure is not None or not isinstance(grouping_by_timepoint, dict):
+            self._show_status(f"Grouping failed: {msg}")
+            return
+
+        entry = WorkflowDatasetEntry(
+            name=store.path.stem,
+            source=DatasetSource.H5_EXISTING,
+            h5_path=store.path,
+            channel_names=tuple(store.metadata.get("channel_names", [])),
+            compress_plan=None,
+        )
+
+        self._show_status(
+            f"QC each of {len(grouping_by_timepoint)} timepoint(s) — "
+            "accept (Ctrl+Enter) to advance to the next frame."
+        )
+        self._tl_qc_mask_name = mask_name
+        self._tl_qc_entry = TimelapseThresholdQCQueueEntry(
+            viewer_win=viewer_win,
+            data_model=self.data_model,
+            entry=entry,
+            round_spec=round_spec,
+            grouping_by_timepoint=grouping_by_timepoint,
+            queue_index=0,
+            queue_total=1,
+            on_complete=self._on_timelapse_qc_complete,
+            seg_name=seg_name,
+        )
+        self._tl_qc_entry.start()
+
+    def _on_timelapse_qc_complete(self, result) -> None:
+        """After the per-timepoint QC: restore the viewer and select the mask.
+
+        The QC driver cleared the viewer between frames and already wrote the
+        ``(T, H, W)`` ``/masks/<name>`` + ``/groups/<name>`` resources; restore
+        the dataset's layers and (on success) auto-select the new mask.
+        """
+        self._tl_qc_entry = None
+        self._repopulate_viewer()
+        if not getattr(result, "success", False):
+            self._show_status(
+                f"Grouped thresholding cancelled: {getattr(result, 'message', '')}"
+            )
+            return
+        store = self._get_store()
+        if store is not None:
+            self.data_model.session.refresh_resource_lists(
+                mask_names=store.list_masks()
+            )
+        if self._tl_qc_mask_name:
+            self.data_model.set_active_mask(self._tl_qc_mask_name)
+        self._show_status(
+            f"Grouped thresholding done across timepoints: "
+            f"'{self._tl_qc_mask_name}' — {getattr(result, 'message', '')}"
+        )
+
+    def _repopulate_viewer(self) -> None:
+        try:
+            self._repopulate_viewer_cb()
+        except Exception:  # noqa: BLE001 — viewer restore is best-effort
+            logger.exception("grouped threshold: viewer repopulate failed")

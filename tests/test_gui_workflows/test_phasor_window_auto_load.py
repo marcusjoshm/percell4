@@ -7,13 +7,10 @@ channel changes while it is already visible.
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock
-
 import numpy as np
 import pytest
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.phasor_plot import PhasorPlotWindow
 
@@ -82,10 +79,10 @@ def test_show_with_full_cache_populates_window(qtbot, window, repo):
     window.show()
     qtbot.waitExposed(window)
 
-    # _g_map should now be populated (filtered cache → set as g_map)
+    # _g_map should now be populated with the raw (unfiltered) cache
     assert window._g_map is not None
-    # g_unfiltered should be the raw cache
-    assert window._g_map_unfiltered is not None
+    # the wavelet cache should be available as the optional view
+    assert window._g_map_wavelet is not None
 
 
 def test_show_with_raw_only_cache_populates_without_unfiltered(qtbot, window, repo):
@@ -95,8 +92,8 @@ def test_show_with_raw_only_cache_populates_without_unfiltered(qtbot, window, re
     qtbot.waitExposed(window)
 
     assert window._g_map is not None
-    # No filtered cache → g_unfiltered should be None (mirror compute_phasor shape)
-    assert window._g_map_unfiltered is None
+    # No wavelet cache → no wavelet view available
+    assert window._g_map_wavelet is None
 
 
 def test_show_with_no_cache_leaves_window_empty(qtbot, window):
@@ -208,8 +205,8 @@ def test_dataset_switch_same_channel_name_auto_loads_new_cache(qtbot, tmp_path, 
         "== new_channel — _on_dataset_changed needs to call "
         "_try_auto_load_cached() at the end."
     )
-    # Wavelet was cached → filtered values are what landed in _g_map.
-    assert win._g_map_unfiltered is not None
+    # Wavelet was cached → the wavelet view is available alongside raw g/s.
+    assert win._g_map_wavelet is not None
 
 
 def test_dataset_switch_different_channel_name_still_auto_loads(

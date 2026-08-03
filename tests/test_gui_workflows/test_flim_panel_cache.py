@@ -7,15 +7,14 @@ goes through the existing ComputePhasor / ApplyWavelet use cases.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from qtpy.QtCore import Qt
 
 from percell4.application.session import Session
 from percell4.domain.dataset import DatasetHandle
+from percell4.domain.flim.wavelet_filter import MAX_FILTER_LEVEL
 from percell4.interfaces.gui.task_panels.flim_panel import FlimPanel
 from percell4.model import CellDataModel
 
@@ -23,26 +22,44 @@ from percell4.model import CellDataModel
 class FakeRepo:
     def __init__(self):
         self.arrays: dict[str, np.ndarray] = {}
+        self.attrs: dict[str, dict] = {}
         self.disk_metadata: dict = {}
 
     def write_array(self, handle, path, data, attrs=None):
         self.arrays[path] = data
+        if attrs:
+            self.attrs[path] = dict(attrs)
 
     def read_array(self, handle, path, view_bin=1):
         if path not in self.arrays:
             raise KeyError(f"Array not found: {path}")
         return self.arrays[path]
 
+    def read_array_attrs(self, handle, path):
+        return dict(self.attrs.get(path, {}))
+
+    def array_exists(self, handle, path):
+        return path in self.arrays
+
     def read_metadata(self, handle):
         return dict(self.disk_metadata)
 
 
-def _seed_full_cache(repo: FakeRepo, channel: str = "ch0", shape=(8, 8)):
+# The FlimPanel's Filter Level spinbox defaults to 9; seeded wavelet caches
+# are stamped at this level so the default-level Apply hits the cache.
+_DEFAULT_WAVELET_LEVEL = 9
+
+
+def _seed_full_cache(
+    repo: FakeRepo, channel: str = "ch0", shape=(8, 8),
+    filter_level: int = _DEFAULT_WAVELET_LEVEL,
+):
     rng = np.random.default_rng(0)
     repo.arrays[f"phasor/{channel}/g"] = rng.uniform(0.1, 0.9, size=shape).astype(np.float32)
     repo.arrays[f"phasor/{channel}/s"] = rng.uniform(0.05, 0.5, size=shape).astype(np.float32)
     repo.arrays[f"phasor/{channel}/g_filtered"] = rng.uniform(size=shape).astype(np.float32)
     repo.arrays[f"phasor/{channel}/s_filtered"] = rng.uniform(size=shape).astype(np.float32)
+    repo.attrs[f"phasor/{channel}/g_filtered"] = {"filter_level": filter_level}
     repo.arrays[f"decay/{channel}"] = rng.uniform(size=(*shape, 16)).astype(np.float32)
 
 
@@ -80,7 +97,8 @@ def panel(qtbot, session_with_dataset):
 
 
 def test_compute_phasor_loads_from_cache_when_no_shift(panel):
-    """No Shift held + cache present → compute use case NOT invoked; phasor window populated from cache."""
+    """No Shift held + cache present → compute use case NOT invoked;
+    phasor window populated from cache."""
     with patch(
         "percell4.application.use_cases.compute_phasor.ComputePhasor.execute"
     ) as mock_compute:
@@ -162,6 +180,78 @@ def test_apply_wavelet_raw_cache_only_runs_wavelet(panel):
     # Remove wavelet cache, keep raw
     panel._test_repo.arrays.pop("phasor/ch0/g_filtered")
     panel._test_repo.arrays.pop("phasor/ch0/s_filtered")
+    fake_result = MagicMock(
+        g_filtered=np.zeros((4, 4), dtype=np.float32),
+        s_filtered=np.zeros((4, 4), dtype=np.float32),
+        n_valid=10,
+    )
+    with patch(
+        "percell4.application.use_cases.apply_wavelet.ApplyWavelet.execute",
+        return_value=fake_result,
+    ) as mock_wavelet:
+        with patch.object(panel, "_shift_held", return_value=False):
+            panel._on_apply_wavelet()
+
+    mock_wavelet.assert_called_once()
+
+
+# ── Filter-level spinbox range ────────────────────────────────
+
+
+def test_wavelet_level_spinbox_allows_up_to_max(panel):
+    """The Filter Level spinbox accepts levels up to MAX_FILTER_LEVEL (well
+    above the legacy cap of 15)."""
+    assert panel._wavelet_level.maximum() == MAX_FILTER_LEVEL
+    assert panel._wavelet_level.minimum() == 1
+    assert MAX_FILTER_LEVEL > 15
+    # A value above the old cap is settable and round-trips.
+    panel._wavelet_level.setValue(20)
+    assert panel._wavelet_level.value() == 20
+
+
+# ── Filter-level change → recompute over cache ────────────────
+
+
+def test_apply_wavelet_same_level_loads_from_cache(panel):
+    """Cache stamped at level 9 + spinbox at 9 → no recompute, cache served."""
+    panel._wavelet_level.setValue(_DEFAULT_WAVELET_LEVEL)
+    with patch(
+        "percell4.application.use_cases.apply_wavelet.ApplyWavelet.execute"
+    ) as mock_wavelet:
+        with patch.object(panel, "_shift_held", return_value=False):
+            panel._on_apply_wavelet()
+
+    mock_wavelet.assert_not_called()
+    panel._test_phasor_win.set_phasor_data.assert_called_once()
+
+
+def test_apply_wavelet_different_level_recomputes_over_cache(panel):
+    """Cache stamped at level 9 but the user picks a different level →
+    ApplyWavelet recomputes at the requested level instead of serving the
+    stale cache. This is the bug fix: a level change must not no-op."""
+    panel._wavelet_level.setValue(5)
+    fake_result = MagicMock(
+        g_filtered=np.zeros((4, 4), dtype=np.float32),
+        s_filtered=np.zeros((4, 4), dtype=np.float32),
+        n_valid=10,
+    )
+    with patch(
+        "percell4.application.use_cases.apply_wavelet.ApplyWavelet.execute",
+        return_value=fake_result,
+    ) as mock_wavelet:
+        with patch.object(panel, "_shift_held", return_value=False):
+            panel._on_apply_wavelet()
+
+    mock_wavelet.assert_called_once()
+    # The recompute used the newly requested level (which ApplyWavelet then
+    # writes over the old cache).
+    assert mock_wavelet.call_args.kwargs["filter_level"] == 5
+
+
+def test_apply_wavelet_unknown_cached_level_recomputes(panel):
+    """Wavelet cache present but missing the filter_level attr (a pre-attr
+    file) → treated as level-unknown and recomputed rather than served."""
+    panel._test_repo.attrs.pop("phasor/ch0/g_filtered", None)
     fake_result = MagicMock(
         g_filtered=np.zeros((4, 4), dtype=np.float32),
         s_filtered=np.zeros((4, 4), dtype=np.float32),

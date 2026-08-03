@@ -24,6 +24,76 @@ from numpy.typing import NDArray
 # tests and future tuning can override it.
 MAX_GMM_PIXELS = 100_000
 
+# Highest harmonic offered for stored per-harmonic calibration. Matches the
+# FLIM panel's Harmonic dropdown (1, 2, 3). Raise here and in the dropdown
+# together if more harmonics are ever needed.
+MAX_CAL_HARMONIC = 3
+
+
+# ── Per-harmonic calibration metadata ─────────────────────────
+#
+# Calibration phase/modulation are frequency-dependent, so a phasor computed
+# at harmonic n must use the calibration measured at harmonic n. These are
+# stored in /metadata as scalar attrs keyed by channel and harmonic:
+#
+#     flim_cal_phase_<ch>_h<n>   (radians)
+#     flim_cal_mod_<ch>_h<n>     (dimensionless, 1.0 == no scaling)
+#
+# The legacy single-value keys ``flim_cal_phase_<ch>`` / ``flim_cal_mod_<ch>``
+# (written by the import dialog, no harmonic suffix) are the harmonic-1
+# calibration — ``resolve_calibration`` falls back to them so pre-existing
+# datasets keep working unchanged.
+
+
+def cal_phase_key(channel: str, harmonic: int) -> str:
+    """Metadata key for the stored calibration phase (radians) of
+    ``channel`` at ``harmonic``."""
+    return f"flim_cal_phase_{channel}_h{harmonic}"
+
+
+def cal_mod_key(channel: str, harmonic: int) -> str:
+    """Metadata key for the stored calibration modulation of ``channel``
+    at ``harmonic``."""
+    return f"flim_cal_mod_{channel}_h{harmonic}"
+
+
+def resolve_calibration(
+    meta: dict, channel: str, harmonic: int
+) -> tuple[float, float]:
+    """Resolve the (phase, modulation) calibration for ``channel`` at
+    ``harmonic`` from a ``/metadata`` dict.
+
+    Resolution order:
+
+    1. Per-harmonic keys ``flim_cal_{phase,mod}_<ch>_h<n>`` when present.
+    2. For harmonic 1 only, the legacy single-value keys
+       ``flim_cal_{phase,mod}_<ch>`` (import-dialog format, no suffix).
+    3. Identity — ``(0.0, 1.0)`` — for a higher harmonic with no stored
+       calibration, i.e. uncalibrated (the phasor lands off the universal
+       circle until a calibration is saved for that harmonic).
+
+    Phase and modulation resolve independently: a stored phase with no
+    stored modulation yields ``(phase, 1.0)``.
+    """
+    phase_key = cal_phase_key(channel, harmonic)
+    mod_key = cal_mod_key(channel, harmonic)
+
+    if phase_key in meta:
+        phase = float(meta[phase_key])
+    elif harmonic == 1:
+        phase = float(meta.get(f"flim_cal_phase_{channel}", 0.0))
+    else:
+        phase = 0.0
+
+    if mod_key in meta:
+        mod = float(meta[mod_key])
+    elif harmonic == 1:
+        mod = float(meta.get(f"flim_cal_mod_{channel}", 1.0))
+    else:
+        mod = 1.0
+
+    return phase, mod
+
 
 def compute_phasor(
     decay_stack: NDArray,
@@ -73,6 +143,41 @@ def compute_phasor(
     s[zero_mask] = np.nan
 
     return g.astype(np.float32), s.astype(np.float32)
+
+
+def median_filter_gs(
+    g_map: NDArray,
+    s_map: NDArray,
+    size: int = 3,
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Apply a square spatial median filter to phasor G/S maps.
+
+    Thin wrapper over ``scipy.ndimage.median_filter`` parameterized by the
+    kernel side-length. At ``size=3`` the result is byte-identical to the
+    fixed 3x3 median that ``ComputePhasor`` used to apply unconditionally —
+    a ``size=3`` median therefore reproduces the legacy "unfiltered"
+    (flimfret-equivalent) output.
+
+    Parameters
+    ----------
+    g_map, s_map : (H, W) phasor coordinate maps. NaN (zero-photon) pixels
+        are passed straight to scipy; NaN propagation matches scipy's
+        default ``median_filter`` behavior (no NaN-aware normalization).
+    size : odd kernel side-length in pixels (>= 3). The window is
+        ``size x size``, i.e. ``size**2`` pixels feed each median.
+
+    Returns
+    -------
+    (g_filtered, s_filtered) : each shape (H, W) float32.
+    """
+    if not isinstance(size, (int, np.integer)) or size < 3 or size % 2 == 0:
+        raise ValueError(f"size must be an odd integer >= 3, got {size!r}")
+
+    from scipy.ndimage import median_filter
+
+    g_filtered = median_filter(g_map, size=int(size)).astype(np.float32)
+    s_filtered = median_filter(s_map, size=int(size)).astype(np.float32)
+    return g_filtered, s_filtered
 
 
 def compute_phasor_chunked(
@@ -456,6 +561,58 @@ def gmm_to_phasor_roi_geometry(
     return center, radii, angle_deg
 
 
+def single_component_fit_phasor(
+    g: NDArray[np.floating],
+    s: NDArray[np.floating],
+    intensity: NDArray[np.floating],
+) -> GMMFitResult:
+    """Closed-form intensity-weighted mean and covariance.
+
+    For n=1, EM is unnecessary — the maximum-likelihood Gaussian over
+    weighted samples has the analytic form
+
+        mu = sum(w_i x_i) / sum(w_i)
+        Sigma = sum(w_i (x_i - mu)(x_i - mu)^T) / sum(w_i)
+
+    Computing it directly over all valid pixels avoids both the EM cost
+    and the ``replace=False, p=p`` sampling bias used in ``gmm_fit_phasor``.
+    Returns a ``GMMFitResult`` shaped identically to a 1-component GMM fit
+    so the use case can treat both paths uniformly.
+
+    Falls back to uniform weighting when ``intensity.sum() == 0``.
+    """
+    g = np.asarray(g, dtype=np.float64)
+    s = np.asarray(s, dtype=np.float64)
+    intensity = np.asarray(intensity, dtype=np.float64)
+    if g.shape != s.shape or g.shape != intensity.shape:
+        raise ValueError("g, s, intensity must share shape")
+    if g.size == 0:
+        raise ValueError("Cannot fit single component on empty input")
+
+    w = intensity if intensity.sum() > 0 else np.ones_like(intensity)
+    w_sum = w.sum()
+    mean_g = float((w * g).sum() / w_sum)
+    mean_s = float((w * s).sum() / w_sum)
+
+    dg = g - mean_g
+    ds = s - mean_s
+    cov_gg = float((w * dg * dg).sum() / w_sum)
+    cov_ss = float((w * ds * ds).sum() / w_sum)
+    cov_gs = float((w * dg * ds).sum() / w_sum)
+
+    means = np.array([[mean_g, mean_s]], dtype=np.float64)
+    covariances = np.array(
+        [[[cov_gg, cov_gs], [cov_gs, cov_ss]]], dtype=np.float64
+    )
+    return GMMFitResult(
+        means=means,
+        covariances=covariances,
+        chosen_n=1,
+        criterion_value=None,
+        sampled_pixels=int(g.size),
+    )
+
+
 def gmm_fit_phasor(
     g: NDArray[np.floating],
     s: NDArray[np.floating],
@@ -476,10 +633,12 @@ def gmm_fit_phasor(
     and the perf-tuned upper bound (``n_max=4``).
 
     Intensity weighting uses ``np.random.default_rng(seed).choice`` with
-    ``p = intensity / intensity.sum()`` instead of the reference
-    scripts' ``np.repeat`` — same proportional weighting, bounded
-    memory. Subsamples to at most ``max_pixels``. When intensity sums
-    to zero (constant or all-zero), falls back to uniform sampling.
+    ``p = intensity / intensity.sum()`` and ``replace=True`` — a
+    with-replacement bootstrap from the intensity-weighted distribution
+    that reproduces the reference scripts' ``np.repeat`` weighting in
+    expectation, without materializing one sample per photon. Subsamples
+    to at most ``max_pixels`` draws. When intensity sums to zero
+    (constant or all-zero), falls back to uniform sampling.
 
     sklearn is lazy-imported inside this function (matches
     ``domain/measure/grouper.py``).
@@ -509,9 +668,17 @@ def gmm_fit_phasor(
 
     if intensity.sum() > 0:
         p = intensity / intensity.sum()
-        idx = rng.choice(n_valid, size=sample_size, replace=False, p=p)
+        # With-replacement bootstrap so intensity actually weights the fit:
+        # drawing sample_size points from the intensity-weighted
+        # distribution reproduces the reference np.repeat weighting in
+        # expectation. replace=False would draw *distinct* pixels and —
+        # whenever sample_size approaches n_valid — collapse to an
+        # essentially unweighted sample, shifting and inflating the GMM
+        # clusters (the bright condensed-phase pixels stop dominating).
+        idx = rng.choice(n_valid, size=sample_size, replace=True, p=p)
     else:
-        # Constant / zero intensity → uniform sampling.
+        # Constant / zero intensity → uniform sampling (no weights to
+        # honor, so distinct pixels without replacement are fine).
         idx = rng.choice(n_valid, size=sample_size, replace=False)
 
     samples = np.column_stack([g[idx], s[idx]])

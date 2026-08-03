@@ -32,7 +32,6 @@ from percell4.interfaces.gui.task_panels.flim_panel import FlimPanel
 from percell4.model import CellDataModel
 from percell4.workflows.diagnostics import WorkerError
 
-
 # ── Fixtures ─────────────────────────────────────────────────
 
 

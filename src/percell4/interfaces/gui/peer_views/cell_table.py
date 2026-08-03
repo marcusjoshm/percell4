@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from qtpy.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel, Qt
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
     QAbstractItemView,
-    QFileDialog,
     QHBoxLayout,
     QMainWindow,
     QMenu,
@@ -23,6 +22,9 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.application.session import Event, Session
+from percell4.gui._dialog_utils import save_file_name
+from percell4.gui.settings import app_settings
+from percell4.interfaces.gui.peer_views._timepoint_view import active_timepoint_view
 
 
 class PandasTableModel(QAbstractTableModel):
@@ -204,6 +206,9 @@ class CellTableWindow(QMainWindow):
             self._session.subscribe(Event.DATASET_CHANGED, self._on_data_changed),
             self._session.subscribe(Event.FILTER_CHANGED, self._on_filter_changed),
             self._session.subscribe(Event.SELECTION_CHANGED, self._on_selection_changed),
+            self._session.subscribe(
+                Event.ACTIVE_TIMEPOINT_CHANGED, self._on_timepoint_changed
+            ),
         ]
         self._table.selectionModel().selectionChanged.connect(
             self._on_table_selection_changed
@@ -230,9 +235,31 @@ class CellTableWindow(QMainWindow):
             return
         self._highlight_selected_rows()
 
+    def _on_timepoint_changed(self) -> None:
+        """Slider-follows-frame: re-slice to the active timepoint's rows.
+
+        Only re-renders when the measurements carry a ``timepoint`` column
+        (time-lapse); single-timepoint data has no column and is a no-op.
+        """
+        if self._is_originator:
+            return
+        if "timepoint" not in self._session.df.columns:
+            return
+        self._reload_table_data()
+        if self._session.is_filtered:
+            self._apply_filter()
+        if self._session.selected_ids:
+            self._highlight_selected_rows()
+
     def _reload_table_data(self) -> None:
-        """Replace the table's DataFrame and update status."""
-        df = self._session.df
+        """Replace the table's DataFrame and update status.
+
+        On a time-lapse dataset the table shows the active timepoint's rows
+        (slider-follows-frame); single-timepoint data shows all rows unchanged.
+        """
+        df = active_timepoint_view(
+            self._session.df, self._session.active_timepoint
+        )
         self._model.set_dataframe(df)
 
         if df.empty:
@@ -352,8 +379,12 @@ class CellTableWindow(QMainWindow):
         if df.empty:
             self._status.showMessage("No data to export")
             return
-        label = "Export Filtered Measurements" if self._session.is_filtered else "Export All Measurements"
-        path, _ = QFileDialog.getSaveFileName(
+        label = (
+            "Export Filtered Measurements"
+            if self._session.is_filtered
+            else "Export All Measurements"
+        )
+        path, _ = save_file_name(
             self, label, "measurements.csv", "CSV (*.csv)"
         )
         if path:
@@ -369,7 +400,7 @@ class CellTableWindow(QMainWindow):
             return
 
         selected_df = df[df["label"].isin(selected_ids)]
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = save_file_name(
             self, "Export Selection", "selection.csv", "CSV (*.csv)"
         )
         if path:
@@ -389,11 +420,11 @@ class CellTableWindow(QMainWindow):
         event.ignore()
 
     def _save_geometry(self) -> None:
-        QSettings("LeeLabPerCell4", "PerCell4").setValue(
+        app_settings().setValue(
             "cell_table/geometry", self.saveGeometry()
         )
 
     def _restore_geometry(self) -> None:
-        geom = QSettings("LeeLabPerCell4", "PerCell4").value("cell_table/geometry")
+        geom = app_settings().value("cell_table/geometry")
         if geom:
             self.restoreGeometry(geom)

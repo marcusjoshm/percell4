@@ -14,7 +14,6 @@ from qtpy.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -23,7 +22,32 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.gui import theme
+from percell4.gui._dialog_utils import message_box, text_input
 from percell4.model import CellDataModel
+
+
+def _format_pixel_size_lines(
+    pixel_size_um: float | None, active_bin: int,
+) -> str:
+    """Format the Dataset Info pixel-size line(s).
+
+    Returns one line for the stored (creation-bin-scaled) pixel size,
+    plus a second line for the view-bin effective size when
+    ``active_bin > 1``. ``None`` pixel size renders as ``unknown`` so
+    legacy datasets without TIFF resolution metadata are explicit.
+    """
+    if pixel_size_um is None or pixel_size_um <= 0:
+        return "Pixel size: unknown"
+    area_um2 = pixel_size_um * pixel_size_um
+    base = f"Pixel size: {pixel_size_um:.4f} µm/px ({area_um2:.5f} µm²/px)"
+    if active_bin and active_bin > 1:
+        eff = pixel_size_um * active_bin
+        eff_area = eff * eff
+        return (
+            f"{base}\n"
+            f"View-bin pixel size: {eff:.4f} µm/px ({eff_area:.5f} µm²/px)"
+        )
+    return base
 
 
 def _read_layer_bin_attrs(store, group: str) -> dict[str, int | None]:
@@ -84,13 +108,7 @@ class DataPanel(QWidget):
         layout.setAlignment(Qt.AlignTop)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        title = QLabel("Data")
-        title.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; padding-bottom: 4px;"
-            f" border-bottom: 1px solid {theme.BORDER};"
-        )
-        layout.addWidget(title)
+        layout.addWidget(theme.section_label("Data"))
 
         # ── Layer Management ──
         mgmt_group = QGroupBox("Layer Management")
@@ -270,7 +288,7 @@ class DataPanel(QWidget):
                     self._mgmt_chan_combo.addItem(name)
                     seen.add(name)
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in viewer_win.viewer.layers:
                 if layer.__class__.__name__ == "Image" and layer.name not in seen:
                     self._mgmt_chan_combo.addItem(layer.name)
@@ -292,27 +310,38 @@ class DataPanel(QWidget):
         try:
             n_labels = len(store.list_labels())
             n_masks = len(store.list_masks())
-            with store.open_read() as s:
-                intensity = s.read_array("intensity")
-                shape = intensity.shape
+            # Shape only — read HDF5 metadata, never the array. Reading the
+            # full intensity here (it ran twice per load) was the dominant
+            # large-file load cost.
+            shape = store.array_shape("intensity")
             session = self.data_model.session
             meta = store.metadata
             native_shape = meta.get("native_shape")
             creation_bin = meta.get("creation_bin", 1)
             active_bin = session.active_bin
+            pixel_size_um = meta.get("pixel_size_um")
             native_line = (
                 f"Native: {tuple(native_shape)}"
                 if native_shape is not None
                 else "Native: (unknown)"
             )
+            # Names the two distinct binning values so neither reads as the
+            # other: the import-time value is explicitly "Imported at", and the
+            # live session value matches the Session window's "Pixel Binning:"
+            # Selector label.
             bin_line = (
-                f"Creation bin: {creation_bin}  |  View bin: {active_bin}"
+                f"Imported at binning: {creation_bin}  |  "
+                f"Pixel binning: {active_bin}"
+            )
+            pixel_size_lines = _format_pixel_size_lines(
+                pixel_size_um, active_bin,
             )
             self._info_label.setText(
                 f"File: {Path(h5_path).name}\n"
                 f"Shape: {shape}\n"
                 f"{native_line}\n"
                 f"{bin_line}\n"
+                f"{pixel_size_lines}\n"
                 f"Labels: {n_labels}  |  Masks: {n_masks}"
             )
         except Exception:
@@ -335,7 +364,7 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to rename")
             return
 
-        new_name, ok = QInputDialog.getText(
+        new_name, ok = text_input(
             self, "Rename", f"New name for '{old_name}':", text=old_name
         )
         if not ok or not new_name or new_name == old_name:
@@ -350,7 +379,7 @@ class DataPanel(QWidget):
                 return
 
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in viewer_win.viewer.layers:
                 if layer.name == old_name:
                     layer.name = new_name
@@ -381,10 +410,12 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to delete")
             return
 
-        reply = QMessageBox.question(
-            self, "Confirm Delete",
+        reply = message_box(
+            self,
+            "Confirm Delete",
             f"Delete '{name}'? This cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
+            icon=QMessageBox.Question,
+            buttons=QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -394,7 +425,7 @@ class DataPanel(QWidget):
             store.delete_item(f"{prefix}/{name}")
 
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in list(viewer_win.viewer.layers):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)
@@ -422,7 +453,7 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to rename")
             return
 
-        new_name, ok = QInputDialog.getText(
+        new_name, ok = text_input(
             self, "Rename Channel", f"New name for '{old_name}':", text=old_name
         )
         if not ok or not new_name or new_name == old_name:
@@ -455,7 +486,7 @@ class DataPanel(QWidget):
                 session.set_active_channel(new_name)
 
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in viewer_win.viewer.layers:
                 if layer.name == old_name:
                     layer.name = new_name
@@ -470,12 +501,14 @@ class DataPanel(QWidget):
             self._show_status("Nothing selected to delete")
             return
 
-        reply = QMessageBox.question(
-            self, "Confirm Delete",
+        reply = message_box(
+            self,
+            "Confirm Delete",
             f"Permanently delete channel '{name}' and its FLIM data "
             "(decay, phasor, calibration) from the .h5 file? "
             "This cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
+            icon=QMessageBox.Question,
+            buttons=QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -521,24 +554,26 @@ class DataPanel(QWidget):
         except KeyError:
             intensity = None
 
-        if intensity is not None and slice_idx is not None and intensity.ndim == 3:
-            if slice_idx < intensity.shape[0]:
-                if intensity.shape[0] <= 1:
+        if intensity is not None and slice_idx is not None:
+            # Disambiguate a leading T axis from a leading C axis via
+            # n_timepoints before slicing: on (T,H,W) deleting the channel
+            # empties /intensity (never slice a timepoint); on (T,C,H,W) slice
+            # the C axis. Non-time-lapse (C,H,W)/(H,W) behavior is unchanged.
+            from percell4.domain.io.layout import plan_channel_deletion
+
+            nt = int(store.metadata.get("n_timepoints", 1) or 1)
+            action, new_intensity, dims = plan_channel_deletion(
+                intensity, slice_idx, nt
+            )
+            if action == "delete":
+                # Only empty a genuinely 2D dataset when the layer is a real
+                # channel (a ch<N> orphan on a 2D dataset must not delete it).
+                if intensity.ndim != 2 or in_metadata:
                     store.delete_item("intensity")
-                else:
-                    keep = [i for i in range(intensity.shape[0]) if i != slice_idx]
-                    new_intensity = intensity[keep, :, :]
-                    store.write_array(
-                        "intensity", new_intensity, attrs={"dims": ["C", "H", "W"]},
-                    )
-            else:
-                # Layer name suggested an index past the current /intensity.
-                # Nothing to slice on disk; the napari layer removal below
-                # still happens.
-                pass
-        elif intensity is not None and intensity.ndim == 2 and in_metadata:
-            # 2D — single-channel dataset, deletion empties it
-            store.delete_item("intensity")
+            elif action == "write":
+                store.write_array("intensity", new_intensity, attrs={"dims": dims})
+            # "noop": index past the channel axis; napari layer removal still
+            # happens below.
 
         # Update channel_names if the deleted layer was in metadata.
         if in_metadata:
@@ -600,7 +635,7 @@ class DataPanel(QWidget):
 
         # Remove the napari layer.
         viewer_win = self._get_viewer_win()
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in list(viewer_win.viewer.layers):
                 if layer.name == name:
                     viewer_win.viewer.layers.remove(layer)

@@ -33,29 +33,35 @@ from __future__ import annotations
 import logging
 from collections.abc import Generator
 
+from percell4.adapters.cellpose import build_cellpose_model
 from percell4.gui.workflows.base_runner import (
     BaseWorkflowRunner,
     PhaseKind,
     PhaseRequest,
     PhaseResult,
 )
-from percell4.adapters.cellpose import build_cellpose_model
 from percell4.store import DatasetStore
 from percell4.workflows.failures import DatasetFailure
 from percell4.workflows.models import (
     DatasetSource,
     RunMetadata,
+    ThresholdAlgorithm,
+    ThresholdingRound,
     WorkflowConfig,
 )
 from percell4.workflows.phases import (
     apply_threshold_headless,
     compress_one,
+    config_needs_pixel_size,
     datasets_without_failures,
     export_run,
     measure_one,
+    pick_existing_segmentation,
     record_failure,
     segment_one,
     threshold_compute_one,
+    track_one,
+    validate_compressed_dataset,
     write_staging_parquet,
 )
 
@@ -78,6 +84,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         metadata: RunMetadata,
         *,
         interactive_qc: bool = True,
+        segmentation_overrides: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._config = config
@@ -97,6 +104,16 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         # Cross-phase state: Phase 3/5 compute stashes GroupingResult
         # per (dataset_name, round_name) for Phase 4/6 QC to pick up.
         self._grouping_cache: dict[tuple[str, str], object] = {}
+        # Per-dataset effective segmentation name. Empty by default, so
+        # every phase resolves to ``config.cellpose_segmentation_name``
+        # (unchanged behavior). Populated when a dataset is tracked (the
+        # tracking phase sets it to ``<seg>_tracked``), when an existing
+        # segmentation is auto-detected (U13), or chosen via the
+        # segmentation-select dialog (U12). Kept off the frozen
+        # WorkflowConfig and reset per run. Seeded from
+        # ``segmentation_overrides`` (the per-dataset picks), which take
+        # precedence over auto-detection.
+        self._effective_seg: dict[str, str] = dict(segmentation_overrides or {})
         # Currently-running interactive QC controller (if any). Held
         # here to prevent Qt GC. Cleared by the terminal callback.
         self._active_qc_controller = None
@@ -122,6 +139,224 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 worker.request_abort()
             except Exception:
                 logger.exception("worker.request_abort raised")
+
+    # ── Effective segmentation name ───────────────────────────
+
+    def _seg_name_for(self, entry) -> str:
+        """The segmentation name a dataset's phases should read/write.
+
+        Defaults to ``config.cellpose_segmentation_name``; overridden per
+        dataset via ``self._effective_seg`` (set by the tracking phase,
+        auto-skip detection, or the segmentation-select dialog).
+        """
+        return self._effective_seg.get(
+            entry.name, self._config.cellpose_segmentation_name
+        )
+
+    def _measure_round_specs_for(self, entry) -> list[ThresholdingRound]:
+        """Round specs the measure phase should use for one dataset.
+
+        Normal runs return ``config.thresholding_rounds`` (the same list
+        for every dataset). In existing-mask mode the rounds are
+        synthesized per dataset from ``existing_mask_selections[entry.name]``
+        — one measure-only :class:`ThresholdingRound` whose ``name`` equals
+        the chosen ``/masks/<name>`` layer. ``measure_one`` reads only
+        ``round.name``, but ``ThresholdingRound.__post_init__`` still
+        validates the placeholder ``channel``/``metric``/``algorithm``, so
+        they must be valid; a mask name that fails the round-name regex
+        records a per-dataset failure rather than aborting the run.
+
+        Per-dataset (not the union of all selections): a dataset measures
+        only the masks the user picked for it, never another dataset's
+        selection that happens to also exist on disk here.
+
+        In a normal run the configured rounds are followed by measure-only
+        specs for the CNR population masks (``<round>_low`` / ``<round>_high``)
+        that a ``cnr_classify`` round minted earlier in this run. Those masks
+        are written by a post-step and are deliberately not rounds themselves,
+        so without this they were written to the ``.h5`` and never measured —
+        the researcher had to re-run the whole workflow in existing-mask mode
+        to get particle statistics for them. The ``percell4-batch-measure``
+        CLI already measures them; this closes that GUI/CLI gap.
+        """
+        if not self._config.use_existing_masks:
+            return [
+                *self._config.thresholding_rounds,
+                *self._cnr_population_specs_for(entry),
+            ]
+        channel = entry.channel_names[0] if entry.channel_names else "channel"
+        specs: list[ThresholdingRound] = []
+        for mask_name in self._config.existing_mask_selections.get(entry.name, []):
+            try:
+                specs.append(
+                    ThresholdingRound(
+                        name=mask_name,
+                        channel=channel,
+                        metric="mean_intensity",
+                        algorithm=ThresholdAlgorithm.KMEANS,
+                    )
+                )
+            except ValueError as e:
+                logger.error(
+                    "cannot measure mask %r on %s: %s", mask_name, entry.name, e
+                )
+                record_failure(
+                    self._metadata,
+                    dataset_name=entry.name,
+                    phase_name="measure",
+                    failure=DatasetFailure.MEASUREMENT_ERROR,
+                    message=f"invalid mask name {mask_name!r}: {e}",
+                )
+        return specs
+
+    #: Suffixes the CNR post-step mints for a ``cnr_classify`` round. Reserved
+    #: against round-name collision in ``WorkflowConfig.__post_init__``, so
+    #: this is a validated contract rather than a naming convention.
+    _CNR_POPULATION_SUFFIXES = ("_low", "_high")
+
+    def _cnr_population_specs_for(self, entry) -> list[ThresholdingRound]:
+        """Measure-only specs for the CNR population masks present on disk.
+
+        Derived per dataset from what actually exists, not from config alone:
+        a dataset whose classification found a single population writes no
+        ``_high`` mask (and ``_classify_and_write_cnr`` skips an all-zero
+        population either way), so the spec list must follow the file.
+
+        Never raises. This runs inside ``_measure_round_specs_for``, which the
+        measure handler calls *outside* its own ``try`` — an exception here
+        would reach ``BaseWorkflowRunner._run_loop`` and terminate the entire
+        run, turning one unreadable dataset into a batch-wide abort. An
+        unreadable store degrades to "no population specs" plus a log line;
+        the base round's measurement still happens and the real error surfaces
+        from the phase that actually needs the data.
+        """
+        rounds = [
+            r for r in self._config.thresholding_rounds if r.cnr_classify is not None
+        ]
+        if not rounds:
+            return []
+        try:
+            present = set(DatasetStore(entry.h5_path).list_masks())
+        except Exception:
+            logger.exception(
+                "could not list masks for %s; skipping CNR population "
+                "measurement for this dataset",
+                entry.name,
+            )
+            return []
+
+        specs: list[ThresholdingRound] = []
+        channel = entry.channel_names[0] if entry.channel_names else "channel"
+        for r in rounds:
+            for suffix in self._CNR_POPULATION_SUFFIXES:
+                name = f"{r.name}{suffix}"
+                if name not in present:
+                    continue
+                try:
+                    specs.append(
+                        ThresholdingRound(
+                            name=name,
+                            channel=r.channel or channel,
+                            metric="mean_intensity",
+                            algorithm=ThresholdAlgorithm.KMEANS,
+                        )
+                    )
+                except ValueError as e:
+                    # A round name close to the 40-char limit produces a
+                    # suffixed name that overflows it. The dataset did nothing
+                    # wrong, so note it and move on rather than recording a
+                    # per-dataset MEASUREMENT_ERROR.
+                    logger.warning(
+                        "skipping CNR population mask %r on %s: %s",
+                        name, entry.name, e,
+                    )
+                    self._log(
+                        phase="measure", dataset=entry.name,
+                        event="cnr_population_skipped",
+                        message=f"cannot measure {name!r}: {e}",
+                    )
+        if specs:
+            self._log(
+                phase="measure", dataset=entry.name,
+                event="cnr_populations_measured",
+                message=(
+                    "also measuring CNR population masks: "
+                    + ", ".join(s.name for s in specs)
+                ),
+            )
+        return specs
+
+    def _detect_existing_segmentation(self, entry) -> str | None:
+        """Pick a pre-existing segmentation for a dataset, or None to segment it.
+
+        Reads the dataset's label inventory and applies
+        ``pick_existing_segmentation`` (prefer ``*_tracked``). Returns None
+        when there are no labels (segment normally) or the store can't be
+        read. Logs a warning when auto-selecting among multiple untracked
+        segmentations so the user knows to use the segmentation-select dialog
+        to override.
+        """
+        try:
+            names = DatasetStore(entry.h5_path).list_labels()
+        except Exception:
+            logger.exception("could not list labels for %s", entry.name)
+            return None
+        seg = pick_existing_segmentation(names)
+        if (
+            seg is not None
+            and not any(n.endswith("_tracked") for n in names)
+            and len(names) > 1
+        ):
+            logger.warning(
+                "dataset %s has multiple segmentations %r and no tracked "
+                "layer; auto-selected %r (use the segmentation-select dialog "
+                "to override)",
+                entry.name,
+                names,
+                seg,
+            )
+        return seg
+
+    def _is_timelapse(self, entry) -> bool:
+        """True when the dataset has more than one acquisition timepoint."""
+        try:
+            return int(
+                DatasetStore(entry.h5_path).metadata.get("n_timepoints", 1) or 1
+            ) > 1
+        except Exception:
+            logger.exception("could not read n_timepoints for %s", entry.name)
+            return False
+
+    def _should_track(self, entry) -> bool:
+        """True when a dataset needs tracking: time-lapse and not yet tracked.
+
+        Skips single-timepoint datasets and datasets whose effective
+        segmentation is already a tracked layer (auto-detected by U13).
+        Also skips a 2D (time-invariant) segmentation — e.g. a whole-field
+        gate from ``percell4-batch-whole-field``: a single 2D label has no
+        per-frame evolution to track, and ``track_one`` would reject it as
+        "not a (T, H, W) stack". Per-frame phases broadcast it instead.
+        """
+        seg_name = self._seg_name_for(entry)
+        if seg_name.endswith("_tracked"):
+            return False
+        try:
+            store = DatasetStore(entry.h5_path)
+            n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+        except Exception:
+            logger.exception("could not read n_timepoints for %s", entry.name)
+            return False
+        if n_timepoints <= 1:
+            return False
+        try:
+            if len(store.labels_shape(seg_name)) == 2:
+                return False
+        except Exception:
+            logger.exception(
+                "could not read labels_shape for %s/%s", entry.name, seg_name
+            )
+            # Fall through: let the track phase surface the real error.
+        return True
 
     # ── Phase generator ───────────────────────────────────────
 
@@ -158,6 +393,69 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         # monkey-patched ``segment_one`` fixtures the tests use.
         active = datasets_without_failures(self._working_entries, meta)
         for idx, entry in enumerate(active):
+            # Auto-skip (U13/R10): if this dataset already has a segmentation
+            # on disk (or an explicit segmentation override), skip Cellpose +
+            # seg-QC and use it. An override (U12) wins over auto-detection.
+            # TIFF-pending datasets were just compressed and have no labels
+            # yet, so they segment normally.
+            existing = self._effective_seg.get(entry.name)
+            if existing is None:
+                existing = self._detect_existing_segmentation(entry)
+            if existing is not None:
+                self._effective_seg[entry.name] = existing
+                # Optionally QC a pre-existing segmentation (produced by
+                # percell4-batch or picked via segmentation_overrides)
+                # before thresholding, instead of skipping straight to it.
+                # Gated to:
+                #   - interactive runs only (headless never yields QC);
+                #   - cfg.run_seg_qc_on_existing (the config-dialog
+                #     checkbox, default True);
+                #   - a layer that exists AND is 2D — a single
+                #     labels_shape() call establishes both. The editor
+                #     (SegmentationQCController) rejects non-2D labels, so a
+                #     (T, H, W) stack is skipped; but a 2D whole-field gate
+                #     on a time-lapse dataset is still QC-able and runs.
+                #     A stale segmentation_overrides entry naming a missing
+                #     layer raises here → skipped (rather than erroring
+                #     inside the controller).
+                #   - NOT a ``*_tracked`` layer — its label VALUES are track
+                #     ids tied to the ``/tracks/<seg>`` lineage table. The
+                #     raw-label QC tools renumber labels, which would
+                #     desync the lineage; ``_should_track`` guards the same
+                #     way. Skip QC for tracked layers.
+                # When any guard fails we fall through to today's behavior
+                # (skip seg-QC, go to thresholding). Cellpose-segmented-
+                # this-run datasets take the fresh path below, unaffected
+                # by this flag.
+                if (
+                    self._interactive_qc
+                    and self._config.run_seg_qc_on_existing
+                    and not existing.endswith("_tracked")
+                ):
+                    try:
+                        is_2d = len(
+                            DatasetStore(entry.h5_path).labels_shape(existing)
+                        ) == 2
+                    except Exception:
+                        logger.exception(
+                            "could not read labels_shape for %s/%s",
+                            entry.name,
+                            existing,
+                        )
+                        is_2d = False
+                    if is_2d:
+                        yield PhaseRequest(
+                            kind=PhaseKind.INTERACTIVE,
+                            phase_name="seg_qc",
+                            dataset_index=idx,
+                            dataset_total=len(active),
+                            dataset_name=entry.name,
+                            handler=self._make_seg_qc_handler(
+                                entry, idx, len(active)
+                            ),
+                        )
+                continue
+
             if self._interactive_qc:
                 yield PhaseRequest(
                     kind=PhaseKind.INTERACTIVE,
@@ -181,6 +479,14 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             # Interleaved with segment so the user sees each dataset's
             # Cellpose result immediately, edits it, and accepts before
             # the next segment runs.
+            #
+            # Gated by cfg.run_seg_qc_on_new_segmentations (the config-dialog
+            # checkbox, default True) so a batch with settled Cellpose
+            # parameters can run unattended. When the gate is off we emit an
+            # explicit status + run-log line rather than silently advancing —
+            # an unreviewed segmentation must never be handed downstream
+            # without the user being told, the same convention the headless
+            # threshold-apply handler follows.
             if self._interactive_qc:
                 # Skip datasets that segment marked as failed.
                 failed_names = {
@@ -189,14 +495,45 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     if rec.phase_name == "segment"
                 }
                 if entry.name not in failed_names:
-                    yield PhaseRequest(
-                        kind=PhaseKind.INTERACTIVE,
-                        phase_name="seg_qc",
-                        dataset_index=idx,
-                        dataset_total=len(active),
-                        dataset_name=entry.name,
-                        handler=self._make_seg_qc_handler(entry, idx, len(active)),
-                    )
+                    if cfg.run_seg_qc_on_new_segmentations:
+                        yield PhaseRequest(
+                            kind=PhaseKind.INTERACTIVE,
+                            phase_name="seg_qc",
+                            dataset_index=idx,
+                            dataset_total=len(active),
+                            dataset_name=entry.name,
+                            handler=self._make_seg_qc_handler(
+                                entry, idx, len(active)
+                            ),
+                        )
+                    else:
+                        msg = (
+                            f"{entry.name}: segmentation accepted without QC "
+                            "(seg-QC turned off for workflow-created "
+                            "segmentations)"
+                        )
+                        print(f"  [seg_qc] {msg}", flush=True)
+                        self._log(
+                            phase="seg_qc", dataset=entry.name,
+                            event="skipped_no_qc", message=msg,
+                        )
+
+        # ── Tracking (time-lapse): link cells across timepoints ──
+        # Runs after seg-QC for datasets with n_timepoints > 1 that aren't
+        # already tracked. On success the dataset's effective segmentation
+        # switches to the tracked layer, so every downstream phase uses it.
+        active = datasets_without_failures(self._working_entries, meta)
+        for idx, entry in enumerate(active):
+            if not self._should_track(entry):
+                continue
+            yield PhaseRequest(
+                kind=PhaseKind.UNATTENDED,
+                phase_name="track",
+                dataset_index=idx,
+                dataset_total=len(active),
+                dataset_name=entry.name,
+                handler=self._make_track_handler(entry),
+            )
 
         # ── Per-round: threshold compute + apply ────────────
         for round_idx, round_spec in enumerate(cfg.thresholding_rounds):
@@ -225,7 +562,24 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     # no GroupingResult to QC. Skip.
                     continue
 
-                if self._interactive_qc:
+                # Interactive threshold-QC uses the single-frame
+                # ThresholdQCController. Time-lapse datasets run it one
+                # timepoint at a time (TimelapseThresholdQCQueueEntry) so the
+                # user QCs every frame's groups interactively, just like the
+                # standard single-timepoint workflow; the per-frame masks are
+                # stacked into the (T,H,W) /masks resource at the end. The
+                # handler picks the right wrapper from _is_timelapse(entry).
+                #
+                # Adaptive-clip and auto-extraction rounds are per-cell (no
+                # intensity grouping) and cannot be previewed by the per-group
+                # ThresholdQCController, so they ALWAYS apply headlessly — even in
+                # an interactive run. The headless handler emits a status line so
+                # the user knows the round applied without a QC pause.
+                if (
+                    self._interactive_qc
+                    and round_spec.adaptive_clip is None
+                    and round_spec.auto_extract is None
+                ):
                     yield PhaseRequest(
                         kind=PhaseKind.INTERACTIVE,
                         phase_name=f"threshold_qc:{round_spec.name}",
@@ -249,6 +603,33 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                             entry, round_spec
                         ),
                     )
+
+        # ── Phase 5: Dilute-phase mask (optional, INTERACTIVE) ──
+        # Runs only when the user enabled dilute generation in the
+        # config dialog AND we're in interactive mode. In headless
+        # tests we skip Phase 5 entirely — the dilute UI is inherently
+        # user-driven (adaptive per-dataset round count) and has no
+        # meaningful auto-mode equivalent.
+        if cfg.dilute_settings is not None and self._interactive_qc:
+            active = datasets_without_failures(self._working_entries, meta)
+            for idx, entry in enumerate(active):
+                # The dilute controller is single-frame and has no headless
+                # per-frame equivalent; skip it for time-lapse datasets (the
+                # per-frame dilute mask is deferred — see plan Scope).
+                if self._is_timelapse(entry):
+                    logger.info(
+                        "skipping interactive dilute for time-lapse dataset %s",
+                        entry.name,
+                    )
+                    continue
+                yield PhaseRequest(
+                    kind=PhaseKind.INTERACTIVE,
+                    phase_name="dilute",
+                    dataset_index=idx,
+                    dataset_total=len(active),
+                    dataset_name=entry.name,
+                    handler=self._make_dilute_handler(entry, idx, len(active)),
+                )
 
         # ── Phase 7: measurement ──────────────────────────
         active = datasets_without_failures(self._working_entries, meta)
@@ -298,6 +679,37 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                           event="failed", failure=failure.value, message=msg)
                 return PhaseResult(success=False, message=msg)
 
+            # Gate on what the run actually needs before any later phase
+            # touches this dataset. import_dataset does not raise when no
+            # source file matches the channel token pattern — it writes an
+            # .h5 with no /intensity and empty channel_names and reports
+            # success — so without this the run continues against an empty
+            # dataset and fails minutes later somewhere unrelated.
+            problem = validate_compressed_dataset(
+                DatasetStore(updated.h5_path),
+                seg_channel_name=self._config.seg_channel_name,
+                round_channels=[
+                    r.channel for r in self._config.thresholding_rounds
+                ],
+                needs_pixel_size=config_needs_pixel_size(
+                    self._config.thresholding_rounds
+                ),
+            )
+            if problem is not None:
+                record_failure(
+                    self._metadata,
+                    dataset_name=entry.name,
+                    phase_name="compress",
+                    failure=DatasetFailure.COMPRESS_FAILED,
+                    message=problem,
+                )
+                self._log(
+                    phase="compress", dataset=entry.name, event="failed",
+                    failure=DatasetFailure.COMPRESS_FAILED.value,
+                    message=problem,
+                )
+                return PhaseResult(success=False, message=problem)
+
             # Swap the updated entry in place so later phases see the
             # real h5_path.
             for i, e in enumerate(self._working_entries):
@@ -305,6 +717,30 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     self._working_entries[i] = updated
                     break
             self._log(phase="compress", dataset=entry.name, event="done")
+            return PhaseResult(success=True, message=msg)
+
+        return handler
+
+    def _make_track_handler(self, entry):
+        def handler() -> PhaseResult:
+            print(f"  [track] {entry.name}...", flush=True)
+            store = DatasetStore(entry.h5_path)
+            raw_seg = self._seg_name_for(entry)
+            tracked_name, failure, msg = track_one(store, raw_seg)
+            if failure is not None:
+                record_failure(
+                    self._metadata,
+                    dataset_name=entry.name,
+                    phase_name="track",
+                    failure=failure,
+                    message=msg,
+                )
+                self._log(phase="track", dataset=entry.name,
+                          event="failed", failure=failure.value, message=msg)
+                return PhaseResult(success=False, message=msg)
+            # Downstream phases now read the tracked segmentation.
+            self._effective_seg[entry.name] = tracked_name
+            self._log(phase="track", dataset=entry.name, event="done", message=msg)
             return PhaseResult(success=True, message=msg)
 
         return handler
@@ -317,7 +753,12 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             if self._cellpose_model is None:
                 try:
                     self._cellpose_model = build_cellpose_model(
-                        gpu=self._config.cellpose.gpu
+                        gpu=self._config.cellpose.gpu,
+                        # Attaches at construction, not to the run_cellpose
+                        # call below: that receives this cached model and
+                        # skips construction entirely, so a callback wired
+                        # there would never fire on this surface.
+                        device_callback=self._on_device_resolved,
                     )
                 except Exception as e:
                     logger.exception("build_cellpose_model failed")
@@ -347,6 +788,9 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 self._config.cellpose,
                 cellpose_model=self._cellpose_model,
                 channel_idx=self._seg_channel_idx(store),
+                edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
+                seg_name=self._seg_name_for(entry),
             )
             if failure is not None:
                 record_failure(
@@ -388,7 +832,12 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
             if self._cellpose_model is None:
                 try:
                     self._cellpose_model = build_cellpose_model(
-                        gpu=self._config.cellpose.gpu
+                        gpu=self._config.cellpose.gpu,
+                        # Attaches at construction, not to the run_cellpose
+                        # call below: that receives this cached model and
+                        # skips construction entirely, so a callback wired
+                        # there would never fire on this surface.
+                        device_callback=self._on_device_resolved,
                     )
                 except Exception as e:
                     logger.exception("build_cellpose_model failed")
@@ -417,6 +866,10 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             seg_ch_idx = self._seg_channel_idx(store)
 
+            edge_mode = self._config.edge_mode
+            edge_margin_px = self._config.edge_margin_px
+            seg_name = self._seg_name_for(entry)
+
             def _do_segment() -> tuple:
                 """Runs in the Worker thread. Pure numpy + h5py, no Qt."""
                 return segment_one(
@@ -424,6 +877,9 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                     self._config.cellpose,
                     cellpose_model=self._cellpose_model,
                     channel_idx=seg_ch_idx,
+                    edge_mode=edge_mode,
+                    edge_margin_px=edge_margin_px,
+                    seg_name=seg_name,
                 )
 
             worker = Worker(_do_segment)
@@ -523,10 +979,114 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 queue_total=queue_total,
                 on_complete=_wrapped_complete,
                 channel_idx=seg_ch,
+                seg_name=self._seg_name_for(entry),
+                cellpose_settings=self._config.cellpose,
+                edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
             )
             self._active_qc_controller = controller
             self._log(phase="seg_qc", dataset=entry.name, event="opened")
             controller.start()
+
+        return handler
+
+    def _make_dilute_handler(self, entry, queue_index: int, queue_total: int):
+        """Factory for the Phase 5 INTERACTIVE dilute-phase handler.
+
+        Per the U5 plan, the handler instantiates a
+        :class:`DilutePhaseQueueEntry` that wraps the existing
+        :class:`DilutePhaseMaskController` in session-free mode.
+        Per-dataset round counts are persisted into
+        ``RunMetadata.per_dataset_dilute_round_counts`` so the
+        ``summary_datasets.csv`` builder can populate ``n_rounds_dilute``.
+        """
+        def handler(on_complete):
+            from percell4.gui.workflows.single_cell.dilute_queue import (
+                DilutePhaseQueueEntry,
+            )
+
+            if self._host is None:
+                on_complete(
+                    PhaseResult(success=False, message="no host for dilute queue")
+                )
+                return
+            if self._config.dilute_settings is None:
+                on_complete(
+                    PhaseResult(
+                        success=True,
+                        message="dilute disabled (no dilute_settings)",
+                    )
+                )
+                return
+
+            viewer_win = self._host.get_viewer_window()
+            data_model = self._host.get_data_model()
+            session = self._host.get_session()
+
+            def _wrapped_complete(result: PhaseResult) -> None:
+                # Explicit cancelled flag (new in U5) — the substring
+                # sniff stays as a backward-compat fallback for handlers
+                # that haven't migrated yet.
+                if result.cancelled or (
+                    not result.success and "cancel" in result.message.lower()
+                ):
+                    self.request_cancel()
+                if not result.success and not result.cancelled:
+                    record_failure(
+                        self._metadata,
+                        dataset_name=entry.name,
+                        phase_name="dilute",
+                        failure=DatasetFailure.MEASUREMENT_ERROR,
+                        message=result.message,
+                    )
+                self._log(
+                    phase="dilute",
+                    dataset=entry.name,
+                    event="done" if result.success else "failed",
+                    message=result.message,
+                )
+                on_complete(result)
+
+            def _record_round_count(name: str, n: int) -> None:
+                """Callback from the queue entry at workflow_done."""
+                self._metadata.per_dataset_dilute_round_counts[name] = n
+
+            try:
+                qentry = DilutePhaseQueueEntry(
+                    entry=entry,
+                    dilute_settings=self._config.dilute_settings,
+                    viewer_win=viewer_win,
+                    data_model=data_model,
+                    session=session,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    on_complete=_wrapped_complete,
+                    on_round_complete=_record_round_count,
+                    seg_name=self._seg_name_for(entry),
+                )
+            except Exception as e:
+                logger.exception("dilute queue entry init failed")
+                _wrapped_complete(
+                    PhaseResult(
+                        success=False,
+                        message=f"dilute queue init failed: {e}",
+                    )
+                )
+                return
+
+            # Strong-ref slot to defeat Qt GC mid-flight.
+            self._active_qc_controller = qentry
+            self._log(phase="dilute", dataset=entry.name, event="opened")
+            try:
+                qentry.start()
+            except Exception as e:
+                logger.exception("dilute queue entry start raised")
+                _wrapped_complete(
+                    PhaseResult(
+                        success=False,
+                        message=f"dilute queue start failed: {e}",
+                    )
+                )
 
         return handler
 
@@ -549,7 +1109,11 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
-            grouping, failure, msg = threshold_compute_one(store, round_spec)
+            grouping, failure, msg = threshold_compute_one(
+                store,
+                round_spec,
+                seg_name=self._seg_name_for(entry),
+            )
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -600,7 +1164,12 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
-            failure, msg = apply_threshold_headless(store, round_spec, grouping)
+            failure, msg = apply_threshold_headless(
+                store,
+                round_spec,
+                grouping,
+                seg_name=self._seg_name_for(entry),
+            )
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -614,8 +1183,24 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                           failure=failure.value, message=msg)
                 return PhaseResult(success=False, message=msg)
 
+            # Per-cell rounds (adaptive-clip / auto-extraction) skip the
+            # interactive QC pause every other round gets; make that explicit so
+            # the user is not silently handed unreviewed masks.
+            is_per_cell = (
+                round_spec.adaptive_clip is not None or round_spec.auto_extract is not None
+            )
+            if is_per_cell and self._interactive_qc:
+                method = (
+                    "adaptive sigma clipping"
+                    if round_spec.adaptive_clip is not None
+                    else "auto-extraction (two-pass)"
+                )
+                msg = f"{method} — applied headlessly (no QC step): {msg}"
+                event = "done_no_qc"
+            else:
+                event = "done"
             self._log(phase=f"threshold_apply:{round_spec.name}",
-                      dataset=entry.name, event="done", message=msg)
+                      dataset=entry.name, event=event, message=msg)
             return PhaseResult(success=True, message=msg)
 
         return handler
@@ -632,6 +1217,7 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
         def handler(on_complete):
             from percell4.gui.workflows.single_cell.threshold_qc_queue import (
                 ThresholdQCQueueEntry,
+                TimelapseThresholdQCQueueEntry,
             )
 
             if self._host is None:
@@ -670,16 +1256,32 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
 
             viewer_win = self._host.get_viewer_window()
             data_model = self._host.get_data_model()
-            queue_entry = ThresholdQCQueueEntry(
-                viewer_win=viewer_win,
-                data_model=data_model,
-                entry=entry,
-                round_spec=round_spec,
-                grouping_result=grouping,
-                queue_index=queue_index,
-                queue_total=queue_total,
-                on_complete=_wrapped_complete,
-            )
+            if self._is_timelapse(entry):
+                # Time-lapse: grouping is a dict[int, GroupingResult]; QC one
+                # timepoint at a time, stacking masks into a (T,H,W) resource.
+                queue_entry = TimelapseThresholdQCQueueEntry(
+                    viewer_win=viewer_win,
+                    data_model=data_model,
+                    entry=entry,
+                    round_spec=round_spec,
+                    grouping_by_timepoint=grouping,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    on_complete=_wrapped_complete,
+                    seg_name=self._seg_name_for(entry),
+                )
+            else:
+                queue_entry = ThresholdQCQueueEntry(
+                    viewer_win=viewer_win,
+                    data_model=data_model,
+                    entry=entry,
+                    round_spec=round_spec,
+                    grouping_result=grouping,
+                    queue_index=queue_index,
+                    queue_total=queue_total,
+                    on_complete=_wrapped_complete,
+                    seg_name=self._seg_name_for(entry),
+                )
             # Hold a reference to prevent GC.
             self._active_qc_controller = queue_entry
             self._log(
@@ -706,10 +1308,23 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
+            round_specs = self._measure_round_specs_for(entry)
             df, failure, msg = measure_one(
                 store,
-                round_specs=list(self._config.thresholding_rounds),
+                round_specs=round_specs,
+                edge_mode=self._config.edge_mode,
+                edge_margin_px=self._config.edge_margin_px,
+                seg_name=self._seg_name_for(entry),
+                particle_settings=self._config.particle_settings,
+                run_log=self._run_log,
+                dataset_name=entry.name,
             )
+            # Soft failures from _append_synthetic_row (e.g. AE2: zero
+            # whole cells in edge-cohort mode) leave df populated so
+            # the dataset's per-cell rows still reach staging — only
+            # the synthetic row is missing. Hard failures (read error,
+            # empty labels, measure crash) return an empty df and we
+            # skip staging entirely.
             if failure is not None:
                 record_failure(
                     self._metadata,
@@ -720,7 +1335,10 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 self._log(phase="measure", dataset=entry.name, event="failed",
                           failure=failure.value, message=msg)
-                return PhaseResult(success=False, message=msg)
+                if df.empty:
+                    return PhaseResult(success=False, message=msg)
+                # Fall through: stage the soft-failure df so its
+                # per-cell rows reach the parquet.
 
             try:
                 write_staging_parquet(
@@ -737,6 +1355,47 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 )
                 return PhaseResult(success=False, message=str(e))
 
+            # Particle analysis: per-particle detail. Per-cell columns
+            # were already merged into df inside measure_one. Errors
+            # here are recorded but non-fatal — per-cell measurements
+            # have already landed.
+            if self._config.particle_settings is not None:
+                try:
+                    from percell4.workflows.phases import (
+                        measure_particles_one,
+                        write_staging_particles_parquet,
+                    )
+
+                    particles_df, pfail, pmsg = measure_particles_one(
+                        store,
+                        round_specs=round_specs,
+                        particle_settings=self._config.particle_settings,
+                        seg_name=self._seg_name_for(entry),
+                        run_log=self._run_log,
+                        dataset_name=entry.name,
+                    )
+                    if pfail is not None:
+                        record_failure(
+                            self._metadata,
+                            dataset_name=entry.name,
+                            phase_name="particles",
+                            failure=pfail,
+                            message=pmsg,
+                        )
+                    elif not particles_df.empty:
+                        write_staging_particles_parquet(
+                            self._metadata.run_folder, entry.name, particles_df
+                        )
+                except Exception as e:
+                    logger.exception("particle staging failed for %s", entry.name)
+                    record_failure(
+                        self._metadata,
+                        dataset_name=entry.name,
+                        phase_name="particles",
+                        failure=DatasetFailure.MEASUREMENT_ERROR,
+                        message=f"particle staging failed: {e}",
+                    )
+
             self._log(phase="measure", dataset=entry.name, event="done",
                       message=msg)
             return PhaseResult(success=True, message=msg)
@@ -746,8 +1405,22 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
     def _make_export_handler(self):
         def handler() -> PhaseResult:
             print("  [export] aggregating measurements...", flush=True)
+            # In existing-mask mode config.thresholding_rounds is empty, so
+            # pass the union of measured mask names as the effective round
+            # names — otherwise summary_groups.csv and n_rounds_thresholding
+            # come out blank despite masks having been measured.
+            round_names = None
+            if self._config.use_existing_masks:
+                names: list[str] = []
+                seen: set[str] = set()
+                for sel in self._config.existing_mask_selections.values():
+                    for m in sel:
+                        if m not in seen:
+                            seen.add(m)
+                            names.append(m)
+                round_names = names
             failure, msg = export_run(
-                self._metadata.run_folder, self._config, self._metadata
+                self._metadata.run_folder, self._config, self._metadata, round_names
             )
             if failure is not None:
                 # Export failure is a run-level failure; record it under
@@ -789,6 +1462,29 @@ class SingleCellThresholdingRunner(BaseWorkflowRunner):
                 name,
             )
             return 0
+
+    def _on_device_resolved(self, resolution) -> None:
+        """Record which device the run's Cellpose model was built on.
+
+        Into the run log rather than a dialog: this runner drives long
+        unattended batches, and an interruption partway through one would
+        strand the whole run behind a modal nobody is there to dismiss. A
+        fallback becomes an artifact the run carries with it, which is also
+        what makes it explicable afterwards when the timings look wrong.
+
+        Fires once per run — the model is built once and reused.
+        """
+        self._log(
+            phase="segment",
+            event="device",
+            message=resolution.reason,
+            device=resolution.device,
+            fell_back=resolution.fell_back,
+        )
+        if resolution.fell_back:
+            logger.warning("cellpose device fallback: %s", resolution.reason)
+        else:
+            logger.info("cellpose running on %s", resolution.device)
 
     def _log(self, **fields) -> None:
         """Forward a structured log entry to the run's RunLog."""

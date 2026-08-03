@@ -11,33 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import Qt
 
-from percell4.application.session import Event, Session
+from percell4.application.session import Event
 from percell4.domain.dataset import DatasetHandle
 from percell4.interfaces.gui.peer_views.session_window import SessionWindow
 from percell4.model import CellDataModel
 
-
 # ── Fixtures ────────────────────────────────────────────────────────
-
-
-@pytest.fixture
-def isolated_settings(tmp_path, monkeypatch):
-    """Sandbox QSettings so geometry/pin tests don't bleed into the real store."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    # On macOS, QSettings uses ~/Library/Preferences. Forcing INI format to
-    # tmp_path/.config keeps the test hermetic across platforms.
-    from qtpy.QtCore import QCoreApplication
-    QCoreApplication.setOrganizationName("LeeLabPerCell4")
-    QCoreApplication.setApplicationName("PerCell4")
-    QSettings.setDefaultFormat(QSettings.IniFormat)
-    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path))
-    # Clear any leftover from previous tests
-    QSettings("LeeLabPerCell4", "PerCell4").clear()
-    yield tmp_path
-    QSettings("LeeLabPerCell4", "PerCell4").clear()
 
 
 def _make_model(channel_names=None, mask_names=None, seg_names=None,
@@ -309,7 +290,7 @@ def test_channel_list_changed_refreshes_channel_combo(qtbot, tmp_path):
 # ── Pin-on-top toggle ───────────────────────────────────────────────
 
 
-def test_pin_on_top_defaults_to_true(qtbot, isolated_settings):
+def test_pin_on_top_defaults_to_true(qtbot):
     """Fresh window with no saved preference defaults to always-on-top."""
     model = CellDataModel()
     win = SessionWindow(data_model=model)
@@ -319,7 +300,7 @@ def test_pin_on_top_defaults_to_true(qtbot, isolated_settings):
     assert bool(win.windowFlags() & Qt.WindowStaysOnTopHint)
 
 
-def test_pin_on_top_toggle_off_clears_flag(qtbot, isolated_settings):
+def test_pin_on_top_toggle_off_clears_flag(qtbot):
     model = CellDataModel()
     win = SessionWindow(data_model=model)
     qtbot.addWidget(win)
@@ -328,7 +309,7 @@ def test_pin_on_top_toggle_off_clears_flag(qtbot, isolated_settings):
     assert not bool(win.windowFlags() & Qt.WindowStaysOnTopHint)
 
 
-def test_pin_on_top_toggle_keeps_window_visible(qtbot, isolated_settings):
+def test_pin_on_top_toggle_keeps_window_visible(qtbot):
     """Toggling pin-on-top must NOT hide the window.
 
     Regression: ``QWidget.setWindowFlag`` hides the widget as a side effect.
@@ -351,7 +332,7 @@ def test_pin_on_top_toggle_keeps_window_visible(qtbot, isolated_settings):
     assert win.isVisible(), "Window vanished after toggling Pin-on-top ON"
 
 
-def test_pin_on_top_state_persists_across_construction(qtbot, isolated_settings):
+def test_pin_on_top_state_persists_across_construction(qtbot):
     """Toggling off and reopening preserves the off state."""
     model = CellDataModel()
     win1 = SessionWindow(data_model=model)
@@ -371,7 +352,7 @@ def test_pin_on_top_state_persists_across_construction(qtbot, isolated_settings)
 # ── Geometry persistence ────────────────────────────────────────────
 
 
-def test_geometry_round_trip_via_close_and_reopen(qtbot, isolated_settings):
+def test_geometry_round_trip_via_close_and_reopen(qtbot):
     """Closing the window saves geometry; reopening restores it.
 
     Width chosen to comfortably exceed the natural minimum of the row of
@@ -384,6 +365,11 @@ def test_geometry_round_trip_via_close_and_reopen(qtbot, isolated_settings):
     # Allow geometry to apply
     win1.show()
     qtbot.waitExposed(win1)
+    # Qt may clamp the width up to the natural minimum of the Selectors row,
+    # which is font-metric dependent (wider under a headless WM than on a
+    # desktop). Capture the *realized* geometry and assert the round-trip
+    # reproduces that, so the test measures persistence, not the WM's clamp.
+    saved = win1.geometry()
     win1.close()
 
     # New window in the same settings sandbox
@@ -395,8 +381,8 @@ def test_geometry_round_trip_via_close_and_reopen(qtbot, isolated_settings):
 
     g = win2.geometry()
     # restoreGeometry may adjust by 1-2 px on some platforms; use loose equality
-    assert abs(g.width() - 1100) <= 5
-    assert abs(g.height() - 90) <= 5
+    assert abs(g.width() - saved.width()) <= 5
+    assert abs(g.height() - saved.height()) <= 5
 
 
 # ── No reads of viewer.layers ───────────────────────────────────────

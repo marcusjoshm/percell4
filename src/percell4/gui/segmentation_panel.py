@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import logging
 import weakref
-from pathlib import Path
 
 import numpy as np
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
-    QComboBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -27,8 +24,12 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.config import viewer_presets as vp
+from percell4.gui import theme
+from percell4.gui._cellpose_settings_form import CellposeSettingsForm
+from percell4.gui._dialog_utils import message_box
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
 from percell4.model import CellDataModel
+from percell4.workflows.models import CellposeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,65 @@ logger = logging.getLogger(__name__)
 _PAINT_AUTOSAVE_DEBOUNCE_MS = 200
 
 
+def empty_labels_array(shape, n_timepoints: int) -> np.ndarray:
+    """Allocate an empty int32 labels canvas for Create Empty Labels.
+
+    ``(H, W)`` on a single-timepoint dataset; ``(T, H, W)`` on a time-lapse
+    dataset (``n_timepoints > 1``) so the user can draw per frame and the
+    time-aware edit handlers engage. Pure (no Qt). ``shape`` is ``(H, W)``.
+    """
+    if n_timepoints > 1:
+        return np.zeros((n_timepoints, *tuple(shape)), dtype=np.int32)
+    return np.zeros(tuple(shape), dtype=np.int32)
+
+
+def diameter_circle_bbox(shape, diameter: float, margin: float):
+    """Bounding-box vertices for the Cellpose diameter reference circle.
+
+    Returns the four corners of the circle's bounding box in napari image
+    coordinates ``(y, x)``, ordered top-left → top-right → bottom-right →
+    bottom-left, as a float array suitable for a ``shape_type="ellipse"``
+    Shapes layer. Pure (no Qt, no napari). ``shape`` is ``(H, W)``.
+
+    Returns ``None`` when ``diameter <= 0`` so callers have a single branch
+    for "draw nothing" — 0 is the Cellpose auto-detect sentinel, and there is
+    no meaningful size to show for it.
+
+    napari's y axis increases downward, so the bottom-left corner is large-y
+    / small-x. The centre is clamped to stay at least one radius from the top
+    and left edges; when ``diameter`` exceeds an image dimension the disc is
+    pinned flush to that axis' origin and spills past the far edge, which is
+    itself the answer the user is looking for.
+    """
+    if diameter <= 0:
+        return None
+
+    height, width = float(shape[0]), float(shape[1])
+    radius = diameter / 2.0
+
+    center_y = min(max(height - radius - margin, radius), max(radius, height - radius))
+    center_x = min(max(radius + margin, radius), max(radius, width - radius))
+
+    top, bottom = center_y - radius, center_y + radius
+    left, right = center_x - radius, center_x + radius
+    return np.array(
+        [[top, left], [top, right], [bottom, right], [bottom, left]],
+        dtype=float,
+    )
+
+
 class SegmentationPanel(QWidget):
     """Panel for cell segmentation with multiple methods.
 
     Designed to be embedded in the launcher's sidebar content area.
     Communicates with the viewer and store via the launcher reference.
     """
+
+    #: Emitted with the ``DeviceResolution`` once Cellpose has chosen a
+    #: device. A plain signal rather than a direct call because the adapter
+    #: invokes its callback on the worker thread, and only the UI thread may
+    #: touch widgets — Qt marshals the payload across for us.
+    device_resolved = Signal(object)
 
     def __init__(
         self,
@@ -53,6 +107,9 @@ class SegmentationPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.data_model = data_model
+        #: Fallback reasons already surfaced as a dialog this session.
+        self._seen_device_warnings: set[str] = set()
+        self.device_resolved.connect(self._on_device_resolved)
         self._launcher = launcher
 
         # Auto-save state: a single debounced timer + the most recently
@@ -63,7 +120,7 @@ class SegmentationPanel(QWidget):
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(_PAINT_AUTOSAVE_DEBOUNCE_MS)
         self._autosave_timer.timeout.connect(self._flush_pending_autosave)
-        self._pending_autosave_layer: "weakref.ref | None" = None
+        self._pending_autosave_layer: weakref.ref | None = None
         self._wired_viewer_id: int | None = None
         self._wired_layer_ids: set[int] = set()
 
@@ -73,11 +130,14 @@ class SegmentationPanel(QWidget):
         self.data_model.state_changed.connect(self._on_state_changed)
 
     def _on_state_changed(self, change) -> None:
+        if change.segmentation or change.data:
+            # Relabel sequential renumbers labels, which would scramble the
+            # track ids of a tracked segmentation — disable it for those.
+            self._sync_relabel_enabled()
         if change.data:
             # A dataset was loaded (or cleared). Wire auto-save so that any
             # napari-level paint/erase or in-place mutations on Labels
-            # layers get persisted without the user remembering to click
-            # "Save Labels to HDF5".
+            # layers get persisted automatically — no manual save step.
             # Defer to the next event-loop tick: ``Session.set_dataset``
             # emits ``state_changed.data`` *before* the launcher's load path
             # creates the viewer window and adds Labels layers, so wiring
@@ -85,6 +145,12 @@ class SegmentationPanel(QWidget):
             # ``layers.events.inserted`` events for layers added later in
             # the same call.
             QTimer.singleShot(0, self._wire_paint_autosave)
+            # Rebuild (or clear) the diameter reference circle against the new
+            # dataset's shape. Same deferral, same reason as above — the
+            # viewer's layers do not exist yet at this point. Runs whether or
+            # not the box is ticked so a circle from the previous dataset
+            # cannot survive the switch.
+            QTimer.singleShot(0, self._sync_diameter_circle)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -94,37 +160,22 @@ class SegmentationPanel(QWidget):
 
         from percell4.gui import theme
 
-        title = QLabel("Segmentation")
-        title.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {theme.TEXT_BRIGHT};"
-            f" margin-bottom: 12px; padding-bottom: 4px;"
-            f" border-bottom: 1px solid {theme.BORDER};"
-        )
-        layout.addWidget(title)
+        layout.addWidget(theme.section_label("Segmentation"))
 
         # ── Cellpose section ──────────────────────────────────
         cp_group = QGroupBox("Cellpose")
         cp_layout = QVBoxLayout(cp_group)
 
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Model:"))
-        self._cp_model = QComboBox()
-        self._cp_model.addItems(["cpsam", "cyto3", "cyto2", "cyto", "nuclei"])
-        model_row.addWidget(self._cp_model)
-        cp_layout.addLayout(model_row)
-
-        diam_row = QHBoxLayout()
-        diam_row.addWidget(QLabel("Diameter:"))
-        self._cp_diameter = QSpinBox()
-        self._cp_diameter.setRange(0, 500)
-        self._cp_diameter.setValue(30)
-        self._cp_diameter.setSpecialValueText("Auto")
-        diam_row.addWidget(self._cp_diameter)
-        cp_layout.addLayout(diam_row)
-
-        self._cp_gpu = QCheckBox("Use GPU")
-        self._cp_gpu.setStyleSheet(f"QCheckBox {{ color: {theme.TEXT}; }}")
-        cp_layout.addWidget(self._cp_gpu)
+        # Model / Diameter / GPU / Flow / Cellprob / Min-size / Saturation /
+        # Sigma all live in the shared CellposeSettingsForm so this panel and
+        # the workflow setup dialog cannot drift. The channel is NOT picked
+        # here — _on_run_cellpose reads session.active_channel (the
+        # SessionWindow Selector owns it). Seed diameter at 300 for parity
+        # with the workflow window.
+        self._cp_form = CellposeSettingsForm(
+            initial=CellposeSettings(diameter=300.0)
+        )
+        cp_layout.addWidget(self._cp_form)
 
         self._cp_remove_edges = QCheckBox("Remove edge cells")
         self._cp_remove_edges.setChecked(True)
@@ -135,32 +186,81 @@ class SegmentationPanel(QWidget):
         )
         cp_layout.addWidget(self._cp_remove_edges)
 
+        margin_row = QHBoxLayout()
+        margin_row.addWidget(QLabel("Edge margin (px):"))
+        self._cp_edge_margin = QSpinBox()
+        self._cp_edge_margin.setRange(0, 500)
+        self._cp_edge_margin.setValue(0)
+        self._cp_edge_margin.setToolTip(
+            "Pixel margin from the image border that counts as 'edge'.\n"
+            "0 = strict border-touching cells only.\n"
+            "N > 0 = cells within N pixels of any border are removed.\n"
+            "Only applies when 'Remove edge cells' is ticked."
+        )
+        margin_row.addWidget(self._cp_edge_margin)
+        cp_layout.addLayout(margin_row)
+
+        # Display-only overlay toggle — writes no session field and no dataset
+        # resource, so it is an Action (see docs/audits/
+        # gui-element-classification.yaml). Off by default.
+        self._cp_show_diameter_circle = QCheckBox("Show diameter reference circle")
+        self._cp_show_diameter_circle.setChecked(False)
+        self._cp_show_diameter_circle.setStyleSheet(
+            f"QCheckBox {{ color: {theme.TEXT}; }}"
+        )
+        self._cp_show_diameter_circle.setToolTip(
+            "Draw a magenta circle in the viewer whose diameter equals the\n"
+            "Diameter (px) value above, so you can size that value against\n"
+            "real cells. The default 300 px suits one pixel size; datasets\n"
+            "acquired at another objective or binning need a different value.\n"
+            "The circle sits at the image's bottom-left and resizes as you\n"
+            "type. Diameter (px) = 0 is auto-detect, so no circle is drawn.\n"
+            "Display only — it is never saved and never affects segmentation."
+        )
+        self._cp_show_diameter_circle.toggled.connect(
+            self._on_diameter_circle_toggled
+        )
+        self._cp_form.diameter_changed.connect(self._on_diameter_value_changed)
+        cp_layout.addWidget(self._cp_show_diameter_circle)
+
         btn_run_cp = QPushButton("Run Cellpose")
         btn_run_cp.clicked.connect(self._on_run_cellpose)
         cp_layout.addWidget(btn_run_cp)
 
         layout.addWidget(cp_group)
 
-        # ── Manual Editing section ─────────────────────────────
-        draw_group = QGroupBox("Manual Editing")
-        draw_layout = QVBoxLayout(draw_group)
+        # ── Tracking section (time-lapse) ──────────────────────
+        track_group = QGroupBox("Tracking (time-lapse)")
+        track_layout = QVBoxLayout(track_group)
+        track_layout.addWidget(QLabel(
+            "Link the active segmentation across timepoints so each\n"
+            "cell keeps one ID over time. Divisions are recorded as\n"
+            "parent → daughter lineage."
+        ))
+        self._btn_track = QPushButton("Track Cells Across Timepoints")
+        self._btn_track.setToolTip(
+            "Requires a time-lapse dataset (filenames with _tN tokens) and a\n"
+            "segmentation covering every timepoint. Writes a new "
+            "'<segmentation>_tracked' resource (the original is kept for easy\n"
+            "editing) where each cell's label value is its track ID, plus a\n"
+            "lineage table."
+        )
+        self._btn_track.clicked.connect(self._on_track_cells)
+        track_layout.addWidget(self._btn_track)
+        layout.addWidget(track_group)
 
-        draw_layout.addWidget(QLabel(
+        # ── Edit Labels section (manual editing + cleanup) ─────
+        edit_group = QGroupBox("Edit Labels")
+        edit_layout = QVBoxLayout(edit_group)
+
+        edit_layout.addWidget(QLabel(
             "Create, add, or remove labels using napari's\n"
             "built-in paint/fill/erase tools."
         ))
 
         btn_new_labels = QPushButton("Create Empty Labels Layer")
         btn_new_labels.clicked.connect(self._on_create_empty_labels)
-        draw_layout.addWidget(btn_new_labels)
-
-        btn_delete_label = QPushButton("Delete Selected Label")
-        btn_delete_label.setToolTip(
-            "Click a cell in the viewer, then click this button\n"
-            "to remove that label from the active labels layer."
-        )
-        btn_delete_label.clicked.connect(self._on_delete_selected_label)
-        draw_layout.addWidget(btn_delete_label)
+        edit_layout.addWidget(btn_new_labels)
 
         btn_add_label = QPushButton("Add New Label (next ID)")
         btn_add_label.setToolTip(
@@ -168,23 +268,27 @@ class SegmentationPanel(QWidget):
             "so you can draw a new cell with napari's polygon tool."
         )
         btn_add_label.clicked.connect(self._on_add_new_label)
-        draw_layout.addWidget(btn_add_label)
+        edit_layout.addWidget(btn_add_label)
 
-        btn_relabel = QPushButton("Clean Up Labels (relabel sequential)")
+        btn_delete_label = QPushButton("Delete Selected Label")
+        btn_delete_label.setToolTip(
+            "Click a cell in the viewer, then click this button\n"
+            "to remove that label from the active labels layer."
+        )
+        btn_delete_label.clicked.connect(self._on_delete_selected_label)
+        edit_layout.addWidget(btn_delete_label)
+
+        btn_relabel = self._btn_relabel = QPushButton(
+            "Clean Up Labels (relabel sequential)"
+        )
         btn_relabel.setToolTip(
             "Renumber all labels to be sequential [1, 2, 3, ...]\n"
             "after adding or deleting cells."
         )
         btn_relabel.clicked.connect(self._on_relabel_sequential)
-        draw_layout.addWidget(btn_relabel)
+        edit_layout.addWidget(btn_relabel)
 
-        layout.addWidget(draw_group)
-
-        # ── Label Cleanup section ─────────────────────────────
-        cleanup_group = QGroupBox("Label Cleanup")
-        cleanup_layout = QVBoxLayout(cleanup_group)
-
-        cleanup_layout.addWidget(QLabel(
+        edit_layout.addWidget(QLabel(
             "Remove partial cells at image edges and\n"
             "cells below a minimum area threshold."
         ))
@@ -199,10 +303,10 @@ class SegmentationPanel(QWidget):
             ">0 = also remove cells within this many pixels of the border."
         )
         margin_row.addWidget(self._cleanup_margin)
-        cleanup_layout.addLayout(margin_row)
+        edit_layout.addLayout(margin_row)
 
         min_area_row = QHBoxLayout()
-        min_area_row.addWidget(QLabel("Min cell area (px):"))
+        min_area_row.addWidget(QLabel("Min cell area (px²):"))
         self._cleanup_min_area = QSpinBox()
         self._cleanup_min_area.setRange(0, 10000)
         self._cleanup_min_area.setValue(0)
@@ -211,7 +315,7 @@ class SegmentationPanel(QWidget):
             "0 = no area filtering."
         )
         min_area_row.addWidget(self._cleanup_min_area)
-        cleanup_layout.addLayout(min_area_row)
+        edit_layout.addLayout(min_area_row)
 
         btn_preview = QPushButton("Preview Removal")
         btn_preview.setToolTip(
@@ -219,28 +323,22 @@ class SegmentationPanel(QWidget):
             "Does not modify the labels layer."
         )
         btn_preview.clicked.connect(self._on_cleanup_preview)
-        cleanup_layout.addWidget(btn_preview)
+        edit_layout.addWidget(btn_preview)
 
         self._btn_apply_cleanup = QPushButton("Apply Removal")
         self._btn_apply_cleanup.setEnabled(False)
         self._btn_apply_cleanup.clicked.connect(self._on_cleanup_apply)
-        cleanup_layout.addWidget(self._btn_apply_cleanup)
+        edit_layout.addWidget(self._btn_apply_cleanup)
 
         self._cleanup_status = QLabel("")
         self._cleanup_status.setWordWrap(True)
-        cleanup_layout.addWidget(self._cleanup_status)
+        edit_layout.addWidget(self._cleanup_status)
 
-        layout.addWidget(cleanup_group)
+        auto_saved = QLabel("Edits auto-saved to the dataset.")
+        auto_saved.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        edit_layout.addWidget(auto_saved)
 
-        # ── Save ──────────────────────────────────────────────
-        save_group = QGroupBox("Save")
-        save_layout = QVBoxLayout(save_group)
-
-        btn_save = QPushButton("Save Labels to HDF5")
-        btn_save.clicked.connect(self._on_save_labels)
-        save_layout.addWidget(btn_save)
-
-        layout.addWidget(save_group)
+        layout.addWidget(edit_group)
 
         layout.addStretch()
 
@@ -250,6 +348,38 @@ class SegmentationPanel(QWidget):
         """Show a status message in the launcher's status bar."""
         if self._launcher is not None:
             self._launcher.statusBar().showMessage(msg)
+
+    # ── Device reporting ──────────────────────────────────────
+    #
+    # Cellpose used to fall back to CPU without saying so, which on a laptop
+    # running the SAM backbone is indistinguishable from a hang. Every run
+    # now reports the device it actually used.
+    #
+    # The dialog fires once per distinct reason per session, then the report
+    # continues on the status line. A machine with no accelerator falls back
+    # on *every* run, and a dialog every run trains the user to dismiss it —
+    # which would rebuild the original blindness through a different door.
+
+    def _on_device_resolved(self, resolution) -> None:
+        """Report the resolved device. Runs on the UI thread via a signal."""
+        if not resolution.fell_back:
+            self._show_status(f"Cellpose running on {resolution.device}")
+            return
+
+        self._show_status(resolution.reason)
+
+        if resolution.reason in self._seen_device_warnings:
+            return
+        self._seen_device_warnings.add(resolution.reason)
+
+        message_box(
+            self,
+            "Cellpose is not using a GPU",
+            f"{resolution.reason}\n\n"
+            "Segmentation will continue on CPU, which is much slower for the "
+            "SAM-based models. This notice appears once per session.",
+            icon=QMessageBox.Warning,
+        )
 
     # ── Auto-save (manual edits → HDF5) ───────────────────────
     #
@@ -294,7 +424,13 @@ class SegmentationPanel(QWidget):
         if viewer_win is None:
             return
         try:
-            napari_viewer = viewer_win.viewer
+            # existing_viewer, not viewer: this runs on every ``data`` state
+            # change, so reading the constructing property here built a napari
+            # window (and an OpenGL canvas) the moment a dataset was loaded,
+            # whether or not the researcher had opened the viewer. There is
+            # nothing to subscribe to on a viewer that does not exist yet —
+            # when one is created, a later ``data`` change wires it up.
+            napari_viewer = viewer_win.existing_viewer
         except Exception:  # noqa: BLE001
             return
         if napari_viewer is None:
@@ -377,7 +513,7 @@ class SegmentationPanel(QWidget):
             return
 
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("Open a dataset in the viewer first")
             return
 
@@ -421,19 +557,76 @@ class SegmentationPanel(QWidget):
         self._cellpose_pending_name = chosen_name
         self._cellpose_pending_bin = active_bin
 
-        image = active_layer.data
-        model_type = self._cp_model.currentText()
-        diameter = self._cp_diameter.value() if self._cp_diameter.value() > 0 else None
-        gpu = self._cp_gpu.isChecked()
+        import numpy as np
 
-        self._show_status(f"Running Cellpose ({model_type})...")
-
-        from percell4.gui.workers import Worker
-        from percell4.adapters.cellpose import run_cellpose
-
-        self._worker = Worker(
-            run_cellpose, image, model_type=model_type, diameter=diameter, gpu=gpu,
+        from percell4.domain.segmentation.preprocess import (
+            apply_gaussian_blur,
+            apply_saturation_lut,
         )
+
+        s = self._cp_form.settings()
+        model_type = s.model
+        diameter = s.diameter if s.diameter > 0 else None
+        gpu = s.gpu
+
+        # Pre-Cellpose preprocessing — saturation LUT then Gaussian blur,
+        # mirroring phases.segment_one. Applied to an in-memory copy of the
+        # layer data only; the on-disk /intensity is never modified. For a
+        # time-lapse (T, H, W) layer both are applied per-frame so the
+        # saturation percentile reference is the frame's own intensity and
+        # the blur never bleeds across timepoints.
+        raw = np.asarray(active_layer.data)
+
+        def _preprocess(plane):
+            if s.saturation_pct > 0.0:
+                plane = apply_saturation_lut(plane, s.saturation_pct)
+            if s.blur_sigma > 0.0:
+                plane = apply_gaussian_blur(plane, s.blur_sigma)
+            return plane
+
+        if raw.ndim == 3:
+            image = np.stack([_preprocess(raw[t]) for t in range(raw.shape[0])])
+        else:
+            image = _preprocess(raw)
+
+        from percell4.adapters.cellpose import run_cellpose, run_cellpose_stack
+        from percell4.gui.workers import Worker
+
+        # A time-lapse channel layer is (T, H, W): segment every frame and
+        # write one (T, H, W) raw-label resource. A 2D layer is the historical
+        # single-frame path. (run_cellpose reads a 3D array as multichannel,
+        # so the stack must go through run_cellpose_stack.)
+        if image.ndim == 3:
+            n_t = int(image.shape[0])
+            self._show_status(
+                f"Running Cellpose ({model_type}) on {n_t} timepoints..."
+            )
+            self._worker = Worker(
+                run_cellpose_stack,
+                image,
+                model_type=model_type,
+                diameter=diameter,
+                gpu=gpu,
+                flow_threshold=s.flow_threshold,
+                cellprob_threshold=s.cellprob_threshold,
+                min_size=s.min_size,
+                # Emitting the signal is all the worker thread does here;
+                # the handler on the UI thread owns every widget touch.
+                device_callback=self.device_resolved.emit,
+            )
+        else:
+            self._show_status(f"Running Cellpose ({model_type})...")
+            self._worker = Worker(
+                run_cellpose,
+                image,
+                model_type=model_type,
+                diameter=diameter,
+                gpu=gpu,
+                flow_threshold=s.flow_threshold,
+                cellprob_threshold=s.cellprob_threshold,
+                min_size=s.min_size,
+                device_callback=self.device_resolved.emit,
+            )
         self._worker.finished.connect(self._on_cellpose_done)
         self._worker.error.connect(self._on_cellpose_error)
         self._worker.start()
@@ -445,8 +638,8 @@ class SegmentationPanel(QWidget):
             self._show_status(f"Error: {err.exc_type}: {err.message}")
 
     def _on_cellpose_done(self, masks) -> None:
-        from percell4.application.use_cases.segment_cells import SegmentCells
         from percell4.adapters.hdf5_store import Hdf5DatasetRepository
+        from percell4.application.use_cases.segment_cells import SegmentCells
 
         # Delegate post-processing + store write to the use case. The
         # captured bin (set at queue time) is what the finalize call uses
@@ -460,6 +653,7 @@ class SegmentationPanel(QWidget):
                 remove_edge_cells=self._cp_remove_edges.isChecked(),
                 name=getattr(self, "_cellpose_pending_name", None),
                 view_bin=getattr(self, "_cellpose_pending_bin", 1),
+                edge_margin=self._cp_edge_margin.value(),
             )
         except ValueError as e:
             self._show_status(f"Error: {e}")
@@ -479,6 +673,182 @@ class SegmentationPanel(QWidget):
         if viewer_win is not None:
             viewer_win.add_labels(result.labels, name=result.seg_name)
 
+    # ── Tracking (time-lapse) ─────────────────────────────────
+
+    def _on_track_cells(self) -> None:
+        """Creator: track the active segmentation across timepoints.
+
+        Runs TrackCells synchronously (it mutates the session, which must
+        stay on the main thread), then adds the tracked labels layer to the
+        viewer. TrackCells already wrote the resource, refreshed the
+        inventory, and set it active (Creator contract).
+        """
+        from percell4.adapters.hdf5_store import Hdf5DatasetRepository
+        from percell4.adapters.laptrack_tracker import LaptrackTracker
+        from percell4.application.use_cases.track_cells import TrackCells
+        from percell4.domain.errors import NoDatasetError
+
+        session = self.data_model.session
+        if session.n_timepoints <= 1:
+            self._show_status(
+                "Tracking needs a time-lapse dataset (filenames with _tN tokens)."
+            )
+            return
+        seg_name = session.active_segmentation
+        if not seg_name:
+            self._show_status("Select a segmentation to track first.")
+            return
+
+        self._show_status(
+            f"Tracking cells across {session.n_timepoints} timepoints..."
+        )
+        repo = Hdf5DatasetRepository()
+        uc = TrackCells(repo, session, LaptrackTracker())
+        try:
+            result = uc.execute(seg_name)
+        except (ValueError, NoDatasetError) as e:
+            self._show_status(f"Tracking failed: {e}")
+            return
+
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        if viewer_win is not None:
+            # Creator step: add the new tracked layer to the viewer. The raw
+            # segmentation layer is preserved (both remain selectable).
+            viewer_win.add_labels(result.tracked_labels, name=result.seg_name)
+            # Overlay tracks/lineage if measurements for this resource exist.
+            try:
+                lineage = repo.read_tracks(session.dataset, result.seg_name)
+            except KeyError:
+                lineage = None
+            measurements = self.data_model.df
+            if (
+                measurements is not None
+                and not measurements.empty
+                and "track_id" in measurements.columns
+            ):
+                viewer_win.show_tracks_from_measurements(
+                    measurements, lineage_df=lineage, name=f"{result.seg_name}_tracks"
+                )
+
+        self._show_status(
+            f"Tracked: {result.n_tracks} tracks, {result.n_divisions} divisions. "
+            f"Saved as '{result.seg_name}'."
+        )
+
+    # ── Diameter reference circle ─────────────────────────────
+
+    def _on_diameter_circle_toggled(self, _checked: bool) -> None:
+        """Checkbox trigger — the only path that talks back to the user."""
+        self._sync_diameter_circle(announce=True)
+
+    def _on_diameter_value_changed(self, _diameter: float) -> None:
+        """Diameter (px) trigger. Silent when the overlay is off."""
+        if not self._cp_show_diameter_circle.isChecked():
+            return
+        self._sync_diameter_circle()
+
+    @staticmethod
+    def _active_layer(viewer):
+        """The viewer's active layer, or None if it has no selection model."""
+        selection = getattr(getattr(viewer, "layers", None), "selection", None)
+        return getattr(selection, "active", None)
+
+    @staticmethod
+    def _restore_active_layer(viewer, layer) -> None:
+        """Re-activate ``layer`` if it is still present. Best-effort."""
+        if layer is None:
+            return
+        selection = getattr(getattr(viewer, "layers", None), "selection", None)
+        if selection is None or layer not in list(viewer.layers):
+            return
+        try:
+            selection.active = layer
+        except Exception:  # noqa: BLE001 - display-only; never break the toggle
+            logger.debug("could not restore active layer after circle add")
+
+    def _remove_diameter_circle(self, viewer) -> bool:
+        """Drop the reference-circle layer if present. Returns whether it was."""
+        removed = False
+        for layer in list(viewer.layers):
+            if getattr(layer, "name", None) == vp.DIAMETER_CIRCLE_LAYER_NAME:
+                viewer.layers.remove(layer)
+                removed = True
+        return removed
+
+    def _sync_diameter_circle(self, *, announce: bool = False) -> None:
+        """Bring the reference-circle layer in line with the current state.
+
+        The single convergence point for all three triggers (checkbox,
+        Diameter (px) edit, dataset load). Idempotent and remove-before-add,
+        which is what keeps repeated toggles from stacking layers and keeps a
+        stale circle from surviving a dataset switch.
+
+        ``announce`` is set only by the explicit user toggle — a dataset load
+        must not spam the status bar on every open.
+        """
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        # existing_viewer: this also runs on dataset load, so asking through
+        # the constructing property built a napari window on every open.
+        viewer = getattr(viewer_win, "existing_viewer", None) if viewer_win else None
+        if viewer is None:
+            if announce:
+                self._show_status("Open a dataset in the viewer first")
+            return
+
+        self._remove_diameter_circle(viewer)
+
+        if not self._cp_show_diameter_circle.isChecked():
+            return
+
+        shape = self._get_image_shape()
+        if shape is None:
+            if announce:
+                self._show_status("Load an image first")
+            return
+
+        diameter = self._cp_form.settings().diameter
+        bbox = diameter_circle_bbox(shape, diameter, vp.DIAMETER_CIRCLE_MARGIN_PX)
+        if bbox is None:
+            # Diameter (px) == 0 means auto-detect; there is no size to show.
+            # The checkbox stays ticked so the circle returns on the next
+            # nonzero value.
+            if announce:
+                self._show_status(
+                    "Diameter (px) is 0 (auto-detect) — nothing to draw. "
+                    "Enter a diameter to see the reference circle."
+                )
+            return
+
+        # napari makes every newly added layer the active one, which would
+        # yank selection off the Labels layer the user is painting — and with
+        # it the `M` multi-select keystroke, which binds on Labels keymaps.
+        # Capture and restore around the add. `editable = False` does not
+        # prevent this on its own.
+        previous_active = self._active_layer(viewer)
+
+        viewer.add_shapes(
+            [bbox],
+            shape_type="ellipse",
+            name=vp.DIAMETER_CIRCLE_LAYER_NAME,
+            face_color=[list(vp.DIAMETER_CIRCLE_FACE_COLOR)],
+            edge_color=[list(vp.DIAMETER_CIRCLE_EDGE_COLOR)],
+            edge_width=vp.DIAMETER_CIRCLE_EDGE_WIDTH,
+            blending=vp.DIAMETER_CIRCLE_BLENDING,
+            **vp._optional_kwargs(opacity=vp.DIAMETER_CIRCLE_OPACITY),
+        )
+        # A reference ruler the user can reshape is a ruler that lies.
+        for layer in viewer.layers:
+            if getattr(layer, "name", None) == vp.DIAMETER_CIRCLE_LAYER_NAME:
+                layer.editable = False
+                break
+
+        self._restore_active_layer(viewer, previous_active)
+
+        if announce:
+            self._show_status(
+                f"Diameter reference circle: {diameter:g} px across."
+            )
+
     # ── Load ROIs ─────────────────────────────────────────────
 
     def _get_image_shape(self):
@@ -488,7 +858,7 @@ class SegmentationPanel(QWidget):
         if self._launcher is None:
             return None
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return None
         if channel_name:
             for layer in viewer_win.viewer.layers:
@@ -504,28 +874,52 @@ class SegmentationPanel(QWidget):
 
     def _on_create_empty_labels(self) -> None:
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             self._show_status("Open a dataset in the viewer first")
             return
         shape = self._get_image_shape()
         if shape is None:
             self._show_status("Load an image first")
             return
-        labels = np.zeros(shape, dtype=np.int32)
+        # Time-lapse: allocate a (T,H,W) canvas (T from session.n_timepoints, the
+        # canonical source) so per-frame drawing works and the already
+        # time-aware edit handlers (delete/relabel/cleanup) engage. A 2D zeros
+        # array would be stored as a time-invariant gate and could not be edited
+        # per frame.
+        labels = empty_labels_array(shape, self.data_model.session.n_timepoints)
         viewer_win.add_labels(labels, name="manual")
         self.data_model.set_active_segmentation("manual")
         # Persist immediately so the labels/manual entry exists in HDF5
         # even if the user closes the dataset before painting anything.
         new_layer = self._get_active_labels_layer()
         if new_layer is not None and new_layer.name == "manual":
-            self._persist_labels_layer(new_layer)
+            if self._persist_labels_layer(new_layer):
+                # Refresh the session's segmentation inventory so
+                # SessionWindow (and any other SEGMENTATION_LIST_CHANGED
+                # subscriber) learns about the new "manual" entry without
+                # requiring a dataset reload. Mirrors the canonical
+                # Creator pattern at
+                # ``application/use_cases/segment_cells.py:209``.
+                store = (
+                    getattr(self._launcher, "_current_store", None)
+                    if self._launcher
+                    else None
+                )
+                if store is not None:
+                    mask_set = set(store.list_masks())
+                    seg_names = [
+                        n for n in store.list_labels() if n not in mask_set
+                    ]
+                    self.data_model.session.refresh_resource_lists(
+                        segmentation_names=seg_names
+                    )
         self._show_status("Empty labels layer created — use napari tools to draw cells")
 
     def _get_active_labels_layer(self):
         if self._launcher is None:
             return None
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return None
         import napari
         active_name = self.data_model.active_segmentation
@@ -545,9 +939,55 @@ class SegmentationPanel(QWidget):
         if self._launcher is None:
             return
         viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return
         viewer_win.viewer.layers.selection.active = labels_layer
+
+    def _current_timepoint(self) -> int:
+        """The displayed timepoint (napari dims axis 0), or 0 if not time-lapse."""
+        if self._launcher is None:
+            return 0
+        viewer_win = self._launcher._windows.get("viewer")
+        if viewer_win is None or viewer_win.existing_viewer is None:
+            return 0
+        dims = viewer_win.viewer.dims
+        if dims.ndim >= 3 and len(dims.current_step) > 0:
+            return int(dims.current_step[0])
+        return 0
+
+    def _active_seg_is_tracked(self) -> bool:
+        """True when the active segmentation has a stored lineage table.
+
+        A tracked segmentation's label value IS the track id, so relabeling
+        or compacting ids would break cross-timepoint identity.
+        """
+        name = self.data_model.active_segmentation
+        if not name:
+            return False
+        store = (
+            getattr(self._launcher, "_current_store", None)
+            if self._launcher is not None
+            else None
+        )
+        if store is None:
+            return False
+        try:
+            return name in store.list_tracks()
+        except Exception:  # noqa: BLE001 — advisory check, never fatal
+            return False
+
+    def _sync_relabel_enabled(self) -> None:
+        """Disable relabel-sequential when the active segmentation is tracked."""
+        btn = getattr(self, "_btn_relabel", None)
+        if btn is None:
+            return
+        tracked = self._active_seg_is_tracked()
+        btn.setEnabled(not tracked)
+        if tracked:
+            btn.setToolTip(
+                "Disabled for a tracked segmentation: relabeling would scramble "
+                "the track IDs that link cells across timepoints."
+            )
 
     def _on_delete_selected_label(self) -> None:
         labels_layer = self._get_active_labels_layer()
@@ -559,13 +999,27 @@ class SegmentationPanel(QWidget):
             self._show_status("No label selected (click a cell first)")
             return
         data = labels_layer.data.copy()
-        count = int(np.sum(data == selected_id))
-        data[data == selected_id] = 0
+        # For a time-lapse (T, H, W) labels layer, delete only within the
+        # displayed timepoint — the same label id is a different physical cell
+        # in other frames (raw seg) or a cell that legitimately persists
+        # (tracked seg), so it must not be wiped across the whole stack.
+        if data.ndim == 3:
+            t = max(0, min(self._current_timepoint(), data.shape[0] - 1))
+            frame = data[t]
+            count = int(np.sum(frame == selected_id))
+            frame[frame == selected_id] = 0
+            scope = f" at timepoint {t}"
+        else:
+            count = int(np.sum(data == selected_id))
+            data[data == selected_id] = 0
+            scope = ""
         labels_layer.data = data
         labels_layer.selected_label = 0
         labels_layer.refresh()
         self._persist_labels_layer(labels_layer)
-        self._show_status(f"Deleted label {selected_id} ({count} pixels removed)")
+        self._show_status(
+            f"Deleted label {selected_id} ({count} pixels removed{scope})"
+        )
 
     def _on_add_new_label(self) -> None:
         from qtpy.QtCore import QTimer
@@ -606,14 +1060,29 @@ class SegmentationPanel(QWidget):
         if labels_layer is None:
             self._show_status("No labels layer active")
             return
+        if self._active_seg_is_tracked():
+            self._show_status(
+                "Relabel is disabled for a tracked segmentation — it would "
+                "scramble the track IDs."
+            )
+            return
         from percell4.domain.segmentation.postprocess import relabel_sequential
-        old_data = labels_layer.data
-        new_data = relabel_sequential(np.asarray(old_data, dtype=np.int32))
-        n_cells = int(new_data.max())
-        labels_layer.data = new_data
+        data = np.asarray(labels_layer.data, dtype=np.int32).copy()
+        # Frame-scope on a time-lapse stack: renumber only the displayed
+        # timepoint so the other frames' labels are untouched.
+        if data.ndim == 3:
+            t = max(0, min(self._current_timepoint(), data.shape[0] - 1))
+            data[t] = relabel_sequential(data[t])
+            n_cells = int(data[t].max())
+            scope = f" at timepoint {t}"
+        else:
+            data = relabel_sequential(data)
+            n_cells = int(data.max())
+            scope = ""
+        labels_layer.data = data
         labels_layer.refresh()
         self._persist_labels_layer(labels_layer)
-        self._show_status(f"Relabeled to {n_cells} sequential cells")
+        self._show_status(f"Relabeled to {n_cells} sequential cells{scope}")
 
     # ── Label Cleanup ─────────────────────────────────────────
 
@@ -643,13 +1112,21 @@ class SegmentationPanel(QWidget):
             self._cleanup_status.setStyleSheet(f"color: {theme.ERROR};")
             return
 
-        labels = np.asarray(labels_layer.data, dtype=np.int32)
+        full = np.asarray(labels_layer.data, dtype=np.int32)
+        # Frame-scope on a time-lapse stack: preview removals only in the
+        # displayed timepoint.
+        t = None
+        if full.ndim == 3:
+            t = max(0, min(self._current_timepoint(), full.shape[0] - 1))
+            labels = full[t]
+        else:
+            labels = full
         filtered, edge_removed, small_removed, total_removed = (
             self._run_cleanup_filters(labels)
         )
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        if viewer_win is None or viewer_win.viewer is None:
+        if viewer_win is None or viewer_win.existing_viewer is None:
             return
 
         for layer in list(viewer_win.viewer.layers):
@@ -664,7 +1141,14 @@ class SegmentationPanel(QWidget):
             return
 
         removed_mask = (labels > 0) & (filtered == 0)
-        highlight = np.where(removed_mask, 1, 0).astype(np.int32)
+        frame_highlight = np.where(removed_mask, 1, 0).astype(np.int32)
+        # Build an overlay matching the layer's rank so it tracks the slider;
+        # only the displayed frame is marked for a time-lapse stack.
+        if t is not None:
+            highlight = np.zeros(full.shape, dtype=np.int32)
+            highlight[t] = frame_highlight
+        else:
+            highlight = frame_highlight
         viewer_win.viewer.add_labels(
             highlight,
             name="_cleanup_preview",
@@ -692,20 +1176,36 @@ class SegmentationPanel(QWidget):
 
         from percell4.domain.segmentation.postprocess import relabel_sequential
 
-        labels = np.asarray(labels_layer.data, dtype=np.int32)
+        full = np.asarray(labels_layer.data, dtype=np.int32).copy()
+        tracked = self._active_seg_is_tracked()
+        # Frame-scope on a time-lapse stack: clean up only the displayed frame.
+        t = None
+        if full.ndim == 3:
+            t = max(0, min(self._current_timepoint(), full.shape[0] - 1))
+            frame = full[t]
+        else:
+            frame = full
         filtered, edge_removed, small_removed, total_removed = (
-            self._run_cleanup_filters(labels)
+            self._run_cleanup_filters(frame)
         )
 
-        filtered = relabel_sequential(filtered)
-        n_remaining = int(filtered.max())
+        # Compacting ids would break a tracked segmentation's track IDs, so
+        # skip the relabel step there — just remove the filtered cells.
+        if not tracked:
+            filtered = relabel_sequential(filtered)
+        n_remaining = int((np.unique(filtered) > 0).sum())
 
-        labels_layer.data = filtered
+        if t is not None:
+            full[t] = filtered
+            out_data = full
+        else:
+            out_data = filtered
+        labels_layer.data = out_data
         labels_layer.refresh()
         self._persist_labels_layer(labels_layer)
 
         viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
-        if viewer_win is not None and viewer_win.viewer is not None:
+        if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in list(viewer_win.viewer.layers):
                 if layer.name == "_cleanup_preview":
                     viewer_win.viewer.layers.remove(layer)
@@ -724,30 +1224,3 @@ class SegmentationPanel(QWidget):
         self._cleanup_status.setStyleSheet(f"color: {theme.SUCCESS};")
         self._show_status(f"Cleanup: removed {total_removed}, {n_remaining} remaining")
 
-    # ── Save ──────────────────────────────────────────────────
-
-    def _on_save_labels(self) -> None:
-        store = getattr(self._launcher, "_current_store", None) if self._launcher else None
-        if store is None:
-            self._show_status("No dataset loaded")
-            return
-        viewer_win = self._launcher._windows.get("viewer")
-        if viewer_win is None or viewer_win.viewer is None:
-            self._show_status("Viewer not open")
-            return
-
-        import napari
-        active = viewer_win.viewer.layers.selection.active
-        if active is not None and isinstance(active, napari.layers.Labels):
-            name = active.name
-            data = active.data
-        else:
-            labels_layer = self._get_active_labels_layer()
-            if labels_layer is None:
-                self._show_status("No labels layer to save")
-                return
-            name = labels_layer.name
-            data = labels_layer.data
-
-        count = store.write_labels(name, np.asarray(data, dtype=np.int32))
-        self._show_status(f"Saved labels '{name}' ({count} pixels)")

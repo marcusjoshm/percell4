@@ -116,7 +116,7 @@ percell4/
 **Goal:** Installable Python package with passing test suite.
 
 **Create:**
-- `pyproject.toml` — src layout, Python >=3.12, all deps with upper bounds (e.g., `napari>=0.5,<0.8`, `cellpose>=3.0,<5.0`), ruff (line-length 100), pytest config with `slow`/`gui` markers, optional deps: `gpu = ["cellpose[gpu]"]`, `dev = ["pytest", "pytest-qt", "ruff"]`. Entry points: `percell4 = "percell4.cli.main:cli"`, `percell4-gui = "percell4.app:main"`. Based on `/Users/leelab/percell3/pyproject.toml`.
+- `pyproject.toml` — src layout, Python >=3.12, all deps with upper bounds (e.g., `napari>=0.5,<0.8`, `cellpose>=3.0,<5.0`), ruff (line-length 100), pytest config with `slow`/`gui` markers, optional deps: `gpu = ["cellpose[gpu]"]`, `dev = ["pytest", "pytest-qt", "ruff"]`. Entry points: `percell4 = "percell4.cli.main:cli"`, `percell4-gui = "percell4.app:main"`. Based on `~/percell3/pyproject.toml`.
 - `.gitignore` — Python standard + `.venv/`, `*.h5`, `*.sdt`, `*.ptu`, `.DS_Store`
 - `src/percell4/__init__.py` — `__version__ = "0.1.0"`
 - `src/percell4/_types.py` — Shared type aliases: `LabelArray = NDArray[np.int32]`, `IntensityImage = NDArray[np.float32]`, and cross-module dataclasses like `DatasetMetadata`.
@@ -411,8 +411,8 @@ pytest tests/test_model.py -v
 **Goal:** Scan TIFF directory, parse tokens, assemble tiles, write .h5.
 
 **Create:**
-- `src/percell4/io/models.py` — Frozen dataclasses: `TokenConfig`, `TileConfig`, `DiscoveredFile`, `ScanResult`. Adapted from `/Users/leelab/percell3/src/percell3/io/models.py`
-- `src/percell4/io/scanner.py` — `FileScanner`: walk dir, match TIFFs, parse tokens (ch_, t_, s_, z_) via regex. Adapted from `/Users/leelab/percell3/src/percell3/io/scanner.py`
+- `src/percell4/io/models.py` — Frozen dataclasses: `TokenConfig`, `TileConfig`, `DiscoveredFile`, `ScanResult`. Adapted from `~/percell3/src/percell3/io/models.py`
+- `src/percell4/io/scanner.py` — `FileScanner`: walk dir, match TIFFs, parse tokens (ch_, t_, s_, z_) via regex. Adapted from `~/percell3/src/percell3/io/scanner.py`
 - `src/percell4/io/readers.py` — `read_tiff()`, `read_sdt()`, `read_flim_bin()`, `read_tiff_metadata()`
 - `src/percell4/io/assembler.py` — `assemble_tiles()`, `assemble_channels()`, `project_z(method="mip")`
 - `src/percell4/io/importer.py` — `import_dataset(source_dir, output_h5, token_config, tile_config, project_csv) -> int`. Takes `progress_callback` for GUI integration.
@@ -437,7 +437,7 @@ pytest tests/test_model.py -v
 
 ### .bin TCSPC Reader (from bin_reader — carry forward)
 
-**Source:** `/Users/leelab/bin_reader/flim_bin_reader.py`, `/Users/leelab/bin_reader/bin_to_tif.py`
+**Source:** `~/bin_reader/flim_bin_reader.py`, `~/bin_reader/bin_to_tif.py`
 
 Reads pre-aggregated TCSPC histogram data from raw .bin files (Becker & Hickl, PicoQuant, or generic exports). The .bin format is unstructured binary — user must specify dimensions and dtype.
 
@@ -491,7 +491,7 @@ def read_flim_bin(
 **Goal:** Per-cell metrics from labels + image -> DataFrame -> CellDataModel.
 
 **Create:**
-- `src/percell4/measure/metrics.py` — 7 NaN-safe metric functions + `BUILTIN_METRICS` dict. Direct port from `/Users/leelab/percell3/src/percell3/measure/metrics.py`. Each metric follows the signature `(image_crop: NDArray, cell_mask: NDArray[bool]) -> float` using `np.nan*` functions (nanmean, nanmax, nanmin, nansum, nanstd, nanmedian). The `area` metric counts True pixels in the mask. All return `float` explicitly.
+- `src/percell4/measure/metrics.py` — 7 NaN-safe metric functions + `BUILTIN_METRICS` dict. Direct port from `~/percell3/src/percell3/measure/metrics.py`. Each metric follows the signature `(image_crop: NDArray, cell_mask: NDArray[bool]) -> float` using `np.nan*` functions (nanmean, nanmax, nanmin, nansum, nanstd, nanmedian). The `area` metric counts True pixels in the mask. All return `float` explicitly.
 - `src/percell4/measure/measurer.py` — Main measurement function:
 
 ```
@@ -617,7 +617,7 @@ highlight_scatter = ScatterPlotItem(size=10, pen=mkPen('r', width=2), brush=None
 **Goal:** Binary masks from threshold methods, masked measurements, and particle analysis within cells.
 
 **Create:**
-- `src/percell4/measure/thresholding.py` — Pure functions, adapted from `/Users/leelab/percell3/src/percell3/measure/thresholding.py`:
+- `src/percell4/measure/thresholding.py` — Pure functions, adapted from `~/percell3/src/percell3/measure/thresholding.py`:
 
 ```
 def threshold_otsu(image: NDArray) -> tuple[NDArray[np.uint8], float]
@@ -630,7 +630,7 @@ def apply_gaussian_smoothing(image: NDArray, sigma: float | None) -> NDArray
 
 All return `(mask_uint8, threshold_value)`. Masks stored as uint8 (0/1 not 0/255). Start with otsu + manual — add others when requested.
 
-- `src/percell4/measure/particle.py` — Particle analysis within cells, adapted from `/Users/leelab/percell3/src/percell3/measure/particle_analyzer.py`:
+- `src/percell4/measure/particle.py` — Particle analysis within cells, adapted from `~/percell3/src/percell3/measure/particle_analyzer.py`:
 
 ```
 def analyze_particles(
@@ -780,7 +780,7 @@ IRF correction shifts all phasor points. Applied as: `g_corrected = g * cos(phi)
 
 ### Wavelet Filtering (from flimfret — carry forward)
 
-**Source:** `/Users/leelab/flimfret/src/python/modules/wavelet_filter.py` (671 lines)
+**Source:** `~/flimfret/src/python/modules/wavelet_filter.py` (671 lines)
 
 DTCWT-based adaptive denoising of phasor data. Operates on **post-computed G/S maps** (not raw decay). This is critical for noisy FLIM data — reduces phasor scatter while preserving spatial structure.
 
@@ -823,7 +823,7 @@ def denoise_phasor(
 ### Phase 9: Additional Analysis + Particle Analysis
 
 **Create:**
-- `src/percell4/measure/particle.py` — `analyze_particles(image, labels, mask) -> pd.DataFrame`. Adapted from `/Users/leelab/percell3/src/percell3/measure/particle_analyzer.py`. This is just another measurement function — same pattern as Phase 5.
+- `src/percell4/measure/particle.py` — `analyze_particles(image, labels, mask) -> pd.DataFrame`. Adapted from `~/percell3/src/percell3/measure/particle_analyzer.py`. This is just another measurement function — same pattern as Phase 5.
 
 ---
 

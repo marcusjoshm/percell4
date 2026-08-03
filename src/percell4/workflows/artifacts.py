@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import warnings
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
@@ -24,9 +25,18 @@ from typing import Any
 
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
+    CELLPOSE_MODELS,
+    AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
+    DiluteSettings,
+    EdgeMode,
     GmmCriterion,
+    IterativeOtsuSettings,
+    ParticleSettings,
+    PunctaDetectorSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -63,7 +73,10 @@ def write_atomic(path: Path, writer_fn: Callable[[Path], None]) -> None:
     try:
         writer_fn(tmp)
         # Ensure the temp file's bytes are on disk before the rename.
-        with open(tmp, "rb") as fd:
+        # Open "r+b" (writable): on Windows os.fsync maps to FlushFileBuffers,
+        # which requires a write-access handle — a read-only "rb" descriptor
+        # raises EBADF ("Bad file descriptor") there.
+        with open(tmp, "r+b") as fd:
             os.fsync(fd.fileno())
     except BaseException:
         if tmp.exists():
@@ -89,8 +102,13 @@ def write_atomic(path: Path, writer_fn: Callable[[Path], None]) -> None:
 # ── Run folder creation ──────────────────────────────────────────────────
 
 
-def create_run_folder(output_parent: Path) -> Path:
-    """Create a new ``run_<utc-timestamp>_<shortuuid>/`` folder.
+def create_run_folder(
+    output_parent: Path,
+    *,
+    prefix: str = "run",
+    create_subdirs: bool = True,
+) -> Path:
+    """Create a new ``<prefix>_<utc-timestamp>_<shortuuid>/`` folder.
 
     The timestamp is UTC in ``YYYY-MM-DDTHHMMSSZ`` form — matches the
     ``run_log.jsonl`` entries (also UTC), sorts lexicographically, and is
@@ -99,17 +117,25 @@ def create_run_folder(output_parent: Path) -> Path:
     any collision — the caller should surface the error rather than
     silently sharing a folder between runs.
 
-    Subdirectories created up front: ``per_dataset/`` and ``staging/``.
+    ``prefix`` defaults to ``"run"`` (single-cell workflow behavior).
+    The FLIM-FRET workflow passes ``prefix="flim_fret_run"``.
+
+    ``create_subdirs`` controls whether the ``per_dataset/`` and
+    ``staging/`` subdirs are auto-created. Defaults to True so existing
+    single-cell callers see no change. The FLIM-FRET workflow passes
+    ``create_subdirs=False`` since it writes a single combined CSV
+    directly under the run folder.
     """
     output_parent = Path(output_parent)
     output_parent.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
     suffix = uuid.uuid4().hex[:8]
-    folder = output_parent / f"run_{ts}_{suffix}"
+    folder = output_parent / f"{prefix}_{ts}_{suffix}"
     folder.mkdir(parents=True, exist_ok=False)
-    (folder / "per_dataset").mkdir()
-    (folder / "staging").mkdir()
+    if create_subdirs:
+        (folder / "per_dataset").mkdir()
+        (folder / "staging").mkdir()
     return folder
 
 
@@ -142,8 +168,19 @@ def _cellpose_to_dict(c: CellposeSettings) -> dict[str, Any]:
 
 
 def _cellpose_from_dict(d: dict[str, Any]) -> CellposeSettings:
+    # A config saved against an older model list (e.g. a 3.x "cyto3" round, or
+    # a model dropped from CELLPOSE_MODELS) is coerced to the current default
+    # rather than carrying a name that no selector offers and no 4.x build ships.
+    model = d.get("model", CELLPOSE_MODELS[0])
+    if model not in CELLPOSE_MODELS:
+        warnings.warn(
+            f"Cellpose model {model!r} from the saved config is not an "
+            f"available model {CELLPOSE_MODELS}; using {CELLPOSE_MODELS[0]!r}.",
+            stacklevel=2,
+        )
+        model = CELLPOSE_MODELS[0]
     return CellposeSettings(
-        model=d.get("model", "cpsam"),
+        model=model,
         diameter=d.get("diameter", 30.0),
         gpu=d.get("gpu", True),
         flow_threshold=d.get("flow_threshold", 0.4),
@@ -152,8 +189,110 @@ def _cellpose_from_dict(d: dict[str, Any]) -> CellposeSettings:
     )
 
 
-def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
+def _puncta_to_dict(p: PunctaDetectorSettings) -> dict[str, Any]:
     return {
+        "detector_name": p.detector_name,
+        "seed_detector_name": p.seed_detector_name,
+        "background_estimator_name": p.background_estimator_name,
+        "detector_params": dict(p.detector_params),
+        "seed_params": dict(p.seed_params),
+        "min_spot_px": p.min_spot_px,
+        "max_spot_px": p.max_spot_px,
+        "spot_scale_prior": (list(p.spot_scale_prior) if p.spot_scale_prior is not None else None),
+    }
+
+
+def _puncta_from_dict(d: dict[str, Any]) -> PunctaDetectorSettings:
+    prior = d.get("spot_scale_prior")
+    return PunctaDetectorSettings(
+        detector_name=d.get("detector_name", "otsu"),
+        seed_detector_name=d.get("seed_detector_name", "log"),
+        background_estimator_name=d.get("background_estimator_name", "gaussian-peak"),
+        detector_params=d.get("detector_params", {}),
+        seed_params=d.get("seed_params", {}),
+        min_spot_px=d.get("min_spot_px", 2),
+        max_spot_px=d.get("max_spot_px"),
+        spot_scale_prior=tuple(prior) if prior is not None else None,
+    )
+
+
+def _iterative_otsu_to_dict(s: IterativeOtsuSettings) -> dict[str, Any]:
+    return {
+        "scope": s.scope,
+        "dilation_radius_px": s.dilation_radius_px,
+        "max_rounds": s.max_rounds,
+        "stop_criteria": list(s.stop_criteria),
+        "stop_params": dict(s.stop_params),
+        "stop_combine": s.stop_combine,
+        "fixed_iterations": s.fixed_iterations,
+    }
+
+
+def _iterative_otsu_from_dict(d: dict[str, Any]) -> IterativeOtsuSettings:
+    return IterativeOtsuSettings(
+        scope=d.get("scope", "per-cell"),
+        dilation_radius_px=d.get("dilation_radius_px", 5),
+        max_rounds=d.get("max_rounds", 10),
+        stop_criteria=tuple(d.get("stop_criteria", ("bg-floor", "positive-fraction-high"))),
+        stop_params=d.get("stop_params", {}),
+        stop_combine=d.get("stop_combine", "any"),
+        # Absent in pre-feature run folders → criteria-driven mode.
+        fixed_iterations=d.get("fixed_iterations"),
+    )
+
+
+def _adaptive_clip_to_dict(s: AdaptiveClipSettings) -> dict[str, Any]:
+    return {
+        "d_min_um": s.d_min_um,
+        "k": s.k,
+        "presmooth_sigma_px": s.presmooth_sigma_px,
+        "d_min_unit": s.d_min_unit,
+        "global_sigma": s.global_sigma,
+    }
+
+
+def _adaptive_clip_from_dict(d: dict[str, Any]) -> AdaptiveClipSettings:
+    return AdaptiveClipSettings(
+        d_min_um=d["d_min_um"],
+        k=d.get("k", 1.0),
+        presmooth_sigma_px=d.get("presmooth_sigma_px", 1.0),
+        # Absent in legacy configs → µm (the original behavior).
+        d_min_unit=d.get("d_min_unit", "um"),
+        # Absent in legacy configs → per-cell σ (the original behavior).
+        global_sigma=d.get("global_sigma", False),
+    )
+
+
+def _auto_extract_to_dict(s: AutoExtractSettings) -> dict[str, Any]:
+    return {
+        "smallest_particle_um": s.smallest_particle_um,
+        "presmooth_sigma_px": s.presmooth_sigma_px,
+        "smallest_particle_unit": s.smallest_particle_unit,
+    }
+
+
+def _auto_extract_from_dict(d: dict[str, Any]) -> AutoExtractSettings:
+    return AutoExtractSettings(
+        # None == auto-detect; absent key also reconstructs as auto-detect.
+        smallest_particle_um=d.get("smallest_particle_um"),
+        presmooth_sigma_px=d.get("presmooth_sigma_px", 1.0),
+        smallest_particle_unit=d.get("smallest_particle_unit", "um"),
+    )
+
+
+def _cnr_classify_to_dict(s: CnrClassifySettings) -> dict[str, Any]:
+    return {"threshold": s.threshold, "forced": s.forced}
+
+
+def _cnr_classify_from_dict(d: dict[str, Any]) -> CnrClassifySettings:
+    # ``forced`` absent reconstructs as guided (older run_config.json).
+    return CnrClassifySettings(
+        threshold=d.get("threshold", 0.0), forced=d.get("forced", False)
+    )
+
+
+def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "name": r.name,
         "channel": r.channel,
         "metric": r.metric,
@@ -163,11 +302,100 @@ def _round_to_dict(r: ThresholdingRound) -> dict[str, Any]:
         "kmeans_n_clusters": r.kmeans_n_clusters,
         "gaussian_sigma": r.gaussian_sigma,
     }
+    # Additive: only emitted for puncta / iterative-otsu / adaptive-clip /
+    # auto-extract / cnr-classify rounds so legacy configs round-trip unchanged
+    # and old run_config.json files keep loading (absent keys reconstruct as a
+    # legacy Otsu round).
+    if r.puncta is not None:
+        out["puncta_detector"] = _puncta_to_dict(r.puncta)
+    if r.iterative_otsu is not None:
+        out["iterative_otsu"] = _iterative_otsu_to_dict(r.iterative_otsu)
+    if r.adaptive_clip is not None:
+        out["adaptive_clip"] = _adaptive_clip_to_dict(r.adaptive_clip)
+    if r.auto_extract is not None:
+        out["auto_extract"] = _auto_extract_to_dict(r.auto_extract)
+    if r.cnr_classify is not None:
+        out["cnr_classify"] = _cnr_classify_to_dict(r.cnr_classify)
+    # Additive: only emitted when a size filter is set, so legacy configs
+    # round-trip unchanged and old run_config.json files keep loading (absent
+    # keys reconstruct as no filter).
+    if r.min_particle_size > 0:
+        out["min_particle_size"] = r.min_particle_size
+        out["min_particle_size_unit"] = r.min_particle_size_unit
+    return out
 
 
 def _round_from_dict(d: dict[str, Any]) -> ThresholdingRound:
+    puncta_raw = d.get("puncta_detector")
+    iterative_raw = d.get("iterative_otsu")
+    adaptive_raw = d.get("adaptive_clip")
+    auto_extract_raw = d.get("auto_extract")
+    cnr_classify_raw = d.get("cnr_classify")
     return ThresholdingRound(
         name=d["name"],
+        channel=d["channel"],
+        metric=d["metric"],
+        algorithm=ThresholdAlgorithm(d["algorithm"]),
+        gmm_criterion=GmmCriterion(d.get("gmm_criterion", "bic")),
+        gmm_max_components=d.get("gmm_max_components", 4),
+        kmeans_n_clusters=d.get("kmeans_n_clusters", 3),
+        gaussian_sigma=d.get("gaussian_sigma", 1.0),
+        puncta=_puncta_from_dict(puncta_raw) if puncta_raw is not None else None,
+        iterative_otsu=(
+            _iterative_otsu_from_dict(iterative_raw) if iterative_raw is not None else None
+        ),
+        adaptive_clip=(
+            _adaptive_clip_from_dict(adaptive_raw) if adaptive_raw is not None else None
+        ),
+        auto_extract=(
+            _auto_extract_from_dict(auto_extract_raw) if auto_extract_raw is not None else None
+        ),
+        cnr_classify=(
+            _cnr_classify_from_dict(cnr_classify_raw) if cnr_classify_raw is not None else None
+        ),
+        # Absent in legacy configs → no size filter (0.0 / px).
+        min_particle_size=float(d.get("min_particle_size", 0.0)),
+        min_particle_size_unit=str(d.get("min_particle_size_unit", "px")),
+    )
+
+
+def _particle_to_dict(p: ParticleSettings) -> dict[str, Any]:
+    return {"min_area": p.min_area, "min_area_unit": p.min_area_unit}
+
+
+def _particle_from_dict(d: dict[str, Any]) -> ParticleSettings:
+    """Load ParticleSettings, accepting both the new and legacy schema.
+
+    Legacy ``run_config.json`` files predate the µm² unit selector and
+    carry ``{"min_area": <int>}`` only. Treat that shape as the px
+    default; tolerate either int or float in the value so a hand-edited
+    config doesn't trip the loader.
+    """
+    raw_value = d.get("min_area", 0)
+    return ParticleSettings(
+        min_area=float(raw_value),
+        min_area_unit=str(d.get("min_area_unit", "px")),
+    )
+
+
+def _dilute_to_dict(d: DiluteSettings) -> dict[str, Any]:
+    return {
+        "mask_name": d.mask_name,
+        "dilation_radius_px": d.dilation_radius_px,
+        "channel": d.channel,
+        "metric": d.metric,
+        "algorithm": d.algorithm.value,
+        "gmm_criterion": d.gmm_criterion.value,
+        "gmm_max_components": d.gmm_max_components,
+        "kmeans_n_clusters": d.kmeans_n_clusters,
+        "gaussian_sigma": d.gaussian_sigma,
+    }
+
+
+def _dilute_from_dict(d: dict[str, Any]) -> DiluteSettings:
+    return DiluteSettings(
+        mask_name=d["mask_name"],
+        dilation_radius_px=d["dilation_radius_px"],
         channel=d["channel"],
         metric=d["metric"],
         algorithm=ThresholdAlgorithm(d["algorithm"]),
@@ -207,20 +435,63 @@ def config_to_dict(cfg: WorkflowConfig) -> dict[str, Any]:
         "selected_csv_columns": list(cfg.selected_csv_columns),
         "output_parent": str(cfg.output_parent),
         "seg_channel_name": cfg.seg_channel_name,
+        "edge_mode": cfg.edge_mode.value,
+        "edge_margin_px": cfg.edge_margin_px,
+        "dilute_settings": (
+            _dilute_to_dict(cfg.dilute_settings) if cfg.dilute_settings is not None else None
+        ),
+        "cellpose_segmentation_name": cfg.cellpose_segmentation_name,
+        "particle_settings": (
+            _particle_to_dict(cfg.particle_settings) if cfg.particle_settings is not None else None
+        ),
+        "run_seg_qc_on_existing": cfg.run_seg_qc_on_existing,
+        "run_seg_qc_on_new_segmentations": cfg.run_seg_qc_on_new_segmentations,
+        "use_existing_masks": cfg.use_existing_masks,
+        "existing_mask_selections": {
+            k: list(v) for k, v in cfg.existing_mask_selections.items()
+        },
     }
 
 
 def config_from_dict(data: dict[str, Any]) -> WorkflowConfig:
-    """Reconstruct a WorkflowConfig from its JSON-safe dict form."""
+    """Reconstruct a WorkflowConfig from its JSON-safe dict form.
+
+    Pre-evolution payloads (no ``edge_mode`` or ``dilute_settings`` keys)
+    deserialize with safe defaults: ``EdgeMode.EXCLUDE`` and ``None``
+    respectively, preserving the historical workflow invariant on Resume.
+    """
+    dilute_blob = data.get("dilute_settings")
+    particle_blob = data.get("particle_settings")
     return WorkflowConfig(
         datasets=[_entry_from_dict(d) for d in data["datasets"]],
         cellpose=_cellpose_from_dict(data["cellpose"]),
-        thresholding_rounds=[
-            _round_from_dict(r) for r in data["thresholding_rounds"]
-        ],
+        thresholding_rounds=[_round_from_dict(r) for r in data["thresholding_rounds"]],
         selected_csv_columns=list(data["selected_csv_columns"]),
         output_parent=Path(data["output_parent"]),
         seg_channel_name=data.get("seg_channel_name", ""),
+        edge_mode=EdgeMode(data.get("edge_mode", EdgeMode.EXCLUDE.value)),
+        edge_margin_px=int(data.get("edge_margin_px", 0)),
+        dilute_settings=(_dilute_from_dict(dilute_blob) if dilute_blob is not None else None),
+        cellpose_segmentation_name=data.get("cellpose_segmentation_name", "cellpose_qc"),
+        particle_settings=(
+            _particle_from_dict(particle_blob) if particle_blob is not None else None
+        ),
+        # Absent in pre-feature run folders → default True (checked).
+        run_seg_qc_on_existing=bool(data.get("run_seg_qc_on_existing", True)),
+        # Absent in pre-feature run folders → default True, which is the
+        # behavior those runs actually had (every fresh segmentation QC'd).
+        run_seg_qc_on_new_segmentations=bool(
+            data.get("run_seg_qc_on_new_segmentations", True)
+        ),
+        # Absent in pre-feature run folders → masks-reuse disabled, empty
+        # selections. This preserves the empty-rounds invariant on Resume:
+        # a legacy rounds-present config still loads, and a legacy
+        # rounds-less config (which never existed) would still fail loud.
+        use_existing_masks=bool(data.get("use_existing_masks", False)),
+        existing_mask_selections={
+            k: list(v)
+            for k, v in dict(data.get("existing_mask_selections", {})).items()
+        },
     )
 
 
@@ -255,21 +526,27 @@ def metadata_to_dict(meta: RunMetadata) -> dict[str, Any]:
         "finished_at": meta.finished_at.isoformat() if meta.finished_at else None,
         "intersected_channels": list(meta.intersected_channels),
         "failures": [_failure_to_dict(f) for f in meta.failures],
+        "per_dataset_dilute_round_counts": dict(meta.per_dataset_dilute_round_counts),
     }
 
 
 def metadata_from_dict(data: dict[str, Any]) -> RunMetadata:
+    """Reconstruct a RunMetadata from its JSON-safe dict form.
+
+    Pre-evolution payloads (no ``per_dataset_dilute_round_counts`` key)
+    deserialize with an empty dict, preserving Resume on run folders
+    written before the schema evolution.
+    """
     return RunMetadata(
         run_id=data["run_id"],
         run_folder=Path(data["run_folder"]),
         started_at=datetime.fromisoformat(data["started_at"]),
         finished_at=(
-            datetime.fromisoformat(data["finished_at"])
-            if data.get("finished_at")
-            else None
+            datetime.fromisoformat(data["finished_at"]) if data.get("finished_at") else None
         ),
         intersected_channels=list(data.get("intersected_channels", [])),
         failures=[_failure_from_dict(f) for f in data.get("failures", [])],
+        per_dataset_dilute_round_counts=dict(data.get("per_dataset_dilute_round_counts", {})),
     )
 
 

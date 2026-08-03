@@ -29,7 +29,11 @@ from __future__ import annotations
 from typing import Final
 
 # ── Channel → colormap mapping ──────────────────────────────
+# Substring match on the normalized lower-cased channel name. The
+# ``lifetime`` entry catches derived FLIM channels written by
+# ``ComputeLifetime`` (named ``<source>_<filter>_lifetime``).
 CHANNEL_COLORMAPS: Final[dict[str, str]] = {
+    "lifetime": "turbo",
     "dapi": "blue",
     "hoechst": "blue",
     "gfp": "green",
@@ -177,6 +181,25 @@ YELLOW_ROI_BLENDING: Final[str] = "additive"
 # Setting YELLOW_ROI_OPACITY tunes ALL sub-elements globally; for
 # per-element alpha, edit YELLOW_ROI_FACE_COLOR[3] / YELLOW_ROI_EDGE_COLOR.
 YELLOW_ROI_OPACITY: Final[float | None] = None
+
+# ── Cellpose diameter reference circle (Segment tab overlay) ──
+# A magenta disc drawn at the image's bottom-left whose diameter equals the
+# Cellpose "Diameter (px)" field, so the user can size that value against
+# real cells. Emulates the Cellpose GUI's reference disc.
+DIAMETER_CIRCLE_LAYER_NAME: Final[str] = "_diameter_reference"
+# Deliberately OPAQUE (alpha 1.0), unlike YELLOW_ROI_FACE_COLOR's 0.1 — the
+# Cellpose GUI's disc is solid, and a translucent disc reads as a selection
+# ROI rather than a ruler. Do not "fix" this to match the yellow ROI preset.
+DIAMETER_CIRCLE_FACE_COLOR: Final[tuple[float, ...]] = (1.0, 0.0, 1.0, 1.0)
+DIAMETER_CIRCLE_EDGE_COLOR: Final[tuple[float, ...]] = (1.0, 0.0, 1.0, 1.0)
+DIAMETER_CIRCLE_EDGE_WIDTH: Final[int] = 0
+DIAMETER_CIRCLE_BLENDING: Final[str] = "translucent"
+# Layer-level opacity multiplies into the face alpha; left at the None
+# sentinel so napari's default (1.0) applies and the face color alone owns
+# the opacity. Set it to dial the whole disc back without editing the color.
+DIAMETER_CIRCLE_OPACITY: Final[float | None] = None
+# Inset from the bottom-left image corner, in image pixels.
+DIAMETER_CIRCLE_MARGIN_PX: Final[float] = 10.0
 
 # ── Segmentation cleanup previews (drift survives in opacity only) ──
 # segmentation_panel.py:491 reads LABELS_OVERLAY_DEFAULT_OPACITY (0.5).

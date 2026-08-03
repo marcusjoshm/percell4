@@ -34,27 +34,37 @@ import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+if TYPE_CHECKING:
+    from percell4.workflows.run_log import RunLog
+
+from percell4.adapters.cellpose import run_cellpose
 from percell4.domain.measure.grouper import GroupingResult, group_cells_gmm, group_cells_kmeans
 from percell4.domain.measure.measurer import measure_cells, measure_multichannel_with_masks
 from percell4.domain.measure.metrics import BUILTIN_METRICS
 from percell4.domain.measure.thresholding import apply_gaussian_smoothing
-from percell4.adapters.cellpose import run_cellpose
 from percell4.domain.segmentation.postprocess import (
     filter_edge_cells,
     filter_small_cells,
+    get_edge_labels,
     relabel_sequential,
 )
 from percell4.store import DatasetStore
+from percell4.workflows.artifacts import write_atomic
 from percell4.workflows.failures import DatasetFailure, FailureRecord
 from percell4.workflows.models import (
+    AdaptiveClipSettings,
+    AutoExtractSettings,
     CellposeSettings,
+    CnrClassifySettings,
     DatasetSource,
+    EdgeMode,
+    ParticleSettings,
     RunMetadata,
     ThresholdAlgorithm,
     ThresholdingRound,
@@ -92,15 +102,84 @@ def compress_one(
     z_project_method = plan.get("z_project_method", "mip")
     selected_channels = set(plan.get("selected_channels", []))
 
-    # Convert the stored file path strings back into DiscoveredFile-like
-    # inputs. The existing `import_dataset` accepts a `files=` override
-    # that's a list of DiscoveredFile tuples; we need to reconstruct
-    # those from the captured plan.
+    # Deserialize layer_assignments — preserves user-renamed channel
+    # display names (e.g. token "00" -> "mNG") so the h5 written by
+    # import_dataset reflects the names the researcher chose in the
+    # CompressDialog, not the raw token IDs.
+    layer_assignments: dict[str, Any] | None = None
+    la_payload = plan.get("layer_assignments")
+    if la_payload:
+        from percell4.domain.io.models import LayerAssignment, LayerType
+
+        layer_assignments = {}
+        for ch_id, entry_dict in la_payload.items():
+            try:
+                lt = LayerType(entry_dict.get("layer_type", "channel"))
+            except (KeyError, ValueError):
+                lt = LayerType.CHANNEL
+            layer_assignments[ch_id] = LayerAssignment(
+                layer_type=lt,
+                name=entry_dict.get("name", ""),
+            )
+
+    # Deserialize tile_config — preserves the stitching grid the user
+    # configured in the CompressDialog (rows × cols, traversal pattern,
+    # start corner). Without this, multi-tile datasets silently land in
+    # the .h5 with only the first tile's pixels — _load_and_stitch
+    # raises rather than dropping files once this key is missing AND
+    # multiple files target one channel.
+    tile_config: Any | None = None
+    tc_payload = plan.get("tile_config")
+    if tc_payload:
+        from percell4.domain.io.models import TileConfig
+
+        _ref = tc_payload.get("reference_channel")
+        tile_config = TileConfig(
+            grid_rows=int(tc_payload.get("grid_rows", 1)),
+            grid_cols=int(tc_payload.get("grid_cols", 1)),
+            grid_type=str(tc_payload.get("grid_type", "row_by_row")),
+            order=str(tc_payload.get("order", "right_down")),
+            # Overlap-aware registration fields (hop 3). ``.get()`` with
+            # defaults so old plan dicts (pre-feature) still load to the
+            # byte-identical grid path.
+            overlap=float(tc_payload.get("overlap", 0.0)),
+            register=bool(tc_payload.get("register", False)),
+            reference_channel=str(_ref) if _ref else None,
+        )
+
+    # Deserialize token_config — the filename-token regexes the user either
+    # edited in the CompressDialog or that ``discover_tokenless`` synthesized
+    # for a name-suffixed (tokenless) import. Dropping this key made
+    # import_dataset fall back to ``TokenConfig()`` (channel = ``_ch(\d+)``),
+    # which matches nothing for tokenless or custom-named TIFFs: every file
+    # groups under "", the selected_channels filter drops all groups, and the
+    # .h5 lands with no /intensity and empty channel_names. The run then
+    # failed minutes later in an unrelated phase.
+    #
+    # ``None`` (key absent) is passed through rather than defaulted so a
+    # pre-change run_config.json reconstructs to exactly the old behavior —
+    # import_dataset applies its own TokenConfig() default.
+    token_config: Any | None = None
+    tok_payload = plan.get("token_config")
+    if tok_payload:
+        from percell4.domain.io.models import TokenConfig
+
+        # Patterns are Optional[str]; a disabled token serializes as JSON
+        # null and must stay None, not become the string "None" (which would
+        # compile as a regex and match nothing).
+        token_config = TokenConfig(
+            channel=tok_payload.get("channel"),
+            timepoint=tok_payload.get("timepoint"),
+            z_slice=tok_payload.get("z_slice"),
+            tile=tok_payload.get("tile"),
+        )
+
+    # import_dataset accepts ``files=`` as either DiscoveredFile-like
+    # objects or plain path strings — its scanner re-derives tokens
+    # from filenames using ``token_config``.
     try:
         from percell4.adapters.importer import import_dataset
-        from percell4.domain.io.models import DiscoveredFile
 
-        discovered = [DiscoveredFile(path=Path(p)) for p in files_paths]
         # Single-cell workflow inherits creation_bin from the captured
         # CompressDialog plan if present; otherwise defaults to 1 (no
         # binning), keeping existing single-cell runs byte-identical
@@ -109,10 +188,14 @@ def compress_one(
         import_dataset(
             source_dir=source_dir or str(output_path.parent),
             output_h5=output_path,
+            token_config=token_config,
             z_project_method=z_project_method,
             selected_channels=selected_channels or None,
-            files=discovered or None,
+            layer_assignments=layer_assignments,
+            files=files_paths or None,
             creation_bin=creation_bin,
+            tile_config=tile_config,
+            flim_params=plan.get("flim_params"),
         )
     except Exception as e:
         logger.exception("compress_one failed for %s", entry.name)
@@ -132,18 +215,174 @@ def compress_one(
     return updated, None, ""
 
 
+def validate_compressed_dataset(
+    store: DatasetStore,
+    *,
+    seg_channel_name: str = "",
+    round_channels: Iterable[str] = (),
+    needs_pixel_size: bool = False,
+) -> str | None:
+    """Check a freshly compressed dataset against what the run needs.
+
+    Returns ``None`` when the dataset is usable, or a researcher-facing
+    message naming the specific missing thing.
+
+    ``import_dataset`` does not raise when no source file matches the channel
+    token pattern — it writes an ``.h5`` with ``channel_names == []``,
+    ``n_channels == 0`` and no ``/intensity``, and reports success. Without
+    this gate the run continues against an empty dataset: the segmentation
+    channel lookup logs "falling back to 0", segmentation produces nothing,
+    and the failure only surfaces minutes later in an unrelated phase.
+
+    Deliberately no stricter than what later phases already require. This
+    check moves an existing failure earlier; it must never reject a dataset
+    that would otherwise have worked. In particular the pixel-size check is
+    conditional on a round actually using a µm or µm² unit — px-native rounds
+    need no pixel size, and we never default to 1 µm/px.
+
+    The caller passes a non-session :class:`DatasetStore`, so every read here
+    opens and closes its own handle. HDF5 locking is non-blocking and
+    exclusive; a handle left open would resurface as a ``BlockingIOError``
+    (errno 35) from an unrelated write phase later in the run.
+    """
+    try:
+        meta = store.metadata
+    except Exception as e:  # noqa: BLE001 — unreadable file is a dataset failure
+        return f"cannot read the compressed dataset: {type(e).__name__}: {e}"
+
+    channels = list(meta.get("channel_names") or [])
+    if not channels:
+        return (
+            "compression produced no channels. Check that the source files "
+            "match the channel naming pattern configured in the compress "
+            "dialog — no file matched, so nothing was imported."
+        )
+
+    missing_named = []
+    if seg_channel_name and seg_channel_name not in channels:
+        missing_named.append(f"segmentation channel {seg_channel_name!r}")
+    for ch in dict.fromkeys(round_channels):
+        if ch and ch not in channels:
+            missing_named.append(f"round channel {ch!r}")
+    if missing_named:
+        return (
+            f"{', '.join(missing_named)} not present in the compressed "
+            f"dataset. Available channels: {channels}."
+        )
+
+    if needs_pixel_size:
+        raw_ps = meta.get("pixel_size_um")
+        if not raw_ps or float(raw_ps) <= 0:
+            return (
+                "a round uses a µm / µm² size value but the source TIFFs "
+                "carry no pixel size, so none was stored. Set the pixel size "
+                "on the dataset, or switch the round's unit to px / px²."
+            )
+
+    return None
+
+
+def config_needs_pixel_size(rounds: Iterable[Any]) -> bool:
+    """Whether any round's size knob is expressed in µm or µm².
+
+    Mirrors the config dialog's pre-flight predicate so the two cannot drift.
+    The dialog can only check ``h5_existing`` datasets up front — a
+    ``tiff_pending`` dataset has no ``.h5`` until Phase 0 runs — so this is
+    the same question asked again once the file exists.
+    """
+    return any(
+        (r.adaptive_clip is not None and r.adaptive_clip.d_min_unit == "um")
+        or (
+            r.auto_extract is not None
+            and r.auto_extract.smallest_particle_um is not None
+            and r.auto_extract.smallest_particle_unit == "um"
+        )
+        or (r.min_particle_size > 0 and r.min_particle_size_unit == "um2")
+        for r in rounds
+    )
+
+
 # ── Phase 1: Segment ────────────────────────────────────────────────────
 
 
-def _read_segmentation_channel(
-    store: DatasetStore, channel_idx: int = 0
-) -> NDArray:
+def _read_segmentation_channel(store: DatasetStore, channel_idx: int = 0) -> NDArray:
     """Read one channel plane from /intensity for segmentation.
 
     Works for both 2D (single-channel) and 3D (C, H, W) layouts by
-    delegating to :meth:`DatasetStore.read_channel`.
+    delegating to :meth:`DatasetStore.read_channel`. Single-timepoint only —
+    ``read_channel`` raises on the 4D ``(T, C, H, W)`` time-lapse layout. Use
+    :func:`_read_segmentation_channel_stack` for time-lapse datasets.
     """
     return store.read_channel("intensity", channel_idx)
+
+
+def _channel_from_frame(frame: NDArray, channel_idx: int) -> NDArray:
+    """Pick the segmentation channel out of one timepoint's intensity frame.
+
+    A frame is ``(H, W)`` (single channel) or ``(C, H, W)`` (multichannel) —
+    one rank below the stored ``(T, H, W)`` / ``(T, C, H, W)`` array.
+    """
+    if frame.ndim == 2:
+        if channel_idx != 0:
+            raise IndexError(f"channel_idx={channel_idx} out of range for single-channel frame")
+        return frame
+    return frame[channel_idx]
+
+
+def _read_segmentation_channel_stack(
+    store: DatasetStore, channel_idx: int, n_timepoints: int
+) -> NDArray:
+    """Assemble the ``(T, H, W)`` segmentation-channel stack for a time-lapse.
+
+    Reads one timepoint at a time via :meth:`DatasetStore.read_array_frame`
+    (which handles the 4D layout that ``read_channel`` cannot) and picks the
+    channel from each frame. This per-frame read is the load-bearing piece
+    reused by the time-lapse threshold/measure/QC paths.
+    """
+    frames = [
+        _channel_from_frame(store.read_array_frame("intensity", t), channel_idx)
+        for t in range(n_timepoints)
+    ]
+    return np.stack(frames, axis=0)
+
+
+def pick_existing_segmentation(label_names: list[str]) -> str | None:
+    """Pick the default segmentation to use from a dataset's label inventory.
+
+    Rule: prefer a tracked layer (``*_tracked``); else, if exactly one
+    segmentation, use it; else (multiple untracked, no tracked) use the
+    lexicographically first — the caller logs a warning and the
+    segmentation-select dialog (U12) is where the user overrides. Returns
+    ``None`` when there is
+    no segmentation (``label_names`` is empty), which signals "segment this
+    dataset normally". Note ``store.list_labels()`` already excludes masks
+    (they live in a separate ``/masks/`` group), so no subtraction is needed.
+    """
+    if not label_names:
+        return None
+    tracked = sorted(n for n in label_names if n.endswith("_tracked"))
+    if tracked:
+        return tracked[0]
+    return sorted(label_names)[0]
+
+
+def _postprocess_labels(
+    labels: NDArray,
+    cfg: CellposeSettings,
+    edge_mode: EdgeMode,
+    edge_margin_px: int,
+) -> NDArray[np.int32]:
+    """Edge filter (conditional) + small-cell filter + sequential relabel.
+
+    Shared by the single-frame and per-frame time-lapse segmentation paths.
+    Edge removal is conditional on ``edge_mode``; modes other than EXCLUDE
+    keep edge cells (flagged ``is_edge`` at measure time).
+    """
+    labels = labels.astype(np.int32)
+    if edge_mode == EdgeMode.EXCLUDE:
+        labels, _n_edge = filter_edge_cells(labels, edge_margin=edge_margin_px)
+    labels, _n_small = filter_small_cells(labels, min_area=cfg.min_size)
+    return relabel_sequential(labels)
 
 
 def segment_one(
@@ -151,6 +390,9 @@ def segment_one(
     cfg: CellposeSettings,
     cellpose_model: Any = None,
     channel_idx: int = 0,
+    edge_mode: EdgeMode = EdgeMode.EXCLUDE,
+    edge_margin_px: int = 0,
+    seg_name: str = "cellpose_qc",
 ) -> tuple[NDArray[np.int32], DatasetFailure | None, str]:
     """Run Cellpose + postprocess on one dataset and write `/labels/cellpose_qc`.
 
@@ -163,9 +405,20 @@ def segment_one(
     ``CellposeModel`` instance out of the per-dataset loop and passes it
     here, model construction (seconds-to-minutes on CPU) happens once
     per phase, not once per dataset.
+
+    ``edge_mode`` controls whether border-touching cells are removed in
+    postprocess. Default ``EXCLUDE`` matches the pre-evolution workflow
+    invariant. ``INCLUDE_AS_NORMAL`` and ``INCLUDE_AS_SIZE_NORMALIZED_COHORT``
+    keep edge cells in labels; they are flagged via the ``is_edge`` column
+    at measure time (recomputed from labels by ``get_edge_labels`` — no
+    persistence here).
     """
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
     try:
-        image = _read_segmentation_channel(store, channel_idx=channel_idx)
+        if n_timepoints > 1:
+            image = _read_segmentation_channel_stack(store, channel_idx, n_timepoints)  # (T, H, W)
+        else:
+            image = _read_segmentation_channel(store, channel_idx=channel_idx)
     except (KeyError, IndexError, ValueError) as e:
         logger.exception("failed to read intensity for segmentation")
         return (
@@ -174,89 +427,195 @@ def segment_one(
             f"read /intensity failed: {e}",
         )
 
-    try:
-        diameter = cfg.diameter if cfg.diameter > 0 else None
-        labels = run_cellpose(
-            image,
+    diameter = cfg.diameter if cfg.diameter > 0 else None
+
+    # Pre-Cellpose preprocessing — a saturation LUT (ImageJ-style Enhance
+    # Contrast, same operation the seg-QC Modify Channel group exposes
+    # interactively) followed by an optional Gaussian blur. Both default
+    # to no-ops (saturation_pct/blur_sigma == 0) so legacy runs and users
+    # who opt out get byte-identical Cellpose input. For time-lapse stacks
+    # both are applied per-frame so the saturation percentile reference is
+    # the frame's own intensity and the blur never bleeds across frames.
+    from percell4.domain.segmentation.preprocess import (
+        apply_gaussian_blur,
+        apply_saturation_lut,
+    )
+
+    def _preprocess(plane: NDArray) -> NDArray:
+        if cfg.saturation_pct > 0.0:
+            plane = apply_saturation_lut(plane, cfg.saturation_pct)
+        if cfg.blur_sigma > 0.0:
+            plane = apply_gaussian_blur(plane, cfg.blur_sigma)
+        return plane
+
+    def _infer(plane: NDArray) -> NDArray:
+        return run_cellpose(
+            _preprocess(plane),
             diameter=diameter,
             gpu=cfg.gpu,
             flow_threshold=cfg.flow_threshold,
             cellprob_threshold=cfg.cellprob_threshold,
             min_size=cfg.min_size,
-            model=cellpose_model,
+            model=cellpose_model,  # reuse the hoisted model across frames
         )
+
+    try:
+        if n_timepoints > 1:
+            # Time-lapse: segment every frame independently (per-frame ids;
+            # tracking unifies them later), reusing the hoisted model.
+            # _infer() handles the per-frame saturation LUT internally.
+            frame_labels = [
+                _postprocess_labels(_infer(image[t]), cfg, edge_mode, edge_margin_px)
+                for t in range(n_timepoints)
+            ]
+            labels = np.stack(frame_labels, axis=0).astype(np.int32)
+        else:
+            labels = _postprocess_labels(_infer(image), cfg, edge_mode, edge_margin_px)
     except Exception as e:
         logger.exception("run_cellpose raised for this dataset")
         return (
-            np.zeros_like(image, dtype=np.int32),
+            np.zeros((0, 0), dtype=np.int32),
             DatasetFailure.SEGMENTATION_ERROR,
             f"Cellpose failed: {type(e).__name__}: {e}",
         )
 
-    # Postprocess: edge removal is always on per workflow invariant.
-    labels, _n_edge = filter_edge_cells(labels.astype(np.int32), edge_margin=0)
-    labels, _n_small = filter_small_cells(labels, min_area=cfg.min_size)
-    labels = relabel_sequential(labels)
-
-    if int(labels.max()) == 0:
-        return (
-            labels,
-            DatasetFailure.SEGMENTATION_EMPTY,
-            "Cellpose + postprocess removed all cells",
-        )
-
+    # Empty Cellpose results used to short-circuit here with
+    # ``SEGMENTATION_EMPTY``, which recorded a per-dataset failure and
+    # routed the dataset around every later phase — including
+    # interactive seg QC, leaving the user with no way to draw cells
+    # manually. Now we always persist the (possibly all-zero) labels so
+    # the QC phase has a layer to load and the user can draw cells in
+    # napari directly. Cellpose finding nothing on a particular
+    # channel/diameter combination is a routine condition (especially
+    # on dim or unusual data); the workflow has to recover from it.
     try:
-        store.write_labels("cellpose_qc", labels)
+        store.write_labels(seg_name, labels)
     except Exception as e:
-        logger.exception("failed to write /labels/cellpose_qc")
+        logger.exception("failed to write /labels/%s", seg_name)
         return (
             labels,
             DatasetFailure.SEGMENTATION_ERROR,
-            f"write /labels/cellpose_qc failed: {e}",
+            f"write /labels/{seg_name} failed: {e}",
         )
 
-    return labels, None, f"{int(labels.max())} cells after postprocess"
+    n_cells = int(labels.max())
+    if n_cells == 0:
+        return (
+            labels,
+            None,
+            "Cellpose found 0 cells — draw labels manually in QC",
+        )
+    return labels, None, f"{n_cells} cells after postprocess"
+
+
+# ── Tracking (time-lapse): link cells across timepoints ────────────────
+
+
+def track_one(
+    store: DatasetStore,
+    raw_seg_name: str,
+    tracked_name: str | None = None,
+    tracker: Any = None,
+) -> tuple[str | None, DatasetFailure | None, str]:
+    """Track a ``(T, H, W)`` raw segmentation; write the tracked labels + lineage.
+
+    Reads ``/labels/<raw_seg_name>`` (a time-lapse stack), runs the tracker
+    (laptrack by default), relabels via the shared
+    :func:`~percell4.domain.tracking.build.build_tracked_result`, and writes
+    a new ``<raw>_tracked`` segmentation plus its ``/tracks/<name>`` lineage
+    table — preserving the raw segmentation. Returns
+    ``(tracked_seg_name, failure, message)``; on failure the tracked name is
+    ``None`` and a :class:`DatasetFailure` is returned so the runner drops the
+    dataset from later phases. Mirrors ``TrackCells`` but on ``DatasetStore``
+    (no Session), sharing the relabel/lineage logic.
+    """
+    from percell4.adapters.laptrack_tracker import LaptrackTracker
+    from percell4.domain.tracking.build import build_tracked_result
+
+    try:
+        raw = store.read_labels(raw_seg_name)
+    except (KeyError, ValueError) as e:
+        return None, DatasetFailure.TRACKING_ERROR, f"read /labels/{raw_seg_name} failed: {e}"
+    if raw.ndim != 3:
+        return (
+            None,
+            DatasetFailure.TRACKING_ERROR,
+            f"/labels/{raw_seg_name} is {raw.ndim}D, not a (T, H, W) stack",
+        )
+
+    tracker = tracker or LaptrackTracker()
+    try:
+        result = tracker.track(raw)
+        built = build_tracked_result(raw, result.track_df, result.split_df)
+    except Exception as e:
+        logger.exception("tracking failed for /labels/%s", raw_seg_name)
+        return None, DatasetFailure.TRACKING_ERROR, f"tracking failed: {type(e).__name__}: {e}"
+
+    seg_name = tracked_name or f"{raw_seg_name}_tracked"
+    try:
+        store.write_labels(seg_name, built.tracked_labels)
+        store.write_tracks(seg_name, built.lineage)
+    except Exception as e:
+        logger.exception("failed to write tracked segmentation %s", seg_name)
+        return None, DatasetFailure.TRACKING_ERROR, f"write {seg_name} failed: {e}"
+
+    return (
+        seg_name,
+        None,
+        f"{built.n_tracks} tracks, {built.n_divisions} divisions",
+    )
 
 
 # ── Phase 3/5/...: Threshold compute + headless apply ──────────────────
 
 
-def threshold_compute_one(
-    store: DatasetStore,
-    round_spec: ThresholdingRound,
-) -> tuple[GroupingResult | None, DatasetFailure | None, str]:
-    """Compute the per-cell grouping for one round on one dataset.
+def _trivial_grouping(cell_labels: NDArray) -> GroupingResult:
+    """A single-group :class:`GroupingResult` placing every cell in group 1.
 
-    Reads the round's channel and the QC-accepted labels, computes the
-    per-cell metric, and runs GMM or K-means grouping. Returns a
-    :class:`GroupingResult` on success.
+    Used by adaptive-clip rounds, which threshold per cell and do not use
+    intensity grouping at all. Building this lets such a round populate the
+    grouping cache (so the apply phase always runs) without spending — or being
+    gated by — GMM/k-means clustering on an unused metric. ``group_means`` is a
+    placeholder (the per-cell detector never reads it).
     """
-    try:
-        channel_idx = _channel_index(store, round_spec.channel)
-    except (KeyError, ValueError) as e:
-        return None, DatasetFailure.THRESHOLD_ERROR, str(e)
+    ids = np.asarray(cell_labels, dtype=np.int32)
+    assignments = pd.Series(
+        data=np.ones(len(ids), dtype=int),
+        index=pd.Index(ids, name="label"),
+        name="group",
+    )
+    return GroupingResult(group_assignments=assignments, n_groups=1, group_means=[0.0])
 
-    try:
-        image = store.read_channel("intensity", channel_idx)
-        labels = store.read_labels("cellpose_qc")
-    except KeyError as e:
-        return None, DatasetFailure.THRESHOLD_ERROR, f"missing h5 key: {e}"
 
+def _group_image_labels(
+    image: NDArray, labels: NDArray, round_spec: ThresholdingRound
+) -> tuple[GroupingResult | None, DatasetFailure | None, str]:
+    """Measure the round metric on one 2D frame and group its cells.
+
+    Returns ``(GroupingResult | None, failure, message)``. Shared by the
+    single-frame and per-timepoint threshold-compute paths.
+
+    Adaptive-clip and auto-extraction rounds short-circuit to a trivial
+    single-group result (the per-cell detectors ignore grouping) so a
+    clustering/measure failure on an unused metric can never drop a dataset or
+    timepoint the detector would have thresholded.
+    """
     if int(labels.max()) == 0:
-        return None, DatasetFailure.THRESHOLD_EMPTY, "no cells in /labels/cellpose_qc"
-
+        return None, DatasetFailure.THRESHOLD_EMPTY, "no cells"
+    if round_spec.adaptive_clip is not None or round_spec.auto_extract is not None:
+        ids = np.unique(labels)
+        ids = ids[ids != 0]
+        return _trivial_grouping(ids), None, "per-cell: trivial single group"
     try:
         measure_df = measure_cells(image, labels, metrics=[round_spec.metric])
     except Exception as e:
         logger.exception("measure_cells failed for threshold_compute")
         return None, DatasetFailure.THRESHOLD_ERROR, f"measure_cells failed: {e}"
-
     if len(measure_df) == 0:
         return None, DatasetFailure.THRESHOLD_EMPTY, "measure_cells returned 0 rows"
 
     values = measure_df[round_spec.metric].to_numpy(dtype=np.float64)
     cell_labels = measure_df["label"].to_numpy(dtype=np.int32)
-
     try:
         if round_spec.algorithm is ThresholdAlgorithm.GMM:
             result = group_cells_gmm(
@@ -274,119 +633,892 @@ def threshold_compute_one(
     except Exception as e:
         logger.exception("grouping failed")
         return None, DatasetFailure.THRESHOLD_ERROR, f"grouping failed: {e}"
-
     if result.n_groups == 0:
         return None, DatasetFailure.THRESHOLD_EMPTY, "grouping produced 0 groups"
-
     return result, None, f"{result.n_groups} groups"
 
 
-def apply_threshold_headless(
+def threshold_compute_one(
     store: DatasetStore,
     round_spec: ThresholdingRound,
-    grouping: GroupingResult,
-) -> tuple[DatasetFailure | None, str]:
-    """Headless per-group Otsu thresholding — the Phase 4 QC stand-in.
+    seg_name: str = "cellpose_qc",
+) -> tuple[object | None, DatasetFailure | None, str]:
+    """Compute the per-cell grouping for one round on one dataset.
 
-    For each group returned by :func:`threshold_compute_one`, we:
-
-    1. Mask the channel image to the cells belonging to that group
-       (values outside the group are zeroed).
-    2. Apply a Gaussian smoothing pass at ``round_spec.gaussian_sigma``.
-    3. Compute an Otsu threshold over the non-zero pixels.
-    4. Take pixels above the threshold as the group's binary mask.
-
-    The per-group masks are unioned into one combined ``uint8`` mask.
-    We write ``/masks/<round_spec.name>`` and a ``/groups/<round_spec.name>``
-    DataFrame to the store — the same shape :class:`ThresholdQCController._finalize`
-    produces, so downstream :func:`measure_one` can load both without
-    caring whether the thresholds were interactive or headless.
-
-    This function will be replaced by the interactive
-    ``ThresholdQCController`` path when Phase 6 lands. Headless mode
-    will remain as a fallback for unattended runs.
+    Single-timepoint: returns a :class:`GroupingResult`. Time-lapse
+    (``n_timepoints > 1``): groups each frame independently and returns a
+    ``dict[int, GroupingResult]`` keyed by timepoint (frames with no
+    groupable cells are omitted). The runner caches whatever is returned;
+    :func:`apply_threshold_headless` handles both shapes.
     """
     try:
         channel_idx = _channel_index(store, round_spec.channel)
-        image = store.read_channel("intensity", channel_idx)
-        labels = store.read_labels("cellpose_qc")
     except (KeyError, ValueError) as e:
-        return DatasetFailure.THRESHOLD_ERROR, str(e)
+        return None, DatasetFailure.THRESHOLD_ERROR, str(e)
 
-    # Pre-smooth the whole channel once; per-group processing just masks it.
-    if round_spec.gaussian_sigma > 0:
-        smoothed = apply_gaussian_smoothing(
-            image.astype(np.float32), round_spec.gaussian_sigma
-        )
-    else:
-        smoothed = image.astype(np.float32)
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+    if n_timepoints > 1:
+        per_frame: dict[int, GroupingResult] = {}
+        for t in range(n_timepoints):
+            try:
+                image = _channel_from_frame(store.read_array_frame("intensity", t), channel_idx)
+                labels = store.read_labels(seg_name, timepoint=t)
+            except KeyError as e:
+                return None, DatasetFailure.THRESHOLD_ERROR, f"missing h5 key: {e}"
+            grouping, _failure, _msg = _group_image_labels(image, labels, round_spec)
+            if grouping is not None:
+                per_frame[t] = grouping
+        if not per_frame:
+            return None, DatasetFailure.THRESHOLD_EMPTY, "no groups in any timepoint"
+        return per_frame, None, f"{len(per_frame)} timepoint(s) grouped"
 
-    combined = np.zeros(labels.shape, dtype=np.uint8)
+    try:
+        image = store.read_channel("intensity", channel_idx)
+        labels = store.read_labels(seg_name)
+    except KeyError as e:
+        return None, DatasetFailure.THRESHOLD_ERROR, f"missing h5 key: {e}"
+    return _group_image_labels(image, labels, round_spec)
 
-    # Group assignments Series has index=cell_label, value=group_id (1-based).
+
+def _apply_puncta_groups(
+    smoothed: NDArray,
+    labels: NDArray,
+    grouping: GroupingResult,
+    puncta: object,
+    combined: NDArray,
+    round_name: str,
+) -> str:
+    """Two-pass puncta detection across one frame's groups, into ``combined``.
+
+    Two phases per frame (U6 scale calibration):
+    1. Run pass-1 seed detection ONCE per group, pooling the seed sizes, and
+       derive a per-dataset ``scale_range`` by bounded (narrow-only) refinement
+       of the locked prior.
+    2. Detect each group with the refined range and its cached pass-1 seeds
+       (so pass-1 never re-runs), unioning the per-group ``{0,1}`` masks.
+
+    Returns an error string on detector failure, else ``""``. Pass-1 results
+    stay in memory — no derived array is written to or re-read from HDF5.
+    """
+    from percell4.domain.measure.puncta_pipeline import (
+        DEFAULT_SCALE_RANGE,
+        calibrate_scale_range,
+        compute_seeds,
+        detect_two_pass,
+        seed_sigmas,
+    )
+
+    base_range = puncta.spot_scale_prior or DEFAULT_SCALE_RANGE
+    groups: list[tuple[NDArray, tuple]] = []
+    sigmas: list[float] = []
     for group_id in range(1, grouping.n_groups + 1):
         cells_in_group = grouping.group_assignments.index[
             grouping.group_assignments.values == group_id
         ].to_numpy(dtype=np.int32)
         if len(cells_in_group) == 0:
             continue
-
-        # Mask the smoothed channel to only this group's cells.
         group_label_mask = np.isin(labels, list(cells_in_group))
         if not group_label_mask.any():
             continue
-
-        group_pixels = smoothed[group_label_mask]
-        if group_pixels.size == 0 or not np.isfinite(group_pixels).any():
-            continue
-
         try:
-            # threshold_otsu expects the sub-image (nonzero pixels), so
-            # we pass the masked values and broadcast the result back.
-            # The helper returns (binary_mask, threshold_value) on the
-            # FULL image shape when given a full image — but we want
-            # per-group application, so we compute the threshold
-            # ourselves on the group's pixels and broadcast.
-            from skimage.filters import threshold_otsu as sk_otsu
-
-            if np.unique(group_pixels).size < 2:
-                # Constant group — cannot compute a meaningful threshold.
-                # Accept every pixel of the group as "positive" (safer
-                # than accepting none).
-                group_mask = group_label_mask
-            else:
-                thr = float(sk_otsu(group_pixels))
-                group_mask = group_label_mask & (smoothed >= thr)
+            seeds = compute_seeds(smoothed, group_label_mask, puncta, base_range)
         except Exception as e:
-            logger.exception("otsu failed for group %d", group_id)
-            return (
-                DatasetFailure.THRESHOLD_ERROR,
-                f"otsu for group {group_id}: {e}",
-            )
+            logger.exception("puncta pass-1 failed for group %d", group_id)
+            return f"puncta pass-1 for group {group_id}: {e}"
+        groups.append((group_label_mask, seeds))
+        sigmas.extend(seed_sigmas(seeds))
 
-        # Union into combined mask.
-        np.maximum(combined, group_mask.astype(np.uint8), out=combined)
+    refined, clamped = calibrate_scale_range(sigmas, puncta.spot_scale_prior)
+    if clamped:
+        logger.warning(
+            "round %s: per-dataset scale refinement fell outside the locked "
+            "prior %s; clamped to %s",
+            round_name,
+            puncta.spot_scale_prior,
+            refined,
+        )
+
+    for group_label_mask, seeds in groups:
+        try:
+            group_mask = detect_two_pass(
+                smoothed, group_label_mask, puncta, scale_range=refined, seeds=seeds
+            )
+        except Exception as e:
+            logger.exception("puncta detect failed")
+            return f"puncta detect: {e}"
+        np.maximum(combined, group_mask, out=combined)
+    # Guarantee a {0,1} uint8 union (the store does not binarize).
+    np.minimum(combined, 1, out=combined)
+    return ""
+
+
+def _apply_iterative_otsu_groups(
+    smoothed: NDArray,
+    labels: NDArray,
+    grouping: GroupingResult,
+    settings: object,
+    combined: NDArray,
+    round_name: str,
+) -> str:
+    """Iterative-Otsu peeling across one frame's units, into ``combined``.
+
+    Builds the unit masks per ``settings.scope`` — ``groups`` (reuse the existing
+    intensity grouping), ``per-cell`` (one unit per label), or ``whole-field``
+    (a single all-cells unit) — and delegates the peel loop to the pure-domain
+    core. Unions the binary result into ``combined`` in place and logs the
+    convergence report. Returns an error string on failure, else ``""``.
+    """
+    from percell4.domain.measure.iterative_otsu import peel
+
+    scope = settings.scope
+    units: list[NDArray] = []
+    if scope == "groups":
+        for group_id in range(1, grouping.n_groups + 1):
+            cells_in_group = grouping.group_assignments.index[
+                grouping.group_assignments.values == group_id
+            ].to_numpy(dtype=np.int32)
+            if len(cells_in_group) == 0:
+                continue
+            group_label_mask = np.isin(labels, list(cells_in_group))
+            if group_label_mask.any():
+                units.append(group_label_mask)
+    elif scope == "per-cell":
+        for label_id in np.unique(labels):
+            if label_id == 0:
+                continue
+            units.append(labels == label_id)
+    else:  # whole-field
+        field = labels > 0
+        if field.any():
+            units.append(field)
+
+    if not units:
+        return ""  # no labels to threshold — empty mask, not an error
 
     try:
-        store.write_mask(round_spec.name, combined)
+        mask, report = peel(smoothed, units, settings)
     except Exception as e:
-        logger.exception("write_mask failed")
-        return DatasetFailure.THRESHOLD_ERROR, f"write_mask failed: {e}"
+        logger.exception("iterative-otsu peel failed for round %s", round_name)
+        return f"iterative-otsu: {e}"
 
-    # Persist the group assignments DataFrame — same shape the
-    # ThresholdQCController writes so measure_one can consume it
-    # regardless of source (interactive vs headless).
+    np.maximum(combined, mask, out=combined)
+    np.minimum(combined, 1, out=combined)
+    logger.info(
+        "round %s: iterative-otsu (%s) — %d iters, %d/%d units hit the cap, %d px",
+        round_name,
+        scope,
+        report.n_iterations_run,
+        report.units_hit_max_rounds,
+        report.units_total,
+        report.n_positive,
+    )
+    return ""
+
+
+def _apply_adaptive_clip_cells(
+    image: NDArray,
+    labels: NDArray,
+    settings: AdaptiveClipSettings,
+    combined: NDArray,
+    pixel_size_um: float | None,
+    round_name: str,
+) -> str:
+    """Per-cell Adaptive Local Clipping over one frame, into ``combined``.
+
+    Runs the eye-validated ``detect_adaptive_by_particle_size`` on the **raw**
+    image (the detector does its own presmoothing at ``settings.presmooth_sigma_px``,
+    default 1 px — the validated value; it is NOT the round's grouped-Otsu
+    ``gaussian_sigma``, which defaults to 0). Unions the ``{0,1}`` result into
+    ``combined`` in place. Returns an error string on failure, else ``""``. The
+    detector ignores intensity grouping (it thresholds each Cellpose cell against
+    its own MAD noise floor).
+    """
+    # Unit resolution: in "px" mode the d_min value is pixels — feed the detector
+    # pixel_size 1.0 so it is used directly (no dataset pixel size needed, for
+    # datasets that lack one). In "um" mode require the real pixel size.
+    if settings.d_min_unit == "px":
+        eff_pixel = 1.0
+    else:
+        if pixel_size_um is None or pixel_size_um <= 0:
+            return (
+                "adaptive clip: dataset has no pixel size (µm/px); set the d_min "
+                "unit to px or add a pixel size"
+            )
+        eff_pixel = float(pixel_size_um)
+    from percell4.domain.measure.adaptive_clip import (
+        detect_adaptive_by_particle_size,
+        window_min_spot_for_particle,
+    )
+
+    # Plausibility guard: an absurd pixel size or oversized d_min makes the
+    # local-background window exceed the frame, degenerating the "local" clip to a
+    # global one — detection silently collapses to an empty mask. Fail the dataset
+    # with a clear message instead.
+    window_px, _ = window_min_spot_for_particle(float(settings.d_min_um), eff_pixel)
+    if window_px > min(image.shape[-2:]):
+        return (
+            f"adaptive clip: derived window {window_px}px exceeds the image "
+            f"({'x'.join(str(d) for d in image.shape[-2:])}) for d_min="
+            f"{settings.d_min_um:g} {settings.d_min_unit} — check the d_min and the "
+            "dataset pixel size"
+        )
+
+    try:
+        mask = detect_adaptive_by_particle_size(
+            image,
+            labels,
+            eff_pixel,
+            float(settings.d_min_um),
+            k=float(settings.k),
+            presmooth_sigma_px=float(settings.presmooth_sigma_px),
+            global_sigma=bool(settings.global_sigma),
+        )
+    except Exception as e:
+        logger.exception("adaptive clip failed for round %s", round_name)
+        return f"adaptive clip: {e}"
+
+    np.maximum(combined, mask.astype(np.uint8), out=combined)
+    np.minimum(combined, 1, out=combined)
+    n_pos = int(combined.sum())
+    logger.info(
+        "round %s: adaptive clip (d_min=%.3g %s, k=%.3g, σ=%s) — %d positive px",
+        round_name,
+        settings.d_min_um,
+        settings.d_min_unit,
+        settings.k,
+        "global" if settings.global_sigma else "per-cell",
+        n_pos,
+    )
+    if n_pos == 0:
+        # Adaptive rounds apply headlessly (no QC), so a no-detection result would
+        # otherwise be invisible. Surface it — usually a too-large d_min, too-high
+        # k, or a wrong pixel size.
+        logger.warning(
+            "round %s: adaptive clip detected 0 pixels — check d_min_um (%.3g µm), "
+            "k (%.3g), and the dataset pixel size",
+            round_name,
+            settings.d_min_um,
+            settings.k,
+        )
+    return ""
+
+
+# Sentinel error returned by _apply_auto_extract_cells when auto-detect-smallest found no
+# particles to size. In a time-lapse this is a recoverable empty frame (R9: the dissolved
+# end of a washout); single-timepoint callers still surface it as a clear failure.
+_AUTO_EXTRACT_NO_PARTICLES = (
+    "auto extraction: auto-detect found no particles to size (no blobs); supply a "
+    "smallest particle Ø (turn off auto-detect) or check the data"
+)
+
+
+def _apply_auto_extract_cells(
+    image: NDArray,
+    labels: NDArray,
+    settings: AutoExtractSettings,
+    combined: NDArray,
+    pixel_size_um: float | None,
+    round_name: str,
+    min_spot_px: int | None = None,
+) -> str:
+    """Per-cell two-pass auto-extraction over one frame, into ``combined``.
+
+    Runs ``auto_extract`` (fine pass at ``≈3×smallest`` + optional coarse pass at
+    ``≈3×LoG-largest``, OR-unioned) on the **raw** image. The detector presmooths
+    itself at ``settings.presmooth_sigma_px`` (default 1 px — NOT the round's
+    grouped-Otsu ``gaussian_sigma``, which defaults to 0). ``smallest_particle_um``
+    overrides auto-detection of the smallest particle and is converted to pixels via
+    ``pixel_size_um``; ``None`` leaves the smallest auto-detected (no pixel size
+    needed). ``min_spot_px`` is the union size filter — the round's Min particle size
+    resolved to px, threaded so the batch path matches the GUI 'Adaptive Local
+    Clipping' panel (which passes its Min-particle-size as ``min_spot_px``); ``None``
+    leaves ``auto_extract``'s own default. Unions the ``{0,1}`` result into
+    ``combined`` in place. Returns an error string on failure, else ``""``.
+    """
+    from percell4.domain.measure.auto_extraction import (
+        FILL_FACTOR,
+        NoParticlesFoundError,
+        _win,
+        auto_extract,
+    )
+
+    smallest_particle_px: float | None = None
+    if settings.smallest_particle_um is not None:
+        # Unit resolution: "px" mode uses the value directly (no dataset pixel size
+        # needed); "um" mode converts via the pixel size and requires it.
+        if settings.smallest_particle_unit == "px":
+            smallest_particle_px = float(settings.smallest_particle_um)
+        else:
+            if pixel_size_um is None or pixel_size_um <= 0:
+                return (
+                    "auto extraction: dataset has no pixel size (µm/px) for the µm "
+                    "smallest-particle override; set the unit to px or add a pixel size"
+                )
+            smallest_particle_px = float(settings.smallest_particle_um) / float(pixel_size_um)
+        # Plausibility: guard the FINE WINDOW (≈ FILL_FACTOR × smallest — the exact
+        # window auto_extract derives), NOT the diameter. An absurd pixel size or
+        # oversized smallest particle blows the window past the frame, degenerating
+        # "local" clipping to a global one. Fail cleanly with a clear message.
+        fine_window = _win(FILL_FACTOR * smallest_particle_px)
+        if fine_window > min(image.shape[-2:]):
+            return (
+                f"auto extraction: fine window {fine_window}px (≈{FILL_FACTOR:g}× the "
+                f"smallest particle) exceeds the image "
+                f"({'x'.join(str(d) for d in image.shape[-2:])}) for smallest_particle="
+                f"{settings.smallest_particle_um:g} {settings.smallest_particle_unit} — "
+                f"check the smallest particle and the dataset pixel size"
+            )
+
+    # Thread the round's Min particle size into the detector's own size filter when
+    # set, so the union is filtered exactly as the GUI panel does (which passes its
+    # Min-particle-size as min_spot_px). None → auto_extract keeps its own default.
+    extra = {} if min_spot_px is None else {"min_spot_px": int(min_spot_px)}
+    try:
+        mask, report = auto_extract(
+            image,
+            labels,
+            smallest_particle_px=smallest_particle_px,
+            presmooth_sigma_px=float(settings.presmooth_sigma_px),
+            **extra,
+        )
+    except NoParticlesFoundError:
+        # Auto-detect found no particles to size in this frame. A recoverable "no
+        # particles" outcome (e.g. the dissolved end of a washout time-lapse), NOT a
+        # dataset error: the time-lapse loop turns it into an empty frame (R9). The
+        # single-timepoint caller still treats this sentinel as a clear failure.
+        logger.info(
+            "round %s: auto extraction auto-detect found no particles to size", round_name
+        )
+        return _AUTO_EXTRACT_NO_PARTICLES
+    except Exception as e:
+        logger.exception("auto extraction failed for round %s", round_name)
+        return f"auto extraction: {e}"
+
+    np.maximum(combined, mask.astype(np.uint8), out=combined)
+    np.minimum(combined, 1, out=combined)
+    n_pos = int(combined.sum())
+    # Surface the two-pass decision in the run-log (these rounds apply headlessly,
+    # with no QC step, so the passes/window/largest-Ø are the only visible trace).
+    logger.info(
+        "round %s: auto extraction — passes=%s, fine_window=%s, largest=%.3gpx, "
+        "second_pass=%s, coarse_k(mean per-cell)=%s over %d cells, %d positive px",
+        round_name,
+        report.passes,
+        report.fine_window,
+        report.largest_particle_px or 0.0,
+        report.second_pass_used,
+        f"{report.coarse_k_mean:.2f}" if report.coarse_k_mean is not None else "n/a",
+        report.coarse_k_n,
+        n_pos,
+    )
+    if n_pos == 0:
+        logger.warning(
+            "round %s: auto extraction detected 0 pixels — check the smallest "
+            "particle and the dataset pixel size",
+            round_name,
+        )
+    return ""
+
+
+def _apply_threshold_frame(
+    image: NDArray,
+    labels: NDArray,
+    grouping: GroupingResult,
+    round_spec: ThresholdingRound,
+    pixel_size_um: float | None = None,
+) -> tuple[NDArray | None, pd.DataFrame | None, str]:
+    """Per-group Otsu threshold on one 2D frame.
+
+    Returns ``(combined_mask uint8, group_df, error_message)``. On success
+    ``error_message`` is empty; on Otsu failure the mask/df are ``None`` and
+    the message describes the failure. The ``group_df`` has columns
+    ``["label", "group_<channel>_<metric>"]`` (the same shape the interactive
+    controller writes). No store writes — the caller persists.
+
+    ``pixel_size_um`` is required only by the adaptive-clip branch (the per-cell
+    window is physical); other methods ignore it.
+    """
+    if round_spec.gaussian_sigma > 0:
+        smoothed = apply_gaussian_smoothing(image.astype(np.float32), round_spec.gaussian_sigma)
+    else:
+        smoothed = image.astype(np.float32)
+
+    # Dispatch precedence: auto-extract, then adaptive-clip, then iterative-otsu,
+    # then puncta, then legacy per-group Otsu. All method sentinels None keeps the
+    # legacy path byte-identical.
+    auto_extract = round_spec.auto_extract
+    adaptive = round_spec.adaptive_clip
+    iterative = round_spec.iterative_otsu
+    puncta = round_spec.puncta
+    use_puncta = puncta is not None and puncta.detector_name != "otsu"
+
+    # Resolve the round's Min particle size once (may need the dataset pixel size for
+    # µm²). 0 = no filter. Auto-extract threads it straight into the detector's own
+    # size filter (GUI parity); every other method applies it as a post-mask filter
+    # below.
+    min_size_px = 0
+    if round_spec.min_particle_size > 0:
+        try:
+            min_size_px = _resolve_area_px(
+                float(round_spec.min_particle_size),
+                round_spec.min_particle_size_unit,
+                pixel_size_um,
+                knob="min particle size",
+            )
+        except ValueError as e:
+            return None, None, str(e)
+
+    combined = np.zeros(labels.shape, dtype=np.uint8)
+    if auto_extract is not None:
+        # Two-pass auto-extraction also presmooths the RAW image itself (at its own
+        # validated presmooth_sigma_px, default 1 px) — same trap guard as adaptive.
+        # The Min particle size is threaded into the detector's union filter (matching
+        # the GUI panel), so the generic post-filter below is skipped for this method.
+        err = _apply_auto_extract_cells(
+            image, labels, auto_extract, combined, pixel_size_um, round_spec.name,
+            min_spot_px=(min_size_px if min_size_px > 0 else None),
+        )
+        if err:
+            return None, None, err
+    elif adaptive is not None:
+        # The detector presmooths the RAW image itself (at its own validated
+        # presmooth_sigma_px, default 1 px) — feeding `smoothed` would double-smooth,
+        # and the round's grouped-Otsu `gaussian_sigma` (default 0) is not the
+        # adaptive presmooth.
+        err = _apply_adaptive_clip_cells(
+            image, labels, adaptive, combined, pixel_size_um, round_spec.name,
+        )
+        if err:
+            return None, None, err
+    elif iterative is not None:
+        err = _apply_iterative_otsu_groups(
+            smoothed, labels, grouping, iterative, combined, round_spec.name
+        )
+        if err:
+            return None, None, err
+    elif use_puncta:
+        err = _apply_puncta_groups(smoothed, labels, grouping, puncta, combined, round_spec.name)
+        if err:
+            return None, None, err
+    else:
+        for group_id in range(1, grouping.n_groups + 1):
+            cells_in_group = grouping.group_assignments.index[
+                grouping.group_assignments.values == group_id
+            ].to_numpy(dtype=np.int32)
+            if len(cells_in_group) == 0:
+                continue
+            group_label_mask = np.isin(labels, list(cells_in_group))
+            if not group_label_mask.any():
+                continue
+            group_pixels = smoothed[group_label_mask]
+            if group_pixels.size == 0 or not np.isfinite(group_pixels).any():
+                continue
+            try:
+                from skimage.filters import threshold_otsu as sk_otsu
+
+                if np.unique(group_pixels).size < 2:
+                    # Constant group — accept every pixel (safer than none).
+                    group_mask = group_label_mask
+                else:
+                    thr = float(sk_otsu(group_pixels))
+                    group_mask = group_label_mask & (smoothed >= thr)
+            except Exception as e:
+                logger.exception("otsu failed for group %d", group_id)
+                return None, None, f"otsu for group {group_id}: {e}"
+            np.maximum(combined, group_mask.astype(np.uint8), out=combined)
+
+    # Post-mask size filter: drop connected components below the round's min particle
+    # size before the mask is written (and before the CNR post-step, which reads this
+    # mask). Applied here for every method EXCEPT auto-extract, which threaded the same
+    # value into its own detector-level union filter above for exact GUI parity.
+    if min_size_px > 0 and auto_extract is None:
+        combined = _filter_small_components(combined, min_size_px)
+
     col_name = f"group_{round_spec.channel}_{round_spec.metric}"
     group_df = grouping.group_assignments.reset_index()
     group_df.columns = ["label", col_name]
+    if (
+        auto_extract is not None
+        or adaptive is not None
+        or (iterative is not None and iterative.scope != "groups")
+    ):
+        # Auto-extract / adaptive (per-cell) and per-cell/whole-field iterative
+        # scopes did NOT use the intensity grouping to build the mask, so keep
+        # /groups honest with a single degenerate group rather than implying a
+        # clustering that did not drive the result.
+        group_df[col_name] = 1
+    return combined, group_df, ""
 
+
+def _alc_presmooth_for_round(round_spec: ThresholdingRound) -> float:
+    """The presmooth σ the round's ALC method used, so CNR's per-cell σ matches the
+    detector's noise floor exactly (both default to 1 px)."""
+    if round_spec.auto_extract is not None:
+        return float(round_spec.auto_extract.presmooth_sigma_px)
+    if round_spec.adaptive_clip is not None:
+        return float(round_spec.adaptive_clip.presmooth_sigma_px)
+    return 1.0
+
+
+def _classify_and_write_cnr(
+    store: DatasetStore,
+    round_spec: ThresholdingRound,
+    image: NDArray,
+    labels: NDArray,
+    mask: NDArray,
+    settings: CnrClassifySettings,
+) -> tuple[DatasetFailure | None, str]:
+    """Guided CNR subpopulation split of a produced feature mask (single frame).
+
+    Splits ``mask`` at the user CNR ``threshold`` into per-population masks
+    ``<round>_low`` / ``<round>_high`` and writes a per-focus CNR table to
+    ``/classification/<round>``. CNR uses the same presmooth the producing ALC
+    method used so its per-cell σ matches the detector. A single-population result
+    writes no extra masks (the base mask stands). Returns ``(failure, message)``: a
+    classification raise or a population-mask write failure fails the dataset; a
+    table-write failure is reported in the message but does not lose the masks.
+    """
+    from percell4.domain.measure.cnr_classification import (
+        classify_by_cnr,
+        segment_masks_from_label_image,
+        to_dataframe,
+    )
+
+    try:
+        if settings.forced:
+            # Forced GMM always-2 split — overrides the guided threshold.
+            result = classify_by_cnr(
+                image,
+                mask,
+                labels,
+                n_populations=2,
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
+        else:
+            result = classify_by_cnr(
+                image,
+                mask,
+                labels,
+                threshold=float(settings.threshold),
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
+    except Exception as e:
+        logger.exception("CNR classification failed for round %s", round_spec.name)
+        return DatasetFailure.THRESHOLD_ERROR, f"CNR classification failed: {e}"
+
+    # Clear any stale population masks from a prior run BEFORE writing — a re-run
+    # that now yields a single population must not leave the old _low/_high on disk
+    # (where the standalone batch-measure CLI would otherwise pick them up).
+    for suffix in ("_low", "_high"):
+        store.delete_item(f"masks/{round_spec.name}{suffix}")
+
+    written: list[tuple[str, int]] = []
+    if result.n_subpopulations >= 2:
+        pops = segment_masks_from_label_image(result.labels_image, result.n_subpopulations)
+        for suffix, pop_mask in zip(("_low", "_high"), pops):
+            if int(pop_mask.sum()) == 0:
+                continue
+            name = f"{round_spec.name}{suffix}"
+            try:
+                store.write_mask(name, pop_mask.astype(np.uint8))
+            except Exception as e:
+                logger.exception("write_mask failed for CNR population %s", name)
+                return DatasetFailure.THRESHOLD_ERROR, f"CNR population write failed ({name}): {e}"
+            written.append((name, int(pop_mask.sum())))
+
+    # Per-focus CNR table — secondary; a failure here must not lose the masks.
+    table_note = ""
+    try:
+        store.write_dataframe(f"/classification/{round_spec.name}", to_dataframe(result))
+    except Exception as e:
+        logger.exception("write_dataframe /classification failed for %s", round_spec.name)
+        table_note = f"; CNR table write FAILED: {e}"
+
+    if not written:
+        where = "forced GMM 2-group" if settings.forced else f"threshold {settings.threshold:g}"
+        return None, (
+            f"CNR: single population (no split at {where}); "
+            f"base mask stands{table_note}"
+        )
+    pops_desc = ", ".join(f"{name} ({px} px)" for name, px in written)
+    # Log the CNR cutoff the split was placed at — the GMM-found boundary between the
+    # two populations in forced mode (a user value in guided mode).
+    cutoff_desc = ""
+    if result.threshold is not None:
+        src = "GMM CNR cutoff" if settings.forced else "CNR cutoff"
+        cutoff_desc = f" ({src} {result.threshold:.2f})"
+    return None, f"CNR: split into {pops_desc}{cutoff_desc}{table_note}"
+
+
+def _classify_and_write_cnr_stack(
+    store: DatasetStore,
+    round_spec: ThresholdingRound,
+    image_thw: NDArray,
+    labels_thw: NDArray,
+    mask_thw: NDArray,
+    settings: CnrClassifySettings,
+) -> tuple[DatasetFailure | None, str]:
+    """Per-frame guided CNR split of a ``(T,H,W)`` feature mask (time-lapse, R5/R6).
+
+    The time-lapse analog of :func:`_classify_and_write_cnr`: classifies every frame on
+    its own image/labels at the **one shared** ``threshold`` and writes ``(T,H,W)``
+    ``<round>_low`` / ``<round>_high`` population masks + a per-focus CNR table (with a
+    ``timepoint`` column and a per-frame ``n_subpopulations`` flag) to
+    ``/classification/<round>``. CNR uses the producing ALC round's presmooth so its σ
+    matches the detector (R7). Returns ``(failure, message)``: a classification raise or a
+    population-mask write failure fails the dataset; a table-write failure is reported in
+    the message but does not lose the masks.
+    """
+    from percell4.domain.measure.cnr_classification import classify_by_cnr_stack
+
+    try:
+        if settings.forced:
+            # Forced GMM always-2 split per frame — overrides the guided threshold.
+            res = classify_by_cnr_stack(
+                image_thw,
+                mask_thw,
+                labels_thw,
+                mode="forced",
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
+        else:
+            res = classify_by_cnr_stack(
+                image_thw,
+                mask_thw,
+                labels_thw,
+                mode="guided",
+                threshold=float(settings.threshold),
+                presmooth_sigma_px=_alc_presmooth_for_round(round_spec),
+            )
+    except Exception as e:
+        logger.exception("CNR stack classification failed for round %s", round_spec.name)
+        return DatasetFailure.THRESHOLD_ERROR, f"CNR classification failed: {e}"
+
+    # Clear any stale population masks BEFORE writing — a prior single-tp run leaves 2D
+    # _low/_high, and a re-run that now yields fewer populations must not leave the old
+    # stacks on disk (where the standalone batch-measure CLI would otherwise pick them up).
+    for suffix in ("_low", "_high"):
+        store.delete_item(f"masks/{round_spec.name}{suffix}")
+
+    # Write the population stacks only when at least one frame actually split (matching
+    # the single-tp "single population -> no extra mask, base stands" rule). When some
+    # frames split and others do not, a non-splitting frame still contributes its foci to
+    # the _low plane (n_subpopulations==1 on the table flags it as "unclassified, not
+    # dim") so the (T,H,W) stack stays coherent across the series.
+    n_frames = len(res.per_frame)
+    n_split = sum(1 for f in res.per_frame if f["n_subpopulations"] >= 2)
+    written: list[tuple[str, int]] = []
+    if n_split > 0:
+        for suffix, stack in (("_low", res.low_stack), ("_high", res.high_stack)):
+            # "non-empty" == any frame non-empty; the stack is always exactly (T,H,W) so
+            # the store validates the leading axis against n_timepoints.
+            if int(stack.sum()) == 0:
+                continue
+            name = f"{round_spec.name}{suffix}"
+            try:
+                store.write_mask(name, stack.astype(np.uint8))
+            except Exception as e:
+                logger.exception("write_mask failed for CNR population %s", name)
+                # Don't leave a half-written split (e.g. _low on disk, _high failed):
+                # clear both so a re-run / batch-measure never sees an orphaned mask.
+                for s in ("_low", "_high"):
+                    store.delete_item(f"masks/{round_spec.name}{s}")
+                return (
+                    DatasetFailure.THRESHOLD_ERROR,
+                    f"CNR population write failed ({name}): {e}",
+                )
+            written.append((name, int(stack.sum())))
+
+    table_note = ""
+    try:
+        store.write_dataframe(f"/classification/{round_spec.name}", res.table)
+    except Exception as e:
+        logger.exception("write_dataframe /classification failed for %s", round_spec.name)
+        table_note = f"; CNR table write FAILED: {e}"
+
+    if not written:
+        where = "forced GMM 2-group" if settings.forced else f"threshold {settings.threshold:g}"
+        return None, (
+            f"CNR: single population in all {n_frames} timepoint(s) "
+            f"(no split at {where}); base mask stands{table_note}"
+        )
+    pops_desc = ", ".join(f"{name} ({px} px)" for name, px in written)
+    # Log the per-timepoint CNR cutoff each frame's split was placed at — the GMM-found
+    # boundary between the two populations in forced mode (per-frame, since σ is per-frame).
+    cutoffs = [
+        (f["timepoint"], f["threshold"])
+        for f in res.per_frame
+        if f["n_subpopulations"] >= 2 and f.get("threshold") is not None
+    ]
+    cutoff_desc = ""
+    if cutoffs:
+        src = "GMM CNR cutoff" if settings.forced else "CNR cutoff"
+        pairs = ", ".join(f"t{t}={thr:.2f}" for t, thr in cutoffs)
+        cutoff_desc = f"; {src} per timepoint: {pairs}"
+    return None, (
+        f"CNR: split into {pops_desc} across {n_split}/{n_frames} timepoint(s)"
+        f"{cutoff_desc}{table_note}"
+    )
+
+
+def apply_threshold_headless(
+    store: DatasetStore,
+    round_spec: ThresholdingRound,
+    grouping: object,
+    seg_name: str = "cellpose_qc",
+) -> tuple[DatasetFailure | None, str]:
+    """Headless per-group Otsu thresholding — the Phase 4 QC stand-in.
+
+    For each group returned by :func:`threshold_compute_one`, masks the
+    channel to that group's cells, smooths, computes a per-group Otsu
+    threshold, and unions the per-group masks. Writes
+    ``/masks/<round_spec.name>`` and ``/groups/<round_spec.name>`` — the same
+    shape the interactive ``ThresholdQCController`` produces.
+
+    Single-timepoint: ``grouping`` is a :class:`GroupingResult`, the mask is
+    2D. Time-lapse (``n_timepoints > 1``): ``grouping`` is the
+    ``dict[int, GroupingResult]`` from :func:`threshold_compute_one`; each
+    frame is thresholded with its own grouping, masks are stacked into a
+    ``(T, H, W)`` mask, and the ``/groups`` table gains a ``timepoint`` column.
+    """
+    try:
+        channel_idx = _channel_index(store, round_spec.channel)
+    except (KeyError, ValueError) as e:
+        return DatasetFailure.THRESHOLD_ERROR, str(e)
+
+    # A per-cell round needs a pixel size only when its size knob is in µm.
+    # Adaptive with d_min_unit="px", auto-extraction with a px override, and
+    # auto-detect are all px-native and need none. Fail this dataset cleanly rather
+    # than producing garbage; never default to 1.
+    raw_ps = store.metadata.get("pixel_size_um")
+    pixel_size_um = float(raw_ps) if raw_ps else None
+    adaptive_needs_ps = (
+        round_spec.adaptive_clip is not None and round_spec.adaptive_clip.d_min_unit == "um"
+    )
+    auto_extract_needs_ps = (
+        round_spec.auto_extract is not None
+        and round_spec.auto_extract.smallest_particle_um is not None
+        and round_spec.auto_extract.smallest_particle_unit == "um"
+    )
+    if (adaptive_needs_ps or auto_extract_needs_ps) and (
+        pixel_size_um is None or pixel_size_um <= 0
+    ):
+        method = (
+            "adaptive sigma clipping (µm d_min)"
+            if adaptive_needs_ps
+            else "auto extraction (µm smallest-particle override)"
+        )
+        return (
+            DatasetFailure.THRESHOLD_ERROR,
+            f"{method} needs a pixel size (µm/px) on this dataset; "
+            "switch the size unit to px or add a pixel size",
+        )
+
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+
+    if n_timepoints > 1:
+        per_frame: dict[int, GroupingResult] = grouping  # type: ignore[assignment]
+        mask_frames: list[NDArray] = []
+        group_dfs: list[pd.DataFrame] = []
+        # Guided CNR (R5) classifies each frame on its own image/labels at one shared
+        # threshold (R6). Collect the per-frame image/labels in THIS loop (only when CNR
+        # is requested) so the (T,H,W) stacks feed classify_by_cnr_stack without a second
+        # full-dataset read.
+        want_cnr = round_spec.cnr_classify is not None
+        image_frames: list[NDArray] = []
+        labels_frames: list[NDArray] = []
+        for t in range(n_timepoints):
+            try:
+                labels = store.read_labels(seg_name, timepoint=t)
+                image = _channel_from_frame(store.read_array_frame("intensity", t), channel_idx)
+            except (KeyError, ValueError) as e:
+                return DatasetFailure.THRESHOLD_ERROR, str(e)
+            if want_cnr:
+                image_frames.append(image)
+                labels_frames.append(labels)
+            g = per_frame.get(t)
+            if g is None:
+                # No groups for this frame — empty mask, no group rows.
+                mask_frames.append(np.zeros(labels.shape, dtype=np.uint8))
+                continue
+            mask, gdf, err = _apply_threshold_frame(image, labels, g, round_spec, pixel_size_um)
+            if err == _AUTO_EXTRACT_NO_PARTICLES:
+                # R9: no detectable particles this frame (e.g. dissolved granules at the
+                # end of a washout) — an empty frame, not a dataset failure.
+                mask_frames.append(np.zeros(labels.shape, dtype=np.uint8))
+                continue
+            if err:
+                return DatasetFailure.THRESHOLD_ERROR, err
+            mask_frames.append(mask)
+            gdf = gdf.copy()
+            gdf["timepoint"] = t
+            group_dfs.append(gdf)
+        combined = np.stack(mask_frames, axis=0).astype(np.uint8)  # (T, H, W)
+        try:
+            store.write_mask(round_spec.name, combined)
+        except Exception as e:
+            logger.exception("write_mask failed")
+            return DatasetFailure.THRESHOLD_ERROR, f"write_mask failed: {e}"
+        groups_all = (
+            pd.concat(group_dfs, ignore_index=True)
+            if group_dfs
+            else pd.DataFrame(
+                columns=["label", f"group_{round_spec.channel}_{round_spec.metric}", "timepoint"]
+            )
+        )
+        try:
+            store.write_dataframe(f"/groups/{round_spec.name}", groups_all)
+        except Exception as e:
+            logger.exception("write_dataframe /groups failed")
+            return DatasetFailure.THRESHOLD_ERROR, f"write /groups failed: {e}"
+
+        # Optional per-frame guided CNR split of the just-written (T,H,W) feature mask.
+        cnr_note = ""
+        if want_cnr:
+            image_thw = np.stack(image_frames, axis=0)
+            labels_thw = np.stack(labels_frames, axis=0)
+            cnr_failure, cnr_msg = _classify_and_write_cnr_stack(
+                store, round_spec, image_thw, labels_thw, combined, round_spec.cnr_classify
+            )
+            if cnr_failure is not None:
+                return cnr_failure, cnr_msg
+            cnr_note = f"; {cnr_msg}"
+        return None, (
+            f"{int(combined.sum())} positive pixels across {len(group_dfs)} timepoint(s){cnr_note}"
+        )
+
+    # Single-timepoint path.
+    try:
+        image = store.read_channel("intensity", channel_idx)
+        labels = store.read_labels(seg_name)
+    except (KeyError, ValueError) as e:
+        return DatasetFailure.THRESHOLD_ERROR, str(e)
+    mask, group_df, err = _apply_threshold_frame(image, labels, grouping, round_spec, pixel_size_um)
+    if err:
+        return DatasetFailure.THRESHOLD_ERROR, err
+    try:
+        store.write_mask(round_spec.name, mask)
+    except Exception as e:
+        logger.exception("write_mask failed")
+        return DatasetFailure.THRESHOLD_ERROR, f"write_mask failed: {e}"
     try:
         store.write_dataframe(f"/groups/{round_spec.name}", group_df)
     except Exception as e:
         logger.exception("write_dataframe /groups failed")
         return DatasetFailure.THRESHOLD_ERROR, f"write /groups failed: {e}"
 
-    return None, f"{int(combined.sum())} positive pixels across {grouping.n_groups} groups"
+    # Optional guided CNR subpopulation split of the just-written feature mask.
+    cnr_note = ""
+    if round_spec.cnr_classify is not None:
+        cnr_failure, cnr_msg = _classify_and_write_cnr(
+            store, round_spec, image, labels, mask, round_spec.cnr_classify
+        )
+        if cnr_failure is not None:
+            return cnr_failure, cnr_msg
+        cnr_note = f"; {cnr_msg}"
+    return None, (
+        f"{int(mask.sum())} positive pixels across {grouping.n_groups} groups{cnr_note}"
+    )
 
 
 def _channel_index(store: DatasetStore, channel_name: str) -> int:
@@ -400,98 +1532,511 @@ def _channel_index(store: DatasetStore, channel_name: str) -> int:
     for n in names:
         names_list.append(n.decode() if isinstance(n, bytes) else str(n))
     if channel_name not in names_list:
-        raise KeyError(
-            f"channel {channel_name!r} not in dataset; available: {names_list}"
-        )
+        raise KeyError(f"channel {channel_name!r} not in dataset; available: {names_list}")
     return names_list.index(channel_name)
+
+
+# ── Phase 8: Summary CSV builders (U6) ──────────────────────────────────
+
+
+def _is_metric_column(col: str) -> bool:
+    """True if ``col`` is a numeric metric column the summary should aggregate.
+
+    Excludes identity / cohort flag columns. Anything else numeric is
+    treated as a metric — including per-round mask-overlap columns
+    (``{channel}_{metric}_in_{round}`` etc.) which are legitimate
+    per-cell quantities. The actual numeric-dtype check happens at the
+    caller so this helper stays pure-string.
+    """
+    return col not in _NON_METRIC_COLUMNS and col != "dataset"
+
+
+def _build_summary_groups(
+    df: pd.DataFrame,
+    thresholding_round_names: list[str],
+) -> pd.DataFrame:
+    """Per (dataset × round × group) aggregation: n_cells + metric stats.
+
+    Synthetic rows (``is_edge_synthetic=True``) are excluded — their
+    ``group_<round>`` is NaN and they must not contaminate group
+    statistics. Per origin R18.
+
+    For each thresholding round, produces one row per (dataset,
+    group_label) with:
+      - ``dataset``, ``round_name``, ``group_label``
+      - ``n_cells`` (count of per-cell rows in that group)
+      - ``fraction_of_dataset_cells`` (n_cells / total per-cell rows in
+        that dataset, within this round)
+      - ``<metric>_mean``, ``<metric>_median``, ``<metric>_std`` for
+        every numeric metric column in ``df``
+    """
+    if "is_edge_synthetic" in df.columns:
+        real = df[~df["is_edge_synthetic"]].copy()
+    else:
+        real = df.copy()
+
+    if real.empty:
+        return pd.DataFrame(
+            columns=["dataset", "round_name", "group_label", "n_cells", "fraction_of_dataset_cells"]
+        )
+
+    metric_cols = [
+        c
+        for c in real.columns
+        if _is_metric_column(c)
+        and pd.api.types.is_numeric_dtype(real[c])
+        # Group columns are categorical-ish; skip even if numeric.
+        and not c.startswith("group_")
+    ]
+
+    frames: list[pd.DataFrame] = []
+    for round_name in thresholding_round_names:
+        col = f"group_{round_name}"
+        if col not in real.columns:
+            continue
+        # Cells without a group assignment (NaN) are dropped.
+        grouped = real.dropna(subset=[col]).groupby(["dataset", col], observed=True)
+        if grouped.ngroups == 0:
+            continue
+        counts = grouped.size().rename("n_cells").reset_index()
+        counts = counts.rename(columns={col: "group_label"})
+
+        # Fraction within (dataset) — total real cells per dataset
+        # across all groups in this round (not the dataset's grand
+        # total) so per-round fractions sum to 1.0.
+        per_dataset_total = counts.groupby("dataset", observed=True)["n_cells"].transform("sum")
+        counts["fraction_of_dataset_cells"] = counts["n_cells"] / per_dataset_total
+
+        if metric_cols:
+            stats = grouped[metric_cols].agg(["mean", "median", "std"])
+            # Flatten MultiIndex columns: (metric, stat) → metric_stat
+            stats.columns = [f"{m}_{s}" for m, s in stats.columns]
+            stats = stats.reset_index().rename(columns={col: "group_label"})
+            counts = counts.merge(stats, on=["dataset", "group_label"], how="left")
+
+        counts.insert(1, "round_name", round_name)
+        frames.append(counts)
+
+    if not frames:
+        return pd.DataFrame(
+            columns=["dataset", "round_name", "group_label", "n_cells", "fraction_of_dataset_cells"]
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def _build_summary_datasets(
+    df: pd.DataFrame,
+    config: WorkflowConfig,
+    metadata: RunMetadata,
+    round_names: list[str] | None = None,
+) -> pd.DataFrame:
+    """Per-dataset run audit: counts, edge_mode, dilute round counts, failures.
+
+    One row per dataset in ``config.datasets``. Columns:
+      - ``dataset``, ``source`` (original — TIFF_PENDING is rewritten
+        as ``compressed_from_tiff`` to match the brainstorm's user-facing
+        encoding)
+      - ``n_cells_total``, ``n_cells_whole``, ``n_cells_edge`` (real
+        cells only — synthetic rows excluded from the totals)
+      - ``n_rounds_thresholding`` (len of ``config.thresholding_rounds``)
+      - ``n_rounds_dilute`` (per-dataset count from metadata; NaN if
+        dilute is disabled)
+      - ``dilute_enabled`` (bool — True iff ``config.dilute_settings`` is set)
+      - ``edge_mode`` (the run-wide value, broadcast per row for
+        readability)
+      - ``failure_reason`` (semicolon-joined messages for any failures
+        recorded against this dataset; NaN if none)
+
+    Per origin R19.
+    """
+    rows: list[dict[str, Any]] = []
+    failures_by_ds: dict[str, list[str]] = {}
+    for f in metadata.failures:
+        failures_by_ds.setdefault(f.dataset_name, []).append(f"{f.phase_name}: {f.message}")
+
+    dilute_enabled = config.dilute_settings is not None
+    n_rounds_thresholding = (
+        len(round_names) if round_names is not None else len(config.thresholding_rounds)
+    )
+    edge_mode_value = config.edge_mode.value
+
+    if "is_edge_synthetic" in df.columns:
+        real = df[~df["is_edge_synthetic"]]
+    else:
+        real = df
+
+    # Group real cells by dataset once.
+    if not real.empty and "dataset" in real.columns:
+        counts_by_ds = (
+            real.groupby("dataset", observed=True)
+            .agg(
+                n_cells_total=("label", "size"),
+                n_cells_whole=("is_edge", lambda s: int((~s).sum())),
+                n_cells_edge=("is_edge", lambda s: int(s.sum())),
+            )
+            .to_dict("index")
+        )
+    else:
+        counts_by_ds = {}
+
+    for ds_entry in config.datasets:
+        name = ds_entry.name
+        counts = counts_by_ds.get(name, {})
+        source_str = (
+            "compressed_from_tiff"
+            if ds_entry.source == DatasetSource.TIFF_PENDING
+            else ds_entry.source.value
+        )
+        row: dict[str, Any] = {
+            "dataset": name,
+            "source": source_str,
+            "n_cells_total": int(counts.get("n_cells_total", 0)),
+            "n_cells_whole": int(counts.get("n_cells_whole", 0)),
+            "n_cells_edge": int(counts.get("n_cells_edge", 0)),
+            "n_rounds_thresholding": n_rounds_thresholding,
+            "n_rounds_dilute": (
+                metadata.per_dataset_dilute_round_counts.get(name, 0) if dilute_enabled else None
+            ),
+            "dilute_enabled": dilute_enabled,
+            "edge_mode": edge_mode_value,
+            "failure_reason": ("; ".join(failures_by_ds[name]) if name in failures_by_ds else None),
+        }
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 # ── Phase 7: Measure ────────────────────────────────────────────────────
 
 
-def measure_one(
-    store: DatasetStore,
-    round_specs: list[ThresholdingRound],
-    metric_names: list[str] | None = None,
-) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
-    """Measure one dataset: all channels × all metrics × all round masks.
+# Columns that are identity / cohort flags, NOT metrics — excluded from the
+# synthetic-row aggregation. ``label`` is the post-relabel sequential ID;
+# ``cell_id`` is the same value (carried forward for parquet identity).
+_NON_METRIC_COLUMNS = frozenset({"label", "cell_id", "is_edge", "is_edge_synthetic"})
 
-    Opens one session, reads the full intensity cube, labels, and every
-    round's mask and group DataFrame, calls the single-pass
-    :func:`measure_multichannel_with_masks`, then merges the
-    ``group_<round>`` columns from each round's stored DataFrame.
 
-    Returns an empty DataFrame on failure (alongside a failure code);
-    the caller appends it to ``staging/`` regardless and lets
-    :func:`export_run` skip empty datasets in the concat.
+def _read_pixel_size_um(store: DatasetStore) -> float | None:
+    """Read /metadata.pixel_size_um from the store, or None if absent / invalid.
+
+    Persisted by ``import_dataset`` from the first source TIFF's resolution
+    tag. Returns ``None`` when:
+      - the dataset was imported before this metadata was persisted, OR
+      - the source TIFFs didn't carry a resolution tag, OR
+      - the persisted value is non-positive (defensive guard).
     """
-    metric_names = metric_names or sorted(BUILTIN_METRICS.keys())
-
     try:
-        with store.open_read() as s:
-            intensity = s.read_array("intensity")
-            labels = s.read_labels("cellpose_qc")
-            meta = s.metadata
-            channel_names_raw = meta.get("channel_names", [])
-            channel_names = [
-                n.decode() if isinstance(n, bytes) else str(n)
-                for n in channel_names_raw
-            ]
+        meta = store.metadata
+    except Exception:
+        return None
+    raw = meta.get("pixel_size_um")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
-            # Build channel → image dict
-            images: dict[str, NDArray] = {}
-            if intensity.ndim == 2:
-                name = channel_names[0] if channel_names else "ch0"
-                images[name] = intensity
-            elif intensity.ndim == 3:
-                for i, name in enumerate(channel_names):
-                    if i < intensity.shape[0]:
-                        images[name] = intensity[i]
-            else:
-                return (
-                    pd.DataFrame(),
-                    DatasetFailure.MEASUREMENT_ERROR,
-                    f"unexpected intensity ndim: {intensity.ndim}",
-                )
 
-            # Load all round masks
-            round_masks: dict[str, NDArray[np.uint8]] = {}
-            group_dfs: dict[str, pd.DataFrame] = {}
-            for round_spec in round_specs:
-                try:
-                    round_masks[round_spec.name] = s.read_mask(round_spec.name)
-                except KeyError:
-                    # Round was skipped for this dataset (e.g. threshold failed).
-                    # Skip it from measure but don't fail the whole dataset.
-                    logger.info(
-                        "dataset missing mask /masks/%s — skipping from measure",
-                        round_spec.name,
-                    )
-                    continue
-                try:
-                    group_dfs[round_spec.name] = s.read_dataframe(
-                        f"/groups/{round_spec.name}"
-                    )
-                except KeyError:
-                    logger.info(
-                        "dataset missing /groups/%s — group column won't be added",
-                        round_spec.name,
-                    )
-    except Exception as e:
-        logger.exception("measure_one read session failed")
+def _filter_small_components(mask: NDArray, min_px: int) -> NDArray:
+    """Drop connected components with area < ``min_px`` from a binary mask.
+
+    4-connectivity (``scipy.ndimage.label`` default), matching the particle
+    analysis size filter (``domain/measure/particle``). Returns a ``uint8`` mask;
+    a ``min_px <= 1`` is a no-op (every non-empty component survives).
+    """
+    if min_px <= 1 or not mask.any():
+        return mask.astype(np.uint8, copy=False)
+    from scipy.ndimage import label as ndlabel
+
+    labeled, n = ndlabel(mask)
+    if n == 0:
+        return mask.astype(np.uint8, copy=False)
+    counts = np.bincount(labeled.ravel())
+    keep = counts >= min_px
+    keep[0] = False  # background is never a particle
+    return keep[labeled].astype(np.uint8)
+
+
+def _resolve_area_px(
+    value: float,
+    unit: str,
+    pixel_size_um: float | None,
+    *,
+    dataset_name: str = "",
+    knob: str = "particle area",
+) -> int:
+    """Convert an area value in ``unit`` into an integer pixel threshold.
+
+    ``"px"`` mode is a straight ``int(round(value))``. ``"um2"`` mode divides by
+    the dataset's pixel area; a µm² threshold against a dataset without a known
+    pixel size raises ``ValueError`` so the caller can record the failure rather
+    than silently default to ``pixel_size_um=1`` (which would produce a threshold
+    orders of magnitude off).
+    """
+    if unit == "px":
+        return int(round(value))
+    if unit == "um2":
+        if pixel_size_um is None or pixel_size_um <= 0:
+            label = f" for dataset {dataset_name!r}" if dataset_name else ""
+            raise ValueError(
+                f"µm² {knob} threshold requires a known pixel size{label}; "
+                "re-import the dataset with TIFF resolution metadata or "
+                "switch the unit to px."
+            )
+        return int(round(value / (pixel_size_um * pixel_size_um)))
+    # __post_init__ guards against unknown units, but stay defensive.
+    raise ValueError(f"unknown area unit: {unit!r}")
+
+
+def _resolve_min_area_px(
+    particle_settings: ParticleSettings,
+    pixel_size_um: float | None,
+    *,
+    dataset_name: str = "",
+) -> int:
+    """Convert a ParticleSettings.min_area into an integer pixel threshold."""
+    return _resolve_area_px(
+        float(particle_settings.min_area),
+        particle_settings.min_area_unit,
+        pixel_size_um,
+        dataset_name=dataset_name,
+    )
+
+
+def _add_area_um2_columns(df: pd.DataFrame, pixel_size_um: float | None) -> pd.DataFrame:
+    """Emit `<area_col>_um2` sibling columns for every area column in ``df``.
+
+    No-ops when ``pixel_size_um`` is ``None``. Otherwise, for every column
+    whose name is exactly ``area`` OR ends with ``_area`` OR contains
+    ``_area_in_``, add a sibling ``<name>_um2`` column whose values are
+    the pixel-count area multiplied by ``pixel_size_um ** 2``.
+
+    Idempotent — running twice doesn't double-add. Pixel-side columns
+    are preserved alongside (lossless).
+    """
+    if pixel_size_um is None or pixel_size_um <= 0:
+        return df
+
+    factor = pixel_size_um * pixel_size_um
+    new_cols: dict[str, NDArray] = {}
+    for col in df.columns:
+        if col.endswith("_um2"):
+            continue
+        is_area = (
+            col == "area"
+            or col.endswith("_area")
+            or "_area_in_" in col
+            or col.endswith("_particle_area")
+        )
+        if not is_area:
+            continue
+        sibling = f"{col}_um2"
+        if sibling in df.columns:
+            continue
+        # Multiply numeric values; non-numeric columns (shouldn't happen
+        # for area) are left as-is via pandas' default float coercion.
+        try:
+            new_cols[sibling] = df[col].astype(float) * factor
+        except Exception:
+            logger.exception("failed to compute %s from %s — skipping", sibling, col)
+
+    if not new_cols:
+        return df
+
+    # Insert each um2 column immediately after its pixel-side sibling
+    # so the parquet/CSV columns stay readable left-to-right.
+    result = df.copy()
+    for col_name, values in new_cols.items():
+        result[col_name] = values
+    # Reorder so each _um2 column sits next to its source.
+    ordered: list[str] = []
+    for col in df.columns:
+        ordered.append(col)
+        sibling = f"{col}_um2"
+        if sibling in new_cols:
+            ordered.append(sibling)
+    return result[ordered]
+
+
+def _append_synthetic_row(
+    df: pd.DataFrame,
+    edge_label_set: set[int],
+    edge_mode: EdgeMode,
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Append the size-normalized edge-cohort synthetic row when applicable.
+
+    Origin R7: ``N_theoretical = sum(edge_areas) / mean(whole_areas)``;
+    for each metric column M, ``synthetic_M = nansum(M across edge cells)
+    / N_theoretical``. ``sum(M)/N_theoretical`` is intentional — density-
+    based extrapolation, not a sample mean. See plan U4.
+
+    Returns ``(df, None, "")`` unchanged in these cases:
+    - ``edge_mode`` is not ``INCLUDE_AS_SIZE_NORMALIZED_COHORT`` (most runs).
+    - The dataset has zero edge cells (R10a). No synthetic row needed.
+
+    Returns ``(df, DatasetFailure.MEASUREMENT_ERROR, msg)`` and skips the
+    append when the dataset has zero whole cells (R10b). The per-cell df
+    is returned unchanged so the runner can still stage the dataset's
+    rows; the failure record marks the dataset for the summary CSV's
+    ``failure_reason`` column. AE2.
+
+    NaN policy: ``nansum`` so a single NaN in any edge cell's metric
+    column does not blank the entire synthetic value (Tier 2 doc-review
+    finding). Mask-overlap columns (``<channel>_<metric>_in_<round>``,
+    ``..._out_<round>``) are treated as numeric metrics — the same
+    ``sum/N_theoretical`` formula applies uniformly per origin R7.
+    """
+    if edge_mode != EdgeMode.INCLUDE_AS_SIZE_NORMALIZED_COHORT:
+        return df, None, ""
+
+    if "is_edge" not in df.columns or "label" not in df.columns:
+        # measure_one's caller must populate these before invoking this
+        # helper — a programming error rather than a runtime failure.
+        return df, None, ""
+
+    if not edge_label_set:
+        # R10a: no edge cells in this dataset, no synthetic row.
+        return df, None, ""
+
+    edge_rows = df[df["is_edge"]]
+    whole_rows = df[~df["is_edge"]]
+
+    if whole_rows.empty:
+        # R10b / AE2: cannot compute A_mean for normalization.
         return (
-            pd.DataFrame(),
+            df,
             DatasetFailure.MEASUREMENT_ERROR,
-            f"read session failed: {e}",
+            "no whole cells to compute A_mean for edge-cohort normalization",
         )
 
-    if int(labels.max()) == 0:
+    if "area" not in df.columns:
+        # Defensive: every per-cell row should carry area (core column).
+        return df, None, ""
+
+    a_mean = float(np.nanmean(whole_rows["area"]))
+    if not np.isfinite(a_mean) or a_mean <= 0:
         return (
-            pd.DataFrame(),
+            df,
             DatasetFailure.MEASUREMENT_ERROR,
-            "empty labels — nothing to measure",
+            "whole-cell mean area is non-positive or non-finite — cannot normalize",
         )
 
+    edge_area_sum = float(np.nansum(edge_rows["area"]))
+    n_theoretical = edge_area_sum / a_mean
+    if n_theoretical <= 0:
+        return df, None, ""  # nothing to spread across
+
+    # Build the synthetic row. Numeric metric columns get
+    # nansum / N_theoretical; identity / cohort flags get explicit
+    # values; non-numeric columns get the column's null.
+    synthetic: dict[str, Any] = {}
+    for col in df.columns:
+        if col in _NON_METRIC_COLUMNS:
+            continue
+        # Only aggregate numeric columns. Object / categorical / group
+        # columns are left out of the synthetic row (group_<round>
+        # columns will be NaN after the existing left-merge — natural
+        # behavior with the synthetic label of -1).
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        synthetic[col] = float(np.nansum(edge_rows[col])) / n_theoretical
+
+    synthetic["label"] = -1
+    synthetic["cell_id"] = -1
+    synthetic["is_edge"] = False
+    synthetic["is_edge_synthetic"] = True
+
+    df_out = pd.concat([df, pd.DataFrame([synthetic])], ignore_index=True)
+    return (
+        df_out,
+        None,
+        f"appended edge-cohort synthetic row (n_edge={len(edge_rows)}, "
+        f"n_theoretical={n_theoretical:.2f})",
+    )
+
+
+def _images_from_plane(plane: NDArray, channel_names: list[str]) -> dict[str, NDArray]:
+    """Build a ``{channel_name: 2D image}`` dict from one intensity plane.
+
+    ``plane`` is ``(H, W)`` (single channel) or ``(C, H, W)`` (multichannel)
+    — for a time-lapse dataset this is one timepoint's frame. Raises
+    ``ValueError`` on an unexpected rank.
+    """
+    images: dict[str, NDArray] = {}
+    if plane.ndim == 2:
+        images[channel_names[0] if channel_names else "ch0"] = plane
+    elif plane.ndim == 3:
+        for i, name in enumerate(channel_names):
+            if i < plane.shape[0]:
+                images[name] = plane[i]
+    else:
+        raise ValueError(f"unexpected intensity ndim: {plane.ndim}")
+    return images
+
+
+def _merge_group_dfs(df: pd.DataFrame, group_dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Left-merge each round's ``group_<round>`` column onto ``df`` by label.
+
+    Each ``group_df`` has columns ``["label", "group_<channel>_<metric>"]``;
+    the metric column is renamed to ``group_<round_name>``.
+    """
+    for round_name, g_df in group_dfs.items():
+        cols = list(g_df.columns)
+        if len(cols) != 2 or cols[0] != "label":
+            logger.warning("unexpected group_df schema for %s: %s", round_name, cols)
+            continue
+        g_df = g_df.rename(columns={cols[1]: f"group_{round_name}"})
+        df = df.merge(g_df, on="label", how="left")
+    return df
+
+
+def _join_lineage_columns(store: DatasetStore, seg_name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Attach track_id + lineage columns when ``seg_name`` is a tracked layer.
+
+    The tracked segmentation's label value IS the (1-based) track id, so
+    ``track_id == label``; ``tree_id`` / ``parent_track_id`` are joined from
+    ``/tracks/<seg_name>``. A raw (untracked) segmentation is left unchanged
+    (only the ``timepoint`` column from the caller).
+    """
+    if "label" not in df.columns:
+        return df
+    try:
+        tracks = store.read_tracks(seg_name)
+    except KeyError:
+        return df
+    df = df.copy()
+    df["track_id"] = df["label"]
+    if tracks is not None and not tracks.empty:
+        tree = dict(zip(tracks["track_id"], tracks["tree_id"]))
+        parent = dict(zip(tracks["track_id"], tracks["parent_track_id"]))
+        df["tree_id"] = df["track_id"].map(tree)
+        df["parent_track_id"] = df["track_id"].map(parent)
+    return df
+
+
+def _measure_frame(
+    images: dict[str, NDArray],
+    labels: NDArray,
+    round_masks: dict[str, NDArray],
+    group_dfs: dict[str, pd.DataFrame],
+    metric_names: list[str],
+    edge_mode: EdgeMode,
+    edge_margin_px: int,
+    particle_settings: ParticleSettings | None,
+    pixel_size_um: float | None,
+    run_log: RunLog | None,
+    dataset_name: str,
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Measure one 2D frame: channels × metrics × round masks, + identity/cohort.
+
+    The per-frame core shared by single-timepoint and time-lapse
+    measurement. ``group_dfs`` are 2-column ``[label, group_col]`` (the
+    caller slices the timepoint out for time-lapse). Returns
+    ``(df, failure, message)``; on a soft zero-whole-cells edge-cohort
+    failure the df is preserved (group columns merged) so the caller can
+    still stage rows.
+    """
     try:
         df = measure_multichannel_with_masks(
             images=images,
@@ -501,32 +2046,218 @@ def measure_one(
         )
     except Exception as e:
         logger.exception("measure_multichannel_with_masks failed")
-        return (
-            pd.DataFrame(),
-            DatasetFailure.MEASUREMENT_ERROR,
-            f"measure failed: {e}",
-        )
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"measure failed: {e}"
 
-    # Merge group_<round> columns from the per-round stored DataFrames.
-    # Each group_df has columns ["label", "group_<channel>_<metric>"]; we
-    # rename the second column to "group_<round_name>" for unambiguous
-    # per-round provenance, then left-merge on label.
-    for round_name, g_df in group_dfs.items():
-        cols = list(g_df.columns)
-        if len(cols) != 2 or cols[0] != "label":
-            logger.warning(
-                "unexpected group_df schema for %s: %s", round_name, cols
+    # Keep only "_in_<round>" mask-overlap columns, drop "_out_<round>".
+    out_cols = [c for c in df.columns if "_out_" in c]
+    if out_cols:
+        df = df.drop(columns=out_cols)
+
+    df["cell_id"] = df["label"]
+    edge_label_set = get_edge_labels(labels.astype(np.int32), edge_margin=edge_margin_px)
+    df["is_edge"] = df["label"].isin(edge_label_set)
+    df["is_edge_synthetic"] = False
+
+    if particle_settings is not None:
+        from percell4.domain.measure.particle import analyze_particles
+
+        try:
+            resolved_min_area_px = _resolve_min_area_px(
+                particle_settings,
+                pixel_size_um,
+                dataset_name=dataset_name,
             )
-            continue
-        g_df = g_df.rename(columns={cols[1]: f"group_{round_name}"})
-        df = df.merge(g_df, on="label", how="left")
+        except ValueError as e:
+            logger.error("particle threshold resolve failed: %s", e)
+            if run_log is not None:
+                run_log.log(
+                    phase="measure",
+                    dataset=dataset_name,
+                    event="min_area_resolve_failed",
+                    min_area_value=float(particle_settings.min_area),
+                    min_area_unit=particle_settings.min_area_unit,
+                    pixel_size_um=pixel_size_um,
+                    error=str(e),
+                )
+            return (
+                pd.DataFrame(),
+                DatasetFailure.MEASUREMENT_ERROR,
+                f"particle threshold resolve failed: {e}",
+            )
+        if run_log is not None:
+            run_log.log(
+                phase="measure",
+                dataset=dataset_name,
+                event="min_area_resolved",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                resolved_min_area_px=resolved_min_area_px,
+            )
+        for round_name, round_mask in round_masks.items():
+            try:
+                particle_summary = analyze_particles(
+                    images=images,
+                    labels=labels,
+                    mask=round_mask,
+                    min_area=resolved_min_area_px,
+                )
+            except Exception:
+                logger.exception("analyze_particles failed for round %s — skipping", round_name)
+                continue
+            if particle_summary.empty:
+                continue
+            rename_map = {c: f"{round_name}_{c}" for c in particle_summary.columns if c != "label"}
+            particle_summary = particle_summary.rename(columns=rename_map)
+            df = df.merge(particle_summary, on="label", how="left")
 
+    df, edge_failure, edge_msg = _append_synthetic_row(df, edge_label_set, edge_mode)
+    if edge_failure is not None:
+        df = _merge_group_dfs(df, group_dfs)
+        return df, edge_failure, edge_msg
+
+    df = _merge_group_dfs(df, group_dfs)
+    df = _add_area_um2_columns(df, pixel_size_um)
     return df, None, f"{len(df)} cells, {len(df.columns)} columns"
 
 
-def write_staging_parquet(
-    run_folder: Path, dataset_name: str, df: pd.DataFrame
-) -> Path:
+def measure_one(
+    store: DatasetStore,
+    round_specs: list[ThresholdingRound],
+    metric_names: list[str] | None = None,
+    edge_mode: EdgeMode = EdgeMode.EXCLUDE,
+    edge_margin_px: int = 0,
+    seg_name: str = "cellpose_qc",
+    particle_settings: ParticleSettings | None = None,
+    run_log: RunLog | None = None,
+    dataset_name: str = "",
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Measure one dataset: all channels × all metrics × all round masks.
+
+    Single-timepoint: one frame, no ``timepoint`` column (output unchanged).
+    Time-lapse (``n_timepoints > 1``): measures every timepoint, tags each row
+    with ``timepoint``, and — for a tracked segmentation — joins
+    ``track_id``/``tree_id``/``parent_track_id`` from ``/tracks``. A frame with
+    no cells contributes no rows (per-timepoint counts may differ).
+
+    Adds the per-cell identity / cohort columns ``cell_id``, ``is_edge``,
+    ``is_edge_synthetic`` per frame. Returns an empty DataFrame on a hard
+    failure; for the soft zero-whole-cells case the per-cell df is returned
+    with a recorded failure (single-timepoint only).
+    """
+    metric_names = metric_names or sorted(BUILTIN_METRICS.keys())
+    pixel_size_um = _read_pixel_size_um(store)
+    try:
+        meta = store.metadata
+        channel_names = [
+            n.decode() if isinstance(n, bytes) else str(n) for n in meta.get("channel_names", [])
+        ]
+        n_timepoints = int(meta.get("n_timepoints", 1) or 1)
+    except Exception as e:
+        logger.exception("measure_one metadata read failed")
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"metadata read failed: {e}"
+
+    def _read_round_layers(s, timepoint: int | None):
+        round_masks: dict[str, NDArray] = {}
+        group_dfs: dict[str, pd.DataFrame] = {}
+        for round_spec in round_specs:
+            try:
+                round_masks[round_spec.name] = (
+                    s.read_mask(round_spec.name, timepoint=timepoint)
+                    if timepoint is not None
+                    else s.read_mask(round_spec.name)
+                )
+            except KeyError:
+                logger.info(
+                    "dataset missing mask /masks/%s — skipping from measure",
+                    round_spec.name,
+                )
+                continue
+            try:
+                g_df = s.read_dataframe(f"/groups/{round_spec.name}")
+                if timepoint is not None and "timepoint" in g_df.columns:
+                    g_df = g_df[g_df["timepoint"] == timepoint].drop(columns=["timepoint"])
+                group_dfs[round_spec.name] = g_df
+            except KeyError:
+                logger.info(
+                    "dataset missing /groups/%s — group column won't be added",
+                    round_spec.name,
+                )
+        return round_masks, group_dfs
+
+    if n_timepoints > 1:
+        frames: list[pd.DataFrame] = []
+        for t in range(n_timepoints):
+            try:
+                with store.open_read() as s:
+                    plane = s.read_array_frame("intensity", t)
+                    labels = s.read_labels(seg_name, timepoint=t)
+                    round_masks, group_dfs = _read_round_layers(s, t)
+            except Exception as e:
+                logger.exception("measure_one read session failed (t=%d)", t)
+                return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"read session failed: {e}"
+            if int(labels.max()) == 0:
+                continue  # frame with no cells: death / exit / pre-birth
+            try:
+                images = _images_from_plane(plane, channel_names)
+            except ValueError as e:
+                return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, str(e)
+            df_t, _failure, _msg = _measure_frame(
+                images,
+                labels,
+                round_masks,
+                group_dfs,
+                metric_names,
+                edge_mode,
+                edge_margin_px,
+                particle_settings,
+                pixel_size_um,
+                run_log,
+                dataset_name,
+            )
+            if df_t.empty:
+                continue
+            df_t = df_t.copy()
+            df_t["timepoint"] = t
+            frames.append(df_t)
+        if not frames:
+            return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, "no cells in any timepoint"
+        df = pd.concat(frames, ignore_index=True)
+        df = _join_lineage_columns(store, seg_name, df)
+        return df, None, f"{len(df)} cells across {df['timepoint'].nunique()} timepoints"
+
+    # Single-timepoint (output unchanged from the historical path).
+    try:
+        with store.open_read() as s:
+            intensity = s.read_array("intensity")
+            labels = s.read_labels(seg_name)
+            round_masks, group_dfs = _read_round_layers(s, None)
+    except Exception as e:
+        logger.exception("measure_one read session failed")
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"read session failed: {e}"
+
+    if int(labels.max()) == 0:
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, "empty labels — nothing to measure"
+    try:
+        images = _images_from_plane(intensity, channel_names)
+    except ValueError as e:
+        return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, str(e)
+    return _measure_frame(
+        images,
+        labels,
+        round_masks,
+        group_dfs,
+        metric_names,
+        edge_mode,
+        edge_margin_px,
+        particle_settings,
+        pixel_size_um,
+        run_log,
+        dataset_name,
+    )
+
+
+def write_staging_parquet(run_folder: Path, dataset_name: str, df: pd.DataFrame) -> Path:
     """Write a dataset's measurement DataFrame to ``run_folder/staging/``.
 
     The staging parquet is an intermediate artifact that :func:`export_run`
@@ -543,15 +2274,325 @@ def write_staging_parquet(
     return path
 
 
+# ── U7 particle analysis ────────────────────────────────────────────────
+
+
+def _particles_detail_frame(
+    images: dict[str, NDArray],
+    labels: NDArray,
+    round_masks: dict[str, NDArray],
+    min_area_px: int,
+) -> pd.DataFrame:
+    """Per-particle detail across rounds for one 2D frame (no um2, no timepoint).
+
+    Returns the combined per-particle DataFrame with a ``round_name`` column,
+    or an empty DataFrame when no particles are detected.
+    """
+    from percell4.domain.measure.particle import analyze_particles_detail
+
+    frames: list[pd.DataFrame] = []
+    for round_name, round_mask in round_masks.items():
+        try:
+            detail = analyze_particles_detail(
+                images=images,
+                labels=labels,
+                mask=round_mask,
+                min_area=min_area_px,
+            )
+        except Exception:
+            logger.exception("analyze_particles_detail failed for round %s — skipping", round_name)
+            continue
+        if detail.empty:
+            continue
+        detail = detail.copy()
+        detail.insert(0, "round_name", round_name)
+        frames.append(detail)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _measure_particles_timelapse(
+    store: DatasetStore,
+    round_specs: list[ThresholdingRound],
+    particle_settings: ParticleSettings,
+    seg_name: str,
+    run_log: RunLog | None,
+    dataset_name: str,
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Per-particle detail for a time-lapse dataset, tagged with ``timepoint``."""
+    pixel_size_um = _read_pixel_size_um(store)
+    try:
+        resolved_min_area_px = _resolve_min_area_px(
+            particle_settings,
+            pixel_size_um,
+            dataset_name=dataset_name,
+        )
+    except ValueError as e:
+        logger.error("particle threshold resolve failed: %s", e)
+        if run_log is not None:
+            run_log.log(
+                phase="particles",
+                dataset=dataset_name,
+                event="min_area_resolve_failed",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                error=str(e),
+            )
+        return (
+            pd.DataFrame(),
+            DatasetFailure.MEASUREMENT_ERROR,
+            f"particle threshold resolve failed: {e}",
+        )
+
+    channel_names = [
+        n.decode() if isinstance(n, bytes) else str(n)
+        for n in store.metadata.get("channel_names", [])
+    ]
+    n_timepoints = int(store.metadata.get("n_timepoints", 1) or 1)
+
+    out_frames: list[pd.DataFrame] = []
+    for t in range(n_timepoints):
+        try:
+            with store.open_read() as s:
+                plane = s.read_array_frame("intensity", t)
+                labels = s.read_labels(seg_name, timepoint=t)
+                round_masks: dict[str, NDArray] = {}
+                for round_spec in round_specs:
+                    try:
+                        round_masks[round_spec.name] = s.read_mask(round_spec.name, timepoint=t)
+                    except KeyError:
+                        continue
+        except Exception as e:
+            logger.exception("measure_particles_one read session failed (t=%d)", t)
+            return pd.DataFrame(), DatasetFailure.MEASUREMENT_ERROR, f"read session failed: {e}"
+        if not round_masks or int(labels.max()) == 0:
+            continue
+        images = _images_from_plane(plane, channel_names)
+        detail = _particles_detail_frame(images, labels, round_masks, resolved_min_area_px)
+        if detail.empty:
+            continue
+        detail["timepoint"] = t
+        out_frames.append(detail)
+
+    if not out_frames:
+        return pd.DataFrame(), None, "no particles detected in any timepoint"
+    combined = pd.concat(out_frames, ignore_index=True)
+    combined = _add_area_um2_columns(combined, pixel_size_um)
+    return (
+        combined,
+        None,
+        f"{len(combined)} particles across {combined['timepoint'].nunique()} timepoints",
+    )
+
+
+def measure_particles_one(
+    store: DatasetStore,
+    round_specs: list[ThresholdingRound],
+    particle_settings: ParticleSettings,
+    seg_name: str = "cellpose_qc",
+    run_log: RunLog | None = None,
+    dataset_name: str = "",
+) -> tuple[pd.DataFrame, DatasetFailure | None, str]:
+    """Per-particle detail rows for one dataset across every round.
+
+    Re-reads the dataset's intensity cube, labels, and each round's mask,
+    then calls :func:`analyze_particles_detail` per round. Returns one
+    combined DataFrame whose columns are:
+
+    - ``round_name`` (added here)
+    - ``cell_id``, ``particle_id``, ``area``, ``centroid_y``, ``centroid_x``
+    - ``{channel}_mean_intensity``, ``{channel}_integrated_intensity``
+      for every channel
+
+    Time-lapse datasets detail every timepoint (each row tagged
+    ``timepoint``). Rounds whose mask is missing are skipped silently
+    (consistent with ``measure_one``). On read error returns an empty
+    DataFrame + failure.
+    """
+    if int(store.metadata.get("n_timepoints", 1) or 1) > 1:
+        return _measure_particles_timelapse(
+            store, round_specs, particle_settings, seg_name, run_log, dataset_name
+        )
+    try:
+        with store.open_read() as s:
+            intensity = s.read_array("intensity")
+            labels = s.read_labels(seg_name)
+            meta = s.metadata
+            channel_names_raw = meta.get("channel_names", [])
+            channel_names = [
+                n.decode() if isinstance(n, bytes) else str(n) for n in channel_names_raw
+            ]
+
+            images: dict[str, NDArray] = {}
+            if intensity.ndim == 2:
+                name = channel_names[0] if channel_names else "ch0"
+                images[name] = intensity
+            elif intensity.ndim == 3:
+                for i, name in enumerate(channel_names):
+                    if i < intensity.shape[0]:
+                        images[name] = intensity[i]
+            else:
+                return (
+                    pd.DataFrame(),
+                    DatasetFailure.MEASUREMENT_ERROR,
+                    f"unexpected intensity ndim: {intensity.ndim}",
+                )
+
+            round_masks: dict[str, NDArray[np.uint8]] = {}
+            for round_spec in round_specs:
+                try:
+                    round_masks[round_spec.name] = s.read_mask(round_spec.name)
+                except KeyError:
+                    continue
+    except Exception as e:
+        logger.exception("measure_particles_one read session failed")
+        return (
+            pd.DataFrame(),
+            DatasetFailure.MEASUREMENT_ERROR,
+            f"read session failed: {e}",
+        )
+
+    if not round_masks:
+        return pd.DataFrame(), None, "no round masks present — nothing to detail"
+    if int(labels.max()) == 0:
+        return pd.DataFrame(), None, "empty labels — no particles to detail"
+
+    # Resolve min_area once per dataset using its own pixel_size_um.
+    # µm² mode against a dataset without a known pixel size fails
+    # explicitly rather than silently default.
+    pixel_size_um = _read_pixel_size_um(store)
+    try:
+        resolved_min_area_px = _resolve_min_area_px(
+            particle_settings,
+            pixel_size_um,
+            dataset_name=dataset_name,
+        )
+    except ValueError as e:
+        logger.error("particle threshold resolve failed: %s", e)
+        if run_log is not None:
+            run_log.log(
+                phase="particles",
+                dataset=dataset_name,
+                event="min_area_resolve_failed",
+                min_area_value=float(particle_settings.min_area),
+                min_area_unit=particle_settings.min_area_unit,
+                pixel_size_um=pixel_size_um,
+                error=str(e),
+            )
+        return (
+            pd.DataFrame(),
+            DatasetFailure.MEASUREMENT_ERROR,
+            f"particle threshold resolve failed: {e}",
+        )
+    logger.info(
+        "particle min_area resolved: %.4f %s -> %d px (pixel_size_um=%s)",
+        particle_settings.min_area,
+        particle_settings.min_area_unit,
+        resolved_min_area_px,
+        pixel_size_um,
+    )
+    if run_log is not None:
+        run_log.log(
+            phase="particles",
+            dataset=dataset_name,
+            event="min_area_resolved",
+            min_area_value=float(particle_settings.min_area),
+            min_area_unit=particle_settings.min_area_unit,
+            pixel_size_um=pixel_size_um,
+            resolved_min_area_px=resolved_min_area_px,
+        )
+
+    from percell4.domain.measure.particle import analyze_particles_detail
+
+    frames: list[pd.DataFrame] = []
+    for round_name, round_mask in round_masks.items():
+        try:
+            detail = analyze_particles_detail(
+                images=images,
+                labels=labels,
+                mask=round_mask,
+                min_area=resolved_min_area_px,
+            )
+        except Exception:
+            logger.exception(
+                "analyze_particles_detail failed for round %s — skipping",
+                round_name,
+            )
+            continue
+        if detail.empty:
+            continue
+        detail = detail.copy()
+        detail.insert(0, "round_name", round_name)
+        frames.append(detail)
+
+    if not frames:
+        return pd.DataFrame(), None, "no particles detected in any round"
+
+    combined = pd.concat(frames, ignore_index=True)
+
+    # Each per-particle row carries an ``area`` column. Emit an
+    # ``area_um2`` sibling when /metadata.pixel_size_um is available.
+    combined = _add_area_um2_columns(combined, pixel_size_um)
+
+    return combined, None, f"{len(combined)} particles across {len(frames)} rounds"
+
+
+def write_staging_particles_parquet(run_folder: Path, dataset_name: str, df: pd.DataFrame) -> Path:
+    """Write a dataset's per-particle DataFrame to ``run_folder/staging_particles/``.
+
+    Sibling of :func:`write_staging_parquet`. :func:`export_run`
+    concatenates these into ``particles.parquet`` / ``particles.csv``
+    when present, alongside the existing per-cell artifacts.
+    """
+    staging_dir = run_folder / "staging_particles"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    df_out = df.copy()
+    df_out.insert(0, "dataset", dataset_name)
+    path = staging_dir / f"{dataset_name}.parquet"
+    df_out.to_parquet(path, engine="pyarrow", index=False, compression="snappy")
+    return path
+
+
 # ── Phase 8: Export ─────────────────────────────────────────────────────
+
+
+def _ordered_csv_columns(
+    df: pd.DataFrame,
+    selected_csv_columns: list[str],
+    extra_identity: tuple[str, ...] = (),
+) -> list[str]:
+    """Identity columns + user-selected columns, de-duplicated, order-preserving.
+
+    Identity columns (``dataset``, ``cell_id``, ``label``, plus any
+    ``extra_identity`` such as the tracking columns) come first and are always
+    kept when present in ``df``, even if absent from ``selected_csv_columns``.
+    The user-selected columns follow in their configured order. Any column not
+    present in ``df`` is dropped. Shared by ``combined.csv`` and
+    ``complete_tracks.csv`` so both honour the column selection identically.
+    """
+    identity = ["dataset", "cell_id", "label", *extra_identity]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for c in [*identity, *selected_csv_columns]:
+        if c in df.columns and c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return ordered
 
 
 def export_run(
     run_folder: Path,
     config: WorkflowConfig,
     metadata: RunMetadata,
+    round_names: list[str] | None = None,
 ) -> tuple[DatasetFailure | None, str]:
     """Aggregate per-dataset staging parquets into the final run artifacts.
+
+    ``round_names`` overrides the round names used to build ``summary_groups.csv``
+    and the ``n_rounds_thresholding`` column. It defaults to the names in
+    ``config.thresholding_rounds``; the existing-mask-reuse path passes the
+    measured mask names explicitly, since ``config.thresholding_rounds`` is
+    empty there but masks were nonetheless measured.
 
     Produces, in ``run_folder/``:
       - ``measurements.parquet`` — the full cross-dataset DataFrame
@@ -580,9 +2621,20 @@ def export_run(
         )
 
     try:
+        import pyarrow as pa
         import pyarrow.dataset as pa_ds
+        import pyarrow.parquet as pq
 
-        ds = pa_ds.dataset([str(p) for p in staging_files], format="parquet")
+        # Datasets may carry DIFFERENT columns — e.g. existing-mask mode
+        # where each dataset measured a different mask, so the per-round
+        # particle columns differ. pyarrow.dataset() otherwise infers the
+        # schema from the FIRST fragment and silently drops columns the
+        # other fragments add. Unify all fragment schemas first (missing
+        # columns become null) so no dataset's measurements are lost.
+        unified = pa.unify_schemas([pq.read_schema(str(p)) for p in staging_files])
+        ds = pa_ds.dataset(
+            [str(p) for p in staging_files], format="parquet", schema=unified
+        )
         table = ds.to_table()
         df = table.to_pandas(types_mapper=None)
     except Exception as e:
@@ -622,16 +2674,15 @@ def export_run(
             f"measurements.parquet write failed: {e}",
         )
 
-    # Build the CSV export subset.
-    identity_cols = [c for c in ("dataset", "cell_id", "label") if c in df.columns]
-    selected = [c for c in config.selected_csv_columns if c in df.columns]
-    # De-duplicate while preserving order.
-    csv_cols: list[str] = []
-    seen: set[str] = set()
-    for c in identity_cols + selected:
-        if c not in seen:
-            seen.add(c)
-            csv_cols.append(c)
+    # Build the CSV export subset. Keep `timepoint` as an identity column so time-lapse
+    # runs carry it in combined.csv and the per_dataset CSVs (it is present in the staged
+    # per-cell df but is neither a base identity nor a user-selectable metric, so it would
+    # otherwise be dropped). Self-gating: _ordered_csv_columns only retains it when present,
+    # so single-timepoint runs are unaffected. (complete_tracks.csv already does this; this
+    # brings combined.csv into line. particles.csv writes all columns, so it already has it.)
+    csv_cols = _ordered_csv_columns(
+        df, config.selected_csv_columns, extra_identity=("timepoint",)
+    )
 
     combined_csv = run_folder / "combined.csv"
     try:
@@ -670,6 +2721,156 @@ def export_run(
             return (
                 DatasetFailure.MEASUREMENT_ERROR,
                 f"per_dataset/{ds_name}.csv failed: {e}",
+            )
+
+    # Summary CSVs (U6) — derived from the same in-memory df.
+    # Failures here are recorded but do NOT abort the run: the
+    # measurements.parquet and CSVs have already landed.
+    if round_names is None:
+        round_names = [r.name for r in config.thresholding_rounds]
+    try:
+        summary_groups = _build_summary_groups(df, round_names)
+        write_atomic(
+            run_folder / "summary_groups.csv",
+            lambda tmp: summary_groups.to_csv(
+                tmp,
+                index=False,
+                float_format="%.6g",
+                na_rep="",
+                encoding="utf-8",
+                lineterminator="\n",
+            ),
+        )
+    except Exception as e:
+        logger.exception("summary_groups.csv write failed")
+        record_failure(
+            metadata,
+            dataset_name="<export>",
+            phase_name="summary_groups",
+            failure=DatasetFailure.MEASUREMENT_ERROR,
+            message=str(e),
+        )
+
+    try:
+        summary_datasets = _build_summary_datasets(df, config, metadata, round_names)
+        write_atomic(
+            run_folder / "summary_datasets.csv",
+            lambda tmp: summary_datasets.to_csv(
+                tmp,
+                index=False,
+                float_format="%.6g",
+                na_rep="",
+                encoding="utf-8",
+                lineterminator="\n",
+            ),
+        )
+    except Exception as e:
+        logger.exception("summary_datasets.csv write failed")
+        record_failure(
+            metadata,
+            dataset_name="<export>",
+            phase_name="summary_datasets",
+            failure=DatasetFailure.MEASUREMENT_ERROR,
+            message=str(e),
+        )
+
+    # Complete-tracks CSV — tracked (time-lapse) datasets only. One row per
+    # (track, timepoint) for tracks followed cleanly through every timepoint
+    # (no gaps, not a division daughter, never a division parent). Derived
+    # per dataset from the staged measurements (track_id / parent_track_id /
+    # timepoint), so no per-dataset store re-open is needed. Non-fatal.
+    if "track_id" in df.columns and "timepoint" in df.columns:
+        try:
+            from percell4.domain.tracking.lineage import select_complete_tracks
+
+            parts: list[pd.DataFrame] = []
+            for _ds_name, ds_df in df.groupby("dataset", observed=True):
+                if "parent_track_id" not in ds_df.columns:
+                    continue
+                ds_df = ds_df.dropna(subset=["track_id"])
+                if ds_df.empty:
+                    continue
+                lineage = ds_df.groupby("track_id", as_index=False)["parent_track_id"].first()
+                n_timepoints = int(ds_df["timepoint"].max()) + 1
+                sub = select_complete_tracks(ds_df, lineage, n_timepoints)
+                if not sub.empty:
+                    parts.append(sub)
+            complete_df = pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0]
+            # Same column selection as combined.csv, plus the per-timepoint
+            # tracking identity columns (the whole point of this report). The
+            # one row per (track, timepoint) IS the per-timepoint analysis.
+            complete_cols = _ordered_csv_columns(
+                complete_df,
+                config.selected_csv_columns,
+                extra_identity=("timepoint", "track_id", "tree_id", "parent_track_id"),
+            )
+            write_atomic(
+                run_folder / "complete_tracks.csv",
+                lambda tmp: complete_df.to_csv(
+                    tmp,
+                    columns=complete_cols,
+                    index=False,
+                    float_format="%.6g",
+                    na_rep="",
+                    encoding="utf-8",
+                    lineterminator="\n",
+                ),
+            )
+        except Exception as e:
+            logger.exception("complete_tracks.csv write failed")
+            record_failure(
+                metadata,
+                dataset_name="<export>",
+                phase_name="complete_tracks",
+                failure=DatasetFailure.MEASUREMENT_ERROR,
+                message=str(e),
+            )
+
+    # Particles export (U7) — concat the per-dataset particle staging
+    # files into particles.parquet + particles.csv when present. Errors
+    # are recorded but non-fatal (measurements.parquet has landed).
+    particles_dir = run_folder / "staging_particles"
+    particles_files = sorted(particles_dir.glob("*.parquet")) if particles_dir.is_dir() else []
+    if particles_files:
+        try:
+            import pyarrow.dataset as pa_ds
+
+            pds = pa_ds.dataset([str(p) for p in particles_files], format="parquet")
+            particles_df = pds.to_table().to_pandas()
+            if "dataset" in particles_df.columns:
+                particles_df["dataset"] = pd.Categorical(particles_df["dataset"])
+            particles_path = run_folder / "particles.parquet"
+            particles_df.to_parquet(
+                particles_path,
+                engine="pyarrow",
+                compression="snappy",
+                index=False,
+                use_dictionary=True,
+            )
+            particles_csv = run_folder / "particles.csv"
+            particles_df.to_csv(
+                particles_csv,
+                index=False,
+                float_format="%.6g",
+                na_rep="",
+                encoding="utf-8",
+                lineterminator="\n",
+            )
+            # Clean up per-particle staging on success.
+            try:
+                for p in particles_files:
+                    p.unlink()
+                particles_dir.rmdir()
+            except OSError:
+                logger.exception("failed to clean up staging_particles/")
+        except Exception as e:
+            logger.exception("particles export failed")
+            record_failure(
+                metadata,
+                dataset_name="<export>",
+                phase_name="particles",
+                failure=DatasetFailure.MEASUREMENT_ERROR,
+                message=f"particles export failed: {e}",
             )
 
     # Clean up staging on success.

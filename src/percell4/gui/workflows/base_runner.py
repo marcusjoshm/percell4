@@ -81,6 +81,15 @@ class PhaseResult:
     # Phase-specific payload (e.g. a dict of per-dataset mask arrays,
     # a GroupingResult, etc.). Pure Python — no Qt dependency.
     payload: Any = None
+    # Explicit cancel flag — set True when the user cancels the
+    # workflow (vs a phase failure). The runner reads this to decide
+    # whether to propagate cooperative cancel to subsequent phases
+    # rather than fishing for the substring "cancel" in `message`,
+    # which can false-positive on legitimate error text (e.g.,
+    # "operation was cancelled by OS"). New handlers should set this
+    # explicitly; the legacy substring sniff in _wrapped_complete
+    # remains as a backward-compat fallback.
+    cancelled: bool = False
 
 
 PhaseHandlerSync = Callable[[], PhaseResult]

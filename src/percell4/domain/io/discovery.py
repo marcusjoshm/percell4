@@ -12,8 +12,13 @@ from pathlib import Path
 
 from percell4.domain.io.models import DatasetSpec, DiscoveredFile, ScanResult, TokenConfig
 from percell4.domain.io.scanner import FileScanner
+from percell4.domain.io.tokenless import build_channel_pattern, derive_channel_names
 
 _IMAGE_EXTENSIONS = {".tif", ".tiff", ".bin"}
+
+# A TokenConfig that parses no tokens — used to enumerate a flat folder's files
+# before the channel vocabulary has been derived.
+_NO_TOKENS = TokenConfig(channel=None, timepoint=None, z_slice=None, tile=None)
 
 
 def discover_by_subdirectory(
@@ -137,6 +142,49 @@ def discover_flat(
         )
 
     return datasets
+
+
+def discover_tokenless(
+    root: Path,
+    output_dir: Path | None = None,
+) -> tuple[list[DatasetSpec], TokenConfig | None]:
+    """Discover datasets from a flat folder of name-suffixed TIFFs — no token.
+
+    Derives the channel-name vocabulary structurally from the filenames (the
+    trailing remainder after the shared dataset prefix; see
+    ``domain/io/tokenless``), synthesizes an internal channel regex from it, and
+    delegates grouping to :func:`discover_flat` with that regex so the shared
+    leading prefix becomes each ``.h5`` name and the trailing name becomes the
+    channel.  Multi-underscore names (``SG_mask``) stay whole.
+
+    Returns ``(datasets, token_config)``.  The synthesized ``token_config`` is
+    returned so the caller can thread the *identical* regex into
+    ``import_dataset`` — discovery and the importer's re-parse then agree
+    byte-for-byte.  Returns ``([], None)`` when the folder has no image files.
+
+    Raises
+    ------
+    ValueError
+        If the derived vocabulary is too large to encode as a token pattern
+        (propagated from :func:`build_channel_pattern`); the dialog surfaces this
+        rather than importing silently.
+    """
+    root = Path(root)
+    out = output_dir or root
+
+    # Enumerate the flat set of image files without parsing any tokens yet.
+    scan = FileScanner(_NO_TOKENS).scan(path=root)
+    stems = [f.path.stem for f in scan.files]
+    names, _ = derive_channel_names(stems)
+    if not names:
+        return [], None
+
+    pattern = build_channel_pattern(names)
+    token_config = TokenConfig(
+        channel=pattern, timepoint=None, z_slice=None, tile=None
+    )
+    datasets = discover_flat(root, token_config, out)
+    return datasets, token_config
 
 
 def _derive_dataset_name(stem: str, config: TokenConfig) -> str:

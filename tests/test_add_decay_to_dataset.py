@@ -21,7 +21,7 @@ from percell4.domain.io.models import (
     TokenConfig,
     ZeroPadOffsetRule,
 )
-from percell4.store import DatasetStore, LayerSizeMismatchError
+from percell4.store import DatasetStore
 
 
 def _h5_with_intensity(tmp_path, channel_names=("ch00", "ch01"), shape=(8, 8)):
@@ -821,3 +821,531 @@ def test_add_decay_native_shape_match_succeeds(tmp_path, mock_read_flim_bin):
     assert report.written == ("ch00",)
     assert report.errors == {}
 
+
+# ── Registered-geometry append (U7) ─────────────────────────────────────
+
+
+def _tile_id_reader():
+    """A patterned .bin reader that embeds the tile id (_s<idx>) into the
+    array so placement can be verified pixel-for-pixel.
+
+    Returns 8x8x2 tiles whose every pixel equals ``idx + 1`` (so tile 0 = 1,
+    tile 1 = 2, ...). Distinct constant values make the overlap-winner check
+    unambiguous.
+    """
+    import re as _re
+
+    def _read(path, **kwargs):
+        m = _re.search(r"_s(\d+)", str(path))
+        idx = int(m.group(1)) if m else 0
+        arr = np.full((8, 8, 2), idx + 1, dtype=np.uint16)
+        return {
+            "array": arr,
+            "intensity": arr[..., 0].copy(),
+            "metadata": {"shape": (8, 8, 2)},
+        }
+
+    return _read
+
+
+def _write_registered_geometry(store, offsets, *, reference_channel="ch00",
+                               overlap=0.25, disconnected=()):
+    """Persist registered overlap-stitch geometry via the store boundary."""
+    from percell4.domain.io.models import StitchProvenanceRecord
+
+    prov = StitchProvenanceRecord(
+        reference_channel=reference_channel,
+        overlap=str(overlap),
+        library="grid_stitching@test",
+        quality_json="{}",
+        n_tiles=str(len(offsets)),
+        importer_version="test",
+        timestamp_utc="2026-06-24T00:00:00+00:00",
+    )
+    store.write_stitch_geometry(
+        np.asarray(offsets, dtype=np.int32),
+        prov,
+        reference_channel=reference_channel,
+        overlap=overlap,
+        disconnected=disconnected,
+    )
+
+
+def test_add_decay_registered_reuses_persisted_offsets(tmp_path, monkeypatch):
+    """AE2: append to a dataset with persisted registered geometry places
+    decay tiles at the persisted (y0, x0); /decay (H, W) == native_shape;
+    registration is NEVER recomputed."""
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # Guard: estimate_tile_offsets must NOT be called on the append path.
+    def _no_register(*a, **k):  # pragma: no cover - must never run
+        raise AssertionError("registration must not run on decay append")
+
+    monkeypatch.setattr(
+        "percell4.domain.io.assembler.estimate_tile_offsets", _no_register
+    )
+
+    # 2-tile horizontal mosaic: 8x8 tiles, tile 1 shifted right by 6 px
+    # (2 px overlap). canvas_from_offsets -> (8, 6 + 8) = (8, 14).
+    offsets = [(0, 0), (0, 6)]
+    from percell4.domain.io.assembler import canvas_from_offsets
+
+    native = canvas_from_offsets(np.asarray(offsets), (8, 8))
+    assert native == (8, 14)
+
+    store = _h5_with_intensity(
+        tmp_path, channel_names=("ch00",), shape=native
+    )
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    # _s0 -> tile 0 (value 1), _s1 -> tile 1 (value 2); offset=0 so token
+    # "00" maps to "ch00".
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+
+    assert report.written == ("ch00",), report.errors
+    assert report.errors == {}
+
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+    # Final (H, W) equals native_shape == canvas_from_offsets.
+    assert decay.shape == (8, 14, 2)
+    # Tile 0 (value 1) at columns 0-5 (its non-overlapped region).
+    assert (decay[:, 0:6, 0] == 1).all()
+    # Tile 1 (value 2) at columns 6-13.
+    assert (decay[:, 6:14, 0] == 2).all()
+    # Overlap columns 6-7: tile 1 (higher index) wins.
+    assert (decay[:, 6:8, 0] == 2).all()
+
+
+def _patterned_tile_reader():
+    """A .bin reader whose (H, W) plane is an asymmetric gradient so a per-tile
+    rotation is verifiable pixel-for-pixel (a constant tile would hide it).
+
+    Tile ``_s<idx>`` -> (8, 8, 2) with ``arr[y, x, :] = (idx+1)*100 + y*10 + x``
+    — distinct per tile AND not symmetric under a 90° rotation.
+    """
+    import re as _re
+
+    def _read(path, **kwargs):
+        m = _re.search(r"_s(\d+)", str(path))
+        idx = int(m.group(1)) if m else 0
+        y = np.arange(8)[:, None]
+        x = np.arange(8)[None, :]
+        plane = (idx + 1) * 100 + y * 10 + x                 # (8, 8)
+        arr = np.repeat(plane[:, :, None], 2, axis=2).astype(np.uint16)
+        return {"array": arr, "intensity": arr[..., 0].copy(),
+                "metadata": {"shape": (8, 8, 2)}}
+
+    return _read
+
+
+def test_add_decay_registered_rotate_k_rotates_per_tile(tmp_path, monkeypatch):
+    """Overlap shape-mismatch regression: a registered (overlap) dataset
+    appended with a non-zero ``rotate_k`` must rotate each .bin tile BEFORE
+    placement and reproduce ``native_shape`` EXACTLY — never whole-image-rotate
+    the registered mosaic off ``native_shape``.
+
+    Square 8x8 tiles, NON-SQUARE canvas (8, 14): a whole-image rotate_k=1 would
+    transpose it to (14, 8) and the size-check would reject the append (the
+    reported bug). The fix rotates per-tile, so the canvas stays (8, 14).
+    """
+    reader = _patterned_tile_reader()
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        reader,
+    )
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", reader)
+
+    offsets = [(0, 0), (0, 6)]
+    from percell4.domain.io.assembler import canvas_from_offsets
+
+    native = canvas_from_offsets(np.asarray(offsets), (8, 8))
+    assert native == (8, 14)  # non-square — a whole-image rotate would transpose
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=native)
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+        rotate_k=1,
+    )
+
+    assert report.written == ("ch00",), report.errors
+    assert report.errors == {}
+
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+    # Canvas stays at native_shape — NOT transposed to (14, 8).
+    assert decay.shape == (8, 14, 2)
+
+    # Content == each tile rot90(k=1) applied PER-TILE, placed at the persisted
+    # offsets with ascending-index overlap priority (tile 1 wins cols 6-7).
+    golden = np.zeros((8, 14, 2), dtype=decay.dtype)
+    for idx in (0, 1):
+        raw = reader(src / f"exp_s{idx}_ch00.bin")["array"]
+        rot = np.rot90(raw, k=1, axes=(0, 1))
+        y0, x0 = offsets[idx]
+        golden[y0:y0 + 8, x0:x0 + 8, :] = rot
+    assert np.array_equal(decay, golden), (
+        "registered decay + rotate_k must rotate per-tile and reproduce the "
+        "intensity canvas exactly (no whole-image rotation)"
+    )
+
+
+def test_add_decay_registered_offsets_absent_raises(tmp_path, mock_read_flim_bin,
+                                                    monkeypatch):
+    """AE4: a dataset flagged stitch_registered=True but with tile_offsets
+    absent → the append RAISES (no silent grid fallback)."""
+    from percell4.store import StitchGeometry
+
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 8))
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    # Simulate the registered-but-offsets-absent corruption by patching the
+    # store's read_stitch_geometry to report registered=True / offsets=None.
+    monkeypatch.setattr(
+        "percell4.store.DatasetStore.read_stitch_geometry",
+        lambda self: StitchGeometry(
+            registered=True, offsets=None,
+            reference_channel="ch00", overlap=0.25,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="stitch_registered"):
+        add_decay_to_dataset(
+            h5_path=store.path,
+            source_dir=src,
+            token_config=TokenConfig(),
+            tile_config=TileConfig(grid_rows=1, grid_cols=1),
+            flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+            cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        )
+
+    # No decay was written.
+    with h5py.File(store.path, "r") as f:
+        assert "decay" not in f
+
+
+def test_add_decay_non_registered_uses_grid_path(tmp_path, mock_read_flim_bin):
+    """Back-compat: a dataset with NO registered geometry runs the unchanged
+    grid placement path (read_stitch_geometry reports registered=False)."""
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(16, 16))
+    # No stitch geometry written → read_stitch_geometry().registered is False.
+    assert store.read_stitch_geometry().registered is False
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, [
+        "exp_s1_ch1.bin", "exp_s2_ch1.bin", "exp_s3_ch1.bin", "exp_s4_ch1.bin",
+    ])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=2, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+    )
+
+    assert report.written == ("ch00",)
+    with h5py.File(store.path, "r") as f:
+        # 2x2 grid of 8x8 tiles → 16x16 stitched (edge-to-edge grid).
+        assert f["decay/ch00"].shape == (16, 16, 4)
+
+
+def test_add_decay_registered_rotate_k_no_whole_image_transpose(tmp_path, monkeypatch):
+    """A registered dataset's native_shape ALWAYS equals canvas_from_offsets —
+    the import applies NO whole-image rotation to the registered /intensity. So
+    rotate_k is applied PER TILE, never to the assembled mosaic, and a dataset
+    whose declared native_shape is the TRANSPOSED canvas (an impossible state for
+    a real registered import) is correctly REJECTED — rather than being silently
+    whole-image-rotated to match (the overlap shape-mismatch bug). Cf. the
+    positive case in test_add_decay_registered_rotate_k_rotates_per_tile.
+    """
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # 2-tile horizontal mosaic → registered canvas (8, 14). A real registered
+    # import sets native_shape to exactly this; declaring the transposed (14, 8)
+    # is inconsistent and must NOT be "fixed" by a whole-image rotate.
+    offsets = [(0, 0), (0, 6)]
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(14, 8))
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+        rotate_k=1,
+    )
+
+    # Registered canvas (8, 14) != declared native (14, 8): rejected, not
+    # transposed. The error names the registered-geometry mismatch.
+    assert report.written == ()
+    assert "ch00" in report.errors
+    assert "native_shape" in report.errors["ch00"]
+    with h5py.File(store.path, "r") as f:
+        assert "decay/ch00" not in f  # nothing written on rejection
+
+
+# ── FIX C: registered append completeness + disconnected winner ──────────
+
+
+def test_add_decay_registered_missing_tile_raises(tmp_path, monkeypatch):
+    """FIX C: a registered append that omits a registered tile is reported as
+    an error — partial registered decay is unsupported (it would leave the
+    missing tile's region empty and mis-resolve overlaps).
+    """
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # 2-tile registered mosaic, canvas (8, 14) — but supply only tile 0.
+    offsets = [(0, 0), (0, 6)]
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 14))
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin"])  # tile 1 (_s1) deliberately absent
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+
+    # The per-channel error reports the missing tile; nothing was written.
+    assert report.written == ()
+    assert "ch00" in report.errors
+    assert "requires all 2 tiles" in report.errors["ch00"]
+    with h5py.File(store.path, "r") as f:
+        assert "decay" not in f
+
+
+def test_add_decay_registered_disconnected_winner(tmp_path, monkeypatch):
+    """FIX C: a persisted disconnected tile is demoted (placed first) on the
+    append, so its registered neighbour wins the overlap even though the
+    disconnected tile has the higher index — reproducing the import exactly.
+    """
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin",
+        _tile_id_reader(),
+    )
+    monkeypatch.setattr(
+        "percell4.adapters.readers.read_flim_bin",
+        _tile_id_reader(),
+    )
+
+    # 2-tile horizontal mosaic, canvas (8, 14); tile 1 (higher index) is
+    # disconnected, so the overlap must go to registered tile 0.
+    offsets = [(0, 0), (0, 6)]
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 14))
+    _write_registered_geometry(store, offsets, disconnected=(1,))
+
+    # Sanity: the persisted disconnected set round-trips.
+    assert store.read_stitch_geometry().disconnected == (1,)
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch00.bin", "exp_s1_ch00.bin"])
+
+    report = add_decay_to_dataset(
+        h5_path=store.path,
+        source_dir=src,
+        token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+
+    assert report.written == ("ch00",), report.errors
+    with h5py.File(store.path, "r") as f:
+        decay = f["decay/ch00"][...]
+    assert decay.shape == (8, 14, 2)
+    # Overlap columns 6-7: registered tile 0 (value 1) wins because the
+    # disconnected tile 1 was placed FIRST (lowest priority).
+    assert (decay[:, 6:8, 0] == 1).all()
+    # Tile 1's exclusive region 8-13 still shows its own value (2).
+    assert (decay[:, 8:14, 0] == 2).all()
+
+
+# ── FIX F: corrupt-state guards (both states raise) ──────────────────────
+
+
+def test_add_decay_offsets_present_flag_absent_raises(tmp_path, mock_read_flim_bin):
+    """FIX F: stitch/tile_offsets present but stitch_registered absent (a
+    partial/aborted registered import) raises before the per-channel loop.
+    """
+    store = _h5_with_intensity(tmp_path, channel_names=("ch00",), shape=(8, 8))
+    # Write the offset array WITHOUT the commit marker — the aborted state.
+    store.write_array(
+        "stitch/tile_offsets",
+        np.array([[0, 0], [0, 6]], dtype=np.int32),
+    )
+    geom = store.read_stitch_geometry()
+    assert geom.offsets is not None and geom.registered is False
+
+    src = tmp_path / "bin"
+    _make_bin_files(src, ["exp_s0_ch1.bin"])
+
+    with pytest.raises(ValueError, match="stitch_registered is False"):
+        add_decay_to_dataset(
+            h5_path=store.path,
+            source_dir=src,
+            token_config=TokenConfig(),
+            tile_config=TileConfig(grid_rows=1, grid_cols=1),
+            flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=4),
+            cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=1),
+        )
+
+    # Nothing was written.
+    with h5py.File(store.path, "r") as f:
+        assert "decay" not in f
+
+
+
+# ── Multi-timepoint (time-lapse) decay append (U3/U4/U5) ─────────────────
+
+
+def _timepoint_tile_reader():
+    """A patterned .bin reader keyed on the ``_t<N>`` and ``_s<idx>`` tokens so
+    per-timepoint placement is verifiable: tile value = ``t * 100 + (idx + 1)``.
+    """
+    import re as _re
+
+    def _read(path, **kwargs):
+        s = Path(path).name  # basename only — tmp dirs can contain _tN/_sN
+        t = int(_re.search(r"_t(\d+)", s).group(1))
+        idx = int(_re.search(r"_s(\d+)", s).group(1))
+        val = t * 100 + (idx + 1)
+        arr = np.full((8, 8, 2), val, dtype=np.uint16)
+        return {"array": arr, "intensity": arr[..., 0].copy(),
+                "metadata": {"shape": (8, 8, 2)}}
+
+    return _read
+
+
+def test_add_decay_timelapse_per_timepoint_success(tmp_path, monkeypatch):
+    """A registered 3-timepoint dataset with one .bin set per timepoint appends a
+    4-D (T_acq, H, W, T_bins) /decay; each frame places that timepoint's tiles at
+    the persisted offsets (overlap winner = higher tile index). _t1 -> frame 0."""
+    reader = _timepoint_tile_reader()
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin", reader)
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", reader)
+
+    offsets = [(0, 0), (0, 6)]
+    from percell4.domain.io.assembler import canvas_from_offsets
+    native = canvas_from_offsets(np.asarray(offsets), (8, 8))
+    assert native == (8, 14)
+
+    store = DatasetStore(tmp_path / "movie.h5")
+    store.create(metadata={"channel_names": ["ch00"],
+                           "native_shape": native, "n_timepoints": 3})
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    # Single-padded, 1-based timepoint + tile tokens: _t1.._t3, _s0/_s1.
+    names = [f"exp_t{t}_s{s}_ch00.bin" for t in (1, 2, 3) for s in (0, 1)]
+    _make_bin_files(src, names)
+
+    report = add_decay_to_dataset(
+        h5_path=store.path, source_dir=src, token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+    assert report.written == ("ch00",), report.errors
+
+    with h5py.File(store.path, "r") as f:
+        ds = f["decay/ch00"]
+        assert ds.shape == (3, 8, 14, 2)
+        assert list(ds.attrs["dims"]) == ["Tacq", "H", "W", "T"]
+        for t_acq, t in enumerate((1, 2, 3)):
+            # tile0 (t*100+1) non-overlap cols 0-5; tile1 (t*100+2) cols 6-13;
+            # overlap cols 6-7 -> tile1 (higher index) wins.
+            assert (ds[t_acq, :, 0:6, 0] == t * 100 + 1).all()
+            assert (ds[t_acq, :, 6:14, 0] == t * 100 + 2).all()
+
+
+def test_add_decay_timelapse_incomplete_rejected(tmp_path, monkeypatch):
+    """A 3-timepoint dataset given only 2 timepoints' .bin sets is rejected per
+    channel (no partial time-lapse decay); nothing is written."""
+    reader = _timepoint_tile_reader()
+    monkeypatch.setattr(
+        "percell4.application.use_cases.add_decay_to_dataset.read_flim_bin", reader)
+    monkeypatch.setattr("percell4.adapters.readers.read_flim_bin", reader)
+
+    offsets = [(0, 0), (0, 6)]
+    store = DatasetStore(tmp_path / "movie.h5")
+    store.create(metadata={"channel_names": ["ch00"],
+                           "native_shape": (8, 14), "n_timepoints": 3})
+    _write_registered_geometry(store, offsets)
+
+    src = tmp_path / "bin"
+    names = [f"exp_t{t}_s{s}_ch00.bin" for t in (1, 2) for s in (0, 1)]  # missing t3
+    _make_bin_files(src, names)
+
+    report = add_decay_to_dataset(
+        h5_path=store.path, source_dir=src, token_config=TokenConfig(),
+        tile_config=TileConfig(grid_rows=1, grid_cols=2),
+        flim_config=FlimConfig(bin_x=8, bin_y=8, bin_t=2,
+                               bin_dtype="uint16", bin_dim_order="YXT"),
+        cross_format_rule=ZeroPadOffsetRule(pad_width=2, offset=0),
+    )
+    assert report.written == ()
+    assert "ch00" in report.errors
+    assert "timepoint" in report.errors["ch00"].lower()
+    with h5py.File(store.path, "r") as f:
+        assert "decay/ch00" not in f
