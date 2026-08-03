@@ -20,6 +20,7 @@
   - [`percell4-batch-export` — TIFF export](#percell4-batch-export--tiff-export)
   - [`percell4-batch-phasor` — compute phasor + wavelet filter](#percell4-batch-phasor--compute-phasor--wavelet-filter)
   - [`percell4-batch-phasor-masks` — fit GMM ellipse + write dual-threshold masks](#percell4-batch-phasor-masks--fit-gmm-ellipse--write-dual-threshold-masks)
+  - [`percell4-batch-export-phasor` — export cached phasors as PNGs](#percell4-batch-export-phasor--export-cached-phasors-as-pngs)
   - [`percell4-batch-whole-field` — whole-field segmentation](#percell4-batch-whole-field--whole-field-segmentation)
   - [`percell4-batch-rename` — rename a resource across datasets](#percell4-batch-rename--rename-a-resource-across-datasets)
   - [`percell4-batch-delete` — delete resources across datasets](#percell4-batch-delete--delete-resources-across-datasets)
@@ -314,6 +315,31 @@ percell4-batch-phasor-masks *.h5 --channels DAPI --t-mask-a 1.0 --t-mask-b 10.0 
 
 # Audit a planned run without writing
 percell4-batch-phasor-masks /scratch/dishes/ --channels mNG --t-fit 20.0 --dry-run
+```
+
+### `percell4-batch-export-phasor` — export cached phasors as PNGs
+
+Renders the phasor cache to PNG images across one or more `.h5` datasets. For each dataset it writes one raw PNG per channel under `/phasor/<ch>` (`<h5_stem>_<ch>_phasor.png`) and, for every channel that also has `g_filtered` + `s_filtered`, one filtered PNG (`<h5_stem>_<ch>_phasor_filtered.png`). Each image mirrors the GUI phasor window: intensity-weighted 2D histogram, universal semicircle overlay, labeled G/S axes. This is the tool for pulling publication-ready phasor plots out of a batch without opening each dataset in the GUI.
+
+Read-only with respect to the `.h5` files — nothing is written back into the datasets, so it is safe to run against files a GUI session has open. It does **not** compute phasors: channels with no `/phasor/<ch>/g` are reported as skipped, so run `percell4-batch-phasor` first. Outputs use a flat layout (no per-dataset subfolders) and existing files at those paths are overwritten silently — point `--output-dir` at a fresh directory to preserve prior runs. The output directory is probed for writability up front, so a bad path fails fast before any dataset is processed.
+
+```bash
+percell4-batch-export-phasor PATHS --output-dir DIR [options]
+```
+
+| Option | Purpose |
+|---|---|
+| `paths` | One or more `.h5` files, or directories containing `.h5` files. Directories are globbed non-recursively (`*.h5`). **Required.** |
+| `--output-dir OUTPUT_DIR`, `-o OUTPUT_DIR` | Target directory for the `.png` outputs. Created if missing. Existing files with matching names are overwritten. **Required.** |
+| `--quiet` | Suppress per-channel error / skip / empty detail lines. Per-dataset status headers and final totals always print. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+percell4-batch-export-phasor dish_1.h5 dish_2.h5 --output-dir /tmp/phasors
+percell4-batch-export-phasor /scratch/dishes/ --output-dir ~/phasors/
+percell4-batch-export-phasor *.h5 --output-dir out/ --quiet
 ```
 
 ### `percell4-batch-whole-field` — whole-field segmentation
