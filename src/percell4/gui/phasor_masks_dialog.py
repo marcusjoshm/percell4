@@ -70,6 +70,7 @@ from percell4.gui._dialog_utils import (
     wrap_in_scroll,
 )
 from percell4.gui.settings import app_settings
+from percell4.io.paths import drop_sidecars, scan_files
 from percell4.store import DatasetStore
 from percell4.workflows.channels import intersect_channels
 
@@ -402,7 +403,7 @@ class PhasorMasksDialog(QDialog):
         )
         if not paths:
             return
-        self._add_h5_paths([Path(p) for p in paths])
+        self._add_h5_paths(drop_sidecars(paths))
 
     def _on_add_h5_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -410,10 +411,7 @@ class PhasorMasksDialog(QDialog):
         )
         if not folder:
             return
-        folder_path = Path(folder)
-        h5_files = sorted(folder_path.glob("*.h5")) + sorted(
-            folder_path.glob("*.hdf5")
-        )
+        h5_files = scan_files(folder, "*.h5", "*.hdf5")
         if not h5_files:
             return
         self._add_h5_paths(h5_files)

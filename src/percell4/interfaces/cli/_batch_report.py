@@ -18,6 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from percell4.io.paths import is_sidecar, scan_files
+
 
 def resolve_paths(args: list[str]) -> list[Path]:
     """Expand positional arguments into a flat list of .h5 file paths.
@@ -31,8 +33,8 @@ def resolve_paths(args: list[str]) -> list[Path]:
     for arg in args:
         p = Path(arg)
         if p.is_dir():
-            paths.extend(sorted(p.glob("*.h5")))
-        else:
+            paths.extend(scan_files(p, "*.h5"))
+        elif not is_sidecar(p):
             paths.append(p)
     return paths
 

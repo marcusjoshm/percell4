@@ -1885,6 +1885,42 @@ def test_export_run_writes_parquet_and_csvs(tmp_path, fixture_store_with_labels)
     assert not (run_folder / "staging").exists()
 
 
+def test_export_run_ignores_appledouble_staging_sidecars(
+    tmp_path, fixture_store_with_labels
+):
+    """A run folder on an exFAT drive gets a ``._<name>.parquet`` xattr blob
+    beside every staging file. It matches ``*.parquet`` but is not one, so an
+    unfiltered scan killed the whole export with "Parquet magic bytes not
+    found in footer" after every dataset had already been measured."""
+    run_folder = tmp_path / "run_exfat"
+    (run_folder / "per_dataset").mkdir(parents=True)
+    (run_folder / "staging").mkdir(parents=True)
+
+    round_spec = ThresholdingRound(
+        name="R",
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    grouping, _, _ = threshold_compute_one(fixture_store_with_labels, round_spec)
+    apply_threshold_headless(fixture_store_with_labels, round_spec, grouping)
+    df, failure, _ = measure_one(fixture_store_with_labels, round_specs=[round_spec])
+    assert failure is None
+
+    write_staging_parquet(run_folder, "DS1", df)
+    (run_folder / "staging" / "._DS1.parquet").write_bytes(b"\x00\x05\x16\x07" * 16)
+
+    cfg = _sample_workflow_config(selected_cols=["GFP_mean_intensity"])
+    meta = _sample_run_metadata(run_folder)
+
+    failure, msg = export_run(run_folder, cfg, meta)
+    assert failure is None, msg
+    assert (run_folder / "measurements.parquet").exists()
+    assert len(pd.read_parquet(run_folder / "measurements.parquet")) == 12
+
+
 def test_export_run_keeps_timepoint_for_multitimepoint(tmp_path, fixture_store_with_labels):
     """combined.csv + per_dataset CSVs must carry `timepoint` for time-lapse data — it's
     in the staged per-cell df (like complete_tracks.csv), but the export column selection

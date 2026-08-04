@@ -78,6 +78,7 @@ from percell4.gui._dialog_utils import (
 from percell4.gui._flim_bin_form import FlimBinParamsForm, RotateFlipForm
 from percell4.gui._stitching_form import StitchingForm
 from percell4.gui.tcspc_tab_state import build_rule_from_preset
+from percell4.io.paths import scan_files
 
 _NO_PAIR_LABEL = "— select —"
 _SKIP_LABEL = "— skip —"
@@ -634,7 +635,7 @@ class BatchTCSPCDialog(QDialog):
         if group_folder is None or not group_folder.exists():
             return []
         tokens: set[str] = set()
-        for p in group_folder.rglob("*.bin"):
+        for p in scan_files(group_folder, "*.bin", recursive=True):
             m = re.search(r"_ch(\d+)", p.stem)
             if m:
                 tokens.add(m.group(1))

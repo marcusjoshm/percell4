@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from percell4.io.paths import scan_files
+
 # Required columns in project.csv
 _COLUMNS = ["path", "condition", "replicate", "notes", "status"]
 
@@ -101,7 +103,7 @@ class ProjectIndex:
         csv_paths = set(df["path"].tolist())
 
         # Find .h5 files on disk
-        disk_files = {str(p) for p in project_dir.rglob("*.h5")}
+        disk_files = {str(p) for p in scan_files(project_dir, "*.h5", recursive=True)}
 
         orphans = sorted(disk_files - csv_paths)
         missing = sorted(csv_paths - disk_files)

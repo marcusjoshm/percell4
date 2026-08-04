@@ -66,6 +66,7 @@ from percell4.gui.analysis_widgets import (
     persist_output_parent,
     populate_layer_combo,
 )
+from percell4.io.paths import scan_files
 from percell4.store import DatasetStore
 
 logger = logging.getLogger(__name__)
@@ -366,9 +367,7 @@ class PerParticleMultichannelDialog(QDialog):
         )
         if not folder:
             return
-        candidates = sorted(Path(folder).glob("*.h5")) + sorted(
-            Path(folder).glob("*.hdf5")
-        )
+        candidates = scan_files(folder, "*.h5", "*.hdf5")
         if not candidates:
             return
         self._add_paths(candidates)

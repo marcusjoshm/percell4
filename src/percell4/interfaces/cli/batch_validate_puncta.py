@@ -34,6 +34,8 @@ import logging
 import sys
 from pathlib import Path
 
+from percell4.io.paths import scan_files
+
 logger = logging.getLogger(__name__)
 
 
@@ -195,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     gt_dir = Path(args.gt_dir)
-    csv_paths = sorted(gt_dir.glob("*.csv"))
+    csv_paths = scan_files(gt_dir, "*.csv")
     if not csv_paths:
         print(f"error: no *.csv found in {gt_dir}", file=sys.stderr)
         return 1

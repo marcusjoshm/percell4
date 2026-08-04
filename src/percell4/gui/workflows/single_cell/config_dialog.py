@@ -69,6 +69,7 @@ from percell4.gui.workflows.single_cell.round_card import (
     METHOD_AUTO_EXTRACT,
     RoundCard,
 )
+from percell4.io.paths import drop_sidecars, scan_files
 from percell4.store import DatasetStore
 from percell4.workflows.channels import ChannelSource, intersect_channels
 from percell4.workflows.csv_columns import (
@@ -1567,7 +1568,7 @@ class WorkflowConfigDialog(QDialog):
         )
         if not paths:
             return
-        added, skipped = self._add_h5_paths([Path(p) for p in paths])
+        added, skipped = self._add_h5_paths(drop_sidecars(paths))
         self._toast_add_result(added, skipped)
 
     def _on_add_h5_folder(self) -> None:
@@ -1578,9 +1579,7 @@ class WorkflowConfigDialog(QDialog):
             return
         folder_path = Path(folder)
         # Non-recursive by default — keeps the behaviour predictable.
-        h5_files = sorted(folder_path.glob("*.h5")) + sorted(
-            folder_path.glob("*.hdf5")
-        )
+        h5_files = scan_files(folder_path, "*.h5", "*.hdf5")
         if not h5_files:
             self._dataset_status.setText(
                 f"No .h5 files found in {folder_path}"

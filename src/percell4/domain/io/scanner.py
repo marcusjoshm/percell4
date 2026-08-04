@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from percell4.domain.io.models import DiscoveredFile, ScanResult, TokenConfig
+from percell4.io.paths import is_sidecar
 
 _IMAGE_EXTENSIONS = {".tif", ".tiff", ".bin"}
 
@@ -39,11 +40,17 @@ class FileScanner:
             raise ValueError("Must provide either path or files")
 
         if files is not None:
-            tiff_paths = [Path(f) for f in files if Path(f).suffix.lower() in _IMAGE_EXTENSIONS]
+            tiff_paths = [
+                Path(f)
+                for f in files
+                if Path(f).suffix.lower() in _IMAGE_EXTENSIONS and not is_sidecar(f)
+            ]
         else:
             tiff_paths = sorted(
                 p for p in Path(path).rglob("*")
-                if p.suffix.lower() in _IMAGE_EXTENSIONS and not p.is_symlink()
+                if p.suffix.lower() in _IMAGE_EXTENSIONS
+                and not p.is_symlink()
+                and not is_sidecar(p)
             )
 
         result = ScanResult()

@@ -40,6 +40,7 @@ from percell4.domain.io.models import (
     TokenConfig,
 )
 from percell4.domain.io.timepoints import ordered_timepoint_tokens
+from percell4.io.paths import scan_files
 from percell4.store import DatasetStore, LayerSizeMismatchError
 
 
@@ -113,7 +114,7 @@ def add_decay_to_dataset(
     progress = progress_callback or (lambda _: None)
 
     progress("Scanning source directory")
-    bin_files = sorted(p for p in source_dir.rglob("*.bin") if p.is_file())
+    bin_files = [p for p in scan_files(source_dir, "*.bin", recursive=True) if p.is_file()]
     if not bin_files:
         return AppendReport(
             errors={"scan": f"no .bin files found under {source_dir}"}

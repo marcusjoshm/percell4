@@ -41,6 +41,7 @@ from percell4.application.use_cases.batch_export_phasor import (
     BatchPhasorExportItemResult,
     batch_export_phasor,
 )
+from percell4.io.paths import is_sidecar, scan_files
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,8 @@ def _resolve_paths(args: list[str]) -> list[Path]:
     for arg in args:
         p = Path(arg)
         if p.is_dir():
-            paths.extend(sorted(p.glob("*.h5")))
-        else:
+            paths.extend(scan_files(p, "*.h5"))
+        elif not is_sidecar(p):
             paths.append(p)
     return paths
 

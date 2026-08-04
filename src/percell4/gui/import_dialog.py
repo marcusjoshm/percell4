@@ -29,6 +29,7 @@ from percell4.gui._dialog_utils import (
     wrap_in_scroll,
 )
 from percell4.gui._stitching_form import StitchingForm
+from percell4.io.paths import scan_files
 
 
 class ImportDialog(QDialog):
@@ -258,7 +259,7 @@ class ImportDialog(QDialog):
         # Find .bin files and extract channel tokens
         channel_pattern = self._tok_channel.text()
         channels: set[str] = set()
-        for f in sorted(source_path.glob("*.bin")):
+        for f in scan_files(source_path, "*.bin"):
             if channel_pattern:
                 m = re.search(channel_pattern, f.stem)
                 if m:
@@ -266,7 +267,7 @@ class ImportDialog(QDialog):
 
         if not channels:
             # Also check TIFF files with TCSPC token
-            for f in sorted(source_path.glob("*.tif")) + sorted(source_path.glob("*.tiff")):
+            for f in scan_files(source_path, "*.tif", "*.tiff"):
                 if "TCSPC" in f.stem.upper() and channel_pattern:
                     m = re.search(channel_pattern, f.stem)
                     if m:

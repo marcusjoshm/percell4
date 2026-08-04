@@ -54,6 +54,7 @@ from percell4.domain.segmentation.postprocess import (
     get_edge_labels,
     relabel_sequential,
 )
+from percell4.io.paths import scan_files
 from percell4.store import DatasetStore
 from percell4.workflows.artifacts import write_atomic
 from percell4.workflows.failures import DatasetFailure, FailureRecord
@@ -2613,7 +2614,7 @@ def export_run(
             f"staging/ missing: {staging_dir}",
         )
 
-    staging_files = sorted(staging_dir.glob("*.parquet"))
+    staging_files = scan_files(staging_dir, "*.parquet")
     if not staging_files:
         return (
             DatasetFailure.MEASUREMENT_ERROR,
@@ -2830,7 +2831,7 @@ def export_run(
     # files into particles.parquet + particles.csv when present. Errors
     # are recorded but non-fatal (measurements.parquet has landed).
     particles_dir = run_folder / "staging_particles"
-    particles_files = sorted(particles_dir.glob("*.parquet")) if particles_dir.is_dir() else []
+    particles_files = scan_files(particles_dir, "*.parquet") if particles_dir.is_dir() else []
     if particles_files:
         try:
             import pyarrow.dataset as pa_ds

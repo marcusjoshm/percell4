@@ -64,6 +64,7 @@ from percell4.gui._dialog_utils import (
 from percell4.gui._stitch_order import normalize_order
 from percell4.gui._stitching_form import StitchingForm
 from percell4.gui.tcspc_tab_state import TcspcTabState
+from percell4.io.paths import scan_files
 
 
 class AddLayerDialog(QDialog):
@@ -1159,7 +1160,7 @@ class AddLayerDialog(QDialog):
         if not source.is_dir():
             self.statusBar_msg(f"Not a directory: {source}")
             return
-        bins = sorted(p for p in source.rglob("*.bin") if p.is_file())
+        bins = [p for p in scan_files(source, "*.bin", recursive=True) if p.is_file()]
         if not bins:
             self._tcspc_bin_files = []
             self._tcspc_table.setRowCount(0)

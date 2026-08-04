@@ -24,6 +24,7 @@ from pathlib import Path
 
 import h5py
 
+from percell4.io.paths import scan_files
 from percell4.store import DatasetStore
 from percell4.workflows.models import FlimFretPair
 
@@ -54,9 +55,7 @@ def discover_flim_fret_candidates(
 
     Results are sorted by path so dialog dropdowns are deterministic.
     """
-    paths = sorted(
-        {*source_folder.glob("*.h5"), *source_folder.glob("*.hdf5")}
-    )
+    paths = scan_files(source_folder, "*.h5", "*.hdf5")
     return [_evaluate_candidate(p, single_cell=single_cell) for p in paths]
 
 

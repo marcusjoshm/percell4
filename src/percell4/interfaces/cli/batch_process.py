@@ -57,6 +57,7 @@ from percell4.application.use_cases.batch_process_datasets import (
     DatasetSpec,
     batch_process_datasets,
 )
+from percell4.io.paths import is_sidecar, scan_files
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +102,12 @@ def _build_specs(sources: list[Path], output_dir: Path | None) -> list[DatasetSp
 
     specs: list[DatasetSpec] = []
     for src in sources:
+        if is_sidecar(src):
+            continue
         if src.suffix.lower() == ".h5" and src.is_file():
             specs.append(_h5_spec(src))
         elif src.is_dir():
-            h5_files = sorted(src.glob("*.h5"))
+            h5_files = scan_files(src, "*.h5")
             if h5_files:
                 specs.extend(_h5_spec(h5) for h5 in h5_files)
             elif output_dir is None:
@@ -154,7 +157,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--channel-names", default=None,
                         help="Comma-separated names to rename the imported "
                              "channels, in order (e.g. 'DAPI,GFP,RFP'). Must "
-                             "match the imported channel count.")
+                             "give one name per /intensity channel, whether or "
+                             "not those channels are already named.")
     parser.add_argument("--seg-name", default=None,
                         help="Name for the segmentation layer "
                              "(default: cellpose_<n_cells>). With "
