@@ -50,6 +50,25 @@ def _format_pixel_size_lines(
     return base
 
 
+def _format_description_lines(description: str | None) -> str:
+    """Format the Dataset Info description block.
+
+    Renders the description in full -- the label word-wraps, and nothing is
+    truncated or elided, because a truncated description defeats the point
+    of storing it. ``None`` renders as an explicit "not set" line so the
+    absence is distinguishable from the feature being missing.
+    """
+    if not description:
+        return "Description: not set"
+    return f"Description:\n{description}"
+
+
+# Sentinel for refresh_dataset_info's optional description override. A plain
+# ``None`` default could not distinguish "caller passed nothing" from
+# "caller knows there is no description".
+_UNSET = object()
+
+
 def _read_layer_bin_attrs(store, group: str) -> dict[str, int | None]:
     """Read each ``/{group}/<name>``'s ``created_at_bin`` attr, if present.
 
@@ -110,8 +129,12 @@ class DataPanel(QWidget):
 
         layout.addWidget(theme.section_label("Data"))
 
-        # ── Layer Management ──
-        mgmt_group = QGroupBox("Layer Management")
+        # ── Dataset Management ──
+        # Named for the dataset, not only its layers: the description below
+        # belongs to the dataset itself, and this is the launcher's one
+        # place for add/rename/delete against an open dataset.
+        mgmt_group = QGroupBox("Dataset Management")
+        self._mgmt_group = mgmt_group
         mgmt_layout = QVBoxLayout(mgmt_group)
 
         mgmt_layout.addWidget(QLabel("Segmentations:"))
@@ -152,6 +175,17 @@ class DataPanel(QWidget):
         btn_delete_chan.clicked.connect(self._on_delete_channel)
         chan_mgmt_row.addWidget(btn_delete_chan)
         mgmt_layout.addLayout(chan_mgmt_row)
+
+        mgmt_layout.addWidget(QLabel("Description:"))
+        desc_mgmt_row = QHBoxLayout()
+        desc_mgmt_row.addStretch()
+        self._btn_edit_description = QPushButton("Edit...")
+        self._btn_edit_description.setToolTip(
+            "Add, change, or remove this dataset's experiment description."
+        )
+        self._btn_edit_description.clicked.connect(self._on_edit_description)
+        desc_mgmt_row.addWidget(self._btn_edit_description)
+        mgmt_layout.addLayout(desc_mgmt_row)
 
         layout.addWidget(mgmt_group)
 
@@ -294,13 +328,21 @@ class DataPanel(QWidget):
                     self._mgmt_chan_combo.addItem(layer.name)
                     seen.add(layer.name)
 
-    def refresh_dataset_info(self) -> None:
+    def refresh_dataset_info(self, description: Any = _UNSET) -> None:
         """Refresh the Dataset Info label from the current store.
 
         Shows the canonical on-disk shape, the dataset's native (k=1)
-        H, W from /metadata.native_shape (U1), and the current session
-        view bin from session.active_bin (U4). The active-bin line is
-        read-only here -- the SessionWindow SpinBox owns the toggle.
+        H, W from /metadata.native_shape (U1), the current session
+        view bin from session.active_bin (U4), and the dataset's free-text
+        description. The active-bin line is read-only here -- the
+        SessionWindow SpinBox owns the toggle.
+
+        ``description`` lets a caller that just wrote a description pass the
+        known-good text instead of having it re-read from disk. HDF5 keeps a
+        per-process metadata cache, so a read opened right after a write in
+        the same process can serve a stale value -- see
+        ``docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md``.
+        Omit it and the description is read from the store as usual.
         """
         store = self._get_store()
         h5_path = self._get_h5_path()
@@ -336,13 +378,22 @@ class DataPanel(QWidget):
             pixel_size_lines = _format_pixel_size_lines(
                 pixel_size_um, active_bin,
             )
+            # Read the description in its own guard: a description that
+            # fails to read must not blank the facts above it.
+            if description is _UNSET:
+                try:
+                    description = store.description
+                except Exception:  # noqa: BLE001
+                    description = None
+            description_lines = _format_description_lines(description)
             self._info_label.setText(
                 f"File: {Path(h5_path).name}\n"
                 f"Shape: {shape}\n"
                 f"{native_line}\n"
                 f"{bin_line}\n"
                 f"{pixel_size_lines}\n"
-                f"Labels: {n_labels}  |  Masks: {n_masks}"
+                f"Labels: {n_labels}  |  Masks: {n_masks}\n"
+                f"{description_lines}"
             )
         except Exception:
             pass
@@ -353,6 +404,70 @@ class DataPanel(QWidget):
         self._mgmt_seg_combo.clear()
         self._mgmt_mask_combo.clear()
         self._mgmt_chan_combo.clear()
+
+    # ── Dataset description ───────────────────────────────────
+
+    def _prompt_for_description(self, current: str | None):
+        """Show the description editor. Seam for tests to drive the dialog."""
+        from percell4.gui.description_dialog import edit_description
+
+        return edit_description(self, current)
+
+    def _on_edit_description(self) -> None:
+        """Edit the loaded dataset's description, then refresh the display.
+
+        The refresh is handed the text we just wrote rather than re-reading
+        it: HDF5 keeps a per-process metadata cache, so a read opened right
+        after a write in the same process can serve a stale value. The same
+        known-good text goes into the session's dataset snapshot, which is
+        frozen at load time and would otherwise keep the old description.
+        See ``docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md``.
+        """
+        store = self._get_store()
+        if store is None:
+            self._show_status("Open a dataset first — no dataset is loaded")
+            return
+
+        try:
+            current = store.description
+        except Exception as exc:  # noqa: BLE001
+            self._show_status(f"Could not read the description: {exc}")
+            return
+
+        result = self._prompt_for_description(current)
+        if not result.accepted:
+            return
+
+        new_text = None if result.clear else result.text
+        try:
+            store.set_description(new_text)
+        except Exception as exc:  # noqa: BLE001
+            self._show_status(f"Could not save the description: {exc}")
+            return
+
+        # set_description treats blank text as a clear, so re-normalize here
+        # rather than displaying an empty string the file does not hold.
+        stored = new_text if (new_text or "").strip() else None
+        self._sync_description_snapshot(stored)
+        self.refresh_dataset_info(description=stored)
+        self._show_status(
+            "Description cleared" if stored is None else "Description saved"
+        )
+
+    def _sync_description_snapshot(self, description: str | None) -> None:
+        """Push the known-good description into the session's dataset snapshot.
+
+        ``DatasetHandle`` is frozen but its ``metadata`` dict is mutable,
+        which is the documented way to keep in-memory readers in step with a
+        just-completed write.
+        """
+        handle = self.data_model.session.dataset
+        if handle is None:
+            return
+        if description is None:
+            handle.metadata.pop("description", None)
+        else:
+            handle.metadata["description"] = description
 
     def _on_rename_layer(self, prefix: str) -> None:
         combo = self._mgmt_seg_combo if prefix == "labels" else self._mgmt_mask_combo
@@ -468,14 +583,22 @@ class DataPanel(QWidget):
                 return
 
         # Sync the in-memory handle metadata so use cases see the new name
-        # without requiring a dataset reload.
+        # without requiring a dataset reload. Re-read channel_names from the
+        # store rather than patching the old list by index: renaming an
+        # unnamed /intensity slice (a ``ch<N>`` placeholder) APPENDS a name
+        # and bumps n_channels, which no in-memory substitution can produce.
         session = self.data_model.session
         handle = session.dataset
         if handle is not None:
             meta = handle.metadata
-            names = list(meta.get("channel_names", []))
-            if old_name in names:
-                names[names.index(old_name)] = new_name
+            if store is not None:
+                names = list(store.metadata.get("channel_names", []))
+                meta["n_channels"] = len(names)
+            else:
+                names = list(meta.get("channel_names", []))
+                if old_name in names:
+                    names[names.index(old_name)] = new_name
+            meta["channel_names"] = names
             for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
                 old_key = f"{key_prefix}{old_name}"
                 new_key = f"{key_prefix}{new_name}"
@@ -532,22 +655,23 @@ class DataPanel(QWidget):
         # away permanently" regardless of which case. We resolve the
         # /intensity slice index from either the metadata position OR the
         # ``ch<N>`` fallback name and slice the array accordingly.
-        import re
+        from percell4.domain.io.layout import placeholder_channel_index
+
         names = list(store.metadata.get("channel_names", []))
         in_metadata = name in names
 
-        # Resolve the /intensity slice index for this layer name
+        # Resolve the /intensity slice index for this layer name. The
+        # placeholder→index rule lives beside the code that synthesizes the
+        # name (domain/io/layout.py) so this path and rename_channel's
+        # promotion resolve the same slice.
         slice_idx: int | None = None
         if in_metadata:
             slice_idx = names.index(name)
         else:
-            m = re.fullmatch(r"ch(\d+)", name)
-            if m:
-                candidate = int(m.group(1))
-                # Valid orphan-slice index = past channel_names AND within
-                # intensity.shape[0]. We check the shape inside the
-                # try-block below.
-                slice_idx = candidate
+            # Valid orphan-slice index = past channel_names AND within
+            # intensity.shape[0]. We check the shape inside the
+            # try-block below.
+            slice_idx = placeholder_channel_index(name)
 
         try:
             intensity = store.read_array("intensity")
