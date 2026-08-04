@@ -24,9 +24,11 @@
   - [`percell4-batch-whole-field` — whole-field segmentation](#percell4-batch-whole-field--whole-field-segmentation)
   - [`percell4-batch-rename` — rename a resource across datasets](#percell4-batch-rename--rename-a-resource-across-datasets)
   - [`percell4-batch-delete` — delete resources across datasets](#percell4-batch-delete--delete-resources-across-datasets)
+  - [`percell4-batch-describe` — set the experiment description across datasets](#percell4-batch-describe--set-the-experiment-description-across-datasets)
   - [`percell4-batch-threshold` — headless grouped thresholding](#percell4-batch-threshold--headless-grouped-thresholding)
   - [`percell4-batch-measure` — measure + particle analysis + CSV export](#percell4-batch-measure--measure--particle-analysis--csv-export)
   - [`percell4-inspect` — print dataset metadata + layers](#percell4-inspect--print-dataset-metadata--layers)
+  - [Dataset descriptions](#dataset-descriptions)
 - [Tech Stack](#tech-stack)
 - [Features](#features)
 - [Changelog](#changelog)
@@ -438,6 +440,50 @@ percell4-batch-delete /scratch/dishes/ --kind mask --all --dry-run
 percell4-batch-delete *.h5 --kind channel --all
 ```
 
+### `percell4-batch-describe` — set the experiment description across datasets
+
+Sets, appends to, or clears the free-text **experiment description** stored inside each input `.h5`. The description is where the sample, its preparation, the experimental condition, and anything else worth recognising later actually lives — the filename can't hold a sentence. Because it is stored in the file, it travels with the dataset through copies and moves.
+
+Exactly one verb is required, so a run can never write without saying what it is doing. `--set` replaces whatever is there; `--append` adds the new text below the existing text separated by a blank line; `--clear` removes the description. Setting or appending empty text clears rather than storing a blank placeholder. Datasets with no description to clear are reported as skipped, not failed. Close any open PerCell4 GUI session against the target files first; the batch CLI writes to the same `.h5` files the GUI reads.
+
+The `--append` verb is what makes a whole experiment cheap to label: run it once over the folder with the prep and condition every dish shares, then add each dish's own detail on top.
+
+```bash
+percell4-batch-describe PATHS (--set TEXT | --append TEXT | --clear) [options]
+```
+
+| Option | Purpose |
+|---|---|
+| `paths` | One or more `.h5` files, or directories containing `.h5` files. Directories are globbed non-recursively (`*.h5`). **Required.** |
+| `--set TEXT` | Replace each dataset's description with `TEXT`. Mutually exclusive with `--append` / `--clear`; exactly one verb is required. |
+| `--append TEXT` | Add `TEXT` below each dataset's existing description, separated by a blank line. Appending to a dataset with no description writes `TEXT` alone. |
+| `--clear` | Remove each dataset's description entirely. |
+| `--dry-run` | Classify each dataset as succeeded / skipped / failed exactly as a live run would, but do not mutate any file. |
+| `--quiet` | Suppress per-dataset detail lines. The per-dataset summary line and final totals always print. |
+| `--verbose`, `-v` | Enable DEBUG logging. |
+
+Examples:
+
+```bash
+# Label one dish
+percell4-batch-describe dish_1.h5 \
+    --set 'HeLa p14, fixed 4% PFA 15min, permeabilized 0.1% TX-100'
+
+# Add the shared prep note to every dish in an experiment
+percell4-batch-describe /scratch/experiment_7/ \
+    --append '2h 10uM drug at 37C, 5% CO2'
+
+# See which files would be touched, without touching them
+percell4-batch-describe /scratch/experiment_7/ --append 'shared notes' --dry-run
+
+# Then add what is unique to one dish
+percell4-batch-describe /scratch/experiment_7/dish_3.h5 \
+    --append 'bubble in the upper-left quadrant'
+
+# Remove a description
+percell4-batch-describe dish_3.h5 --clear
+```
+
 ### `percell4-batch-threshold` — headless grouped thresholding
 
 Runs one grouped-threshold round across datasets and writes `/masks/<round>` + `/groups/<round>` back into each `.h5` in place. Requires each dataset to already carry a segmentation (`/labels`); it does not segment, measure, or export — pair it with `percell4-batch-measure` to get CSVs (it prints the exact follow-up command on success). It refuses to overwrite an existing same-name `/masks/<round>` unless `--overwrite` is passed, and auto-picks the segmentation per dataset when `--segmentation` is omitted.
@@ -547,18 +593,21 @@ percell4-batch-measure /scratch/dishes/ --mask grouped \
 
 ### `percell4-inspect` — print dataset metadata + layers
 
-Read-only triage: prints each dataset's file size, metadata (channels, resolution, pixel size, timepoints), and every layer (intensity, segmentations, masks, groups, tracks) with name/shape/dtype. Shapes and dtypes are read straight from the HDF5 headers without decoding arrays, so it stays fast even on multi-gigabyte stacks.
+Read-only triage: prints each dataset's file size, metadata (channels, resolution, pixel size, timepoints), the free-text [experiment description](#dataset-descriptions), and every layer (intensity, segmentations, masks, groups, tracks) with name/shape/dtype. Shapes and dtypes are read straight from the HDF5 headers without decoding arrays, so it stays fast even on multi-gigabyte stacks.
 
 It mutates nothing — no file is opened for writing and nothing is staged back into the `.h5`. Directory arguments expand to every `*.h5` they contain (non-recursive). Pass `--json` to emit a machine-readable JSON array of per-dataset records instead of the human-readable text report.
 
+`--grep` turns it into a search: only datasets whose description contains the given text are reported, so you can find the right dataset in a folder of many without opening any of them in the launcher. Matching is case-insensitive and matches anywhere in the description; datasets with no description never match. A filter that matches nothing exits `1`.
+
 ```bash
-percell4-inspect DATASETS [DATASETS ...] [--json]
+percell4-inspect DATASETS [DATASETS ...] [--json] [--grep TEXT]
 ```
 
 | Option | Purpose |
 |---|---|
 | `datasets` | One or more `.h5` files, or directories (every `*.h5` within, non-recursive). **Required** — at least one. |
 | `--json` | Emit a JSON array of per-dataset records instead of human-readable text. |
+| `--grep TEXT` | Report only datasets whose description contains `TEXT` (case-insensitive substring). Applies to both output modes. Exits `1` when nothing matches. |
 | `-h`, `--help` | Show the help message and exit. |
 
 Examples:
@@ -569,7 +618,20 @@ percell4-inspect dish_1.h5 dish_2.h5
 
 # JSON records for every .h5 in a directory
 percell4-inspect /scratch/dishes/ --json
+
+# Which of these dishes were PFA-fixed?
+percell4-inspect /scratch/dishes/ --grep PFA
 ```
+
+### Dataset descriptions
+
+Every `.h5` dataset can carry one free-text **description** — the sample, how it was prepared, the experimental condition, or anything else that makes the dataset recognisable weeks later. It is stored inside the file, so it survives copying and moving, and it is the answer to "which of these twelve dishes am I looking at?" when the filename no longer tells you.
+
+Three surfaces read and write it:
+
+- **The launcher's Data tab** shows the loaded dataset's description read-only under **Dataset Info**, and the **Description → Edit…** control in **Dataset Management** opens an editor for it.
+- **[`percell4-batch-describe`](#percell4-batch-describe--set-the-experiment-description-across-datasets)** sets, appends to, or clears it across one file or a whole folder.
+- **[`percell4-inspect`](#percell4-inspect--print-dataset-metadata--layers)** prints it, and `--grep` searches a folder by it.
 
 ---
 
