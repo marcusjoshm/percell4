@@ -5,6 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 from percell4.domain.io.layout import (
+    intensity_channel_count,
+    placeholder_channel_index,
+    placeholder_channel_name,
     plan_channel_deletion,
     split_channels_2d,
     split_intensity_layers,
@@ -158,3 +161,44 @@ def test_plan_delete_index_past_axis_is_noop():
     intensity = np.zeros((3, 2, 8, 8), dtype=np.float32)
     action, _, _ = plan_channel_deletion(intensity, slice_idx=9, n_timepoints=3)
     assert action == "noop"
+
+
+# ── placeholder names for unnamed /intensity slices ───────────
+
+
+def test_placeholder_name_and_index_round_trip():
+    for i in (0, 1, 7, 12):
+        assert placeholder_channel_index(placeholder_channel_name(i)) == i
+
+
+def test_placeholder_index_rejects_real_channel_names():
+    # Only a whole-string ch<digits> qualifies; anything else is a real name.
+    for name in ("GFP", "ER", "ch", "chX", "ch1_bin", "mch1", "SG_mask"):
+        assert placeholder_channel_index(name) is None
+
+
+def test_placeholder_index_matches_the_split_fallback():
+    """The index must address the same slice the display layer named."""
+    plane = np.zeros((3, 8, 8), dtype=np.float32)
+    out = split_channels_2d(plane, ["GFP"])  # slices 1 and 2 are unnamed
+    for i, (name, _) in enumerate(out):
+        if i >= 1:
+            assert placeholder_channel_index(name) == i
+
+
+# ── intensity_channel_count ───────────────────────────────────
+
+
+def test_channel_count_mirrors_the_split_for_every_layout():
+    cases = [
+        ((8, 8), 1),  # (H,W)
+        ((3, 8, 8), 1),  # (C,H,W)
+        ((5, 8, 8), 5),  # (T,H,W) read as channels when nt <= 1
+        ((30, 4, 4), 1),  # leading dim past the <= 20 heuristic
+        ((5, 8, 8), 5),  # (T,H,W) time-lapse
+        ((5, 3, 8, 8), 5),  # (T,C,H,W)
+    ]
+    for shape, nt in cases:
+        arr = np.zeros(shape, dtype=np.float32)
+        expected = len(split_intensity_layers(arr, [], n_timepoints=nt))
+        assert intensity_channel_count(shape, nt) == expected, shape

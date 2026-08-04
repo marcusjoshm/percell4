@@ -24,6 +24,11 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from percell4.domain.io.cross_format import deserialize_rule, serialize_rule
+from percell4.domain.io.layout import (
+    intensity_channel_count,
+    placeholder_channel_index,
+    placeholder_channel_name,
+)
 from percell4.domain.io.models import (
     CrossFormatRule,
     ExplicitRule,
@@ -1530,7 +1535,7 @@ class DatasetStore:
         finally:
             self._close_if_not_session(f)
 
-    def set_description(self, text: str | None) -> None:
+    def set_description(self, text: str | None) -> str | None:
         """Write the dataset's description, or clear it when blank.
 
         ``None``, an empty string, and whitespace-only text all clear
@@ -1538,11 +1543,16 @@ class DatasetStore:
         an explicit clear leave identical bytes on disk. Writing goes
         through :meth:`set_metadata` so its inferred-bin-metadata side
         effects stay identical to every other metadata write.
+
+        Returns what is now stored -- the text, or ``None`` when the call
+        cleared. Callers that need to display or cache the result use this
+        instead of re-deriving the blank rule or re-reading the file.
         """
         if text is None or not text.strip():
             self.clear_description()
-            return
+            return None
         self.set_metadata({"description": text})
+        return text
 
     def clear_description(self) -> bool:
         """Remove the description. Returns True if one was removed."""
@@ -1733,37 +1743,113 @@ class DatasetStore:
         Moves ``/decay/<old>`` and ``/phasor/<old>`` groups, updates the
         ``channel_names`` list, and renames per-channel FLIM calibration
         attrs (``flim_cal_phase_<name>``, ``flim_cal_mod_<name>``, and every
-        per-harmonic variant ``flim_cal_{phase,mod}_<name>_h<n>``). Silent
-        no-op for paths/attrs that don't exist.
+        per-harmonic variant ``flim_cal_{phase,mod}_<name>_h<n>``). Surfaces
+        that don't exist are skipped, but at least one must — see below.
+
+        ``old_name`` may also be a **placeholder** for an ``/intensity``
+        slice that has no ``channel_names`` entry (``ch<N>``, as synthesized
+        for display by :func:`~percell4.domain.io.layout.split_intensity_layers`).
+        Renaming one promotes it: ``channel_names`` is padded to length N
+        with placeholders, slot N takes ``new_name``, and ``n_channels`` is
+        brought in line with the array. This is the rename counterpart of the
+        ``ch<N>``-aware delete path in the Data tab, and it converges the
+        very metadata/array mismatch that produced the placeholder.
+
+        Raises ``ValueError`` if ``old_name`` names no surface at all, or if
+        ``new_name`` is already taken. A rename that matched nothing must not
+        report success — callers show the user a "renamed" confirmation, and
+        the change would silently vanish on the next reload.
         """
         if old_name == new_name:
             return
         with h5py.File(self.path, "a") as f:
-            for prefix in ("decay", "phasor"):
-                old_path = f"{prefix}/{old_name}"
-                new_path = f"{prefix}/{new_name}"
-                if old_path in f:
-                    if new_path in f:
-                        raise ValueError(f"Target path already exists: {new_path}")
-                    f.move(old_path, new_path)
-            if "metadata" in f:
+            has_meta = "metadata" in f
+            names = list(f["metadata"].attrs.get("channel_names", [])) if has_meta else []
+
+            # ── Validate before touching anything. A rename spans four
+            #    surfaces, and h5py gives no transaction — a collision
+            #    discovered after the first move would leave the dataset
+            #    half-renamed.
+            slot: int | None = None  # channel_names index this rename writes
+            if old_name in names:
+                slot = names.index(old_name)
+            elif has_meta:
+                slot = self._unnamed_slice_index(f, names, old_name)
+            if slot is not None and new_name in names:
+                raise ValueError(f"Channel already exists: {new_name}")
+            moves = [
+                (f"{prefix}/{old_name}", f"{prefix}/{new_name}")
+                for prefix in ("decay", "phasor")
+                if f"{prefix}/{old_name}" in f
+            ]
+            for _, new_path in moves:
+                if new_path in f:
+                    raise ValueError(f"Target path already exists: {new_path}")
+            cal_keys = self._cal_attr_renames(f, old_name, new_name) if has_meta else []
+            if slot is None and not moves and not cal_keys:
+                raise ValueError(f"Channel not found: {old_name}")
+
+            # ── Apply.
+            for old_path, new_path in moves:
+                f.move(old_path, new_path)
+            if slot is not None:
                 attrs = f["metadata"].attrs
-                names = list(attrs.get("channel_names", []))
-                if old_name in names:
-                    names[names.index(old_name)] = new_name
-                    attrs["channel_names"] = names
-                for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
-                    old_base = f"{key_prefix}{old_name}"
-                    new_base = f"{key_prefix}{new_name}"
-                    for key in list(attrs.keys()):
-                        if key == old_base:
-                            attrs[new_base] = attrs[key]
-                            del attrs[key]
-                        else:
-                            suffix = _cal_harmonic_suffix(key, old_base)
-                            if suffix is not None:
-                                attrs[new_base + suffix] = attrs[key]
-                                del attrs[key]
+                # channel_names is positional, so an intervening unnamed slot
+                # keeps its placeholder rather than letting later names shift
+                # down into the wrong /intensity slice.
+                while len(names) <= slot:
+                    names.append(placeholder_channel_name(len(names)))
+                names[slot] = new_name
+                attrs["channel_names"] = names
+                attrs["n_channels"] = len(names)
+            for old_key, new_key in cal_keys:
+                attrs = f["metadata"].attrs
+                attrs[new_key] = attrs[old_key]
+                del attrs[old_key]
+
+    @staticmethod
+    def _unnamed_slice_index(
+        f: h5py.File, names: list[str], old_name: str
+    ) -> int | None:
+        """Resolve a ``ch<N>`` placeholder to its ``/intensity`` slice index.
+
+        ``None`` when ``old_name`` isn't a placeholder, or names a slot that
+        no slice backs. Only meaningful once ``old_name`` is known to be
+        absent from ``names`` — a real imported channel can be called
+        ``ch00`` (the numeric-token form), and that one is a rename, not a
+        promotion.
+        """
+        idx = placeholder_channel_index(old_name)
+        if idx is None or idx < len(names) or "intensity" not in f:
+            return None
+        shape = tuple(int(x) for x in f["intensity"].shape)
+        n_timepoints = int(f["metadata"].attrs.get("n_timepoints", 1) or 1)
+        if idx >= intensity_channel_count(shape, n_timepoints):
+            return None
+        return idx
+
+    @staticmethod
+    def _cal_attr_renames(
+        f: h5py.File, old_name: str, new_name: str
+    ) -> list[tuple[str, str]]:
+        """``[(old_key, new_key)]`` for this channel's FLIM calibration attrs.
+
+        Covers the legacy suffix-less ``flim_cal_{phase,mod}_<name>`` and
+        every per-harmonic variant ``..._<name>_h<n>``.
+        """
+        attrs = f["metadata"].attrs
+        renames: list[tuple[str, str]] = []
+        for key_prefix in ("flim_cal_phase_", "flim_cal_mod_"):
+            old_base = f"{key_prefix}{old_name}"
+            new_base = f"{key_prefix}{new_name}"
+            for key in list(attrs.keys()):
+                if key == old_base:
+                    renames.append((key, new_base))
+                else:
+                    suffix = _cal_harmonic_suffix(key, old_base)
+                    if suffix is not None:
+                        renames.append((key, new_base + suffix))
+        return renames
 
     @staticmethod
     def create_atomic(

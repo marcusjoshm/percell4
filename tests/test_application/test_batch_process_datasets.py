@@ -144,6 +144,66 @@ def test_batch_channel_names_count_mismatch_is_recorded_failure(tmp_path):
     assert "channel-names" in (report.items[0].error or "")
 
 
+def _h5_with_unnamed_channels(path: Path, n_channels: int) -> None:
+    """An .h5 whose /intensity has channels but whose channel_names is empty.
+
+    A real shape: an import whose channel token didn't match leaves the names
+    list empty while /intensity still carries the slices.
+    """
+    import h5py
+
+    with h5py.File(path, "w") as f:
+        meta = f.create_group("metadata")
+        meta.attrs["channel_names"] = []
+        meta.attrs["n_timepoints"] = 1
+        ds = f.create_dataset(
+            "intensity", data=np.full((n_channels, 40, 40), 100, dtype=np.float32)
+        )
+        ds.attrs["dims"] = ["C", "H", "W"]
+
+
+def test_batch_channel_names_validated_against_intensity_not_metadata(tmp_path):
+    """Regression: the count guard used to be skipped entirely when the
+    dataset's own channel_names was empty, so a short override was written
+    verbatim — leaving fewer names than /intensity slices, which is what makes
+    the extra channels display as unnamed ``ch<N>`` placeholders."""
+    src = tmp_path / "unnamed.h5"
+    _h5_with_unnamed_channels(src, n_channels=2)
+    out = tmp_path / "out.h5"
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        channel_names=["ER"],  # one name for a two-channel /intensity
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.n_failed == 1
+    assert "channel-names" in (report.items[0].error or "")
+    assert list(DatasetStore(out).metadata.get("channel_names", [])) == []
+
+
+def test_batch_channel_names_can_name_previously_unnamed_channels(tmp_path):
+    """The complement: a full-length override on a dataset with empty
+    channel_names is exactly how you label such a dataset, and must work."""
+    src = tmp_path / "unnamed.h5"
+    _h5_with_unnamed_channels(src, n_channels=2)
+    out = tmp_path / "out.h5"
+
+    report = batch_process_datasets(
+        [DatasetSpec(source_dir=src, output_h5=out)],
+        channel_names=["G3BP1", "ER"], seg_channel="G3BP1",
+        segmenter=FakeSegmenter(), tracker=FakeTracker(),
+    )
+
+    assert report.items[0].succeeded, report.items[0].error
+    store = DatasetStore(out)
+    assert list(store.metadata["channel_names"]) == ["G3BP1", "ER"]
+    # n_channels must follow the names, as it does for every other writer —
+    # a stale value fails check_intensity_dims_consistency at open time.
+    assert int(store.metadata["n_channels"]) == 2
+    store.check_intensity_dims_consistency()
+
+
 def test_batch_seg_name_sets_segmentation_layer_name(tmp_path):
     src = tmp_path / "movie"
     _timelapse_tiffs(src, n_t=2)

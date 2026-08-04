@@ -440,14 +440,13 @@ class DataPanel(QWidget):
 
         new_text = None if result.clear else result.text
         try:
-            store.set_description(new_text)
+            # The store returns what it actually stored -- blank text is a
+            # clear -- so the display never shows text the file does not hold.
+            stored = store.set_description(new_text)
         except Exception as exc:  # noqa: BLE001
             self._show_status(f"Could not save the description: {exc}")
             return
 
-        # set_description treats blank text as a clear, so re-normalize here
-        # rather than displaying an empty string the file does not hold.
-        stored = new_text if (new_text or "").strip() else None
         self._sync_description_snapshot(stored)
         self.refresh_dataset_info(description=stored)
         self._show_status(

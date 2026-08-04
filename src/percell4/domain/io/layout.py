@@ -11,21 +11,72 @@ Pure numpy — no h5py, Qt, or napari.
 
 from __future__ import annotations
 
+import re
+
 from numpy.typing import NDArray
 
 __all__ = [
     "split_channels_2d",
     "split_intensity_layers",
     "plan_channel_deletion",
+    "placeholder_channel_name",
+    "placeholder_channel_index",
+    "intensity_channel_count",
 ]
 
 # Historical heuristic: a leading axis this small on a non-time-lapse
 # dataset is treated as channels; anything larger is shown as one layer.
 _MAX_SPLIT_CHANNELS = 20
 
+# Inverse of :func:`placeholder_channel_name`. Kept next to the producer so
+# the two can never drift -- the channel-name contract's single-source-of-
+# truth rule (docs/solutions/architecture-patterns/
+# channel-name-contract-and-tokenless-discovery-2026-07-23.md).
+_PLACEHOLDER_RE = re.compile(r"ch(\d+)")
+
+
+def placeholder_channel_name(i: int) -> str:
+    """Display name for an ``/intensity`` slice with no ``channel_names`` entry.
+
+    A dataset may carry more ``/intensity`` slices than metadata names (a
+    half-finished import, or metadata rewritten without the array). Those
+    slices still have to be shown, deleted and renamed, so they get a
+    positional placeholder derived from the slice index.
+    """
+    return f"ch{i}"
+
+
+def placeholder_channel_index(name: str) -> int | None:
+    """Slice index encoded in a placeholder name, or ``None`` if not one.
+
+    Only meaningful for a name that is **absent** from ``channel_names`` --
+    a real imported channel can legitimately be called ``ch00`` (the numeric
+    token form), so membership must be checked first. Callers resolving an
+    unnamed slice ask this second.
+    """
+    m = _PLACEHOLDER_RE.fullmatch(name)
+    return int(m.group(1)) if m else None
+
+
+def intensity_channel_count(shape: tuple[int, ...], n_timepoints: int) -> int:
+    """Number of channels an ``/intensity`` array of *shape* splits into.
+
+    Mirrors :func:`split_intensity_layers` exactly -- same T-vs-C
+    disambiguation, same ``<= 20`` leading-axis heuristic -- so "how many
+    layers will be shown" and "how many channels are there" can never
+    disagree.
+    """
+    ndim = len(shape)
+    nt = int(n_timepoints or 1)
+    if nt > 1:
+        return shape[1] if ndim == 4 else 1
+    if ndim == 3 and shape[0] <= _MAX_SPLIT_CHANNELS:
+        return shape[0]
+    return 1
+
 
 def _channel_name(channel_names: list[str], i: int) -> str:
-    return channel_names[i] if i < len(channel_names) else f"ch{i}"
+    return channel_names[i] if i < len(channel_names) else placeholder_channel_name(i)
 
 
 def split_channels_2d(

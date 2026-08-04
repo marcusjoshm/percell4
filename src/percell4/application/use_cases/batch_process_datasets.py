@@ -14,15 +14,35 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
+    from percell4.store import DatasetStore
     from percell4.workflows.models import CellposeSettings
 
 logger = logging.getLogger(__name__)
+
+
+def _dataset_channel_count(
+    store: DatasetStore, metadata: dict[str, Any]
+) -> int | None:
+    """How many channels ``/intensity`` actually holds, or ``None`` if absent.
+
+    ``/intensity`` is the authority, not ``metadata.channel_names`` — the two
+    can disagree, and the names list is exactly what a caller overriding
+    channel names is trying to correct. Uses the same T-vs-C rule the display
+    split uses, so this count equals the number of channel layers shown.
+    """
+    from percell4.domain.io.layout import intensity_channel_count
+
+    try:
+        shape = store.array_shape("intensity")
+    except KeyError:
+        return None
+    return intensity_channel_count(shape, int(metadata.get("n_timepoints", 1) or 1))
 
 
 @dataclass(frozen=True)
@@ -205,17 +225,44 @@ def batch_process_datasets(
             # of the importer's "ch00,ch01"). One name per imported channel;
             # order is preserved, so this is a pure relabel.
             if channel_names is not None:
-                if imported_channels and len(channel_names) != len(imported_channels):
+                store = DatasetStore(spec.output_h5)
+                # Count channels from /intensity, not from channel_names:
+                # naming a dataset whose names list is empty or short is a
+                # legitimate use of this override, and validating against that
+                # list would either skip the check entirely or measure the
+                # override against the very value being replaced. A short
+                # override written unchecked is what leaves /intensity slices
+                # with no name, displaying as ``ch<N>`` placeholders.
+                n_channels = _dataset_channel_count(store, handle.metadata)
+                if n_channels is None:
+                    raise ValueError(
+                        f"channel-names was given {len(channel_names)} name(s) but "
+                        f"{spec.output_h5.name} has no /intensity to name — the "
+                        "import produced no channels"
+                    )
+                if len(channel_names) != n_channels:
+                    # Report the imported names when there are any; on the
+                    # empty-names case they'd read as a bare "[]" and imply the
+                    # dataset has no channels, which is the opposite of the
+                    # problem.
+                    detail = (
+                        f": {imported_channels}" if imported_channels
+                        else " (none of them named yet)"
+                    )
                     raise ValueError(
                         f"channel-names has {len(channel_names)} name(s) but dataset "
-                        f"has {len(imported_channels)} channel(s): {imported_channels}"
+                        f"has {n_channels} channel(s){detail}"
                     )
-                DatasetStore(spec.output_h5).set_metadata(
-                    {"channel_names": list(channel_names)}
-                )
+                # n_channels follows channel_names, as it does for every other
+                # writer — a stale value fails the open-time dims check.
+                store.set_metadata({
+                    "channel_names": list(channel_names),
+                    "n_channels": len(channel_names),
+                })
                 # Refresh the in-memory snapshot too: re-reading alone can serve
                 # a stale h5py metadata cache within the same process.
                 handle.metadata["channel_names"] = list(channel_names)
+                handle.metadata["n_channels"] = len(channel_names)
 
             active_channels = list(handle.metadata.get("channel_names", []))
             n_timepoints = int(handle.metadata.get("n_timepoints", 1) or 1)

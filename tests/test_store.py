@@ -302,6 +302,13 @@ def test_set_description_empty_clears_instead_of_storing_placeholder(store):
         assert "description" not in f["metadata"].attrs
 
 
+def test_set_description_returns_what_it_stored(store):
+    """Callers use the return value instead of re-deriving the blank rule."""
+    assert store.set_description("HeLa p14") == "HeLa p14"
+    assert store.set_description("   ") is None
+    assert store.set_description(None) is None
+
+
 def test_set_description_none_clears(store):
     """None is accepted as a clear, so callers need no special case."""
     store.set_description("something")
