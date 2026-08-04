@@ -297,6 +297,22 @@ def _cal_harmonic_suffix(key: str, base: str) -> str | None:
     return None
 
 
+def _normalize_description(raw: Any) -> str | None:
+    """Coerce a stored description attr to ``str``, or ``None`` when blank.
+
+    h5py returns ``str`` for a text attr written as ``str``, but a value
+    written as bytes (or by an older writer) comes back as ``bytes`` /
+    ``numpy.bytes_``. Blank text collapses to ``None`` so that "absent" and
+    "empty" are one state for every reader.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, np.bytes_)):
+        raw = raw.decode("utf-8", errors="replace")
+    text = str(raw)
+    return text if text.strip() else None
+
+
 class DatasetStore:
     """Read/write interface for a single .h5 dataset file.
 
@@ -1427,6 +1443,15 @@ class DatasetStore:
                 attrs["channel_names"] = [
                     c.decode() if isinstance(c, bytes) else str(c) for c in cn
                 ]
+            # Free-text description: decode bytes and collapse a blank value
+            # to absent, so the dict agrees with the `description` property
+            # that empty and missing are the same state.
+            if "description" in attrs:
+                normalized = _normalize_description(attrs["description"])
+                if normalized is None:
+                    del attrs["description"]
+                else:
+                    attrs["description"] = normalized
             if "creation_bin" in attrs:
                 attrs["creation_bin"] = int(attrs["creation_bin"])
             if "n_timepoints" in attrs:
@@ -1468,6 +1493,60 @@ class DatasetStore:
             for key, val in attrs.items():
                 grp.attrs[key] = val
         return len(attrs)
+
+    def delete_metadata_key(self, key: str) -> bool:
+        """Remove one attribute from the /metadata group.
+
+        Returns True if the attribute was there and is now gone, False if
+        there was nothing to remove. :meth:`set_metadata` merges keys and
+        cannot delete one, so this is the only way to take a metadata entry
+        back off a dataset.
+        """
+        if not self.path.exists():
+            return False
+        with h5py.File(self.path, "a") as f:
+            grp = f.get("metadata")
+            if grp is None or key not in grp.attrs:
+                return False
+            del grp.attrs[key]
+            return True
+
+    # ── Dataset description ───────────────────────────────────
+
+    @property
+    def description(self) -> str | None:
+        """The dataset's free-text experiment description, or None.
+
+        Absent and blank are the same state: a dataset either has a
+        description or it has none. Bytes are decoded, so a value written
+        by an older writer still reads back as ``str``.
+        """
+        f = self._open_read()
+        try:
+            grp = f.get("metadata")
+            if grp is None or "description" not in grp.attrs:
+                return None
+            return _normalize_description(grp.attrs["description"])
+        finally:
+            self._close_if_not_session(f)
+
+    def set_description(self, text: str | None) -> None:
+        """Write the dataset's description, or clear it when blank.
+
+        ``None``, an empty string, and whitespace-only text all clear
+        rather than writing, so a confirmed edit that emptied the field and
+        an explicit clear leave identical bytes on disk. Writing goes
+        through :meth:`set_metadata` so its inferred-bin-metadata side
+        effects stay identical to every other metadata write.
+        """
+        if text is None or not text.strip():
+            self.clear_description()
+            return
+        self.set_metadata({"description": text})
+
+    def clear_description(self) -> bool:
+        """Remove the description. Returns True if one was removed."""
+        return self.delete_metadata_key("description")
 
     # ── File lifecycle ────────────────────────────────────────
 

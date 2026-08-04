@@ -242,6 +242,112 @@ def test_metadata_channel_names_normalized_to_str_list(store):
     assert store.metadata["channel_names"] == ["mNG"]
 
 
+# ── Dataset description ───────────────────────────────────────
+
+
+def test_description_roundtrips_multiline_unicode(store):
+    """Free-text description keeps its line breaks and non-ASCII text."""
+    text = "HeLa p14, fixed 4% PFA 15min\npermeabilized 0.1% TX-100\n37 °C, 5% CO₂"
+    store.set_description(text)
+    assert store.description == text
+
+
+def test_description_none_when_never_set(store):
+    """A dataset that never had a description reads as None."""
+    assert store.description is None
+
+
+def test_description_whitespace_only_reads_as_none(store):
+    """Absent and empty are the same state to every reader (R3).
+
+    Written through h5py directly so the read path is what's under test,
+    not set_description's own empty-clears behaviour.
+    """
+    with h5py.File(store.path, "a") as f:
+        f.require_group("metadata").attrs["description"] = "   \n  "
+    assert store.description is None
+
+
+def test_description_decodes_bytes(store):
+    """A description written as bytes still reads back as str."""
+    with h5py.File(store.path, "a") as f:
+        f.require_group("metadata").attrs["description"] = np.bytes_(b"legacy notes")
+    assert store.description == "legacy notes"
+
+
+def test_clear_description_removes_it(store):
+    """Clearing returns the dataset to the no-description state."""
+    store.set_description("dish 3 had a bubble")
+    assert store.clear_description() is True
+    assert store.description is None
+    with h5py.File(store.path, "r") as f:
+        assert "description" not in f["metadata"].attrs
+
+
+def test_clear_description_noop_when_absent(store):
+    """Clearing a dataset with no description reports nothing removed."""
+    assert store.clear_description() is False
+
+
+def test_set_description_empty_clears_instead_of_storing_placeholder(store):
+    """Writing empty text is a clear, not a write (R4).
+
+    A confirmed edit that emptied the text area and an explicit clear must
+    leave identical bytes on disk -- no empty placeholder attribute.
+    """
+    store.set_description("something")
+    store.set_description("   ")
+    assert store.description is None
+    with h5py.File(store.path, "r") as f:
+        assert "description" not in f["metadata"].attrs
+
+
+def test_set_description_none_clears(store):
+    """None is accepted as a clear, so callers need no special case."""
+    store.set_description("something")
+    store.set_description(None)
+    assert store.description is None
+
+
+def test_set_description_preserves_other_metadata(store):
+    """Writing a description doesn't disturb the rest of /metadata."""
+    store.set_metadata({"channel_names": ["GFP", "RFP"]})
+    store.set_description("notes")
+    meta = store.metadata
+    assert meta["channel_names"] == ["GFP", "RFP"]
+    assert meta["source"] == "test"
+    assert meta["pixel_size_um"] == 0.325
+
+
+def test_description_write_then_read_in_same_process(store):
+    """Write-then-read inside one process returns the value just written.
+
+    HDF5 keeps a per-process metadata cache, so a handle opened right after
+    a write-then-close can serve a stale view -- see
+    docs/solutions/logic-errors/in-session-hdf5-staleness-multi-vector-2026-04-30.md.
+    Validating this in a subprocess would not detect the class at all.
+    """
+    store.set_description("first")
+    assert store.description == "first"
+    store.set_description("second")
+    assert store.description == "second"
+    store.clear_description()
+    assert store.description is None
+
+
+def test_delete_metadata_key_is_generic(store):
+    """The single-key delete works for any /metadata attribute."""
+    assert store.delete_metadata_key("source") is True
+    assert "source" not in store.metadata
+    assert store.delete_metadata_key("source") is False
+
+
+def test_description_appears_in_metadata_dict(store):
+    """The description is a normal /metadata entry, readable via the dict."""
+    store.set_description("HeLa p14")
+    assert store.metadata["description"] == "HeLa p14"
+
+
 # ── Bin metadata: native_shape + creation_bin (U1) ────────────
 
 
