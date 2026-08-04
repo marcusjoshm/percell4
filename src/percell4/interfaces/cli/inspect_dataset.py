@@ -13,10 +13,11 @@ Usage:
     percell4-inspect dish_1.h5 dish_2.h5
     percell4-inspect /scratch/dishes/            # every *.h5 in the dir
     percell4-inspect dish_1.h5 --json            # machine-readable output
+    percell4-inspect /scratch/dishes/ --grep PFA # only matching descriptions
 
 Exit codes:
-    0 -- at least one dataset was inspected successfully
-    1 -- every input failed to open / inspect
+    0 -- at least one dataset was reported
+    1 -- every input failed to open / inspect, or --grep matched nothing
 
 Programmatic use:
     from percell4.interfaces.cli.inspect_dataset import main
@@ -114,6 +115,7 @@ def _inspect(path: Path) -> dict[str, Any]:
             "n_timepoints": meta.get("n_timepoints"),
             "creation_bin": meta.get("creation_bin"),
             "source": meta.get("source"),
+            "description": store.description,
         },
         "intensity": intensity,
         "segmentations": _layer_rows(store, "labels", seg_names),
@@ -121,6 +123,32 @@ def _inspect(path: Path) -> dict[str, Any]:
         "groups": _layer_rows(store, "groups", store.list_groups("groups")),
         "tracks": _layer_rows(store, "tracks", store.list_groups("tracks")),
     }
+
+
+def _print_description(description: str | None) -> None:
+    """Print the free-text description, indenting continuation lines.
+
+    A description is prose and often multi-line, so it gets its own block
+    rather than sharing the single-line label column above.
+    """
+    if not description:
+        print("Description: —")
+        return
+    lines = description.splitlines() or [description]
+    print(f"Description: {lines[0]}")
+    for line in lines[1:]:
+        print(f"             {line}")
+
+
+def _matches_grep(description: str | None, needle: str) -> bool:
+    """Case-insensitive substring match against a dataset's description.
+
+    A dataset with no description never matches -- there is nothing to
+    search, so a filter run excludes it.
+    """
+    if not description:
+        return False
+    return needle.casefold() in description.casefold()
 
 
 def _print_layer_block(title: str, rows: list[dict[str, Any]]) -> None:
@@ -147,6 +175,7 @@ def _print_human(info: dict[str, Any]) -> None:
     print(f"Created bin: {m['creation_bin'] if m['creation_bin'] is not None else '—'}")
     if m.get("source"):
         print(f"Source:      {m['source']}")
+    _print_description(m["description"])
     print("  Layers")
     if info["intensity"] is not None:
         i = info["intensity"]
@@ -163,9 +192,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="percell4-inspect",
         description=(
-            "Print metadata and the layer inventory (intensity, segmentations, "
-            "masks, groups, tracks) for one or more PerCell4 .h5 datasets. "
-            "Read-only; shapes/dtypes are read without decoding arrays."
+            "Print metadata, the free-text description, and the layer "
+            "inventory (intensity, segmentations, masks, groups, tracks) for "
+            "one or more PerCell4 .h5 datasets. Read-only; shapes/dtypes are "
+            "read without decoding arrays, so a folder of multi-gigabyte "
+            "datasets inspects fast. Use --grep to find the dataset you want "
+            "without opening any of them."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -178,6 +210,15 @@ def main(argv: list[str] | None = None) -> int:
         "--json",
         action="store_true",
         help="Emit a JSON array of per-dataset records instead of human-readable text.",
+    )
+    parser.add_argument(
+        "--grep",
+        metavar="TEXT",
+        help=(
+            "Report only datasets whose description contains TEXT "
+            "(case-insensitive substring). Datasets with no description "
+            "never match. Exits 1 when nothing matches."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -193,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
             info = _inspect(path)
         except Exception as e:  # corrupt / non-HDF5 / unreadable
             print(f"[error] {path}: {e}", file=sys.stderr)
+            continue
+        if args.grep and not _matches_grep(info["metadata"]["description"], args.grep):
             continue
         n_ok += 1
         if args.json:
