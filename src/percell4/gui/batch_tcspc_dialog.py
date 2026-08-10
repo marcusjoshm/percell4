@@ -1202,7 +1202,7 @@ class BatchTCSPCDialog(QDialog):
         """
         errors: list[str] = []
         if self._calibration is None:
-            errors.append("Load a calibration CSV before validating.")
+            errors.append("Load a calibration CSV or .lif before validating.")
 
         checked = self._checked_datasets()
         if not checked:
@@ -1211,12 +1211,20 @@ class BatchTCSPCDialog(QDialog):
         if errors:
             return [], {}, {}, errors
 
-        # CSV cross-check: every selected dataset's stem must have rows.
-        csv_errors = validate_calibration_csv_against_selection(
-            self._calibration,  # type: ignore[arg-type]
-            [d.stem for d in checked],
-        )
-        errors.extend(csv_errors)
+        # Coverage cross-check. The two sources fail differently, so each
+        # reports its own shape: a CSV is missing whole datasets, a .lif has
+        # unbound channels. Running the CSV check over a .lif-sourced batch
+        # would say "no calibration rows for dataset X" when the real problem
+        # is a specific channel nobody bound.
+        if self._lif_records:
+            errors.extend(self._recompute_lif_calibration())
+        else:
+            errors.extend(
+                validate_calibration_csv_against_selection(
+                    self._calibration,  # type: ignore[arg-type]
+                    [d.stem for d in checked],
+                )
+            )
 
         # Build BatchAppendItems for datasets that have a pairing AND
         # calibration rows. Datasets missing either land in `errors`.

@@ -1237,3 +1237,123 @@ def test_checking_a_dataset_refreshes_the_binding_table(qtbot, tmp_path: Path) -
         ("Dish 1", "G3BP1"),
         ("Dish 2", "mNG"),
     ]
+
+
+# ── Validation of a .lif-sourced batch ─────────────────────────────────
+
+
+def _paired_dialog(qtbot, tmp_path: Path, channels: list[str], records) -> Any:
+    """Dialog with one checked, paired dataset and a .lif loaded."""
+    h5 = _make_h5(tmp_path / "Dish 1.h5", channels)
+    group = tmp_path / "scan" / "Dish 1"
+    group.mkdir(parents=True)
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(), lif_reader=lambda _p: records
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._pairings[h5] = group
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    return dlg
+
+
+def test_no_calibration_message_names_both_formats(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+
+    dlg._on_validate()
+
+    log = dlg._validate_log.toPlainText()
+    assert ".lif" in log and "CSV" in log
+
+
+def test_unbound_channel_blocks_validation_and_is_named(
+    qtbot, tmp_path: Path
+) -> None:
+    dlg = _paired_dialog(
+        qtbot, tmp_path, ["G3BP1", "mNG"], (_lif_record(stem="Dish 1"),)
+    )
+
+    dlg._on_validate()
+
+    log = dlg._validate_log.toPlainText()
+    assert dlg._validated is False
+    assert not dlg._run_btn.isEnabled()
+    assert "G3BP1" in log
+    assert "mNG" in log
+    assert "Dish 1" in log
+
+
+def test_fully_bound_lif_validates_and_enables_run(qtbot, tmp_path: Path) -> None:
+    dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1"], (_lif_record(stem="Dish 1"),))
+
+    dlg._on_validate()
+
+    assert dlg._validated is True
+    assert dlg._run_btn.isEnabled()
+
+
+def test_lif_items_match_csv_items_for_the_same_calibration(
+    qtbot, tmp_path: Path
+) -> None:
+    """KTD4 — a .lif is a second producer of BatchCalibration, nothing more."""
+    record = _lif_record(stem="Dish 1")
+    lif_dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1"], (record,))
+    lif_items, _, _, lif_errors = lif_dlg._build_items_and_metadata()
+
+    csv_h5 = _make_h5(tmp_path / "csv" / "Dish 1.h5", ["G3BP1"])
+    csv_group = tmp_path / "csv-scan" / "Dish 1"
+    csv_group.mkdir(parents=True)
+    cal = _bcal(
+        {
+            "Dish 1": {
+                "G3BP1": ChannelCalibration(
+                    record.frequency_mhz, record.phase, record.modulation
+                )
+            }
+        }
+    )
+    csv_dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(), csv_parser=lambda _p: cal
+    )
+    qtbot.addWidget(csv_dlg)
+    csv_dlg._add_dataset_row(csv_h5, checked=True)
+    csv_dlg._pairings[csv_h5] = csv_group
+    csv_dlg._load_calibration_file(tmp_path / "cal.csv")
+    csv_items, _, _, csv_errors = csv_dlg._build_items_and_metadata()
+
+    assert lif_errors == csv_errors == []
+    assert lif_items[0].calibration == csv_items[0].calibration
+
+
+def test_frequency_disagreement_surfaces_in_the_preflight_log(
+    qtbot, tmp_path: Path
+) -> None:
+    records = (
+        _lif_record(stem="Dish 1", region="Region_1", frequency_mhz=78.02),
+        _lif_record(
+            stem="Dish 1", region="Region_2", detector="HyD X 1", frequency_mhz=40.0
+        ),
+    )
+    dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1", "mNG"], records)
+    _binding_combo(dlg, 0).setCurrentIndex(1)
+    _binding_combo(dlg, 1).setCurrentIndex(2)
+
+    dlg._on_validate()
+
+    assert "frequency_mhz" in dlg._validate_log.toPlainText()
+    assert dlg._validated is False
+
+
+def test_rebinding_after_a_pass_requires_revalidation(qtbot, tmp_path: Path) -> None:
+    dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1"], (_lif_record(stem="Dish 1"),))
+    dlg._on_validate()
+    assert dlg._run_btn.isEnabled()
+
+    _binding_combo(dlg, 0).setCurrentIndex(0)
+
+    assert dlg._validated is False
+    assert not dlg._run_btn.isEnabled()
