@@ -14,7 +14,8 @@ from typing import Any
 
 import h5py
 import pandas as pd
-from qtpy.QtWidgets import QCheckBox, QComboBox
+import pytest
+from qtpy.QtWidgets import QCheckBox, QComboBox, QGroupBox
 
 from percell4.application.use_cases.add_decay_to_dataset import AppendReport
 from percell4.application.use_cases.batch_add_decay import (
@@ -23,10 +24,16 @@ from percell4.application.use_cases.batch_add_decay import (
     BatchItemResult,
     BatchValidationReport,
 )
+from percell4.domain.errors import (
+    CalibrationCSVError,
+    LifCalibrationError,
+    LifHeaderError,
+)
 from percell4.domain.io.calibration_csv import (
     BatchCalibration,
     ChannelCalibration,
 )
+from percell4.domain.io.lif_calibration import LifCalibrationRecord
 from percell4.domain.io.models import TileConfig
 from percell4.gui.batch_tcspc_dialog import (
     BatchTCSPCDialog,
@@ -816,3 +823,226 @@ def test_registration_controls_remain_on_this_append_surface(qtbot) -> None:
     assert tc.overlap == 0.2
     assert tc.register is True
     assert tc.reference_channel == "ch00"
+
+
+# ── Calibration source: CSV or .lif ────────────────────────────────────
+
+
+def _lif_record(
+    stem: str = "Dish 1",
+    *,
+    region: str = "Region_1",
+    detector: str = "HyD X 3",
+    channel_index: int = 0,
+    phase: float = -0.444242509,
+    modulation: float = 0.999413114,
+    frequency_mhz: float = 78.02,
+) -> LifCalibrationRecord:
+    return LifCalibrationRecord(
+        dataset_stem=stem,
+        region_name=region,
+        element_path=f"root/{region}",
+        channel_index=channel_index,
+        detector_name=detector,
+        frequency_mhz=frequency_mhz,
+        phase=phase,
+        modulation=modulation,
+        harmonic=1,
+    )
+
+
+def _silence_critical(monkeypatch) -> list[tuple[str, str]]:
+    """Capture QMessageBox.critical calls instead of blocking on them."""
+    seen: list[tuple[str, str]] = []
+
+    def fake(_parent, title, text, *args, **kwargs):  # noqa: ANN001, ARG001
+        seen.append((title, text))
+
+    monkeypatch.setattr(
+        "percell4.gui.batch_tcspc_dialog.QMessageBox.critical", staticmethod(fake)
+    )
+    return seen
+
+
+def test_csv_suffix_routes_to_the_csv_parser(qtbot, tmp_path: Path) -> None:
+    cal = _bcal({"Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)}})
+    calls: list[str] = []
+
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: (calls.append("csv"), cal)[1],
+        lif_reader=lambda _p: (calls.append("lif"), ())[1],
+    )
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert calls == ["csv"]
+    assert dlg._calibration is cal
+
+
+def test_csv_status_text_is_unchanged(qtbot, tmp_path: Path) -> None:
+    """AE4 — the CSV path must behave exactly as it did before .lif support."""
+    cal = _bcal(
+        {
+            "Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)},
+            "Dish 2": {"ch1": ChannelCalibration(80.0, 0.11, 0.97)},
+        }
+    )
+    dlg = BatchTCSPCDialog(csv_parser=lambda _p: cal)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert dlg._calibration_status_label.text() == "Loaded: 2 rows / 2 datasets"
+
+
+def test_lif_suffix_routes_to_the_lif_reader(qtbot, tmp_path: Path) -> None:
+    calls: list[str] = []
+    records = (_lif_record(),)
+
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: (calls.append("csv"), _bcal({}))[1],
+        lif_reader=lambda _p: (calls.append("lif"), records)[1],
+    )
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert calls == ["lif"]
+    assert dlg._lif_records == records
+
+
+def test_lif_suffix_dispatch_is_case_insensitive(qtbot, tmp_path: Path) -> None:
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(),))
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "SAMPLE.LIF")
+
+    assert len(dlg._lif_records) == 1
+
+
+def test_loading_a_lif_auto_binds_the_unambiguous_case(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    entry = dlg._calibration.get("Dish 1", "G3BP1")
+    assert entry is not None
+    assert entry.phase == pytest.approx(-0.444242509)
+
+
+def test_lif_calibration_error_shows_a_message_and_clears_state(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    seen = _silence_critical(monkeypatch)
+
+    def boom(_p):
+        raise LifCalibrationError(["no phasor calibration in this .lif"])
+
+    dlg = BatchTCSPCDialog(lif_reader=boom)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert len(seen) == 1
+    assert "no phasor calibration" in seen[0][1]
+    assert dlg._calibration is None
+    assert dlg._lif_records == ()
+    assert "No calibration loaded." in dlg._calibration_status_label.text()
+
+
+def test_lif_header_error_uses_the_same_failure_path(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    seen = _silence_critical(monkeypatch)
+
+    def boom(_p):
+        raise LifHeaderError("sample.lif: bad block marker 0x0 at offset 0")
+
+    dlg = BatchTCSPCDialog(lif_reader=boom)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert len(seen) == 1
+    assert "bad block marker" in seen[0][1]
+    assert dlg._lif_records == ()
+
+
+def test_csv_error_still_shows_a_message_and_clears_state(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    seen = _silence_critical(monkeypatch)
+
+    def boom(_p):
+        raise CalibrationCSVError(["row 2: 'phase' is not a number"])
+
+    dlg = BatchTCSPCDialog(csv_parser=boom)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert len(seen) == 1
+    assert dlg._calibration is None
+
+
+def test_loading_a_lif_replaces_a_previously_loaded_csv(
+    qtbot, tmp_path: Path
+) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    cal = _bcal({"Other": {"ch9": ChannelCalibration(40.0, 0.5, 0.5)}})
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: cal,
+        lif_reader=lambda _p: (_lif_record(stem="Dish 1"),),
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert dlg._calibration.datasets() == ("Dish 1",)
+
+
+def test_loading_a_csv_clears_previously_loaded_lif_records(
+    qtbot, tmp_path: Path
+) -> None:
+    cal = _bcal({"Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)}})
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: cal,
+        lif_reader=lambda _p: (_lif_record(),),
+    )
+    qtbot.addWidget(dlg)
+
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert dlg._lif_records == ()
+
+
+def test_every_calibration_load_path_leaves_run_disabled(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    _silence_critical(monkeypatch)
+    cal = _bcal({"Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)}})
+
+    def boom(_p):
+        raise LifCalibrationError(["nope"])
+
+    dlg = BatchTCSPCDialog(csv_parser=lambda _p: cal, lif_reader=boom)
+    qtbot.addWidget(dlg)
+
+    for name in ("cal.csv", "sample.lif"):
+        dlg._validated = True
+        dlg._run_btn.setEnabled(True)
+        dlg._load_calibration_file(tmp_path / name)
+        assert dlg._run_btn.isEnabled() is False
+        assert dlg._validated is False
+
+
+def test_section_numbers_are_unique(qtbot) -> None:
+    """The calibration and channel-token sections both used to be '4.'."""
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    numbers = [
+        box.title().split(".", 1)[0]
+        for box in dlg.findChildren(QGroupBox)
+        if box.title() and box.title()[0].isdigit()
+    ]
+
+    assert len(numbers) == len(set(numbers)), f"duplicate section numbers: {numbers}"

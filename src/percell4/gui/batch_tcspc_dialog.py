@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -58,12 +58,22 @@ from percell4.application.use_cases.batch_add_decay import (
     validate_batch_inputs,
     validate_calibration_csv_against_selection,
 )
-from percell4.domain.errors import CalibrationCSVError
+from percell4.domain.errors import (
+    CalibrationCSVError,
+    LifCalibrationError,
+    LifHeaderError,
+)
 from percell4.domain.io.calibration_csv import (
     BatchCalibration,
     parse_calibration_csv,
 )
 from percell4.domain.io.cross_format import IntensityChannel
+from percell4.domain.io.lif_calibration import (
+    LifCalibrationRecord,
+    auto_match,
+    read_lif_calibration,
+    resolve_lif_calibration,
+)
 from percell4.domain.io.models import (
     CrossFormatRule,
     TokenConfig,
@@ -98,6 +108,9 @@ class BatchTCSPCDialog(QDialog):
         orchestrator: Callable[..., BatchAppendReport] = batch_add_decay,
         validator: Callable[..., Any] = validate_batch_inputs,
         csv_parser: Callable[[Path], BatchCalibration] = parse_calibration_csv,
+        lif_reader: Callable[
+            [Path], tuple[LifCalibrationRecord, ...]
+        ] = read_lif_calibration,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Batch TCSPC Append")
@@ -114,6 +127,7 @@ class BatchTCSPCDialog(QDialog):
         self._orchestrator = orchestrator
         self._validator = validator
         self._csv_parser = csv_parser
+        self._lif_reader = lif_reader
 
         # ── Pure-Python state ──
         self._datasets: list[Path] = []  # selected .h5 paths
@@ -122,6 +136,11 @@ class BatchTCSPCDialog(QDialog):
         # h5_path -> group folder Path or None
         self._pairings: dict[Path, Path | None] = {}
         self._calibration: BatchCalibration | None = None
+        # .lif calibration source. Records are what the file says; bindings
+        # map (dataset stem, channel name) onto them, because a .lif cannot
+        # know the .h5 channel names. Empty whenever a CSV is the source.
+        self._lif_records: tuple[LifCalibrationRecord, ...] = ()
+        self._lif_bindings: dict[tuple[str, str], int] = {}
         self._validated: bool = False
         self._suppress_pair_signal: bool = False
         # channel_name -> .bin token string (e.g. "CA-SiR" -> "1"). Required
@@ -135,7 +154,7 @@ class BatchTCSPCDialog(QDialog):
         self._source_root_edit: QLineEdit | None = None
         self._groups_label: QLabel | None = None
         self._pairing_table: QTableWidget | None = None
-        self._csv_status_label: QLabel | None = None
+        self._calibration_status_label: QLabel | None = None
         self._channel_tokens_table: QTableWidget | None = None
         self._channel_tokens_status_label: QLabel | None = None
         self._validate_log: QPlainTextEdit | None = None
@@ -174,7 +193,7 @@ class BatchTCSPCDialog(QDialog):
         body.addWidget(self._build_section_source_root())
         body.addWidget(self._build_section_pairing())
         body.addWidget(self._build_section_channel_tokens())
-        body.addWidget(self._build_section_csv())
+        body.addWidget(self._build_section_calibration())
         body.addWidget(self._build_section_stitching())
         body.addWidget(self._build_section_conflict_policy())
         body.addWidget(self._build_section_validation())
@@ -311,14 +330,14 @@ class BatchTCSPCDialog(QDialog):
 
         return box
 
-    def _build_section_csv(self) -> QGroupBox:
-        box = QGroupBox("4. Calibration CSV (long format)")
+    def _build_section_calibration(self) -> QGroupBox:
+        box = QGroupBox("5. Calibration (CSV or .lif)")
         layout = QHBoxLayout(box)
-        browse_btn = QPushButton("Choose CSV…")
-        browse_btn.clicked.connect(self._on_load_csv)
-        self._csv_status_label = QLabel("No CSV loaded.")
+        browse_btn = QPushButton("Choose CSV or .lif…")
+        browse_btn.clicked.connect(self._on_choose_calibration)
+        self._calibration_status_label = QLabel("No calibration loaded.")
         layout.addWidget(browse_btn)
-        layout.addWidget(self._csv_status_label, 1)
+        layout.addWidget(self._calibration_status_label, 1)
         return box
 
     def _build_section_stitching(self) -> QGroupBox:
@@ -333,7 +352,7 @@ class BatchTCSPCDialog(QDialog):
 
         Registration controls stay visible on this surface, unchanged.
         """
-        box = QGroupBox("5. Stitching & orientation (applied to every dataset)")
+        box = QGroupBox("6. Stitching & orientation (applied to every dataset)")
         layout = QVBoxLayout(box)
         self._stitching_form = StitchingForm(
             show_registration=True, show_fusion=False, title=""
@@ -350,7 +369,7 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_conflict_policy(self) -> QGroupBox:
-        box = QGroupBox("6. If a /decay layer already exists")
+        box = QGroupBox("7. If a /decay layer already exists")
         layout = QHBoxLayout(box)
         self._conflict_skip_radio = QRadioButton("Skip existing layers")
         self._conflict_skip_radio.setChecked(True)
@@ -365,7 +384,7 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_validation(self) -> QGroupBox:
-        box = QGroupBox("7. Pre-flight report")
+        box = QGroupBox("8. Pre-flight report")
         layout = QVBoxLayout(box)
         self._validate_log = QPlainTextEdit()
         self._validate_log.setReadOnly(True)
@@ -770,38 +789,106 @@ class BatchTCSPCDialog(QDialog):
     # Slots — section 4 (CSV)
     # ────────────────────────────────────────────────────────────
 
-    def _on_load_csv(self) -> None:
-        assert self._csv_status_label is not None
+    def _on_choose_calibration(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose calibration CSV", "", "CSV files (*.csv);;All files (*)"
+            self,
+            "Choose calibration CSV or .lif",
+            "",
+            "Calibration files (*.csv *.lif);;CSV files (*.csv);;"
+            "Leica .lif (*.lif);;All files (*)",
         )
-        if not path:
-            return
+        if path:
+            self._load_calibration_file(Path(path))
+
+    def _load_calibration_file(self, path: Path) -> None:
+        """Load calibration from ``path``, routing on its suffix.
+
+        Split from the file-picker slot so the state machine is reachable in
+        tests without driving a modal dialog. Every exit — success or failure
+        — refreshes the pairing table and invalidates the run gate, so a
+        changed calibration can never be run on a stale validation.
+        """
+        assert self._calibration_status_label is not None
         try:
-            self._calibration = self._csv_parser(Path(path))
-        except CalibrationCSVError as exc:
-            QMessageBox.critical(
-                self,
-                "CSV parse failed",
-                "\n".join(exc.errors[:30])
-                + ("\n…" if len(exc.errors) > 30 else ""),
-            )
-            self._calibration = None
-            self._csv_status_label.setText("No CSV loaded.")
-            self._refresh_pairing_table()
-            self._invalidate_run()
-            return
-        n_datasets = len(self._calibration.datasets())
-        n_rows = sum(len(chans) for chans in self._calibration.rows.values())
-        self._csv_status_label.setText(
-            f"Loaded: {n_rows} rows / {n_datasets} datasets"
-        )
+            if path.suffix.lower() == ".lif":
+                self._load_lif_calibration(path)
+            else:
+                self._load_csv_calibration(path)
+        except (CalibrationCSVError, LifCalibrationError) as exc:
+            self._fail_calibration_load(path, exc.errors)
+        except LifHeaderError as exc:
+            self._fail_calibration_load(path, [str(exc)])
         self._refresh_pairing_table()
         self._invalidate_run()
 
+    def _load_csv_calibration(self, path: Path) -> None:
+        calibration = self._csv_parser(path)
+        self._calibration = calibration
+        self._lif_records = ()
+        self._lif_bindings = {}
+        n_datasets = len(calibration.datasets())
+        n_rows = sum(len(chans) for chans in calibration.rows.values())
+        self._calibration_status_label.setText(
+            f"Loaded: {n_rows} rows / {n_datasets} datasets"
+        )
+
+    def _load_lif_calibration(self, path: Path) -> None:
+        records = self._lif_reader(path)
+        self._lif_records = records
+        # Seed the bindings with whatever follows unambiguously; the binding
+        # table shows the result and lets the user fix the rest.
+        self._lif_bindings = auto_match(records, self._dataset_selection())
+        self._recompute_lif_calibration()
+        stems = {r.dataset_stem for r in records}
+        self._calibration_status_label.setText(
+            f"Loaded: {len(records)} calibration record(s) / "
+            f"{len(stems)} region(s) from {path.name}"
+        )
+
+    def _fail_calibration_load(self, path: Path, errors: Sequence[str]) -> None:
+        assert self._calibration_status_label is not None
+        QMessageBox.critical(
+            self,
+            f"Could not read {path.name}",
+            "\n".join(errors[:30]) + ("\n…" if len(errors) > 30 else ""),
+        )
+        self._calibration = None
+        self._lif_records = ()
+        self._lif_bindings = {}
+        self._calibration_status_label.setText("No calibration loaded.")
+
+    def _dataset_selection(self) -> dict[str, list[str]]:
+        """Checked datasets as ``{.h5 stem: [channel names]}``.
+
+        This is the half of the binding that only the ``.h5`` files know; the
+        ``.lif`` supplies the other half.
+        """
+        selection: dict[str, list[str]] = {}
+        for dataset_path in self._checked_datasets():
+            try:
+                channel_names, _ = self._read_store_summary(dataset_path)
+            except Exception:  # noqa: BLE001 — an unreadable .h5 is reported at validate
+                continue
+            selection[dataset_path.stem] = list(channel_names)
+        return selection
+
+    def _recompute_lif_calibration(self) -> tuple[str, ...]:
+        """Rebuild ``_calibration`` from the current records and bindings.
+
+        Returns the unresolved-binding messages so the caller can decide
+        whether to surface them; loading only displays, validation blocks.
+        """
+        if not self._lif_records:
+            return ()
+        calibration, messages = resolve_lif_calibration(
+            self._lif_records, self._dataset_selection(), self._lif_bindings
+        )
+        self._calibration = calibration
+        return messages
+
     def _calibration_summary_text(self, dataset_stem: str) -> str:
         if self._calibration is None:
-            return "(no CSV)"
+            return "(no calibration)"
         rows = self._calibration.rows.get(dataset_stem)
         if not rows:
             return "(no rows for this dataset)"
