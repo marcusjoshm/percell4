@@ -11,6 +11,20 @@ list.
 
 ### Added
 
+- **FLIM calibration read straight from a Leica `.lif`.** The Batch TCSPC
+  dialog's calibration step now accepts a `.lif` wherever it accepted a CSV.
+  Pick the file and the phase, modulation, and laser frequency come out of the
+  header at full precision — no retyping, and no OCR pass over a screenshot of
+  the LAS X Phasor Calibration dialog. This matters because LAS X *displays*
+  rounded values: it shows `25.45°` and `0.9994` for numbers it stored as
+  `25.45322087` and `1.000587231`, so a hand-copied CSV starts about four
+  decimal places short. Because a `.lif` names its own regions and detectors
+  rather than your `.h5` channel names, a binding table maps the two: press
+  **Auto-match** to fill the rows that follow unambiguously, and use the
+  dropdowns for the rest. Anything left unbound blocks the run and says which
+  dataset and channel is short, rather than letting an uncalibrated channel
+  through. Calibration CSVs work exactly as before.
+
 - **A diameter reference circle for Cellpose, in the Segment tab.** Tick
   **Show diameter reference circle** under Cellpose and a magenta disc appears
   at the bottom-left of the image, exactly as many pixels across as the

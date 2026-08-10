@@ -4,6 +4,13 @@ Helper tools for turning a Leica **Phasor Calibration** table into the
 `batch_tcspc_calibration.csv` that PerCell4 ingests (per-channel
 `phase` / `modulation` / `frequency_mhz`).
 
+> **Prefer the `.lif` when you have one.** The Batch TCSPC dialog now reads
+> phase and modulation directly out of a Leica `.lif`, which is the same
+> calibration this tool OCRs off a screenshot of — except the file holds it
+> at full precision, while the dialog rounds for display. Reading the `.lif`
+> needs no Tesseract, no OCR review pass, and no manual CSV. Use these tools
+> when the `.lif` is unavailable and a screenshot is all you have.
+
 ## Files
 
 - `phasor_ocr_to_xlsx.py` — OCRs Leica Phasor Calibration screenshots (PNG) into
