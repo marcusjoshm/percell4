@@ -1046,3 +1046,194 @@ def test_section_numbers_are_unique(qtbot) -> None:
     ]
 
     assert len(numbers) == len(set(numbers)), f"duplicate section numbers: {numbers}"
+
+
+# ── .lif → channel binding table ───────────────────────────────────────
+
+
+def _binding_combo(dlg, row: int) -> QComboBox:
+    return dlg._lif_binding_table.cellWidget(row, 2)
+
+
+def _binding_rows(dlg) -> list[tuple[str, str, str]]:
+    table = dlg._lif_binding_table
+    return [
+        (
+            table.item(r, 0).text(),
+            table.item(r, 1).text(),
+            _binding_combo(dlg, r).currentText(),
+        )
+        for r in range(table.rowCount())
+    ]
+
+
+def test_binding_section_is_hidden_until_a_lif_is_loaded(
+    qtbot, tmp_path: Path
+) -> None:
+    cal = _bcal({"Dish 1": {"G3BP1": ChannelCalibration(80.0, 0.12, 0.98)}})
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: cal, lif_reader=lambda _p: (_lif_record(),)
+    )
+    qtbot.addWidget(dlg)
+
+    assert dlg._lif_binding_box.isVisibleTo(dlg) is False
+
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+    assert dlg._lif_binding_box.isVisibleTo(dlg) is False
+
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    assert dlg._lif_binding_box.isVisibleTo(dlg) is True
+
+
+def test_binding_rows_cover_every_checked_dataset_channel(
+    qtbot, tmp_path: Path
+) -> None:
+    a = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    b = _make_h5(tmp_path / "Dish 2.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(a, checked=True)
+    dlg._add_dataset_row(b, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert [(d, c) for d, c, _ in _binding_rows(dlg)] == [
+        ("Dish 1", "G3BP1"),
+        ("Dish 1", "mNG"),
+        ("Dish 2", "G3BP1"),
+    ]
+
+
+def test_auto_match_button_fills_the_unambiguous_row(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+
+    # Load before any dataset is checked, so nothing can auto-bind at load.
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._refresh_lif_binding_table()
+    assert _binding_rows(dlg) == [("Dish 1", "G3BP1", "(unmapped)")]
+
+    dlg._on_auto_match_lif()
+
+    assert _binding_rows(dlg) == [("Dish 1", "G3BP1", "Region_1 · HyD X 3")]
+
+
+def test_auto_match_leaves_an_ambiguous_row_unmapped(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    dlg._on_auto_match_lif()
+
+    assert [text for _, _, text in _binding_rows(dlg)] == [
+        "(unmapped)",
+        "(unmapped)",
+    ]
+
+
+def test_combo_labels_distinguish_records_from_different_regions(
+    qtbot, tmp_path: Path
+) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    records = (
+        _lif_record(stem="Dish 1", region="Region_1"),
+        _lif_record(stem="Dish 1", region="Region_2", detector="HyD X 1"),
+    )
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: records)
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    combo = _binding_combo(dlg, 0)
+    labels = [combo.itemText(i) for i in range(combo.count())]
+
+    assert labels == ["(unmapped)", "Region_1 · HyD X 3", "Region_2 · HyD X 1"]
+
+
+def test_manual_pick_survives_a_refresh_from_checking_another_dataset(
+    qtbot, tmp_path: Path
+) -> None:
+    a = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    b = _make_h5(tmp_path / "Dish 2.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(a, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    _binding_combo(dlg, 1).setCurrentIndex(1)  # bind Dish 1 / mNG by hand
+    assert _binding_rows(dlg)[1][2] == "Region_1 · HyD X 3"
+
+    dlg._add_dataset_row(b, checked=True)
+    dlg._refresh_lif_binding_table()
+
+    rows = {(d, c): text for d, c, text in _binding_rows(dlg)}
+    assert rows[("Dish 1", "mNG")] == "Region_1 · HyD X 3"
+
+
+def test_manual_pick_survives_auto_match(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    records = (
+        _lif_record(stem="Dish 1", region="Region_1"),
+        _lif_record(stem="Dish 1", region="Region_2", detector="HyD X 1"),
+    )
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: records)
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    _binding_combo(dlg, 0).setCurrentIndex(2)  # Region_2
+    dlg._on_auto_match_lif()
+
+    assert _binding_rows(dlg)[0][2] == "Region_2 · HyD X 1"
+
+
+def test_changing_a_binding_invalidates_the_run_gate(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    dlg._validated = True
+    dlg._run_btn.setEnabled(True)
+    _binding_combo(dlg, 0).setCurrentIndex(0)  # back to (unmapped)
+
+    assert dlg._validated is False
+    assert dlg._run_btn.isEnabled() is False
+
+
+def test_binding_a_channel_updates_the_resolved_calibration(
+    qtbot, tmp_path: Path
+) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert dlg._calibration.get("Dish 1", "mNG") is None
+    _binding_combo(dlg, 1).setCurrentIndex(1)
+
+    assert dlg._calibration.get("Dish 1", "mNG").phase == pytest.approx(-0.444242509)
+
+
+def test_checking_a_dataset_refreshes_the_binding_table(qtbot, tmp_path: Path) -> None:
+    """The binding rows track the dataset selection with no explicit refresh."""
+    a = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    b = _make_h5(tmp_path / "Dish 2.h5", ["mNG"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(a, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    assert len(_binding_rows(dlg)) == 1
+
+    dlg._add_dataset_row(b, checked=True)
+    dlg._on_dataset_check_changed()
+
+    assert [(d, c) for d, c, _ in _binding_rows(dlg)] == [
+        ("Dish 1", "G3BP1"),
+        ("Dish 2", "mNG"),
+    ]

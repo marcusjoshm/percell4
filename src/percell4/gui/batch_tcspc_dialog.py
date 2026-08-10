@@ -91,6 +91,7 @@ from percell4.gui.tcspc_tab_state import build_rule_from_preset
 from percell4.io.paths import scan_files
 
 _NO_PAIR_LABEL = "— select —"
+_NO_BINDING_LABEL = "(unmapped)"
 _SKIP_LABEL = "— skip —"
 _AUTO_PAIR_THRESHOLD = 0.6
 
@@ -141,6 +142,10 @@ class BatchTCSPCDialog(QDialog):
         # know the .h5 channel names. Empty whenever a CSV is the source.
         self._lif_records: tuple[LifCalibrationRecord, ...] = ()
         self._lif_bindings: dict[tuple[str, str], int] = {}
+        # Cells the user set by hand. Kept apart from _lif_bindings so a
+        # rebuild or a later Auto-match cannot overwrite a deliberate pick.
+        self._lif_manual_bindings: dict[tuple[str, str], int | None] = {}
+        self._suppress_binding_signal: bool = False
         self._validated: bool = False
         self._suppress_pair_signal: bool = False
         # channel_name -> .bin token string (e.g. "CA-SiR" -> "1"). Required
@@ -157,6 +162,8 @@ class BatchTCSPCDialog(QDialog):
         self._calibration_status_label: QLabel | None = None
         self._channel_tokens_table: QTableWidget | None = None
         self._channel_tokens_status_label: QLabel | None = None
+        self._lif_binding_box: QGroupBox | None = None
+        self._lif_binding_table: QTableWidget | None = None
         self._validate_log: QPlainTextEdit | None = None
         self._run_btn: QPushButton | None = None
         self._validate_btn: QPushButton | None = None
@@ -194,6 +201,7 @@ class BatchTCSPCDialog(QDialog):
         body.addWidget(self._build_section_pairing())
         body.addWidget(self._build_section_channel_tokens())
         body.addWidget(self._build_section_calibration())
+        body.addWidget(self._build_section_lif_binding())
         body.addWidget(self._build_section_stitching())
         body.addWidget(self._build_section_conflict_policy())
         body.addWidget(self._build_section_validation())
@@ -340,6 +348,141 @@ class BatchTCSPCDialog(QDialog):
         layout.addWidget(self._calibration_status_label, 1)
         return box
 
+    def _build_section_lif_binding(self) -> QGroupBox:
+        """Bind each .h5 channel to a record from the loaded ``.lif``.
+
+        A CSV names the ``.h5`` stem and channel directly, so it needs no
+        binding step; a ``.lif`` knows only its own region and detector names.
+        Follows the pairing section's shape — a table of combos plus one
+        auto-fill button — so the two mapping steps in this dialog behave the
+        same way.
+        """
+        box = QGroupBox("6. .lif → channel binding")
+        layout = QVBoxLayout(box)
+
+        layout.addWidget(
+            QLabel(
+                "One row per channel needing calibration. Auto-match fills the "
+                "rows that follow unambiguously; set the rest by hand."
+            )
+        )
+
+        self._lif_binding_table = QTableWidget(0, 3)
+        self._lif_binding_table.setHorizontalHeaderLabels(
+            ["Dataset", "Channel", ".lif calibration record"]
+        )
+        self._lif_binding_table.horizontalHeader().setStretchLastSection(True)
+        self._lif_binding_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._lif_binding_table.verticalHeader().setVisible(False)
+        self._lif_binding_table.setMinimumHeight(140)
+        layout.addWidget(self._lif_binding_table)
+
+        auto_btn = QPushButton("Auto-match")
+        auto_btn.clicked.connect(self._on_auto_match_lif)
+        row = QHBoxLayout()
+        row.addWidget(auto_btn)
+        row.addStretch()
+        layout.addLayout(row)
+
+        self._lif_binding_box = box
+        box.setVisible(False)
+        return box
+
+    def _refresh_lif_binding_table(self) -> None:
+        """Rebuild the binding rows from the current selection and records.
+
+        Row values resolve in precedence order: an explicit user pick wins,
+        then any binding already in effect whose record still exists, else
+        unmapped. That ordering is what lets a deliberate pick survive a
+        rebuild caused by checking another dataset.
+        """
+        assert self._lif_binding_box is not None
+        assert self._lif_binding_table is not None
+
+        has_records = bool(self._lif_records)
+        self._lif_binding_box.setVisible(has_records)
+        if not has_records:
+            self._lif_binding_table.setRowCount(0)
+            return
+
+        selection = self._dataset_selection()
+        resolved: dict[tuple[str, str], int] = {}
+
+        self._suppress_binding_signal = True
+        try:
+            self._lif_binding_table.setRowCount(0)
+            for stem, channels in selection.items():
+                for channel in channels:
+                    key = (stem, channel)
+                    index = self._effective_binding(key)
+                    if index is not None:
+                        resolved[key] = index
+                    self._add_lif_binding_row(stem, channel, index)
+        finally:
+            self._suppress_binding_signal = False
+
+        self._lif_bindings = resolved
+
+    def _effective_binding(self, key: tuple[str, str]) -> int | None:
+        if key in self._lif_manual_bindings:
+            return self._lif_manual_bindings[key]
+        index = self._lif_bindings.get(key)
+        if index is not None and 0 <= index < len(self._lif_records):
+            return index
+        return None
+
+    def _add_lif_binding_row(self, stem: str, channel: str, index: int | None) -> None:
+        assert self._lif_binding_table is not None
+        row = self._lif_binding_table.rowCount()
+        self._lif_binding_table.insertRow(row)
+        for column, text in ((0, stem), (1, channel)):
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self._lif_binding_table.setItem(row, column, item)
+
+        combo = QComboBox()
+        combo.addItem(_NO_BINDING_LABEL, None)
+        for record_index, record in enumerate(self._lif_records):
+            combo.addItem(record.label, record_index)
+        combo.setCurrentIndex(0 if index is None else index + 1)
+        combo.currentIndexChanged.connect(
+            lambda _i, k=(stem, channel), c=combo: self._on_lif_binding_changed(k, c)
+        )
+        self._lif_binding_table.setCellWidget(row, 2, combo)
+
+    def _on_lif_binding_changed(
+        self, key: tuple[str, str], combo: QComboBox
+    ) -> None:
+        if self._suppress_binding_signal:
+            return
+        index = combo.currentData()
+        self._lif_manual_bindings[key] = index
+        if index is None:
+            self._lif_bindings.pop(key, None)
+        else:
+            self._lif_bindings[key] = index
+        self._recompute_lif_calibration()
+        self._refresh_pairing_table()
+        self._invalidate_run()
+
+    def _on_auto_match_lif(self) -> None:
+        """Fill what follows unambiguously, leaving manual picks alone.
+
+        Updates rather than replaces, so rows Auto-match has no opinion about
+        keep whatever they already hold.
+        """
+        if not self._lif_records:
+            return
+        self._lif_bindings.update(
+            auto_match(self._lif_records, self._dataset_selection())
+        )
+        self._refresh_lif_binding_table()
+        self._recompute_lif_calibration()
+        self._refresh_pairing_table()
+        self._invalidate_run()
+
     def _build_section_stitching(self) -> QGroupBox:
         """Section 5 — Stitching + orientation + raw ``.bin`` geometry.
 
@@ -352,7 +495,7 @@ class BatchTCSPCDialog(QDialog):
 
         Registration controls stay visible on this surface, unchanged.
         """
-        box = QGroupBox("6. Stitching & orientation (applied to every dataset)")
+        box = QGroupBox("7. Stitching & orientation (applied to every dataset)")
         layout = QVBoxLayout(box)
         self._stitching_form = StitchingForm(
             show_registration=True, show_fusion=False, title=""
@@ -369,7 +512,7 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_conflict_policy(self) -> QGroupBox:
-        box = QGroupBox("7. If a /decay layer already exists")
+        box = QGroupBox("8. If a /decay layer already exists")
         layout = QHBoxLayout(box)
         self._conflict_skip_radio = QRadioButton("Skip existing layers")
         self._conflict_skip_radio.setChecked(True)
@@ -384,7 +527,7 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_validation(self) -> QGroupBox:
-        box = QGroupBox("8. Pre-flight report")
+        box = QGroupBox("9. Pre-flight report")
         layout = QVBoxLayout(box)
         self._validate_log = QPlainTextEdit()
         self._validate_log.setReadOnly(True)
@@ -424,6 +567,7 @@ class BatchTCSPCDialog(QDialog):
             self._add_dataset_row(path, checked=True)
         self._refresh_pairing_table()
         self._refresh_channel_tokens_table()
+        self._refresh_lif_binding_table()
         self._invalidate_run()
 
     def _on_remove_datasets(self) -> None:
@@ -437,6 +581,7 @@ class BatchTCSPCDialog(QDialog):
             del self._datasets[row]
         self._refresh_pairing_table()
         self._refresh_channel_tokens_table()
+        self._refresh_lif_binding_table()
         self._invalidate_run()
 
     def _on_dataset_check_changed(self) -> None:
@@ -448,6 +593,7 @@ class BatchTCSPCDialog(QDialog):
         """
         self._refresh_pairing_table()
         self._refresh_channel_tokens_table()
+        self._refresh_lif_binding_table()
         self._invalidate_run()
 
     def _add_dataset_row(self, path: Path, *, checked: bool) -> None:
@@ -577,6 +723,7 @@ class BatchTCSPCDialog(QDialog):
         # Pairing changed → re-scan available .bin tokens from whichever
         # group is now first-paired, then re-render the channel-tokens table.
         self._refresh_channel_tokens_table()
+        self._refresh_lif_binding_table()
         self._invalidate_run()
 
     def _enforce_pairing_uniqueness(
@@ -633,6 +780,7 @@ class BatchTCSPCDialog(QDialog):
                         combo.setCurrentIndex(idx)
                         self._suppress_pair_signal = False
         self._refresh_channel_tokens_table()
+        self._refresh_lif_binding_table()
         self._invalidate_run()
 
     # ────────────────────────────────────────────────────────────
@@ -826,6 +974,8 @@ class BatchTCSPCDialog(QDialog):
         self._calibration = calibration
         self._lif_records = ()
         self._lif_bindings = {}
+        self._lif_manual_bindings = {}
+        self._refresh_lif_binding_table()
         n_datasets = len(calibration.datasets())
         n_rows = sum(len(chans) for chans in calibration.rows.values())
         self._calibration_status_label.setText(
@@ -837,7 +987,9 @@ class BatchTCSPCDialog(QDialog):
         self._lif_records = records
         # Seed the bindings with whatever follows unambiguously; the binding
         # table shows the result and lets the user fix the rest.
+        self._lif_manual_bindings = {}
         self._lif_bindings = auto_match(records, self._dataset_selection())
+        self._refresh_lif_binding_table()
         self._recompute_lif_calibration()
         stems = {r.dataset_stem for r in records}
         self._calibration_status_label.setText(
@@ -855,6 +1007,8 @@ class BatchTCSPCDialog(QDialog):
         self._calibration = None
         self._lif_records = ()
         self._lif_bindings = {}
+        self._lif_manual_bindings = {}
+        self._refresh_lif_binding_table()
         self._calibration_status_label.setText("No calibration loaded.")
 
     def _dataset_selection(self) -> dict[str, list[str]]:
