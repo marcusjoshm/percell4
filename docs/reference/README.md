@@ -20,4 +20,11 @@ let stale references accumulate.
   records and which one is correct.
 - [`lif-xml-header.xml`](lif-xml-header.xml) — the full pretty-printed header of
   the reference file, for grep.
+- [`lif-multichannel-metadata.md`](lif-multichannel-metadata.md) — a two-region,
+  two-channel acquisition, and how a calibration block is tied to its channel.
+  The block's own `<Channel>` element reads 0 in every block and names nothing;
+  position within `PhasorData` is the identity. Read this before changing how
+  records are labelled or auto-matched.
+- [`lif-xml-header-multichannel.xml`](lif-xml-header-multichannel.xml) — that
+  file's full pretty-printed header.
 

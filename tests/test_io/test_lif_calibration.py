@@ -36,36 +36,62 @@ EXPECTED_FREQ_MHZ = 78.020000
 ACQUISITION_PHASE = -0.348959893
 
 
-def _acquisition_block(detector: str = "HyD X 3", index: int = 0) -> str:
-    return (
-        "<RawData><Sequence><SequenceItem><Detectors><Detectors>"
-        f"<Detector>{index}</Detector>"
+def _acquisition_block(*detectors: str) -> str:
+    """Ordered detector records.
+
+    Every one reports ``<Detector>0</Detector>``, matching real files — which
+    is why extraction pairs blocks to detectors by position, not by that value.
+    """
+    names = detectors or ("HyD X 3",)
+    records = "".join(
+        "<Detectors>"
+        "<Detector>0</Detector>"
         "<LaserPulseFrequency>78020000</LaserPulseFrequency>"
         "<PhasorAutomaticReference>true</PhasorAutomaticReference>"
         f"<PhasorPhase>{ACQ_PHASE_DEG}</PhasorPhase>"
         f"<PhasorAmplitude>{ACQ_AMPLITUDE}</PhasorAmplitude>"
-        f"<Name>{detector}</Name>"
-        "</Detectors></Detectors></SequenceItem></Sequence></RawData>"
+        f"<Name>{name}</Name>"
+        "</Detectors>"
+        for name in names
+    )
+    return (
+        "<RawData><Sequence><SequenceItem><Detectors>"
+        f"{records}"
+        "</Detectors></SequenceItem></Sequence></RawData>"
     )
 
 
-def _phasor_block(
+def _channels_block(
     *,
     channel: int = 0,
     phase: str = REF_PHASE_DEG,
     amplitude: str = REF_AMPLITUDE,
     period: str = REF_PERIOD,
 ) -> str:
+    """One calibration block.
+
+    ``channel`` is written verbatim so tests can prove it is ignored: LAS X
+    reports 0 in every block regardless of which channel it describes.
+    """
     return (
-        "<PhasorData><Channels>"
+        "<Channels>"
         f"<Channel>{channel}</Channel>"
         f"<Period>{period}</Period>"
         "<AutomaticReference>true</AutomaticReference>"
         f"<AutomaticReferencePhase>{phase}</AutomaticReferencePhase>"
         f"<AutomaticReferenceAmplitude>{amplitude}</AutomaticReferenceAmplitude>"
         "<Filter>Wavelet</Filter><FilterSize>3</FilterSize>"
-        "</Channels></PhasorData>"
+        "</Channels>"
     )
+
+
+def _phasor_data(*blocks: str) -> str:
+    """Several calibration blocks in one ``PhasorData``, as a real region has."""
+    return "<PhasorData>" + "".join(blocks) + "</PhasorData>"
+
+
+def _phasor_block(**kwargs) -> str:
+    return _phasor_data(_channels_block(**kwargs))
 
 
 # A Channels element with no AutomaticReferencePhase. The reference file has 25
@@ -182,10 +208,8 @@ def test_decoy_channels_blocks_are_not_matched(lif_file):
     assert len(records) == 1
 
 
-def test_detector_name_resolves_by_channel_index(lif_file):
-    xml = _header(
-        _region("Region_1", _acquisition_block(detector="HyD X 3") + _phasor_block())
-    )
+def test_detector_name_resolves_positionally(lif_file):
+    xml = _header(_region("Region_1", _acquisition_block("HyD X 3") + _phasor_block()))
 
     (record,) = read_lif_calibration(lif_file(xml))
 
@@ -193,12 +217,32 @@ def test_detector_name_resolves_by_channel_index(lif_file):
     assert record.channel_index == 0
 
 
-def test_detector_name_falls_back_to_the_channel_index(lif_file):
+def test_each_block_takes_the_detector_at_its_own_position(lif_file):
+    """Two channels, two detectors, and a <Channel> value that names neither."""
+    xml = _header(
+        _region(
+            "Region_1",
+            _acquisition_block("HyD X 3", "HyD X 1")
+            + _phasor_data(
+                _channels_block(channel=0, phase="34.83"),
+                _channels_block(channel=0, phase="32.70"),
+            ),
+        )
+    )
+
+    first, second = read_lif_calibration(lif_file(xml))
+
+    assert (first.channel_index, first.detector_name) == (0, "HyD X 3")
+    assert (second.channel_index, second.detector_name) == (1, "HyD X 1")
+
+
+def test_detector_name_falls_back_to_the_position(lif_file):
     xml = _header(_region("Region_1", _phasor_block(channel=2)))
 
     (record,) = read_lif_calibration(lif_file(xml))
 
-    assert record.detector_name == "ch2"
+    assert record.detector_name == "detector 0"
+    assert record.channel_index == 0
 
 
 def test_harmonic_defaults_to_one_when_absent(lif_file):
@@ -246,31 +290,35 @@ def test_zero_amplitude_is_an_error(lif_file):
     assert "amplitude" in str(excinfo.value).lower()
 
 
-def test_record_label_shows_the_las_x_facing_values(lif_file):
-    """Phase reads back as LAS X displays it, so rows cross-check by eye."""
+def test_record_label_names_region_channel_and_detector(lif_file):
     xml = _header(_region("Region_1", _acquisition_block() + _phasor_block()))
 
     (record,) = read_lif_calibration(lif_file(xml))
 
     assert isinstance(record, LifCalibrationRecord)
-    assert record.label == "Region_1 · HyD X 3 · φ 25.4532° · m 0.999413"
+    assert record.label == "Region_1 · ch0 HyD X 3"
 
 
-def test_labels_distinguish_records_that_share_region_and_detector(lif_file):
-    """A region can hold several records for one detector; all must be pickable."""
+def test_labels_distinguish_every_record_in_a_region(lif_file):
+    """A multi-channel region's records must all be separately pickable."""
     xml = _header(
         _region(
             "Region_1",
-            _acquisition_block()
-            + _phasor_block(phase="34.8309987", amplitude="1.00029786")
-            + _phasor_block(phase="32.70105596", amplitude="1.000585206"),
+            _acquisition_block("HyD X 3", "HyD X 1")
+            + _phasor_data(
+                _channels_block(phase="34.8309987", amplitude="1.00029786"),
+                _channels_block(phase="32.70105596", amplitude="1.000585206"),
+            ),
         )
     )
 
     records = read_lif_calibration(lif_file(xml))
 
     assert len(records) == 2
-    assert len({r.label for r in records}) == 2
+    assert [r.label for r in records] == [
+        "Region_1 · ch0 HyD X 3",
+        "Region_1 · ch1 HyD X 1",
+    ]
 
 
 def test_dataset_stem_drops_a_lif_suffix_on_the_root_element(lif_file):
@@ -364,8 +412,27 @@ def test_auto_match_leaves_two_channels_unbound():
     assert auto_match(records, selection) == {}
 
 
-def test_auto_match_leaves_two_records_unbound():
+def test_auto_match_binds_channels_to_records_by_position():
+    """Two records, two channels: the n-th channel takes the n-th record."""
     records = [_record(channel_index=0), _record(channel_index=1, detector="HyD X 1")]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
+
+    assert auto_match(records, selection) == {
+        ("FLIM_calibratoin_test_Region_1", "G3BP1"): 0,
+        ("FLIM_calibratoin_test_Region_1", "mNG"): 1,
+    }
+
+
+def test_auto_match_refuses_when_counts_disagree():
+    records = [_record(channel_index=0), _record(channel_index=1, detector="HyD X 1")]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG", "Halo"]}
+
+    assert auto_match(records, selection) == {}
+
+
+def test_auto_match_refuses_when_positions_are_not_consecutive():
+    """A gap means a block was skipped; position can no longer be trusted."""
+    records = [_record(channel_index=0), _record(channel_index=2, detector="HyD X 1")]
     selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
 
     assert auto_match(records, selection) == {}
@@ -516,6 +583,14 @@ def test_multi_region_lif_records_are_all_distinguishable():
 
     assert len(records) == 4
     assert len({r.label for r in records}) == 4
+    # Two channels per region, each named by its own detector — not the same
+    # detector twice, which is what a <Channel>-keyed lookup produced.
+    assert [r.label for r in records] == [
+        "UT Hpep3 5x8 · ch0 HyD X 3",
+        "UT Hpep3 5x8 · ch1 HyD X 1",
+        "As Hpep3 5x8 · ch0 HyD X 3",
+        "As Hpep3 5x8 · ch1 HyD X 1",
+    ]
     assert {r.dataset_stem for r in records} == {
         "Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2_UT Hpep3 5x8",
         "Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2_As Hpep3 5x8",
@@ -538,5 +613,10 @@ def test_multi_region_lif_auto_matches_against_real_h5_stems():
     for stem in selection:
         assert [r for r in records if r.dataset_stem == stem], f"no record for {stem}"
 
-    # Ambiguous by design: two candidate records against two channels.
-    assert auto_match(records, selection) == {}
+    # Two records, two channels, positions 0 and 1: every row binds.
+    bindings = auto_match(records, selection)
+    assert len(bindings) == 4
+    cal, unresolved = resolve_lif_calibration(records, selection, bindings)
+    assert unresolved == ()
+    ut = "Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2_UT Hpep3 5x8"
+    assert cal.get(ut, "Halo").phase != cal.get(ut, "mNG").phase

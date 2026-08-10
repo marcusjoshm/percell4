@@ -64,6 +64,9 @@ class LifCalibrationRecord:
     dataset_stem: str
     region_name: str
     element_path: str
+    #: Position of this calibration block within its ``PhasorData``. This is
+    #: the channel identity — the block's own ``<Channel>`` element reads 0 in
+    #: every block, so it names nothing.
     channel_index: int
     detector_name: str
     frequency_mhz: float
@@ -73,23 +76,8 @@ class LifCalibrationRecord:
 
     @property
     def label(self) -> str:
-        """Identity for a picker, unique enough to choose between records.
-
-        A region can hold several calibration records for the same detector
-        and channel — the reference file has one, but real acquisitions carry
-        two — and then region and detector alone name them all identically.
-        Phase and modulation are the only fields that differ, so they belong
-        in the label.
-
-        Phase renders as LAS X shows it: degrees, positive. The stored value
-        is negated radians (KTD2), so a row here can be read straight across
-        against the Phasor Calibration dialog.
-        """
-        phase_deg = -math.degrees(self.phase)
-        return (
-            f"{self.region_name} · {self.detector_name} · "
-            f"φ {phase_deg:.4f}° · m {self.modulation:.6f}"
-        )
+        """Identity for a picker: region, channel ordinal, and detector."""
+        return f"{self.region_name} · ch{self.channel_index} {self.detector_name}"
 
 
 def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
@@ -109,7 +97,17 @@ def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
     root = read_lif_header(path)
     parents = {child: parent for parent in root.iter() for child in parent}
 
-    blocks = [c for c in root.iter("Channels") if c.find(CALIBRATION_MARKER) is not None]
+    # Enumerate per container: a region's calibration blocks are ordered, and
+    # that order is the only thing tying a block to a channel.
+    blocks: list[tuple[ET.Element, int]] = []
+    for container in root.iter():
+        siblings = [
+            c
+            for c in container
+            if c.tag == "Channels" and c.find(CALIBRATION_MARKER) is not None
+        ]
+        blocks.extend((block, ordinal) for ordinal, block in enumerate(siblings))
+
     if not blocks:
         raise LifCalibrationError(
             [
@@ -121,9 +119,9 @@ def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
 
     errors: list[str] = []
     records: list[LifCalibrationRecord] = []
-    for block in blocks:
+    for block, ordinal in blocks:
         chain = _element_chain(block, parents)
-        record = _build_record(block, chain, parents, errors)
+        record = _build_record(block, ordinal, chain, parents, errors)
         if record is not None:
             records.append(record)
 
@@ -156,6 +154,7 @@ def _owning_element(node: ET.Element, parents: dict) -> ET.Element | None:
 
 def _build_record(
     block: ET.Element,
+    ordinal: int,
     chain: list[str],
     parents: dict,
     errors: list[str],
@@ -171,8 +170,6 @@ def _build_record(
     # Best-effort even so: the caller lets the user rebind when it misses.
     parts = [_strip_lif_suffix(part) for part in chain[:2]]
     stem = "_".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
-
-    channel_index = _int(block.findtext("Channel"), default=0)
 
     period = _float(block.findtext("Period"), f"{where}: 'Period'", errors)
     phase_deg = _float(
@@ -200,8 +197,8 @@ def _build_record(
         dataset_stem=stem,
         region_name=region,
         element_path="/".join(chain),
-        channel_index=channel_index,
-        detector_name=_detector_name(owner, channel_index),
+        channel_index=ordinal,
+        detector_name=_detector_name(owner, ordinal),
         frequency_mhz=1.0 / period / 1e6,
         phase=-math.radians(phase_deg),
         modulation=1.0 / amplitude,
@@ -209,19 +206,25 @@ def _build_record(
     )
 
 
-def _detector_name(owner: ET.Element | None, channel_index: int) -> str:
-    """Detector label from the acquisition block whose index matches.
+def _detector_name(owner: ET.Element | None, ordinal: int) -> str:
+    """Name of the ``ordinal``-th detector record in this element.
 
-    Display only — nothing binds on it, so a miss costs a nicer label and
-    falls back to the channel index.
+    Positional, deliberately. Every acquisition detector record reports
+    ``<Detector>0</Detector>`` regardless of which detector it describes, so a
+    lookup keyed on that value returns the first detector for every block — the
+    reason a two-channel region used to show the same detector name twice. A
+    region carries its calibration blocks and its detector records in the same
+    order, and that correspondence is what names a block.
     """
     if owner is not None:
-        for detectors in owner.iter("Detectors"):
-            name = detectors.findtext("Name")
-            index = detectors.findtext("Detector")
-            if name and index is not None and _int(index, default=-1) == channel_index:
-                return name
-    return f"ch{channel_index}"
+        names = [
+            name
+            for detectors in owner.iter("Detectors")
+            if (name := detectors.findtext("Name"))
+        ]
+        if ordinal < len(names):
+            return names[ordinal]
+    return f"detector {ordinal}"
 
 
 def _harmonic(owner: ET.Element | None) -> int:
@@ -270,17 +273,30 @@ def auto_match(
     """Propose bindings that follow unambiguously from the inputs.
 
     ``selection`` maps a dataset stem to the channel names that need
-    calibration. A dataset binds by exact stem match; within it, a channel
-    binds only when there is exactly one candidate record and exactly one
-    channel. Anything else is left out rather than guessed — a wrong silent
-    binding writes a wrong calibration into the ``.h5``, whereas an unbound
-    row is visible in the table and blocks validation.
+    calibration. A dataset binds by exact stem match. Within it, channels bind
+    by position when the counts agree and the records occupy consecutive
+    positions from zero — the ``.lif`` orders its calibration blocks the way
+    the acquisition ordered its detectors, and the ``.h5`` orders its channels
+    the same way, so the *n*-th channel takes the *n*-th record. A single
+    record against a single channel is that rule's simplest case.
+
+    Any other shape is left out rather than guessed: a wrong silent binding
+    writes a wrong calibration into the ``.h5``, whereas an unbound row is
+    visible in the table and blocks validation.
+
+    Position is an inference, not a proof — the table shows every binding so
+    it can be corrected before the run.
     """
     bindings: Bindings = {}
     for stem, channels in selection.items():
         candidates = [i for i, r in enumerate(records) if r.dataset_stem == stem]
-        if len(candidates) == 1 and len(channels) == 1:
-            bindings[(stem, channels[0])] = candidates[0]
+        if len(candidates) != len(channels):
+            continue
+        by_position = sorted(candidates, key=lambda i: records[i].channel_index)
+        if [records[i].channel_index for i in by_position] != list(range(len(channels))):
+            continue
+        for channel, index in zip(channels, by_position, strict=True):
+            bindings[(stem, channel)] = index
     return bindings
 
 
