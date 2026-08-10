@@ -464,17 +464,22 @@ class BatchTCSPCDialog(QDialog):
         for record_index, record in enumerate(self._lif_records):
             combo.addItem(record.label, record_index)
         combo.setCurrentIndex(0 if index is None else index + 1)
+        # Capture the key only, never the combo. Rebuilding this table destroys
+        # its cell widgets, and a closure holding one keeps the Python wrapper
+        # alive past its C++ object. Row 0 is the unmapped sentinel, so combo
+        # row N carries record N-1.
         combo.currentIndexChanged.connect(
-            lambda _i, k=(stem, channel), c=combo: self._on_lif_binding_changed(k, c)
+            lambda combo_row, k=(stem, channel): self._on_lif_binding_changed(
+                k, None if combo_row <= 0 else combo_row - 1
+            )
         )
         self._lif_binding_table.setCellWidget(row, 2, combo)
 
     def _on_lif_binding_changed(
-        self, key: tuple[str, str], combo: QComboBox
+        self, key: tuple[str, str], index: int | None
     ) -> None:
         if self._suppress_binding_signal:
             return
-        index = combo.currentData()
         self._lif_manual_bindings[key] = index
         if index is None:
             self._lif_bindings.pop(key, None)

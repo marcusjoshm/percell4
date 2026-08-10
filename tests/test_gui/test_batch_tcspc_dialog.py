@@ -852,14 +852,22 @@ def _lif_record(
 
 
 def _silence_critical(monkeypatch) -> list[tuple[str, str]]:
-    """Capture QMessageBox.critical calls instead of blocking on them."""
+    """Capture QMessageBox.critical calls instead of blocking on them.
+
+    Swaps the module's reference to the class, not ``critical`` on the real
+    PyQt class. Assigning onto a C++-backed Qt class mutates it process-wide
+    for every later test, and restoring it is not reliably clean — this stub
+    is scoped to the module under test.
+    """
     seen: list[tuple[str, str]] = []
 
-    def fake(_parent, title, text, *args, **kwargs):  # noqa: ANN001, ARG001
-        seen.append((title, text))
+    class _StubMessageBox:
+        @staticmethod
+        def critical(_parent, title, text, *args, **kwargs):  # noqa: ANN001, ARG001
+            seen.append((title, text))
 
     monkeypatch.setattr(
-        "percell4.gui.batch_tcspc_dialog.QMessageBox.critical", staticmethod(fake)
+        "percell4.gui.batch_tcspc_dialog.QMessageBox", _StubMessageBox
     )
     return seen
 
