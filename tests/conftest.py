@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import struct
 
 # Pin qtpy's binding before anything can import it. A dev machine often has
 # PyQt5, PyQt6, and PySide6 installed at once (napari and its plugins pull
@@ -275,3 +276,36 @@ def sample_image() -> np.ndarray:
     image[50:70, 60:80] = 250.0
     image[70:85, 35:50] = 175.0
     return image
+
+
+@pytest.fixture
+def lif_header_bytes():
+    """Factory wrapping header XML in a valid ``.lif`` container prefix.
+
+    The reference ``.lif`` is 78 MB and cannot be checked in, so every
+    ``.lif`` test synthesises the header it needs. Returns bytes shaped like
+    a real file's first block: ``0x70`` marker, remaining-byte count, ``0x2A``
+    separator, UTF-16 character count, then the XML as UTF-16LE.
+
+    The byte count at offset 4 covers the separator and the character count
+    as well as the XML — five bytes more than the payload — which is the
+    trap ``read_lif_header`` has to avoid. Overridable so tests can build
+    deliberately malformed containers.
+    """
+
+    def build(
+        xml: str,
+        *,
+        marker: int = 0x70,
+        separator: int = 0x2A,
+        nchars: int | None = None,
+        truncate: int = 0,
+    ) -> bytes:
+        payload = xml.encode("utf-16-le")
+        declared = len(xml) if nchars is None else nchars
+        head = struct.pack("<ii", marker, 1 + 4 + len(payload))
+        head += bytes([separator]) + struct.pack("<i", declared)
+        blob = head + payload
+        return blob[: len(blob) - truncate] if truncate else blob
+
+    return build

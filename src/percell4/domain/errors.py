@@ -47,3 +47,14 @@ class CalibrationCSVError(PercellError):
     def __init__(self, errors: list[str] | tuple[str, ...]) -> None:
         self.errors: tuple[str, ...] = tuple(errors)
         super().__init__("; ".join(self.errors))
+
+
+class LifHeaderError(PercellError):
+    """A Leica ``.lif`` container header could not be read.
+
+    Covers both "this is not a ``.lif``" (bad block marker or separator) and
+    "this ``.lif`` is damaged" (truncated payload, malformed XML). The message
+    names the file and the failing check so the caller can tell those apart.
+    Single-failure by nature — unlike :class:`CalibrationCSVError`, there is
+    nothing to accumulate; the first bad byte ends the read.
+    """
