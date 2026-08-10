@@ -227,10 +227,41 @@ def _flush_pending_qt_deletions():
     app = QApplication.instance()
     if app is None:
         return
+    _schedule_pyqtgraph_window_deletion(app)
     for _ in range(3):
         app.processEvents()
     app.sendPostedEvents(None, QEvent.DeferredDelete)
     app.processEvents()
+
+
+def _schedule_pyqtgraph_window_deletion(app) -> None:
+    """Put closed-but-alive pyqtgraph windows on the deferred-delete queue.
+
+    ``qtbot.addWidget`` closes a widget at teardown but never destroys it, so a
+    window holding a pyqtgraph ``PlotWidget`` — the CNR/metric segmenter, the
+    threshold-QC and phasor views — survives its test with a live
+    ``GraphicsView`` on it. A later test spins the event loop, that stale view
+    is painted, its ``AxisItem`` has since been collected, and the process
+    segfaults inside ``GraphicsView.paintEvent``. The crash lands on whichever
+    test is running at the time, which is why it presented as an unrelated
+    flake in ``tests/test_gui/test_metric_segmenter_panel.py``.
+
+    Nothing else puts these windows on the queue, so the drain below has
+    nothing to collect unless they are scheduled here first. Widgets already
+    destroyed on the C++ side raise on attribute access; they are what this
+    is cleaning up after, so skip them.
+    """
+    try:
+        from pyqtgraph.widgets.GraphicsView import GraphicsView
+    except Exception:  # noqa: BLE001 — pyqtgraph absent; nothing to clean
+        return
+    for widget in list(app.topLevelWidgets()):
+        try:
+            if isinstance(widget, GraphicsView) or widget.findChildren(GraphicsView):
+                widget.close()
+                widget.deleteLater()
+        except RuntimeError:
+            continue
 
 
 @pytest.fixture
