@@ -390,6 +390,23 @@ class BatchTCSPCDialog(QDialog):
         box.setVisible(False)
         return box
 
+    def _clear_lif_state(self) -> None:
+        """Drop every trace of a loaded ``.lif``, including the user's picks."""
+        self._lif_records = ()
+        self._lif_bindings = {}
+        self._lif_manual_bindings = {}
+        self._refresh_lif_binding_table()
+
+    def _refresh_selection_tables(self) -> None:
+        """Rebuild both tables keyed on the dataset selection.
+
+        Kept together because they answer the same question — which channels
+        are in play — and a caller that refreshed only one would leave the
+        other showing a stale channel set.
+        """
+        self._refresh_channel_tokens_table()
+        self._refresh_lif_binding_table()
+
     def _refresh_lif_binding_table(self) -> None:
         """Rebuild the binding rows from the current selection and records.
 
@@ -566,8 +583,7 @@ class BatchTCSPCDialog(QDialog):
                 continue
             self._add_dataset_row(path, checked=True)
         self._refresh_pairing_table()
-        self._refresh_channel_tokens_table()
-        self._refresh_lif_binding_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _on_remove_datasets(self) -> None:
@@ -580,8 +596,7 @@ class BatchTCSPCDialog(QDialog):
             self._dataset_table.removeRow(row)
             del self._datasets[row]
         self._refresh_pairing_table()
-        self._refresh_channel_tokens_table()
-        self._refresh_lif_binding_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _on_dataset_check_changed(self) -> None:
@@ -592,8 +607,7 @@ class BatchTCSPCDialog(QDialog):
         they stay stale until the next add/remove triggers a refresh.
         """
         self._refresh_pairing_table()
-        self._refresh_channel_tokens_table()
-        self._refresh_lif_binding_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _add_dataset_row(self, path: Path, *, checked: bool) -> None:
@@ -722,8 +736,7 @@ class BatchTCSPCDialog(QDialog):
             self._enforce_pairing_uniqueness(dataset_path, chosen)
         # Pairing changed → re-scan available .bin tokens from whichever
         # group is now first-paired, then re-render the channel-tokens table.
-        self._refresh_channel_tokens_table()
-        self._refresh_lif_binding_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _enforce_pairing_uniqueness(
@@ -779,8 +792,7 @@ class BatchTCSPCDialog(QDialog):
                         self._suppress_pair_signal = True
                         combo.setCurrentIndex(idx)
                         self._suppress_pair_signal = False
-        self._refresh_channel_tokens_table()
-        self._refresh_lif_binding_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     # ────────────────────────────────────────────────────────────
@@ -972,10 +984,7 @@ class BatchTCSPCDialog(QDialog):
     def _load_csv_calibration(self, path: Path) -> None:
         calibration = self._csv_parser(path)
         self._calibration = calibration
-        self._lif_records = ()
-        self._lif_bindings = {}
-        self._lif_manual_bindings = {}
-        self._refresh_lif_binding_table()
+        self._clear_lif_state()
         n_datasets = len(calibration.datasets())
         n_rows = sum(len(chans) for chans in calibration.rows.values())
         self._calibration_status_label.setText(
@@ -1005,10 +1014,7 @@ class BatchTCSPCDialog(QDialog):
             "\n".join(errors[:30]) + ("\n…" if len(errors) > 30 else ""),
         )
         self._calibration = None
-        self._lif_records = ()
-        self._lif_bindings = {}
-        self._lif_manual_bindings = {}
-        self._refresh_lif_binding_table()
+        self._clear_lif_state()
         self._calibration_status_label.setText("No calibration loaded.")
 
     def _dataset_selection(self) -> dict[str, list[str]]:
