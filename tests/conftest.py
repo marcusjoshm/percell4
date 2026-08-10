@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import struct
 
 # Pin qtpy's binding before anything can import it. A dev machine often has
 # PyQt5, PyQt6, and PySide6 installed at once (napari and its plugins pull
@@ -226,10 +227,55 @@ def _flush_pending_qt_deletions():
     app = QApplication.instance()
     if app is None:
         return
+    _close_pyqtgraph_views(app)
     for _ in range(3):
         app.processEvents()
     app.sendPostedEvents(None, QEvent.DeferredDelete)
     app.processEvents()
+
+
+def _close_pyqtgraph_views(app) -> None:
+    """Tear down pyqtgraph views before the widgets holding them are collected.
+
+    A window holding a ``PlotWidget`` — the CNR/metric segmenter, threshold-QC,
+    the phasor views — outlives its test: ``qtbot.addWidget`` closes a widget at
+    teardown but never destroys it, and the owning panel drops its own reference
+    on the next run. When Python later collects that window, the C++ objects go
+    with it while pyqtgraph's scene still holds its items. The next event-loop
+    spin paints a deleted ``AxisItem``: pytest-qt logs
+    ``wrapped C/C++ object of type AxisItem has been deleted`` and the process
+    segfaults inside ``GraphicsView.paintEvent``, blaming whichever test was
+    running at the time.
+
+    ``GraphicsView.close()`` is what prevents that — it calls ``scene().clear()``
+    and drops the viewport, so nothing stale is left to paint. Closing the
+    *window* does not reach it: Qt's ``close()`` applies to that widget alone and
+    never descends to child widgets, which is why closing the window and
+    scheduling its deletion was not enough on its own.
+
+    Widgets already destroyed on the C++ side raise on attribute access; they are
+    what this is cleaning up after, so skip them.
+    """
+    try:
+        from pyqtgraph.widgets.GraphicsView import GraphicsView
+    except Exception:  # noqa: BLE001 — pyqtgraph absent; nothing to clean
+        return
+    for widget in list(app.topLevelWidgets()):
+        try:
+            views = list(widget.findChildren(GraphicsView))
+            if isinstance(widget, GraphicsView):
+                views.append(widget)
+            if not views:
+                continue
+            for view in views:
+                # PlotWidget.close() drops its plotItem; a second call raises.
+                if not getattr(view, "closed", False):
+                    view.close()
+            if not isinstance(widget, GraphicsView):
+                widget.close()
+            widget.deleteLater()
+        except RuntimeError:
+            continue
 
 
 @pytest.fixture
@@ -275,3 +321,36 @@ def sample_image() -> np.ndarray:
     image[50:70, 60:80] = 250.0
     image[70:85, 35:50] = 175.0
     return image
+
+
+@pytest.fixture
+def lif_header_bytes():
+    """Factory wrapping header XML in a valid ``.lif`` container prefix.
+
+    The reference ``.lif`` is 78 MB and cannot be checked in, so every
+    ``.lif`` test synthesises the header it needs. Returns bytes shaped like
+    a real file's first block: ``0x70`` marker, remaining-byte count, ``0x2A``
+    separator, UTF-16 character count, then the XML as UTF-16LE.
+
+    The byte count at offset 4 covers the separator and the character count
+    as well as the XML — five bytes more than the payload — which is the
+    trap ``read_lif_header`` has to avoid. Overridable so tests can build
+    deliberately malformed containers.
+    """
+
+    def build(
+        xml: str,
+        *,
+        marker: int = 0x70,
+        separator: int = 0x2A,
+        nchars: int | None = None,
+        truncate: int = 0,
+    ) -> bytes:
+        payload = xml.encode("utf-16-le")
+        declared = len(xml) if nchars is None else nchars
+        head = struct.pack("<ii", marker, 1 + 4 + len(payload))
+        head += bytes([separator]) + struct.pack("<i", declared)
+        blob = head + payload
+        return blob[: len(blob) - truncate] if truncate else blob
+
+    return build

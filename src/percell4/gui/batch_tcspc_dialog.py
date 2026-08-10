@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -58,12 +58,22 @@ from percell4.application.use_cases.batch_add_decay import (
     validate_batch_inputs,
     validate_calibration_csv_against_selection,
 )
-from percell4.domain.errors import CalibrationCSVError
+from percell4.domain.errors import (
+    CalibrationCSVError,
+    LifCalibrationError,
+    LifHeaderError,
+)
 from percell4.domain.io.calibration_csv import (
     BatchCalibration,
     parse_calibration_csv,
 )
 from percell4.domain.io.cross_format import IntensityChannel
+from percell4.domain.io.lif_calibration import (
+    LifCalibrationRecord,
+    auto_match,
+    read_lif_calibration,
+    resolve_lif_calibration,
+)
 from percell4.domain.io.models import (
     CrossFormatRule,
     TokenConfig,
@@ -81,6 +91,7 @@ from percell4.gui.tcspc_tab_state import build_rule_from_preset
 from percell4.io.paths import scan_files
 
 _NO_PAIR_LABEL = "— select —"
+_NO_BINDING_LABEL = "(unmapped)"
 _SKIP_LABEL = "— skip —"
 _AUTO_PAIR_THRESHOLD = 0.6
 
@@ -98,6 +109,9 @@ class BatchTCSPCDialog(QDialog):
         orchestrator: Callable[..., BatchAppendReport] = batch_add_decay,
         validator: Callable[..., Any] = validate_batch_inputs,
         csv_parser: Callable[[Path], BatchCalibration] = parse_calibration_csv,
+        lif_reader: Callable[
+            [Path], tuple[LifCalibrationRecord, ...]
+        ] = read_lif_calibration,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Batch TCSPC Append")
@@ -114,6 +128,7 @@ class BatchTCSPCDialog(QDialog):
         self._orchestrator = orchestrator
         self._validator = validator
         self._csv_parser = csv_parser
+        self._lif_reader = lif_reader
 
         # ── Pure-Python state ──
         self._datasets: list[Path] = []  # selected .h5 paths
@@ -122,6 +137,15 @@ class BatchTCSPCDialog(QDialog):
         # h5_path -> group folder Path or None
         self._pairings: dict[Path, Path | None] = {}
         self._calibration: BatchCalibration | None = None
+        # .lif calibration source. Records are what the file says; bindings
+        # map (dataset stem, channel name) onto them, because a .lif cannot
+        # know the .h5 channel names. Empty whenever a CSV is the source.
+        self._lif_records: tuple[LifCalibrationRecord, ...] = ()
+        self._lif_bindings: dict[tuple[str, str], int] = {}
+        # Cells the user set by hand. Kept apart from _lif_bindings so a
+        # rebuild or a later Auto-match cannot overwrite a deliberate pick.
+        self._lif_manual_bindings: dict[tuple[str, str], int | None] = {}
+        self._suppress_binding_signal: bool = False
         self._validated: bool = False
         self._suppress_pair_signal: bool = False
         # channel_name -> .bin token string (e.g. "CA-SiR" -> "1"). Required
@@ -135,9 +159,11 @@ class BatchTCSPCDialog(QDialog):
         self._source_root_edit: QLineEdit | None = None
         self._groups_label: QLabel | None = None
         self._pairing_table: QTableWidget | None = None
-        self._csv_status_label: QLabel | None = None
+        self._calibration_status_label: QLabel | None = None
         self._channel_tokens_table: QTableWidget | None = None
         self._channel_tokens_status_label: QLabel | None = None
+        self._lif_binding_box: QGroupBox | None = None
+        self._lif_binding_table: QTableWidget | None = None
         self._validate_log: QPlainTextEdit | None = None
         self._run_btn: QPushButton | None = None
         self._validate_btn: QPushButton | None = None
@@ -174,7 +200,8 @@ class BatchTCSPCDialog(QDialog):
         body.addWidget(self._build_section_source_root())
         body.addWidget(self._build_section_pairing())
         body.addWidget(self._build_section_channel_tokens())
-        body.addWidget(self._build_section_csv())
+        body.addWidget(self._build_section_calibration())
+        body.addWidget(self._build_section_lif_binding())
         body.addWidget(self._build_section_stitching())
         body.addWidget(self._build_section_conflict_policy())
         body.addWidget(self._build_section_validation())
@@ -311,15 +338,172 @@ class BatchTCSPCDialog(QDialog):
 
         return box
 
-    def _build_section_csv(self) -> QGroupBox:
-        box = QGroupBox("4. Calibration CSV (long format)")
+    def _build_section_calibration(self) -> QGroupBox:
+        box = QGroupBox("5. Calibration (CSV or .lif)")
         layout = QHBoxLayout(box)
-        browse_btn = QPushButton("Choose CSV…")
-        browse_btn.clicked.connect(self._on_load_csv)
-        self._csv_status_label = QLabel("No CSV loaded.")
+        browse_btn = QPushButton("Choose CSV or .lif…")
+        browse_btn.clicked.connect(self._on_choose_calibration)
+        self._calibration_status_label = QLabel("No calibration loaded.")
         layout.addWidget(browse_btn)
-        layout.addWidget(self._csv_status_label, 1)
+        layout.addWidget(self._calibration_status_label, 1)
         return box
+
+    def _build_section_lif_binding(self) -> QGroupBox:
+        """Bind each .h5 channel to a record from the loaded ``.lif``.
+
+        A CSV names the ``.h5`` stem and channel directly, so it needs no
+        binding step; a ``.lif`` knows only its own region and detector names.
+        Follows the pairing section's shape — a table of combos plus one
+        auto-fill button — so the two mapping steps in this dialog behave the
+        same way.
+        """
+        box = QGroupBox("6. .lif → channel binding")
+        layout = QVBoxLayout(box)
+
+        layout.addWidget(
+            QLabel(
+                "One row per channel needing calibration. Auto-match fills the "
+                "rows that follow unambiguously; set the rest by hand."
+            )
+        )
+
+        self._lif_binding_table = QTableWidget(0, 3)
+        self._lif_binding_table.setHorizontalHeaderLabels(
+            ["Dataset", "Channel", ".lif calibration record"]
+        )
+        self._lif_binding_table.horizontalHeader().setStretchLastSection(True)
+        self._lif_binding_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._lif_binding_table.verticalHeader().setVisible(False)
+        self._lif_binding_table.setMinimumHeight(140)
+        layout.addWidget(self._lif_binding_table)
+
+        auto_btn = QPushButton("Auto-match")
+        auto_btn.clicked.connect(self._on_auto_match_lif)
+        row = QHBoxLayout()
+        row.addWidget(auto_btn)
+        row.addStretch()
+        layout.addLayout(row)
+
+        self._lif_binding_box = box
+        box.setVisible(False)
+        return box
+
+    def _clear_lif_state(self) -> None:
+        """Drop every trace of a loaded ``.lif``, including the user's picks."""
+        self._lif_records = ()
+        self._lif_bindings = {}
+        self._lif_manual_bindings = {}
+        self._refresh_lif_binding_table()
+
+    def _refresh_selection_tables(self) -> None:
+        """Rebuild both tables keyed on the dataset selection.
+
+        Kept together because they answer the same question — which channels
+        are in play — and a caller that refreshed only one would leave the
+        other showing a stale channel set.
+        """
+        self._refresh_channel_tokens_table()
+        self._refresh_lif_binding_table()
+
+    def _refresh_lif_binding_table(self) -> None:
+        """Rebuild the binding rows from the current selection and records.
+
+        Row values resolve in precedence order: an explicit user pick wins,
+        then any binding already in effect whose record still exists, else
+        unmapped. That ordering is what lets a deliberate pick survive a
+        rebuild caused by checking another dataset.
+        """
+        assert self._lif_binding_box is not None
+        assert self._lif_binding_table is not None
+
+        has_records = bool(self._lif_records)
+        self._lif_binding_box.setVisible(has_records)
+        if not has_records:
+            self._lif_binding_table.setRowCount(0)
+            return
+
+        selection = self._dataset_selection()
+        resolved: dict[tuple[str, str], int] = {}
+
+        self._suppress_binding_signal = True
+        try:
+            self._lif_binding_table.setRowCount(0)
+            for stem, channels in selection.items():
+                for channel in channels:
+                    key = (stem, channel)
+                    index = self._effective_binding(key)
+                    if index is not None:
+                        resolved[key] = index
+                    self._add_lif_binding_row(stem, channel, index)
+        finally:
+            self._suppress_binding_signal = False
+
+        self._lif_bindings = resolved
+
+    def _effective_binding(self, key: tuple[str, str]) -> int | None:
+        if key in self._lif_manual_bindings:
+            return self._lif_manual_bindings[key]
+        index = self._lif_bindings.get(key)
+        if index is not None and 0 <= index < len(self._lif_records):
+            return index
+        return None
+
+    def _add_lif_binding_row(self, stem: str, channel: str, index: int | None) -> None:
+        assert self._lif_binding_table is not None
+        row = self._lif_binding_table.rowCount()
+        self._lif_binding_table.insertRow(row)
+        for column, text in ((0, stem), (1, channel)):
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self._lif_binding_table.setItem(row, column, item)
+
+        combo = QComboBox()
+        combo.addItem(_NO_BINDING_LABEL, None)
+        for record_index, record in enumerate(self._lif_records):
+            combo.addItem(record.label, record_index)
+        combo.setCurrentIndex(0 if index is None else index + 1)
+        # Capture the key only, never the combo. Rebuilding this table destroys
+        # its cell widgets, and a closure holding one keeps the Python wrapper
+        # alive past its C++ object. Row 0 is the unmapped sentinel, so combo
+        # row N carries record N-1.
+        combo.currentIndexChanged.connect(
+            lambda combo_row, k=(stem, channel): self._on_lif_binding_changed(
+                k, None if combo_row <= 0 else combo_row - 1
+            )
+        )
+        self._lif_binding_table.setCellWidget(row, 2, combo)
+
+    def _on_lif_binding_changed(
+        self, key: tuple[str, str], index: int | None
+    ) -> None:
+        if self._suppress_binding_signal:
+            return
+        self._lif_manual_bindings[key] = index
+        if index is None:
+            self._lif_bindings.pop(key, None)
+        else:
+            self._lif_bindings[key] = index
+        self._recompute_lif_calibration()
+        self._refresh_pairing_table()
+        self._invalidate_run()
+
+    def _on_auto_match_lif(self) -> None:
+        """Fill what follows unambiguously, leaving manual picks alone.
+
+        Updates rather than replaces, so rows Auto-match has no opinion about
+        keep whatever they already hold.
+        """
+        if not self._lif_records:
+            return
+        self._lif_bindings.update(
+            auto_match(self._lif_records, self._dataset_selection())
+        )
+        self._refresh_lif_binding_table()
+        self._recompute_lif_calibration()
+        self._refresh_pairing_table()
+        self._invalidate_run()
 
     def _build_section_stitching(self) -> QGroupBox:
         """Section 5 — Stitching + orientation + raw ``.bin`` geometry.
@@ -333,7 +517,7 @@ class BatchTCSPCDialog(QDialog):
 
         Registration controls stay visible on this surface, unchanged.
         """
-        box = QGroupBox("5. Stitching & orientation (applied to every dataset)")
+        box = QGroupBox("7. Stitching & orientation (applied to every dataset)")
         layout = QVBoxLayout(box)
         self._stitching_form = StitchingForm(
             show_registration=True, show_fusion=False, title=""
@@ -350,7 +534,7 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_conflict_policy(self) -> QGroupBox:
-        box = QGroupBox("6. If a /decay layer already exists")
+        box = QGroupBox("8. If a /decay layer already exists")
         layout = QHBoxLayout(box)
         self._conflict_skip_radio = QRadioButton("Skip existing layers")
         self._conflict_skip_radio.setChecked(True)
@@ -365,7 +549,7 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_validation(self) -> QGroupBox:
-        box = QGroupBox("7. Pre-flight report")
+        box = QGroupBox("9. Pre-flight report")
         layout = QVBoxLayout(box)
         self._validate_log = QPlainTextEdit()
         self._validate_log.setReadOnly(True)
@@ -404,7 +588,7 @@ class BatchTCSPCDialog(QDialog):
                 continue
             self._add_dataset_row(path, checked=True)
         self._refresh_pairing_table()
-        self._refresh_channel_tokens_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _on_remove_datasets(self) -> None:
@@ -417,7 +601,7 @@ class BatchTCSPCDialog(QDialog):
             self._dataset_table.removeRow(row)
             del self._datasets[row]
         self._refresh_pairing_table()
-        self._refresh_channel_tokens_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _on_dataset_check_changed(self) -> None:
@@ -428,7 +612,7 @@ class BatchTCSPCDialog(QDialog):
         they stay stale until the next add/remove triggers a refresh.
         """
         self._refresh_pairing_table()
-        self._refresh_channel_tokens_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _add_dataset_row(self, path: Path, *, checked: bool) -> None:
@@ -557,7 +741,7 @@ class BatchTCSPCDialog(QDialog):
             self._enforce_pairing_uniqueness(dataset_path, chosen)
         # Pairing changed → re-scan available .bin tokens from whichever
         # group is now first-paired, then re-render the channel-tokens table.
-        self._refresh_channel_tokens_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     def _enforce_pairing_uniqueness(
@@ -613,7 +797,7 @@ class BatchTCSPCDialog(QDialog):
                         self._suppress_pair_signal = True
                         combo.setCurrentIndex(idx)
                         self._suppress_pair_signal = False
-        self._refresh_channel_tokens_table()
+        self._refresh_selection_tables()
         self._invalidate_run()
 
     # ────────────────────────────────────────────────────────────
@@ -770,38 +954,106 @@ class BatchTCSPCDialog(QDialog):
     # Slots — section 4 (CSV)
     # ────────────────────────────────────────────────────────────
 
-    def _on_load_csv(self) -> None:
-        assert self._csv_status_label is not None
+    def _on_choose_calibration(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose calibration CSV", "", "CSV files (*.csv);;All files (*)"
+            self,
+            "Choose calibration CSV or .lif",
+            "",
+            "Calibration files (*.csv *.lif);;CSV files (*.csv);;"
+            "Leica .lif (*.lif);;All files (*)",
         )
-        if not path:
-            return
+        if path:
+            self._load_calibration_file(Path(path))
+
+    def _load_calibration_file(self, path: Path) -> None:
+        """Load calibration from ``path``, routing on its suffix.
+
+        Split from the file-picker slot so the state machine is reachable in
+        tests without driving a modal dialog. Every exit — success or failure
+        — refreshes the pairing table and invalidates the run gate, so a
+        changed calibration can never be run on a stale validation.
+        """
+        assert self._calibration_status_label is not None
         try:
-            self._calibration = self._csv_parser(Path(path))
-        except CalibrationCSVError as exc:
-            QMessageBox.critical(
-                self,
-                "CSV parse failed",
-                "\n".join(exc.errors[:30])
-                + ("\n…" if len(exc.errors) > 30 else ""),
-            )
-            self._calibration = None
-            self._csv_status_label.setText("No CSV loaded.")
-            self._refresh_pairing_table()
-            self._invalidate_run()
-            return
-        n_datasets = len(self._calibration.datasets())
-        n_rows = sum(len(chans) for chans in self._calibration.rows.values())
-        self._csv_status_label.setText(
-            f"Loaded: {n_rows} rows / {n_datasets} datasets"
-        )
+            if path.suffix.lower() == ".lif":
+                self._load_lif_calibration(path)
+            else:
+                self._load_csv_calibration(path)
+        except (CalibrationCSVError, LifCalibrationError) as exc:
+            self._fail_calibration_load(path, exc.errors)
+        except LifHeaderError as exc:
+            self._fail_calibration_load(path, [str(exc)])
         self._refresh_pairing_table()
         self._invalidate_run()
 
+    def _load_csv_calibration(self, path: Path) -> None:
+        calibration = self._csv_parser(path)
+        self._calibration = calibration
+        self._clear_lif_state()
+        n_datasets = len(calibration.datasets())
+        n_rows = sum(len(chans) for chans in calibration.rows.values())
+        self._calibration_status_label.setText(
+            f"Loaded: {n_rows} rows / {n_datasets} datasets"
+        )
+
+    def _load_lif_calibration(self, path: Path) -> None:
+        records = self._lif_reader(path)
+        self._lif_records = records
+        # Seed the bindings with whatever follows unambiguously; the binding
+        # table shows the result and lets the user fix the rest.
+        self._lif_manual_bindings = {}
+        self._lif_bindings = auto_match(records, self._dataset_selection())
+        self._refresh_lif_binding_table()
+        self._recompute_lif_calibration()
+        stems = {r.dataset_stem for r in records}
+        self._calibration_status_label.setText(
+            f"Loaded: {len(records)} calibration record(s) / "
+            f"{len(stems)} region(s) from {path.name}"
+        )
+
+    def _fail_calibration_load(self, path: Path, errors: Sequence[str]) -> None:
+        assert self._calibration_status_label is not None
+        QMessageBox.critical(
+            self,
+            f"Could not read {path.name}",
+            "\n".join(errors[:30]) + ("\n…" if len(errors) > 30 else ""),
+        )
+        self._calibration = None
+        self._clear_lif_state()
+        self._calibration_status_label.setText("No calibration loaded.")
+
+    def _dataset_selection(self) -> dict[str, list[str]]:
+        """Checked datasets as ``{.h5 stem: [channel names]}``.
+
+        This is the half of the binding that only the ``.h5`` files know; the
+        ``.lif`` supplies the other half.
+        """
+        selection: dict[str, list[str]] = {}
+        for dataset_path in self._checked_datasets():
+            try:
+                channel_names, _ = self._read_store_summary(dataset_path)
+            except Exception:  # noqa: BLE001 — an unreadable .h5 is reported at validate
+                continue
+            selection[dataset_path.stem] = list(channel_names)
+        return selection
+
+    def _recompute_lif_calibration(self) -> tuple[str, ...]:
+        """Rebuild ``_calibration`` from the current records and bindings.
+
+        Returns the unresolved-binding messages so the caller can decide
+        whether to surface them; loading only displays, validation blocks.
+        """
+        if not self._lif_records:
+            return ()
+        calibration, messages = resolve_lif_calibration(
+            self._lif_records, self._dataset_selection(), self._lif_bindings
+        )
+        self._calibration = calibration
+        return messages
+
     def _calibration_summary_text(self, dataset_stem: str) -> str:
         if self._calibration is None:
-            return "(no CSV)"
+            return "(no calibration)"
         rows = self._calibration.rows.get(dataset_stem)
         if not rows:
             return "(no rows for this dataset)"
@@ -961,7 +1213,7 @@ class BatchTCSPCDialog(QDialog):
         """
         errors: list[str] = []
         if self._calibration is None:
-            errors.append("Load a calibration CSV before validating.")
+            errors.append("Load a calibration CSV or .lif before validating.")
 
         checked = self._checked_datasets()
         if not checked:
@@ -970,12 +1222,20 @@ class BatchTCSPCDialog(QDialog):
         if errors:
             return [], {}, {}, errors
 
-        # CSV cross-check: every selected dataset's stem must have rows.
-        csv_errors = validate_calibration_csv_against_selection(
-            self._calibration,  # type: ignore[arg-type]
-            [d.stem for d in checked],
-        )
-        errors.extend(csv_errors)
+        # Coverage cross-check. The two sources fail differently, so each
+        # reports its own shape: a CSV is missing whole datasets, a .lif has
+        # unbound channels. Running the CSV check over a .lif-sourced batch
+        # would say "no calibration rows for dataset X" when the real problem
+        # is a specific channel nobody bound.
+        if self._lif_records:
+            errors.extend(self._recompute_lif_calibration())
+        else:
+            errors.extend(
+                validate_calibration_csv_against_selection(
+                    self._calibration,  # type: ignore[arg-type]
+                    [d.stem for d in checked],
+                )
+            )
 
         # Build BatchAppendItems for datasets that have a pairing AND
         # calibration rows. Datasets missing either land in `errors`.
