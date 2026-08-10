@@ -33,10 +33,17 @@ from __future__ import annotations
 
 import math
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from percell4.domain.errors import LifCalibrationError
+from percell4.domain.io.calibration_csv import (
+    BatchCalibration,
+    ChannelCalibration,
+    validate_frequency_consistency,
+)
 from percell4.domain.io.lif_header import read_lif_header
 
 # Presence of this child is what marks a ``Channels`` element as the per-image
@@ -217,3 +224,75 @@ def _int(raw: str | None, *, default: int) -> int:
         return int((raw or "").strip())
     except ValueError:
         return default
+
+
+# ── Binding records onto a dataset selection ──────────────────
+#
+# A ``.lif`` names things its own way — region ``Region_1``, channel index 0,
+# detector ``HyD X 3``. ``BatchCalibration`` is keyed by ``.h5`` stem and
+# ``.h5`` channel name (``G3BP1``). Nothing in the ``.lif`` can know that
+# second name, so the two have to be bridged. The CSV path bridged it by
+# having a human type both names; here, auto-matching proposes what it can
+# prove and the caller lets the user correct the rest.
+
+# (dataset stem, channel name) -> index into the records tuple
+Bindings = dict[tuple[str, str], int]
+
+
+def auto_match(
+    records: Sequence[LifCalibrationRecord],
+    selection: Mapping[str, Sequence[str]],
+) -> Bindings:
+    """Propose bindings that follow unambiguously from the inputs.
+
+    ``selection`` maps a dataset stem to the channel names that need
+    calibration. A dataset binds by exact stem match; within it, a channel
+    binds only when there is exactly one candidate record and exactly one
+    channel. Anything else is left out rather than guessed — a wrong silent
+    binding writes a wrong calibration into the ``.h5``, whereas an unbound
+    row is visible in the table and blocks validation.
+    """
+    bindings: Bindings = {}
+    for stem, channels in selection.items():
+        candidates = [i for i, r in enumerate(records) if r.dataset_stem == stem]
+        if len(candidates) == 1 and len(channels) == 1:
+            bindings[(stem, channels[0])] = candidates[0]
+    return bindings
+
+
+def resolve_lif_calibration(
+    records: Sequence[LifCalibrationRecord],
+    selection: Mapping[str, Sequence[str]],
+    bindings: Bindings,
+) -> tuple[BatchCalibration, tuple[str, ...]]:
+    """Apply ``bindings`` and return the calibration plus what is unresolved.
+
+    Returns messages rather than raising, so the dialog can render every
+    problem at once alongside its other pre-flight errors. A record whose stem
+    matches no selected dataset is silently ignored: a ``.lif`` may hold
+    regions the user did not select, and that is not an error.
+    """
+    rows: dict[str, dict[str, ChannelCalibration]] = {}
+    messages: list[str] = []
+
+    for stem, channels in selection.items():
+        for channel in channels:
+            index = bindings.get((stem, channel))
+            if index is None or not 0 <= index < len(records):
+                messages.append(
+                    f"{stem}: channel {channel!r} has no .lif calibration bound"
+                )
+                continue
+            record = records[index]
+            rows.setdefault(stem, {})[channel] = ChannelCalibration(
+                frequency_mhz=record.frequency_mhz,
+                phase=record.phase,
+                modulation=record.modulation,
+            )
+
+    frozen: dict[str, Mapping[str, ChannelCalibration]] = {
+        stem: MappingProxyType(dict(channels)) for stem, channels in rows.items()
+    }
+    calibration = BatchCalibration(rows=MappingProxyType(frozen))
+    messages.extend(validate_frequency_consistency(calibration))
+    return calibration, tuple(messages)

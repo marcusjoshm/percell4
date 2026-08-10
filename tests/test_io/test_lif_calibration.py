@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 
 from percell4.domain.errors import LifCalibrationError
-from percell4.domain.io.lif_calibration import LifCalibrationRecord, read_lif_calibration
+from percell4.domain.io.lif_calibration import (
+    LifCalibrationRecord,
+    auto_match,
+    read_lif_calibration,
+    resolve_lif_calibration,
+)
 
 # Values from the reference file. The acquisition record is a decoy: reading it
 # instead would yield phase -0.348959893.
@@ -267,3 +272,178 @@ def test_reference_lif_yields_the_documented_values():
     assert record.phase == pytest.approx(EXPECTED_PHASE, abs=1e-9)
     assert record.modulation == pytest.approx(EXPECTED_MODULATION, abs=1e-9)
     assert record.frequency_mhz == pytest.approx(EXPECTED_FREQ_MHZ, abs=1e-6)
+
+
+# ── Resolution against a dataset selection ────────────────────
+
+
+def _record(
+    stem: str = "FLIM_calibratoin_test_Region_1",
+    *,
+    region: str = "Region_1",
+    detector: str = "HyD X 3",
+    channel_index: int = 0,
+    frequency_mhz: float = 78.02,
+    phase: float = EXPECTED_PHASE,
+    modulation: float = EXPECTED_MODULATION,
+) -> LifCalibrationRecord:
+    return LifCalibrationRecord(
+        dataset_stem=stem,
+        region_name=region,
+        element_path=f"root/{region}",
+        channel_index=channel_index,
+        detector_name=detector,
+        frequency_mhz=frequency_mhz,
+        phase=phase,
+        modulation=modulation,
+        harmonic=1,
+    )
+
+
+def test_auto_match_binds_the_one_to_one_case():
+    records = [_record()]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1"]}
+
+    bindings = auto_match(records, selection)
+
+    assert bindings == {("FLIM_calibratoin_test_Region_1", "G3BP1"): 0}
+
+
+def test_auto_match_leaves_two_channels_unbound():
+    records = [_record()]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
+
+    assert auto_match(records, selection) == {}
+
+
+def test_auto_match_leaves_two_records_unbound():
+    records = [_record(channel_index=0), _record(channel_index=1, detector="HyD X 1")]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
+
+    assert auto_match(records, selection) == {}
+
+
+def test_auto_match_ignores_records_for_unselected_datasets():
+    records = [_record(stem="Other_Region_9", region="Region_9")]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1"]}
+
+    assert auto_match(records, selection) == {}
+
+
+def test_resolution_produces_a_batch_calibration():
+    records = [_record()]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1"]}
+
+    cal, unbound = resolve_lif_calibration(
+        records, selection, auto_match(records, selection)
+    )
+
+    assert unbound == ()
+    entry = cal.get("FLIM_calibratoin_test_Region_1", "G3BP1")
+    assert entry.frequency_mhz == pytest.approx(78.02)
+    assert entry.phase == pytest.approx(EXPECTED_PHASE)
+    assert entry.modulation == pytest.approx(EXPECTED_MODULATION)
+
+
+def test_unbound_channels_are_reported_by_dataset_and_channel():
+    records = [_record()]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
+
+    _, unbound = resolve_lif_calibration(records, selection, {})
+
+    assert len(unbound) == 2
+    assert any("G3BP1" in m for m in unbound)
+    assert any("mNG" in m for m in unbound)
+    assert all("FLIM_calibratoin_test_Region_1" in m for m in unbound)
+
+
+def test_a_dataset_with_no_matching_record_reports_every_channel():
+    records = [_record(stem="Other_Region_9", region="Region_9")]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
+
+    _, unbound = resolve_lif_calibration(records, selection, {})
+
+    assert len(unbound) == 2
+
+
+def test_an_unselected_record_is_not_an_error():
+    records = [_record(), _record(stem="Other_Region_9", region="Region_9")]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1"]}
+
+    cal, unbound = resolve_lif_calibration(
+        records, selection, auto_match(records, selection)
+    )
+
+    assert unbound == ()
+    assert cal.datasets() == ("FLIM_calibratoin_test_Region_1",)
+
+
+def test_explicit_binding_resolves_what_auto_match_left_alone():
+    records = [_record()]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
+    bindings = {
+        ("FLIM_calibratoin_test_Region_1", "G3BP1"): 0,
+        ("FLIM_calibratoin_test_Region_1", "mNG"): 0,
+    }
+
+    cal, unbound = resolve_lif_calibration(records, selection, bindings)
+
+    assert unbound == ()
+    assert set(cal.channels("FLIM_calibratoin_test_Region_1")) == {"G3BP1", "mNG"}
+
+
+def test_explicit_binding_overrides_auto_match_for_that_cell_only():
+    records = [
+        _record(channel_index=0),
+        _record(channel_index=1, detector="HyD X 1", phase=-0.1),
+    ]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1"]}
+    bindings = {("FLIM_calibratoin_test_Region_1", "G3BP1"): 1}
+
+    cal, _ = resolve_lif_calibration(records, selection, bindings)
+
+    assert cal.get("FLIM_calibratoin_test_Region_1", "G3BP1").phase == pytest.approx(-0.1)
+
+
+def test_frequency_may_differ_across_datasets():
+    records = [
+        _record(frequency_mhz=78.02),
+        _record(stem="Other_Region_9", region="Region_9", frequency_mhz=40.0),
+    ]
+    selection = {
+        "FLIM_calibratoin_test_Region_1": ["G3BP1"],
+        "Other_Region_9": ["G3BP1"],
+    }
+
+    _, unbound = resolve_lif_calibration(
+        records, selection, auto_match(records, selection)
+    )
+
+    assert unbound == ()
+
+
+def test_frequency_disagreement_within_one_dataset_is_reported():
+    records = [
+        _record(channel_index=0, frequency_mhz=78.02),
+        _record(channel_index=1, detector="HyD X 1", frequency_mhz=40.0),
+    ]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1", "mNG"]}
+    bindings = {
+        ("FLIM_calibratoin_test_Region_1", "G3BP1"): 0,
+        ("FLIM_calibratoin_test_Region_1", "mNG"): 1,
+    }
+
+    _, messages = resolve_lif_calibration(records, selection, bindings)
+
+    assert any("frequency_mhz" in m for m in messages)
+
+
+def test_an_out_of_range_binding_index_is_reported_not_raised():
+    records = [_record()]
+    selection = {"FLIM_calibratoin_test_Region_1": ["G3BP1"]}
+
+    _, unbound = resolve_lif_calibration(
+        records, selection, {("FLIM_calibratoin_test_Region_1", "G3BP1"): 7}
+    )
+
+    assert len(unbound) == 1
