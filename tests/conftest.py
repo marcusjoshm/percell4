@@ -227,29 +227,34 @@ def _flush_pending_qt_deletions():
     app = QApplication.instance()
     if app is None:
         return
-    _schedule_pyqtgraph_window_deletion(app)
+    _close_pyqtgraph_views(app)
     for _ in range(3):
         app.processEvents()
     app.sendPostedEvents(None, QEvent.DeferredDelete)
     app.processEvents()
 
 
-def _schedule_pyqtgraph_window_deletion(app) -> None:
-    """Put closed-but-alive pyqtgraph windows on the deferred-delete queue.
+def _close_pyqtgraph_views(app) -> None:
+    """Tear down pyqtgraph views before the widgets holding them are collected.
 
-    ``qtbot.addWidget`` closes a widget at teardown but never destroys it, so a
-    window holding a pyqtgraph ``PlotWidget`` — the CNR/metric segmenter, the
-    threshold-QC and phasor views — survives its test with a live
-    ``GraphicsView`` on it. A later test spins the event loop, that stale view
-    is painted, its ``AxisItem`` has since been collected, and the process
-    segfaults inside ``GraphicsView.paintEvent``. The crash lands on whichever
-    test is running at the time, which is why it presented as an unrelated
-    flake in ``tests/test_gui/test_metric_segmenter_panel.py``.
+    A window holding a ``PlotWidget`` — the CNR/metric segmenter, threshold-QC,
+    the phasor views — outlives its test: ``qtbot.addWidget`` closes a widget at
+    teardown but never destroys it, and the owning panel drops its own reference
+    on the next run. When Python later collects that window, the C++ objects go
+    with it while pyqtgraph's scene still holds its items. The next event-loop
+    spin paints a deleted ``AxisItem``: pytest-qt logs
+    ``wrapped C/C++ object of type AxisItem has been deleted`` and the process
+    segfaults inside ``GraphicsView.paintEvent``, blaming whichever test was
+    running at the time.
 
-    Nothing else puts these windows on the queue, so the drain below has
-    nothing to collect unless they are scheduled here first. Widgets already
-    destroyed on the C++ side raise on attribute access; they are what this
-    is cleaning up after, so skip them.
+    ``GraphicsView.close()`` is what prevents that — it calls ``scene().clear()``
+    and drops the viewport, so nothing stale is left to paint. Closing the
+    *window* does not reach it: Qt's ``close()`` applies to that widget alone and
+    never descends to child widgets, which is why closing the window and
+    scheduling its deletion was not enough on its own.
+
+    Widgets already destroyed on the C++ side raise on attribute access; they are
+    what this is cleaning up after, so skip them.
     """
     try:
         from pyqtgraph.widgets.GraphicsView import GraphicsView
@@ -257,9 +262,18 @@ def _schedule_pyqtgraph_window_deletion(app) -> None:
         return
     for widget in list(app.topLevelWidgets()):
         try:
-            if isinstance(widget, GraphicsView) or widget.findChildren(GraphicsView):
+            views = list(widget.findChildren(GraphicsView))
+            if isinstance(widget, GraphicsView):
+                views.append(widget)
+            if not views:
+                continue
+            for view in views:
+                # PlotWidget.close() drops its plotItem; a second call raises.
+                if not getattr(view, "closed", False):
+                    view.close()
+            if not isinstance(widget, GraphicsView):
                 widget.close()
-                widget.deleteLater()
+            widget.deleteLater()
         except RuntimeError:
             continue
 
