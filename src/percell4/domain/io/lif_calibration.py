@@ -73,8 +73,23 @@ class LifCalibrationRecord:
 
     @property
     def label(self) -> str:
-        """Human-readable identity for a picker."""
-        return f"{self.region_name} · {self.detector_name}"
+        """Identity for a picker, unique enough to choose between records.
+
+        A region can hold several calibration records for the same detector
+        and channel — the reference file has one, but real acquisitions carry
+        two — and then region and detector alone name them all identically.
+        Phase and modulation are the only fields that differ, so they belong
+        in the label.
+
+        Phase renders as LAS X shows it: degrees, positive. The stored value
+        is negated radians (KTD2), so a row here can be read straight across
+        against the Phasor Calibration dialog.
+        """
+        phase_deg = -math.degrees(self.phase)
+        return (
+            f"{self.region_name} · {self.detector_name} · "
+            f"φ {phase_deg:.4f}° · m {self.modulation:.6f}"
+        )
 
 
 def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
@@ -117,6 +132,10 @@ def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
     return tuple(records)
 
 
+def _strip_lif_suffix(name: str) -> str:
+    return name[:-4] if name.lower().endswith(".lif") else name
+
+
 def _element_chain(node: ET.Element, parents: dict) -> list[str]:
     """Names of the ``Element`` ancestors of ``node``, outermost first."""
     names: list[str] = []
@@ -145,8 +164,13 @@ def _build_record(
     where = region or "unnamed element"
 
     # Dataset stem is root name + region name, joined the way LAS X names its
-    # exports. Best-effort: the caller lets the user rebind when it misses.
-    stem = "_".join(chain[:2]) if len(chain) > 1 else (chain[0] if chain else "")
+    # exports. The root Element is often named for the file *including* its
+    # ``.lif`` suffix, which no exported .h5 stem carries — leaving it in makes
+    # every stem comparison fail, so auto-match silently binds nothing. Mirrors
+    # the ``.h5`` trimming in ``calibration_csv.parse_calibration_csv``.
+    # Best-effort even so: the caller lets the user rebind when it misses.
+    parts = [_strip_lif_suffix(part) for part in chain[:2]]
+    stem = "_".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
 
     channel_index = _int(block.findtext("Channel"), default=0)
 

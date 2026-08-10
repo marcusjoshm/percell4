@@ -246,13 +246,61 @@ def test_zero_amplitude_is_an_error(lif_file):
     assert "amplitude" in str(excinfo.value).lower()
 
 
-def test_record_label_names_region_and_detector(lif_file):
+def test_record_label_shows_the_las_x_facing_values(lif_file):
+    """Phase reads back as LAS X displays it, so rows cross-check by eye."""
     xml = _header(_region("Region_1", _acquisition_block() + _phasor_block()))
 
     (record,) = read_lif_calibration(lif_file(xml))
 
     assert isinstance(record, LifCalibrationRecord)
-    assert record.label == "Region_1 · HyD X 3"
+    assert record.label == "Region_1 · HyD X 3 · φ 25.4532° · m 0.999413"
+
+
+def test_labels_distinguish_records_that_share_region_and_detector(lif_file):
+    """A region can hold several records for one detector; all must be pickable."""
+    xml = _header(
+        _region(
+            "Region_1",
+            _acquisition_block()
+            + _phasor_block(phase="34.8309987", amplitude="1.00029786")
+            + _phasor_block(phase="32.70105596", amplitude="1.000585206"),
+        )
+    )
+
+    records = read_lif_calibration(lif_file(xml))
+
+    assert len(records) == 2
+    assert len({r.label for r in records}) == 2
+
+
+def test_dataset_stem_drops_a_lif_suffix_on_the_root_element(lif_file):
+    """LAS X names the root Element for the file, extension included.
+
+    No exported .h5 stem carries it, so leaving it in makes every stem
+    comparison fail and auto-match silently bind nothing.
+    """
+    xml = _header(_region("UT Hpep3 5x8", _phasor_block()), root="Rep 3 - Dcp2.lif")
+
+    (record,) = read_lif_calibration(lif_file(xml))
+
+    assert record.dataset_stem == "Rep 3 - Dcp2_UT Hpep3 5x8"
+
+
+def test_dataset_stem_suffix_strip_is_case_insensitive(lif_file):
+    xml = _header(_region("Region_1", _phasor_block()), root="Experiment.LIF")
+
+    (record,) = read_lif_calibration(lif_file(xml))
+
+    assert record.dataset_stem == "Experiment_Region_1"
+
+
+def test_a_lif_inside_the_name_is_not_stripped(lif_file):
+    """Only a trailing suffix is an extension."""
+    xml = _header(_region("Region_1", _phasor_block()), root="calif.brate")
+
+    (record,) = read_lif_calibration(lif_file(xml))
+
+    assert record.dataset_stem == "calif.brate_Region_1"
 
 
 REFERENCE_LIF = Path(
@@ -447,3 +495,48 @@ def test_an_out_of_range_binding_index_is_reported_not_raised():
     )
 
     assert len(unbound) == 1
+
+
+MULTI_REGION_LIF = Path(
+    "/Volumes/NX-74205/2026-08-10_export_2/Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2.lif"
+)
+
+
+@pytest.mark.skipif(
+    not MULTI_REGION_LIF.exists(), reason="multi-region .lif volume is not mounted"
+)
+def test_multi_region_lif_records_are_all_distinguishable():
+    """Two regions, two records each, every one identical but for its values.
+
+    This file is why the label carries phase and modulation and why the root
+    element's ``.lif`` suffix is stripped: with neither, the picker showed two
+    identical entries per region and no stem could ever match an .h5.
+    """
+    records = read_lif_calibration(MULTI_REGION_LIF)
+
+    assert len(records) == 4
+    assert len({r.label for r in records}) == 4
+    assert {r.dataset_stem for r in records} == {
+        "Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2_UT Hpep3 5x8",
+        "Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2_As Hpep3 5x8",
+    }
+    assert not any(".lif" in r.dataset_stem for r in records)
+
+
+@pytest.mark.skipif(
+    not MULTI_REGION_LIF.exists(), reason="multi-region .lif volume is not mounted"
+)
+def test_multi_region_lif_auto_matches_against_real_h5_stems():
+    """Auto-match binds nothing here — two records per dataset is ambiguous —
+    but the stems must still match, or the rows could never be bound at all."""
+    records = read_lif_calibration(MULTI_REGION_LIF)
+    selection = {
+        "Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2_UT Hpep3 5x8": ["Halo", "mNG"],
+        "Rep 3 - Hpep3-Dcp1B + cpHalo3-Dcp2_As Hpep3 5x8": ["Halo", "mNG"],
+    }
+
+    for stem in selection:
+        assert [r for r in records if r.dataset_stem == stem], f"no record for {stem}"
+
+    # Ambiguous by design: two candidate records against two channels.
+    assert auto_match(records, selection) == {}

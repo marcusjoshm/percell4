@@ -1124,7 +1124,8 @@ def test_auto_match_button_fills_the_unambiguous_row(qtbot, tmp_path: Path) -> N
 
     dlg._on_auto_match_lif()
 
-    assert _binding_rows(dlg) == [("Dish 1", "G3BP1", "Region_1 · HyD X 3")]
+    expected = _lif_record(stem="Dish 1").label
+    assert _binding_rows(dlg) == [("Dish 1", "G3BP1", expected)]
 
 
 def test_auto_match_leaves_an_ambiguous_row_unmapped(qtbot, tmp_path: Path) -> None:
@@ -1158,7 +1159,8 @@ def test_combo_labels_distinguish_records_from_different_regions(
     combo = _binding_combo(dlg, 0)
     labels = [combo.itemText(i) for i in range(combo.count())]
 
-    assert labels == ["(unmapped)", "Region_1 · HyD X 3", "Region_2 · HyD X 1"]
+    assert labels == ["(unmapped)", records[0].label, records[1].label]
+    assert records[0].label != records[1].label
 
 
 def test_manual_pick_survives_a_refresh_from_checking_another_dataset(
@@ -1171,14 +1173,15 @@ def test_manual_pick_survives_a_refresh_from_checking_another_dataset(
     dlg._add_dataset_row(a, checked=True)
     dlg._load_calibration_file(tmp_path / "sample.lif")
 
+    expected = _lif_record(stem="Dish 1").label
     _binding_combo(dlg, 1).setCurrentIndex(1)  # bind Dish 1 / mNG by hand
-    assert _binding_rows(dlg)[1][2] == "Region_1 · HyD X 3"
+    assert _binding_rows(dlg)[1][2] == expected
 
     dlg._add_dataset_row(b, checked=True)
     dlg._refresh_lif_binding_table()
 
     rows = {(d, c): text for d, c, text in _binding_rows(dlg)}
-    assert rows[("Dish 1", "mNG")] == "Region_1 · HyD X 3"
+    assert rows[("Dish 1", "mNG")] == expected
 
 
 def test_manual_pick_survives_auto_match(qtbot, tmp_path: Path) -> None:
@@ -1195,7 +1198,7 @@ def test_manual_pick_survives_auto_match(qtbot, tmp_path: Path) -> None:
     _binding_combo(dlg, 0).setCurrentIndex(2)  # Region_2
     dlg._on_auto_match_lif()
 
-    assert _binding_rows(dlg)[0][2] == "Region_2 · HyD X 1"
+    assert _binding_rows(dlg)[0][2] == records[1].label
 
 
 def test_changing_a_binding_invalidates_the_run_gate(qtbot, tmp_path: Path) -> None:
