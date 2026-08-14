@@ -97,8 +97,8 @@ See the [command-line reference](docs/cli.md) for all tools and options.
   filtering, and segmentation by ROI: manual placement, derived from fluorescence lifetime
   values, or automated with a Gaussian mixture model.
 - **Measurement and export** — configurable per-cell and per-particle measurements across
-  every segmentation and mask, exported as parquet, CSV, and TIFF, interactively or as a
-  headless batch.
+  every segmentation and mask, exported as CSV and TIFF files.
+- **Batch workflows and analysis** — end-to-end analysis workflows and particle analysis features configured in the GUI or dedicated CLI tools
 
 ## Getting help
 
