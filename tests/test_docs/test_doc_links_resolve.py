@@ -26,6 +26,7 @@ CHECKED_DOCS = (
     "docs/workflow-protocol.md",
     "docs/architecture.md",
     "docs/writing_an_analysis.md",
+    "docs/adaptive-local-clipping.md",
     "docs/CONCEPTS.md",
     "docs/CHANGELOG.md",
     "docs/screenshots/README.md",
