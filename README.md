@@ -21,7 +21,7 @@ Every batch operation is also available as a headless command-line tool.
 > file layouts may still change between versions.
 
 <p align="center">
-  <img src="docs/screenshots/main-window.png" width="900" alt="The PerCell4 launcher, session controls, and image viewer, with a Cellpose segmentation overlaid on a fluorescence image">
+  <img src="docs/screenshots/main-window.png" width="900" alt="The PerCell4 launcher, session controls, image viewer, and phasor plot, showing a FLIM phasor histogram against the universal semicircle">
 </p>
 
 ## Documentation

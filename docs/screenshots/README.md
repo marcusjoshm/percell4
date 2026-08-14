@@ -35,11 +35,16 @@ and dark set reads as two different products.
 
 ### 1. `main-window.png` — README ✅ filled
 
-Shows the session control strip, the launcher with the FLIM panel open, and the
-viewer with a Cellpose segmentation overlaid on a fluorescence image. 1600 x 942,
-downscaled from a 6295 x 3708 retina capture.
+Shows the session control strip, the launcher, the viewer, and the phasor plot
+with a FLIM phasor histogram against the universal semicircle. 1600 x 944,
+downscaled from a 6300 x 3716 retina capture.
 
-**alt:** `The PerCell4 launcher, session controls, and image viewer, with a Cellpose segmentation overlaid on a fluorescence image`
+Note the S axis: it reads 0 to 0.6, with the semicircle apex at 0.5. Any
+replacement must be captured with the fix from
+`fix/phasor-s-axis-si-prefix` in place, or the axis will read 0 to 600 and the
+screenshot will contradict the software.
+
+**alt:** `The PerCell4 launcher, session controls, image viewer, and phasor plot, showing a FLIM phasor histogram against the universal semicircle`
 
 The README references it with no caption, matching the surrounding text.
 
