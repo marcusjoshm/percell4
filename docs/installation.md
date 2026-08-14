@@ -185,7 +185,7 @@ python main.py
 ## Updating
 
 PerCell4 requires **Cellpose 4.2 or newer** for the current segmentation models
-(`cpsam_v2`, `cpsam`, `cpdino`, `cpdino-vitb` — see [Changelog](../README.md#changelog)). To
+(`cpsam_v2`, `cpsam`, `cpdino`, `cpdino-vitb` — see the [changelog](../CHANGELOG.md)). To
 update an existing install, from your checkout with the virtual environment
 active:
 
