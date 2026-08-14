@@ -137,8 +137,8 @@ Then drive a headless batch over existing datasets:
 percell4-inspect data/*.h5                      # what's in these files?
 percell4-batch-threshold data/*.h5 \
     --round-name SG_mask --channel mNG \
-    --strategy adaptive-clip --smallest-particle-um 1.0
-percell4-batch-measure data/*.h5 --masks SG_mask --output-dir results/
+    --strategy adaptive-clip --d-min-um 1.0
+percell4-batch-measure data/*.h5 --mask SG_mask --output results/
 ```
 
 Per-OS setup, GPU and FLIM extras, PyInstaller bundling, and troubleshooting are in
@@ -182,10 +182,10 @@ are unfinished.
 | | |
 |---|---|
 | Source | 254 modules, ~80,500 lines under `src/` |
-| Tests | 4,077 test functions across 296 files, plus 98 GUI tests in a separate suite |
+| Tests | ~4,100 test functions across ~300 files, plus 98 GUI tests in a separate suite |
 | CLI | 14 console entry points |
 | CI | Three jobs — Ruff lint, headless tests on Python 3.12, and a real-OpenGL GUI suite under Xvfb |
-| Decision record | 65 documented learnings, 100 implementation plans |
+| Decision record | 65 documented learnings, 100+ implementation plans |
 
 The test suite is split by *directory*, not by marker: GL-dependent napari tests live in
 `tests_gui/` outside the default `testpaths`, because a marker relies on `addopts` and any explicit

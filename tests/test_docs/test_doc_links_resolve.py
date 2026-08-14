@@ -51,11 +51,30 @@ def _github_slug(heading_text: str) -> str:
     return text.replace(" ", "-")
 
 
+def _strip_fenced_blocks(text: str) -> str:
+    """Blank out fenced code blocks, preserving line count.
+
+    A shell comment inside a fence (``# Tesseract OCR engine:``) is not a
+    heading, but it matches the heading regex. Counting those invents phantom
+    slugs, which both lets a genuinely broken anchor pass and -- if a comment
+    ever collides with a real heading -- pushes that real heading to a ``-1``
+    variant here but not on GitHub, failing a correct link.
+    """
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+            out.append("")
+        else:
+            out.append("" if in_fence else line)
+    return "\n".join(out)
+
+
 def _slugs_for(text: str) -> set[str]:
     """Every anchor GitHub would generate, including -1 suffixes for duplicates."""
     seen: dict[str, int] = {}
     slugs: set[str] = set()
-    for _, heading in HEADING.findall(text):
+    for _, heading in HEADING.findall(_strip_fenced_blocks(text)):
         base = _github_slug(heading)
         if not base:
             continue

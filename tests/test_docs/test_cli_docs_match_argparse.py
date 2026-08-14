@@ -44,6 +44,9 @@ CLI_DOC = REPO_ROOT / "docs" / "cli.md"
 # noise, so they are excluded from the contract in both directions.
 AUTO_FLAGS = frozenset({"-h", "--help"})
 
+# A negative numeric argument value looks like a flag to a naive tokenizer.
+_NEGATIVE_NUMBER = re.compile(r"-\d+(\.\d+)?")
+
 
 class _ParserCapturedError(Exception):
     """Raised inside the patched ``parse_args`` to stop before the command runs."""
@@ -52,6 +55,16 @@ class _ParserCapturedError(Exception):
 def _console_scripts() -> dict[str, str]:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     return data["project"]["scripts"]
+
+
+def _gui_scripts() -> dict[str, str]:
+    """``[project.gui-scripts]`` -- installed commands too, but not argparse CLIs.
+
+    ``percell4-gui`` launches the Qt app and takes no flags, so it is a valid
+    thing to see in a documented example while being outside the flag contract.
+    """
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    return data["project"].get("gui-scripts", {})
 
 
 def _capture_parser(target: str) -> argparse.ArgumentParser:
@@ -122,6 +135,7 @@ def _documented_flags(section_body: str) -> set[str]:
 
 
 SCRIPTS = _console_scripts()
+GUI_SCRIPTS = _gui_scripts()
 
 
 def test_cli_doc_exists() -> None:
@@ -135,6 +149,88 @@ def test_every_console_script_has_a_section(command: str) -> None:
         f"{command} is declared in [project.scripts] but has no `## `{command}`` section "
         f"in docs/cli.md. It installs on every user's PATH, so it needs documenting "
         f"(or removing from the entry points)."
+    )
+
+
+EXAMPLE_DOCS = (
+    "README.md",
+    "docs/cli.md",
+    "docs/installation.md",
+    "docs/workflow-protocol.md",
+)
+
+
+def _example_invocations(text: str) -> list[tuple[str, list[str]]]:
+    """Every ``percell4-*`` invocation inside a fenced block, as (command, flags).
+
+    Joins backslash continuations and drops trailing comments so a wrapped,
+    annotated example is read as one command.
+    """
+    invocations: list[tuple[str, list[str]]] = []
+    in_fence = False
+    pending = ""
+    for raw in text.splitlines():
+        if re.match(r"^\s*(```|~~~)", raw):
+            in_fence = not in_fence
+            pending = ""
+            continue
+        if not in_fence:
+            continue
+        line = re.sub(r"\s+#.*$", "", raw).rstrip()
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        full = (pending + line).strip()
+        pending = ""
+        tokens = full.split()
+        if not tokens or not tokens[0].startswith("percell4-"):
+            continue
+        flags = []
+        for token in tokens[1:]:
+            # usage synopses wrap alternatives in shell metacharacters:
+            # `(--name NAME | --all)`, `[--quiet]`, `--kind {a,b}`
+            cleaned = token.strip("()[]{}|,").split("=")[0]
+            if not cleaned.startswith("-"):
+                continue
+            if _NEGATIVE_NUMBER.fullmatch(cleaned):
+                continue  # a negative value, e.g. --cellprob-threshold -1.0
+            flags.append(cleaned)
+        invocations.append((tokens[0], flags))
+    return invocations
+
+
+@pytest.mark.parametrize("doc", EXAMPLE_DOCS)
+def test_example_invocations_use_real_flags(doc: str) -> None:
+    """Every documented example must be runnable.
+
+    The option tables were already guarded, but the worked examples were not --
+    and that is precisely where two broken commands survived into the very
+    change that added the drift guard. A reader tries the Quickstart first.
+
+    Scope limit worth knowing: this checks that every flag in an example *exists*
+    on that parser. It cannot catch a *combination* rule enforced at runtime
+    rather than by argparse -- ``--strategy adaptive-clip`` requiring
+    ``--d-min-um``, for instance, is a hand-rolled check inside ``main()``.
+    Catching those would mean executing the commands against real datasets.
+    """
+    path = REPO_ROOT / doc
+    if not path.is_file():
+        pytest.skip(f"{doc} not present")
+
+    failures: list[str] = []
+    for command, flags in _example_invocations(path.read_text()):
+        if command in GUI_SCRIPTS:
+            continue  # installed, but not an argparse CLI
+        if command not in SCRIPTS:
+            failures.append(f"  {command}: not a declared entry point in pyproject.toml")
+            continue
+        real = _parser_flags(_capture_parser(SCRIPTS[command])) | AUTO_FLAGS
+        for flag in flags:
+            if flag not in real:
+                failures.append(f"  {command}: {flag} is not a flag this parser accepts")
+
+    assert not failures, "{} contains {} example(s) that would fail if run:\n{}".format(
+        doc, len(failures), "\n".join(failures)
     )
 
 
