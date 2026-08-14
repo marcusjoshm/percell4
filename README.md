@@ -32,10 +32,10 @@ Every batch operation is also available as a headless command-line tool.
 | [Workflow protocol](docs/workflow-protocol.md) | Step-by-step guide to the single-cell analysis workflow |
 | [Command-line tools](docs/cli.md) | All command-line tools and their options |
 | [Architecture](docs/architecture.md) | Code layout, storage model, and testing approach |
-| [Concepts](CONCEPTS.md) | Vocabulary — Dataset, Channel, Label Set, Segmentation, Mask |
+| [Concepts](docs/CONCEPTS.md) | Vocabulary — Dataset, Channel, Label Set, Segmentation, Mask |
 | [Writing an analysis](docs/writing_an_analysis.md) | Adding a new analysis module |
 | [Methods](docs/methods/) | How puncta detection works, and its validation record |
-| [Changelog](CHANGELOG.md) | Dated feature history |
+| [Changelog](docs/CHANGELOG.md) | Dated feature history |
 
 ## Installation
 
@@ -65,6 +65,12 @@ Launch the application:
 percell4-gui
 ```
 
+or
+
+```bash
+python main.py
+```
+
 The [workflow protocol](docs/workflow-protocol.md) walks through the single-cell
 analysis workflow step by step, from importing `.tiff` exports through segmentation,
 thresholding, and measurement.
@@ -82,8 +88,7 @@ See the [command-line reference](docs/cli.md) for all tools and options.
 
 ## Key capabilities
 
-- **Segmentation and tracking** — Cellpose segmentation with interactive quality control
-  in napari, and cell tracking with lineage across time-lapse acquisitions.
+- **Cell segmentation and tracking** — automated single-cell segmentation via Cellpose and cell tracking via LapTrack.
 - **Thresholding and puncta detection** — grouped per-cell autothresholding, adaptive
   local clipping for puncta, and subpopulation classification by contrast-to-noise ratio
   or other per-particle metrics.
@@ -104,6 +109,11 @@ involved where relevant.
 Contributions are welcome. [Writing an analysis](docs/writing_an_analysis.md) describes
 how to add a new analysis module, and [the architecture notes](docs/architecture.md)
 describe the code layout and how the test suite is organised.
+
+Implementation plans, requirements documents, and the project's institutional
+learnings live on the long-lived `development` branch rather than on `main`, so that
+a clone of `main` stays about the software rather than about how it was built. See
+[Development documentation](docs/architecture.md#development-documentation).
 
 ## License
 

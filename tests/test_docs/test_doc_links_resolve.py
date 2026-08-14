@@ -25,6 +25,9 @@ CHECKED_DOCS = (
     "docs/cli.md",
     "docs/workflow-protocol.md",
     "docs/architecture.md",
+    "docs/writing_an_analysis.md",
+    "docs/CONCEPTS.md",
+    "docs/CHANGELOG.md",
     "docs/screenshots/README.md",
 )
 

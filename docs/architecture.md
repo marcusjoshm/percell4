@@ -1,6 +1,6 @@
 # Architecture
 
-How PerCell4 is built and why. Written for someone judging the codebase who has not opened the source: every structural claim cites the file that backs it, and where the design is unfinished or a stated guarantee is not actually enforced, that is said plainly rather than left for you to find. Vocabulary follows [`CONCEPTS.md`](../CONCEPTS.md) — Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer are used in their project-specific senses.
+How PerCell4 is built and why. Written for someone judging the codebase who has not opened the source: every structural claim cites the file that backs it, and where the design is unfinished or a stated guarantee is not actually enforced, that is said plainly rather than left for you to find. Vocabulary follows [`CONCEPTS.md`](CONCEPTS.md) — Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer are used in their project-specific senses.
 
 ---
 
@@ -71,7 +71,7 @@ Use cases consume ports by construction. `LoadDataset` (`src/percell4/applicatio
 
 `pyproject.toml:153-207` declares four `[tool.importlinter]` `forbidden` contracts: `domain/` must not import Qt, napari, h5py, laptrack, adapters, interfaces or application; `domain/analysis` must not import `domain/measure`; `application/` must not import Qt, napari, h5py, adapters, interfaces or `gui`; `ports/` must not import adapters, interfaces or infrastructure.
 
-**Nothing runs them.** `import-linter` is absent from the `dev` extra, and `.github/workflows/ci.yml` has no `lint-imports` step — the only occurrences of the tool name in the repository are the config block and its own `# Run: lint-imports` comment. A repo plan document (`docs/plans/2026-07-28-001-refactor-headless-test-suite-plan.md:86`) calls this "a real gap." Static reading confirms the `application/` contract is currently **violated**: nine `import h5py` sites under `src/percell4/application/use_cases/`, three of them module-level (`flim_fret_discovery.py`, `batch_create_whole_field_segmentation.py`, `batch_fit_phasor_masks.py`). The `domain/` contract does hold. Read the contracts as intent the domain layer honours and the application layer does not.
+**Nothing runs them.** `import-linter` is absent from the `dev` extra, and `.github/workflows/ci.yml` has no `lint-imports` step — the only occurrences of the tool name in the repository are the config block and its own `# Run: lint-imports` comment. A planning document on the `development` branch calls this "a real gap." Static reading confirms the `application/` contract is currently **violated**: nine `import h5py` sites under `src/percell4/application/use_cases/`, three of them module-level (`flim_fret_discovery.py`, `batch_create_whole_field_segmentation.py`, `batch_fit_phasor_masks.py`). The `domain/` contract does hold. Read the contracts as intent the domain layer honours and the application layer does not.
 
 ### The null adapter is the proof
 
@@ -194,7 +194,7 @@ The split is by directory because of a specific incident, recorded at `pyproject
 - **Atomic writes with a stated contract.** `write_atomic` (`src/percell4/workflows/artifacts.py:50-100`): `.tmp` sibling → fsync contents → `os.replace` → fsync parent directory on POSIX. The target is **never** unlinked first, because a crash between unlink and replace would leave the user with nothing; the temp handle opens `"r+b"` because Windows maps `os.fsync` to `FlushFileBuffers`, which needs write access. Same pattern in `src/percell4/project.py`, `src/percell4/adapters/tiff_writer.py` and `src/percell4/application/use_cases/export_phasor_npz.py`.
 - **Parallel decode where only indices cross the process boundary.** `src/percell4/adapters/parallel_decode.py`: HDF5 decompression does not parallelise across threads (the library serialises calls) but does across processes. Each worker owns its own `h5py.File` and writes decoded frames straight into one shared-memory block, so frame indices — never pixels — are pickled. Constraints are baked in for macOS `spawn`: module-level worker functions, a per-process handle cache, parent-only `unlink()` of the block. Measured during development at ~5.3× (60 s → 11 s, 10 workers), output byte-identical to `DatasetStore.read_array`.
 - **Measurement-driven compression.** See §3 — the Blosc-vs-gzip comparison lives in the docstring of the function that makes the choice (`src/percell4/store.py:263`), so the rationale cannot drift from the code.
-- **Metadata-only inspection.** `src/percell4/interfaces/cli/inspect_dataset.py:1-10` reads shapes and dtypes from HDF5 metadata and never decodes an array, so a multi-gigabyte stack inspects instantly. The docstring links the incident that motivated it (`docs/solutions/logic-errors/large-file-load-metadata-read-full-decode-2026-06-07.md`).
+- **Metadata-only inspection.** `src/percell4/interfaces/cli/inspect_dataset.py:1-10` reads shapes and dtypes from HDF5 metadata and never decodes an array, so a multi-gigabyte stack inspects instantly. The docstring links the incident that motivated it, in the learnings store on the `development` branch.
 - **A generator-driven workflow state machine, with the alternative's footgun named.** `src/percell4/gui/workflows/base_runner.py:1-27`: phases are a generator yielding `PhaseRequest` objects, resumed via `gen.send(result)` at a natural Qt event boundary. The docstring says why not nested `QEventLoop.exec_()` — signals arrive while paused and re-enter slots, and `processEvents()` inside a nested loop corrupts Qt state. Side benefit: the request/result dataclasses are pure Python and testable with no running `QApplication`.
 - **Fail-at-import schema validation.** See §4.
 - **Single-source-of-truth name tuples with import-time drift assertions.** The registries for puncta detectors, background estimators, window finders and iterative-Otsu stop criteria each assert that their keys equal the canonical name tuple, at module import: `domain/measure/puncta_detectors.py:536`, `bg_estimators.py:303`, `window_finders.py:167`, `iterative_otsu.py:194`. A registry that drifts from the names the UI offers fails on import, not at the click.
@@ -207,8 +207,36 @@ The split is by directory because of a specific incident, recorded at `pyproject
 
 ---
 
+## Development documentation
+
+`main` carries the documentation a user or a contributor needs to run, understand
+and extend PerCell4. The working record behind it — implementation plans,
+requirements documents, the institutional learnings store, audits, superseded
+material, and the FLIM format reference — lives on the long-lived **`development`**
+branch instead, so that a clone of `main` stays about the software rather than
+about how it was built.
+
+```bash
+git fetch origin development
+git checkout development
+```
+
+That branch is `main` plus `docs/plans/`, `docs/brainstorms/`, `docs/solutions/`,
+`docs/audits/`, `docs/archive/`, `docs/initiatives/`, `docs/ideation/` and
+`docs/reference/`. Development work that produces those artifacts happens there;
+`main` is merged into it to keep it current.
+
+Around 60 comments in `src/` cite a learnings or plan document by path — for
+example `docs/solutions/logic-errors/large-file-load-metadata-read-full-decode-2026-06-07.md`.
+Those paths are correct on `development` and absent on `main`. They were left in
+place deliberately: the citation is the trail back to why a piece of code is
+shaped the way it is, and rewriting 60 comments to remove it would cost more than
+it saves.
+
+---
+
 ## Where to read next
 
-- [`CONCEPTS.md`](../CONCEPTS.md) — the vocabulary authority. Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer and Layer type tag are defined there, with the flagged ambiguities (notably that a Label Set shadowed by a same-named Mask is not a Segmentation). Code and docs use those terms in that sense.
-- [`docs/solutions/`](solutions/) — the decision record: 65 documents across ten categories, **22 of them architecture** (4 in `architecture-decisions/`, 18 in `architecture-patterns/`). Several choices above trace to a specific incident write-up there, linked by path from the source comments.
+- [`CONCEPTS.md`](CONCEPTS.md) — the vocabulary authority. Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer and Layer type tag are defined there, with the flagged ambiguities (notably that a Label Set shadowed by a same-named Mask is not a Segmentation). Code and docs use those terms in that sense.
+- **The decision record** — 65 documents across ten categories, 22 of them architecture. It lives on the `development` branch (see *Development documentation* above); several choices described here trace to a specific incident write-up there, cited by path from the source comments.
 - [`docs/writing_an_analysis.md`](writing_an_analysis.md) — the extension guide, if you want the framework from an author's side.

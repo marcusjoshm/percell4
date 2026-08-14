@@ -55,7 +55,7 @@ to change.
 
 ### 2. `result-manual-vs-adaptive.png` — not used in the README
 
-**Already generated**, built from `docs/archive/puncta_mask_gallery/` by overlaying
+**Already generated**, built from the archived puncta mask gallery (on the `development` branch) by overlaying
 `manual_SG_mask.png` and `adaptive_w15_k225_WINNER.png` on
 `reference_mNG_grayscale.png`.
 

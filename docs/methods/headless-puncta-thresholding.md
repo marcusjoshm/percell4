@@ -3,8 +3,9 @@ title: Headless QC-Free Puncta Thresholding — Method & Validation
 date: 2026-06-04
 status: current
 origin:
-  - docs/brainstorms/2026-06-03-headless-grouped-thresholding-puncta-requirements.md
-  - docs/plans/2026-06-03-002-feat-headless-puncta-thresholding-plan.md
+  # Requirements and plan documents; on the `development` branch.
+  - 2026-06-03-headless-grouped-thresholding-puncta-requirements.md
+  - 2026-06-03-002-feat-headless-puncta-thresholding-plan.md
 ---
 
 # Headless QC-Free Puncta Thresholding — Method & Validation
@@ -399,8 +400,9 @@ threshold-QC step. The settings round-trip through `run_config.json`.
 
 ## 9. References
 
-- Requirements: `docs/brainstorms/2026-06-03-headless-grouped-thresholding-puncta-requirements.md`
-- Plan: `docs/plans/2026-06-03-002-feat-headless-puncta-thresholding-plan.md`
+- Requirements and plan: `2026-06-03-headless-grouped-thresholding-puncta-requirements.md`
+  and `2026-06-03-002-feat-headless-puncta-thresholding-plan.md`, both on the
+  `development` branch
 - Registries & pipeline: `src/percell4/domain/measure/{puncta_names,bg_estimators,puncta_detectors,atrous,puncta_pipeline,puncta_scoring}.py`
 - Config & dispatch: `src/percell4/workflows/models.py` (`PunctaDetectorSettings`), `src/percell4/workflows/phases.py` (`_apply_puncta_groups`, `_apply_threshold_frame`)
 - Harness & CLI: `src/percell4/workflows/puncta_validation.py`, `src/percell4/interfaces/cli/batch_validate_puncta.py`
