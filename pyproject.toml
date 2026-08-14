@@ -81,10 +81,9 @@ ocr = [
 all = [
     "percell4[gpu,flim,imagej,ocr]",
 ]
+# Local development. The test suite and its pytest dependencies live on the
+# `development` branch, along with the CI workflow that runs them.
 dev = [
-    "pytest>=7.4",
-    "pytest-qt>=4.2",
-    "pytest-cov>=4.1",
     "ruff>=0.4",
     "percell4[all]",
 ]
@@ -113,41 +112,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "percell4.resources" = ["*.png", "*.ico", "*.icns"]
-
-[tool.pytest.ini_options]
-# tests/ only. The GL-dependent GUI tests live in tests_gui/, which is
-# deliberately outside this list -- see tests_gui/README.md. Separating them by
-# directory rather than by marker is what makes the default run headless: a
-# marker relies on addopts, and any explicit -m on the command line silently
-# overrides addopts. That is exactly how CI ended up running a different,
-# larger suite than a local run for months.
-testpaths = ["tests"]
-pythonpath = ["."]
-# This is the single source of test selection. CI's blocking job runs a bare
-# `pytest` and inherits it, so a local green and a CI green mean the same
-# thing. Do not move any part of the selection onto a command line.
-#
-# tests/test_scripts exercises the gitignored scripts/ developer-scratch dir,
-# which is not part of a clean checkout, so it is excluded here rather than
-# with --ignore on CI.
-addopts = "-v --tb=short -m 'not slow' --ignore=tests/test_scripts"
-# Pin the Qt binding for pytest-qt. A dev machine can easily end up with
-# PyQt5, PyQt6, and PySide6 all installed (napari and its plugins pull
-# different ones), and without this pytest-qt picks whichever it finds first —
-# so the same suite passes, fails, or segfaults from run to run depending on
-# which binding won. CI installs only PyQt5; pinning here makes a local run
-# reproduce CI instead of testing a configuration nobody ships.
-# The matching QT_API for qtpy is set in tests/conftest.py, which has to run
-# before the first qtpy import.
-qt_api = "pyqt5"
-# One marker, and it is actually applied. A declared-but-unused marker is not
-# harmless: `gui` was declared here and applied to zero tests, so CI's
-# `-m 'not slow and not gui'` deselected nothing while reading as though it
-# excluded the GUI suite. `napari_viewer` is likewise retired -- those tests
-# now live in tests_gui/, so the directory is the selection.
-markers = [
-    "slow: requires a cellpose model download; deselected by default in addopts",
-]
 
 # ── Import-linter: hexagonal architecture contracts ──────────
 # These contracts enforce layer boundaries. Run: lint-imports
@@ -209,7 +173,7 @@ forbidden_modules = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests"]
+src = ["src"]
 # Vendored third-party code (numpy-only grid_stitching core) is kept verbatim to
 # its upstream source; do not lint it against house style.
 extend-exclude = ["src/percell4/domain/_vendor"]
@@ -224,9 +188,3 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "src/percell4/interfaces/gui/**/*.py" = ["N802", "N815"]
 # scikit-learn convention: `X` / `X_sample` is the standard feature-matrix name.
 "src/percell4/domain/measure/grouper.py" = ["N803", "N806"]
-# Tests use requirement-ID / shape-acronym function names (test_AE2_*, test_*_THW,
-# test_compose_with_AND) and scientific / mock locals (H, W, X, A, B, MockUC).
-# Glob covers tests/ and tests_gui/ alike — the relocated GL modules use the
-# same shape-acronym locals (H = W = 48) and would fail the moment the lint
-# job started scanning them.
-"tests*/**/*.py" = ["N802", "N803", "N806"]

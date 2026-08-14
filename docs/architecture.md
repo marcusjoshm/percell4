@@ -1,6 +1,6 @@
 # Architecture
 
-How PerCell4 is built and why. Written for someone judging the codebase who has not opened the source: every structural claim cites the file that backs it, and where the design is unfinished or a stated guarantee is not actually enforced, that is said plainly rather than left for you to find. Vocabulary follows [`CONCEPTS.md`](../CONCEPTS.md) — Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer are used in their project-specific senses.
+How PerCell4 is built and why. Written for someone judging the codebase who has not opened the source: every structural claim cites the file that backs it, and where the design is unfinished or a stated guarantee is not actually enforced, that is said plainly rather than left for you to find. Vocabulary follows [`CONCEPTS.md`](CONCEPTS.md) — Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer are used in their project-specific senses.
 
 ---
 
@@ -69,9 +69,9 @@ Use cases consume ports by construction. `LoadDataset` (`src/percell4/applicatio
 
 ### The contracts are declared, not enforced
 
-`pyproject.toml:153-207` declares four `[tool.importlinter]` `forbidden` contracts: `domain/` must not import Qt, napari, h5py, laptrack, adapters, interfaces or application; `domain/analysis` must not import `domain/measure`; `application/` must not import Qt, napari, h5py, adapters, interfaces or `gui`; `ports/` must not import adapters, interfaces or infrastructure.
+`pyproject.toml` declares four `[tool.importlinter]` `forbidden` contracts: `domain/` must not import Qt, napari, h5py, laptrack, adapters, interfaces or application; `domain/analysis` must not import `domain/measure`; `application/` must not import Qt, napari, h5py, adapters, interfaces or `gui`; `ports/` must not import adapters, interfaces or infrastructure.
 
-**Nothing runs them.** `import-linter` is absent from the `dev` extra, and `.github/workflows/ci.yml` has no `lint-imports` step — the only occurrences of the tool name in the repository are the config block and its own `# Run: lint-imports` comment. A repo plan document (`docs/plans/2026-07-28-001-refactor-headless-test-suite-plan.md:86`) calls this "a real gap." Static reading confirms the `application/` contract is currently **violated**: nine `import h5py` sites under `src/percell4/application/use_cases/`, three of them module-level (`flim_fret_discovery.py`, `batch_create_whole_field_segmentation.py`, `batch_fit_phasor_masks.py`). The `domain/` contract does hold. Read the contracts as intent the domain layer honours and the application layer does not.
+**Nothing runs them.** `import-linter` is absent from the `dev` extra, and the CI workflow on the `development` branch has no `lint-imports` step — the only occurrences of the tool name are the config block and its own `# Run: lint-imports` comment. A planning document on the `development` branch calls this "a real gap." Static reading confirms the `application/` contract is currently **violated**: nine `import h5py` sites under `src/percell4/application/use_cases/`, three of them module-level (`flim_fret_discovery.py`, `batch_create_whole_field_segmentation.py`, `batch_fit_phasor_masks.py`). The `domain/` contract does hold. Read the contracts as intent the domain layer honours and the application layer does not.
 
 ### The null adapter is the proof
 
@@ -177,15 +177,17 @@ Three analyses ship — `per_particle_donut`, `per_particle_multichannel`, `whol
 
 **The `ViewerPort` seam makes the pipeline runnable without a display.** Because every display-touching use case takes a `ViewerPort`, swapping in `NullViewerAdapter` turns the GUI pipeline headless with no branching inside the use case — `src/percell4/interfaces/cli/run_pipeline.py` and `src/percell4/application/use_cases/batch_process_datasets.py` do exactly that. The rest of the 14 console commands stay headless by construction, never reaching for a viewer at all.
 
+**The test suite and the CI workflow live on the `development` branch** (see *Development documentation* below), alongside the planning and learnings material. `main` carries the software and its documentation; the machinery that verifies it is checked out with the development branch. What follows describes that suite, because its shape is part of how this codebase is built rather than an incidental detail.
+
 **Tests are split by directory, not by marker.** `tests/` holds roughly 300 test files and ~4,100 test functions and runs headless under `QT_QPA_PLATFORM=offscreen`; `tests_gui/` holds 16 files and 98 test functions that build real napari viewers and need a real GL context.
 
-The split is by directory because of a specific incident, recorded at `pyproject.toml:118-123`: a marker only takes effect through `addopts`, and **any explicit `-m` on the command line silently overrides `addopts`**. CI used to pass `-m 'not slow and not gui'` while the `gui` marker was declared but applied to zero tests — so the expression excluded nothing and CI quietly ran a *larger* suite than any local run, including ~100 napari-viewer tests deselected locally, for months. The fix made selection unforgeable: `testpaths` and `addopts` in `pyproject.toml` are the single source of test selection, and CI runs a bare `pytest`, so a local green and a CI green mean the same thing.
+The split is by directory because of a specific incident: a marker only takes effect through `addopts`, and **any explicit `-m` on the command line silently overrides `addopts`**. CI used to pass `-m 'not slow and not gui'` while the `gui` marker was declared but applied to zero tests — so the expression excluded nothing and CI quietly ran a *larger* suite than any local run, including ~100 napari-viewer tests deselected locally, for months. The fix made selection unforgeable: `testpaths` and `addopts` are the single source of test selection, and CI runs a bare `pytest`, so a local green and a CI green mean the same thing.
 
-**A monkeypatched constructor enforces the boundary dynamically.** `tests/conftest.py:68-118` replaces `napari.Viewer.__init__` for the whole `tests/` session: it records the attempt with a stack trace, then raises with a message telling the author to move the test to `tests_gui/`. The docstring explains why a static check would not do — *"Grep cannot police that boundary."* One test mentioned neither napari nor `ViewerWindow` yet built a `LauncherWindow` that owns a `ViewerWindow`, whose queued handler constructed the canvas, sometimes during a *later* test's setup; it passed alone and segfaulted when run after another module. The guard records *before* raising, because production code wraps the same access in `except Exception: return` and would otherwise swallow a raise-only guard at exactly the site worth catching. A session-end hook summarises every offender so one run yields the whole relocation list.
+**A monkeypatched constructor enforces the boundary dynamically.** `tests/conftest.py` replaces `napari.Viewer.__init__` for the whole `tests/` session: it records the attempt with a stack trace, then raises with a message telling the author to move the test to `tests_gui/`. The docstring explains why a static check would not do — *"Grep cannot police that boundary."* One test mentioned neither napari nor `ViewerWindow` yet built a `LauncherWindow` that owns a `ViewerWindow`, whose queued handler constructed the canvas, sometimes during a *later* test's setup; it passed alone and segfaulted when run after another module. The guard records *before* raising, because production code wraps the same access in `except Exception: return` and would otherwise swallow a raise-only guard at exactly the site worth catching. A session-end hook summarises every offender so one run yields the whole relocation list.
 
-**Three CI jobs** (`.github/workflows/ci.yml`): `ruff check src tests tests_gui`; the test suite on Python 3.12 with CPU-only torch wheels and no xvfb (offscreen needs no display); and a real-OpenGL `tests_gui` job under `xvfb-run`, which exits via `os._exit` on pytest's return code because napari/vispy can abort during interpreter teardown after the result is already known. The comments are candid about status: `main` has no branch protection, so a failure surfaces as a red check rather than blocking a merge.
+**Three CI jobs** run on `development`: `ruff check src tests tests_gui`; the test suite on Python 3.12 with CPU-only torch wheels and no xvfb (offscreen needs no display); and a real-OpenGL `tests_gui` job under `xvfb-run`, which exits via `os._exit` on pytest's return code because napari/vispy can abort during interpreter teardown after the result is already known.
 
-**No coverage figure appears here** because none is measured. `pytest-cov` is installed in the `dev` extra and in both test jobs, but there is no `[tool.coverage]` section in `pyproject.toml` and no `--cov` anywhere in the repository.
+**No coverage figure appears here** because none is measured. `pytest-cov` is installed for the test suite, but there is no `[tool.coverage]` configuration and no `--cov` anywhere.
 
 ---
 
@@ -194,7 +196,7 @@ The split is by directory because of a specific incident, recorded at `pyproject
 - **Atomic writes with a stated contract.** `write_atomic` (`src/percell4/workflows/artifacts.py:50-100`): `.tmp` sibling → fsync contents → `os.replace` → fsync parent directory on POSIX. The target is **never** unlinked first, because a crash between unlink and replace would leave the user with nothing; the temp handle opens `"r+b"` because Windows maps `os.fsync` to `FlushFileBuffers`, which needs write access. Same pattern in `src/percell4/project.py`, `src/percell4/adapters/tiff_writer.py` and `src/percell4/application/use_cases/export_phasor_npz.py`.
 - **Parallel decode where only indices cross the process boundary.** `src/percell4/adapters/parallel_decode.py`: HDF5 decompression does not parallelise across threads (the library serialises calls) but does across processes. Each worker owns its own `h5py.File` and writes decoded frames straight into one shared-memory block, so frame indices — never pixels — are pickled. Constraints are baked in for macOS `spawn`: module-level worker functions, a per-process handle cache, parent-only `unlink()` of the block. Measured during development at ~5.3× (60 s → 11 s, 10 workers), output byte-identical to `DatasetStore.read_array`.
 - **Measurement-driven compression.** See §3 — the Blosc-vs-gzip comparison lives in the docstring of the function that makes the choice (`src/percell4/store.py:263`), so the rationale cannot drift from the code.
-- **Metadata-only inspection.** `src/percell4/interfaces/cli/inspect_dataset.py:1-10` reads shapes and dtypes from HDF5 metadata and never decodes an array, so a multi-gigabyte stack inspects instantly. The docstring links the incident that motivated it (`docs/solutions/logic-errors/large-file-load-metadata-read-full-decode-2026-06-07.md`).
+- **Metadata-only inspection.** `src/percell4/interfaces/cli/inspect_dataset.py:1-10` reads shapes and dtypes from HDF5 metadata and never decodes an array, so a multi-gigabyte stack inspects instantly. The docstring links the incident that motivated it, in the learnings store on the `development` branch.
 - **A generator-driven workflow state machine, with the alternative's footgun named.** `src/percell4/gui/workflows/base_runner.py:1-27`: phases are a generator yielding `PhaseRequest` objects, resumed via `gen.send(result)` at a natural Qt event boundary. The docstring says why not nested `QEventLoop.exec_()` — signals arrive while paused and re-enter slots, and `processEvents()` inside a nested loop corrupts Qt state. Side benefit: the request/result dataclasses are pure Python and testable with no running `QApplication`.
 - **Fail-at-import schema validation.** See §4.
 - **Single-source-of-truth name tuples with import-time drift assertions.** The registries for puncta detectors, background estimators, window finders and iterative-Otsu stop criteria each assert that their keys equal the canonical name tuple, at module import: `domain/measure/puncta_detectors.py:536`, `bg_estimators.py:303`, `window_finders.py:167`, `iterative_otsu.py:194`. A registry that drifts from the names the UI offers fails on import, not at the click.
@@ -207,8 +209,36 @@ The split is by directory because of a specific incident, recorded at `pyproject
 
 ---
 
+## Development documentation
+
+`main` carries the documentation a user or a contributor needs to run, understand
+and extend PerCell4. The working record behind it — implementation plans,
+requirements documents, the institutional learnings store, audits, superseded
+material, and the FLIM format reference — lives on the long-lived **`development`**
+branch instead, so that a clone of `main` stays about the software rather than
+about how it was built.
+
+```bash
+git fetch origin development
+git checkout development
+```
+
+That branch is `main` plus `docs/plans/`, `docs/brainstorms/`, `docs/solutions/`,
+`docs/audits/`, `docs/archive/`, `docs/initiatives/`, `docs/ideation/` and
+`docs/reference/`. Development work that produces those artifacts happens there;
+`main` is merged into it to keep it current.
+
+Around 60 comments in `src/` cite a learnings or plan document by path — for
+example `docs/solutions/logic-errors/large-file-load-metadata-read-full-decode-2026-06-07.md`.
+Those paths are correct on `development` and absent on `main`. They were left in
+place deliberately: the citation is the trail back to why a piece of code is
+shaped the way it is, and rewriting 60 comments to remove it would cost more than
+it saves.
+
+---
+
 ## Where to read next
 
-- [`CONCEPTS.md`](../CONCEPTS.md) — the vocabulary authority. Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer and Layer type tag are defined there, with the flagged ambiguities (notably that a Label Set shadowed by a same-named Mask is not a Segmentation). Code and docs use those terms in that sense.
-- [`docs/solutions/`](solutions/) — the decision record: 65 documents across ten categories, **22 of them architecture** (4 in `architecture-decisions/`, 18 in `architecture-patterns/`). Several choices above trace to a specific incident write-up there, linked by path from the source comments.
+- [`CONCEPTS.md`](CONCEPTS.md) — the vocabulary authority. Dataset, Channel, Label Set, Segmentation, Mask, Phasor ROI, Layer and Layer type tag are defined there, with the flagged ambiguities (notably that a Label Set shadowed by a same-named Mask is not a Segmentation). Code and docs use those terms in that sense.
+- **The decision record** — 65 documents across ten categories, 22 of them architecture. It lives on the `development` branch (see *Development documentation* above); several choices described here trace to a specific incident write-up there, cited by path from the source comments.
 - [`docs/writing_an_analysis.md`](writing_an_analysis.md) — the extension guide, if you want the framework from an author's side.

@@ -148,6 +148,6 @@ fires; the Scripts tab then shows the button automatically.
 - `tests/test_gui/test_<name>_dialog.py` — construction, `dialog_class`
   binding, Start gating, preset lock, requires-gating, Start dispatch.
 
-See the `registered-analysis-framework` entry in `docs/solutions/` for the
+See the `registered-analysis-framework` entry in the learnings store on the `development` branch for the
 condensed "what must hold" rules the learnings hook surfaces when you edit the
 analysis package.

@@ -33,22 +33,10 @@ The launcher's **Workflows** tab offers five multi-step batch workflows, and thi
 
    Next, set the **Discovery** field. Use **Subdirectory** (the first entry and the default) when each child folder of the source directory is its own dataset. Use **Flat Directory** when the file names carry LASX channel tokens (`_ch00`, `_ch01`, …) — channels will be those tokens. Use **Tokenless (by name)** when the channel is a *name* at the end of the file name instead of a `chXX` token (e.g. `..._DNA.tif`, `..._G3BP1.tif`, `..._SG_mask.tif`): the shared leading part of the file name becomes the dataset (`.h5`) name and the trailing name becomes the channel, so files like `CellProfiler_U2OS_60min_As_3x4_{cells,DNA,G3BP1,SG_mask}.tif` group into one dataset with four named channels. To rename a channel or assign it as a mask or segmentation instead of an intensity channel, set the **Mode** field (next to Discovery) from **Auto** to **Manual** and edit the channel's name and type. Z-series stacks are automatically projected to a single image; the default is `MIP` (Maximum Intensity Projection). Tiles of a tile scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation if needed. For overlapping tiles, set the **Overlap %** and check **Register overlapping tiles** to phase-correlate the overlap and correct for stage drift; pick a **Reference** channel for the solve (any imported channel, including one renamed in Manual mode). Choose a **Fusion** mode for the overlap regions: **None** keeps each pixel from a single tile (no intensity distortion — required and auto-selected when the dataset has FLIM decay), or **Linear Blending** for a seamless display mosaic. Click **Compress** at the bottom of the window.
 
-   <!-- capture: protocol-01-import.png -->
-   ![The Compress TIFF Dataset dialog with the Discovery combo expanded, showing the Subdirectory, Flat Directory, and Tokenless (by name) modes](screenshots/_placeholder.png)
-   *The Discovery mode decides how your `.tiff` files are grouped into datasets — get this wrong and every later step operates on the wrong grouping.*
-
-   <!-- capture: protocol-02-stitching.png -->
-   ![The Tile Stitching form of the Compress TIFF Dataset dialog, showing the overlap percentage, registration, reference channel, and fusion controls](screenshots/_placeholder.png)
-   *Where tile scans are reassembled: the Overlap % and Fusion mode are the two settings that change the pixels, so check them before compressing.*
-
    The Compress TIFF Dataset window closes and the new dataset is added to the Datasets table. Repeat for every experiment you want to include in this run.
 
 4. **Configure Cellpose.**
    Select the channel with the strongest cytoplasmic signal as the segmentation channel. The default settings work for most datasets. The default 300 px diameter corresponds to ~30 µm at optimal resolution on a 1.4 NA objective and suits most cells. For larger- or smaller-than-average cells, adjust the diameter accordingly. The default model is **`cpsam_v2`** (the improved CellposeSAM — most robust for low-contrast fluorescence); `cpsam` (original), `cpdino`, and `cpdino-vitb` are also selectable from the Model dropdown.
-
-   <!-- capture: protocol-03-segment.png -->
-   ![The Cellpose settings with the model selector and Diameter field set, and the diameter reference circle drawn over real cells](screenshots/_placeholder.png)
-   *Diameter is the setting most worth checking by eye — the reference circle should sit about the size of one of your cells.*
 
 5. **Choose the edge-cell mode.** Pick one of three options for how to handle cells touching the image border:
    - **exclude** (default) — discard edge cells
@@ -64,10 +52,6 @@ The launcher's **Workflows** tab offers five multi-step batch workflows, and thi
    - **Sigma (σ)** — applies a Gaussian blur to the image before segmentation, useful for noisy images. Sigma *is* the standard deviation of the Gaussian kernel, measured in pixels: the larger the value, the wider the area each pixel is smoothed over.
 
    Add as many rounds as you need. The workflow runs them in the order shown in the table.
-
-   <!-- capture: protocol-05-rounds.png -->
-   ![The Thresholding rounds table of the workflow setup window with one round expanded, showing its channel, metric, grouping algorithm, and sigma fields](screenshots/_placeholder.png)
-   *One card per round, run top to bottom — this table is where you decide how many masks the run produces and in what order.*
 
 7. **Include particle analysis.**
    The **Include particle analysis** box is checked by default. When it is checked, the app counts and measures particles (e.g., puncta) inside each cell for every thresholding round. Set:
@@ -93,20 +77,12 @@ The launcher's **Workflows** tab offers five multi-step batch workflows, and thi
 
     Click **Accept & Next →** to move on to the next dataset. Repeat for every dataset.
 
-    <!-- capture: protocol-04-seg-qc.png -->
-    ![The segmentation QC window showing Cellpose label boundaries over the intensity channel, with the Accept & Next button in frame](screenshots/_placeholder.png)
-    *The first point where the run waits on you: every cell outline you accept here defines a row in your results.*
-
 12. **Review each thresholding mask (your input needed).**
     For each thresholding round, a review window opens for the first dataset. The proposed mask is shown on top of the target channel. Either:
     - Click **Accept** to keep the proposed mask, or
     - Draw a circular region on the image to guide refinement, then click **Accept** — the app recalculates the mask using only that region.
 
     Repeat for every dataset, then for every round.
-
-    <!-- capture: protocol-06-threshold-qc.png -->
-    ![The threshold review window showing a proposed grouped-threshold mask over its target channel, mid-review, with the group navigation visible](screenshots/_placeholder.png)
-    *What a proposed mask looks like before you accept it — and where drawing a circular region redirects the threshold to the area you care about.*
 
 13. **(Optional) Build the dilute-phase mask (your input needed).**
     If you enabled the dilute-phase mask in step 8, the dilute window opens for the first dataset. For each dataset:

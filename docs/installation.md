@@ -1,9 +1,13 @@
 # Installing PerCell4
 
-PerCell4 requires **Python 3.12 or newer**. Each OS has its own subsection below; pick yours and stop reading the others.
+PerCell4 requires **Python 3.12 or newer**. **Only Python 3.12 is tested** — newer
+versions install and run, but are not verified. If you hit problems on a newer version,
+reinstall with Python 3.12; see [Which Python version](#which-python-version) for the
+detail. Each OS has its own subsection below; pick yours and stop reading the others.
 
 ## Table of Contents
 
+- [Which Python version](#which-python-version)
 - [Installation](#installation)
   - [macOS](#macos)
   - [Linux](#linux)
@@ -15,6 +19,38 @@ PerCell4 requires **Python 3.12 or newer**. Each OS has its own subsection below
 - [Troubleshooting](#troubleshooting)
   - [Windows](#windows-1)
   - [Linux](#linux-1)
+
+---
+
+## Which Python version
+
+**Short version: install on 3.12.** If you are already on something newer and hit an
+install or import failure, recreate the virtual environment with 3.12 before debugging
+anything else — that resolves this class of problem outright.
+
+`pyproject.toml` declares `requires-python = ">=3.12"`, so newer interpreters are not
+blocked, and as of August 2026 they work. A full install of PerCell4 and its dependencies
+— including PyTorch 2.13 and Cellpose 4.2 — completes on Python 3.14.6 on macOS (Apple
+silicon), and the package, the Cellpose adapter, the detection code and the Qt windows
+all import and construct correctly there. But that is a spot check on one platform, not a
+supported configuration: 3.12 is the only version the test suite runs against.
+
+Two things worth knowing before you reach for a newer version:
+
+- **The historical blocker was PyTorch wheels on Windows, not PerCell4 itself.** Cellpose
+  depends on PyTorch, and PyTorch has historically lagged in publishing Windows wheels for
+  each new Python release. Installs on Windows against a newly released interpreter failed
+  for months at a time as a result. PyTorch now publishes `cp313` and `cp314` wheels, but
+  the same gap will reappear with the next Python release, and Windows is where it bites
+  first. If a Windows install fails while resolving or importing `torch`, dropping to
+  Python 3.12 is the fastest fix — see the [`c10.dll` entry](#windows-1) under
+  Troubleshooting for the related runtime failure.
+- **`torchvision` explicitly excludes Python 3.14.1** (`requires_python = "!=3.14.1,>=3.10"`).
+  3.14.0 and 3.14.2+ are fine; that one patch release is not.
+
+If you do run PerCell4 on a newer Python successfully, the useful thing to report is the
+platform and version, so the tested range can be widened deliberately rather than by
+assumption.
 
 ---
 
@@ -97,7 +133,7 @@ python main.py
 
 Prerequisites (do these **before** creating the venv):
 
-1. **64-bit Python 3.12+** from [python.org](https://www.python.org/downloads/) (not the Microsoft Store build, if you hit odd `venv` or SSL issues). During setup, enable **"Add python.exe to PATH"** and **"Install launcher for all users"** so the `py` launcher works.
+1. **64-bit Python 3.12** from [python.org](https://www.python.org/downloads/) — not the Microsoft Store build, if you hit odd `venv` or SSL issues. Use 3.12 specifically: Windows is where new-interpreter PyTorch gaps surface first (see [Which Python version](#which-python-version)). During setup, enable **"Add python.exe to PATH"** and **"Install launcher for all users"** so the `py` launcher works.
 2. **Microsoft Visual C++ 2015–2022 x64 Redistributable, version 14.50 or newer** — required by PyTorch (which Cellpose depends on). Older copies — common on lab/corporate Windows images — cause `OSError: [WinError 1114]` when `import torch` runs. Install from [`aka.ms/vs/17/release/vc_redist.x64.exe`](https://aka.ms/vs/17/release/vc_redist.x64.exe), then reboot. Confirm with:
 
     ```
@@ -116,7 +152,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 ```
 
-`py -3` picks the newest Python 3.x you have installed (3.12 or newer). If you do not have the launcher, use the full path to `python.exe` instead of `py -3`.
+`py -3` picks the newest Python 3.x you have installed. To pin the tested version explicitly, use `py -3.12` instead. If you do not have the launcher, use the full path to `python.exe`.
 
 #### PowerShell
 
@@ -185,7 +221,7 @@ python main.py
 ## Updating
 
 PerCell4 requires **Cellpose 4.2 or newer** for the current segmentation models
-(`cpsam_v2`, `cpsam`, `cpdino`, `cpdino-vitb` — see the [changelog](../CHANGELOG.md)). To
+(`cpsam_v2`, `cpsam`, `cpdino`, `cpdino-vitb` — see the [changelog](CHANGELOG.md)). To
 update an existing install, from your checkout with the virtual environment
 active:
 
@@ -286,7 +322,7 @@ Bundled apps are large (scientific stack + napari). GPU/CUDA is not included in 
 - **PowerShell won't run `Activate.ps1`** — Use the Command Prompt steps with `activate.bat`, or set execution policy as in the PowerShell section above.
 - **`percell4-gui` is not recognized** — Activate the venv first; the script is `.venv\Scripts\percell4-gui.exe`. You can always run `python main.py` from the repo root with the venv active.
 - **Qt / napari import errors** — This project pins **PyQt5** and uses **qtpy**. Avoid installing a second Qt binding (e.g. PyQt6) into the same venv unless you know you need it. If both are present and imports break, try: `set QT_API=pyqt5` before launching (`cmd`) or `$env:QT_API="pyqt5"` (`PowerShell`).
-- **`OSError: [WinError 1114] ... c10.dll`** — PyTorch failed to initialize. Most common fixes, in order: (1) install the [MSVC 2015–2022 x64 Redistributable 14.50+](https://aka.ms/vs/17/release/vc_redist.x64.exe) and reboot; (2) reinstall CPU-only torch with `pip install --no-cache-dir --force-reinstall torch --index-url https://download.pytorch.org/whl/cpu`; (3) if you have `torch==2.9.0` specifically, downgrade — `pip install "torch<2.9" --index-url https://download.pytorch.org/whl/cpu` (known regression [pytorch#169429](https://github.com/pytorch/pytorch/issues/169429) with Qt import order). Full triage in `docs/plans/2026-04-17-fix-windows-torch-c10-dll-init-failure-plan.md`.
+- **`OSError: [WinError 1114] ... c10.dll`** — PyTorch failed to initialize. Most common fixes, in order: (1) install the [MSVC 2015–2022 x64 Redistributable 14.50+](https://aka.ms/vs/17/release/vc_redist.x64.exe) and reboot; (2) reinstall CPU-only torch with `pip install --no-cache-dir --force-reinstall torch --index-url https://download.pytorch.org/whl/cpu`; (3) if you have `torch==2.9.0` specifically, downgrade — `pip install "torch<2.9" --index-url https://download.pytorch.org/whl/cpu` (known regression [pytorch#169429](https://github.com/pytorch/pytorch/issues/169429) with Qt import order). Full triage is in the planning documents on the `development` branch.
 - **Very long clone path** — If installs fail with path-related errors, clone the repo to a short path like `C:\src\percell4` or enable Windows long paths.
 
 ### Linux
