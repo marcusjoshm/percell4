@@ -20,7 +20,7 @@ apparent size. Fix these once and use them for the whole set:
 |---|---|
 | Format | PNG |
 | Capture density | Retina / 2x, then downscale to the target width below |
-| Target width | 1600 px (hero, result) · 1200 px (protocol and dialog shots) |
+| Target width | 1600 px (main window) · 1200 px (protocol and dialog shots) |
 | OS appearance | Light — matches the logo and the majority of GitHub sessions |
 | Window chrome | Cropped out. No macOS traffic lights, no title bar |
 | Visible paths | None. Blur or rename anything showing a home directory, a username, or an unpublished dataset name |
@@ -33,39 +33,38 @@ and dark set reads as two different products.
 
 ## Shots
 
-### 1. `hero.png` — README, above the fold
+### 1. `main-window.png` — README
 
-**Framing:** wide banner crop, roughly 3:1 (1600 x 530). This is deliberate and
-load-bearing: a full 16:9 window grab renders about 495 px tall in GitHub's ~880 px
-column and pushes the opening paragraph off the first screen, which defeats the
-point of the hero.
+**Framing:** wide crop, roughly 3:1 (1600 x 530). A full 16:9 window grab renders
+about 495 px tall in GitHub's ~880 px column, which is more vertical space than a
+single screenshot needs at the top of a README.
 
-**Window:** the napari viewer with a segmentation overlay, plus one peer window
-visible at the edge of frame — the cell table or the scatter plot. The single
-thing this shot has to convey is that PerCell4 is a multi-window analysis
-environment, not a script.
+**Window:** the viewer with a segmentation overlay, plus one other window visible
+at the edge of frame — the cell table or the scatter plot.
 
 **Dataset state:** a field with enough cells to read as real data, a segmentation
 layer active with visible label boundaries, and at least one mask layer in the
 layer list. Avoid a field so dense the individual cells are unreadable at 1600 px.
 
-**Must be visible:** the napari layer list (it shows the Channel / Segmentation /
-Mask structure at a glance), and label boundaries over real intensity data.
+**Must be visible:** the napari layer list, and label boundaries over real
+intensity data.
 
-**alt:** `PerCell4's napari viewer showing a cell segmentation overlay alongside the per-cell data table`
-**caption:** *Segmentation, measurement, and QC in one synchronized workspace.*
+**alt:** `The PerCell4 viewer showing a cell segmentation overlay alongside the per-cell data table`
+
+The README references this slot with no caption, matching the surrounding text.
 
 ---
 
-### 2. `result-manual-vs-adaptive.png` — README, result section
+### 2. `result-manual-vs-adaptive.png` — not used in the README
 
-**Already generated** — see `docs/screenshots/result-manual-vs-adaptive.png`.
-Built from `docs/archive/puncta_mask_gallery/`, overlaying `manual_SG_mask.png`
-and `adaptive_w15_k225_WINNER.png` on `reference_mNG_grayscale.png`. Recapture is
-only needed if the underlying gallery is regenerated.
+**Already generated**, built from `docs/archive/puncta_mask_gallery/` by overlaying
+`manual_SG_mask.png` and `adaptive_w15_k225_WINNER.png` on
+`reference_mNG_grayscale.png`.
 
-**alt:** `Side-by-side comparison of a hand-drawn stress granule mask and the adaptive local clipping result on the same field`
-**caption:** *Same field, same typical particle size. The adaptive detector finds the small, dim foci the hand-drawn mask misses — with no manual QC step.*
+This is a method-comparison figure and belongs with the validation record in
+[`docs/methods/`](../methods/), not in the README — the README describes what the
+software does and leaves method validation to the methods documents and the
+paper. Kept here as an available asset.
 
 ---
 
@@ -87,17 +86,16 @@ what it is doing, and a `caption` line saying why the reader is looking at it.
 
 ---
 
-### 9. `social-preview.png` — GitHub repository settings
+### 9. `social-preview.png` — GitHub repository settings (optional)
 
-Not referenced by any markdown file. This is the card that renders when the repo
-URL is pasted into LinkedIn, Slack, or email — which, for a link on a CV, is often
-the first thing anyone sees.
+Not referenced by any markdown file. This is the card GitHub renders when the repo
+URL is shared in a chat client or email. Optional; the repo works fine without one.
 
 **Size:** exactly 1280 x 640 px.
-**Content:** the PerCell4 logo, the project name, and the one-sentence positioning
-from the top of the README, over a crop of the hero image or a clean segmentation
-field. Keep text well inside the middle 80% — the card is cropped differently by
-each platform.
+**Content:** the PerCell4 logo, the project name, and the opening sentence from the
+README, over a crop of the main-window screenshot or a clean segmentation field.
+Keep text well inside the middle 80% — the card is cropped differently by each
+platform.
 
 **Where it goes:** GitHub → repository **Settings** → **General** → **Social
 preview** → *Upload an image*. This is a repository setting, not a commit.
@@ -106,9 +104,9 @@ preview** → *Upload an image*. This is a repository setting, not a commit.
 
 ## Repository settings to apply alongside these
 
-Same trip, same reader, not carried by any file in this repo:
+Not carried by any file in this repo:
 
-- **About description** — the one-sentence positioning from the top of the README.
+- **About description** — the opening sentence from the README.
 - **Topics** — `microscopy`, `flim`, `cell-segmentation`, `cellpose`, `napari`,
   `hdf5`, `image-analysis`, `single-cell`, `phasor`, `pyqt`.
 - **Website** — leave empty until a docs site exists; an empty field reads better
