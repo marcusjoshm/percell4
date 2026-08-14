@@ -14,7 +14,7 @@ Findings are evidence-backed. Nothing here is inferred from the README itself �
 | Class | Count | Meaning |
 |---|---:|---|
 | **BROKEN** | 5 | Factually wrong; a user following it fails |
-| **STALE** | 7 | Was true, drifted from current code |
+| **STALE** | 8 | Was true, drifted from current code |
 | **MISSING (flags/commands)** | 6 | Real CLI surface the README never mentions |
 | **OVERSTATED** | 3 | Claim the code does not support |
 | **MISSING (capability)** | 11 | Shipped subsystems with zero README presence |
@@ -91,6 +91,13 @@ The README is not neglected — it is *misproportioned*. It documents the CLI in
 ### S7. `tools/png_to_csv/` does not produce a CSV
 - **Where:** `README.md:659` — *"builds the calibration CSV by OCRing screenshots."*
 - **Evidence:** the script is `tools/png_to_csv/phasor_ocr_to_xlsx.py` and writes `phasor_calibration.xlsx`. The CSV in that directory is an empty hand-fill template (`batch_tcspc_calibration_template.csv`).
+
+### S8. The Datasets panel has no `.tiff` file icon
+- **Where:** `README.md:78` — *"Click the **.tiff file icon** in the Datasets panel."*
+- **Evidence:** `src/percell4/gui/workflows/single_cell/config_dialog.py:522-541` builds a row of four text buttons — `Add .h5 files...`, `Add folder of .h5...`, `Add .tiff files...`, `Remove`. There is no icon. Only `Add .tiff files...` opens Compress TIFF Dataset.
+- **Fix:** name the real button.
+
+> Recorded late: this finding was surfaced during source verification but dropped when this document was first written. It is BROKEN-class in effect — a user following it looks for a control that does not exist — and is filed here with the other label drifts.
 
 ---
 

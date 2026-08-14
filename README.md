@@ -75,9 +75,9 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
    Click the **Workflows** tab in the launcher sidebar. Click the **Single-cell thresholding analysis workflow** button. A setup window opens.
 
 3. **Add your datasets.**
-   Click the **.tiff file icon** in the Datasets panel of the setup window. A new window called **Compress TIFF Dataset** opens. In the Source panel at the top, click **Browse...** next to the Directory field and select a folder containing `.tiff` files exported from LASX. The Output field defaults to one level up from the folder containing the `.tiff` files; this is where the dataset will be saved. To change the output folder, click **Browse...** next to the Output field and create or choose a different folder.
+   Click **Add .tiff files...** in the Datasets panel of the setup window — it sits alongside **Add .h5 files...**, **Add folder of .h5...**, and **Remove**. A new window called **Compress TIFF Dataset** opens. In the Source panel at the top, click **Browse...** next to the Directory field and select a folder containing `.tiff` files exported from LASX. The Output field defaults to one level up from the folder containing the `.tiff` files; this is where the dataset will be saved. To change the output folder, click **Browse...** next to the Output field and create or choose a different folder.
 
-   Next, set the **Discovery** field. Use **Flat Directory** when the file names carry LASX channel tokens (`_ch00`, `_ch01`, …) — channels will be those tokens. Use **Tokenless (by name)** when the channel is a *name* at the end of the file name instead of a `chXX` token (e.g. `..._DNA.tif`, `..._G3BP1.tif`, `..._SG_mask.tif`): the shared leading part of the file name becomes the dataset (`.h5`) name and the trailing name becomes the channel, so files like `CellProfiler_U2OS_60min_As_3x4_{cells,DNA,G3BP1,SG_mask}.tif` group into one dataset with four named channels. To rename a channel or assign it as a mask or segmentation instead of an intensity channel, set the **Mode** field (next to Discovery) from **Auto** to **Manual** and edit the channel's name and type. Z-series stacks are automatically projected to a single image; the default is `MIP` (Maximum Intensity Projection). Tiles of a tile scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation if needed. For overlapping tiles, set the **Overlap %** and check **Register overlapping tiles** to phase-correlate the overlap and correct for stage drift; pick a **Reference** channel for the solve (any imported channel, including one renamed in Manual mode). Choose a **Fusion** mode for the overlap regions: **None** keeps each pixel from a single tile (no intensity distortion — required and auto-selected when the dataset has FLIM decay), or **Linear Blending** for a seamless display mosaic. Click **Compress** at the bottom of the window.
+   Next, set the **Discovery** field. Use **Subdirectory** (the first entry and the default) when each child folder of the source directory is its own dataset. Use **Flat Directory** when the file names carry LASX channel tokens (`_ch00`, `_ch01`, …) — channels will be those tokens. Use **Tokenless (by name)** when the channel is a *name* at the end of the file name instead of a `chXX` token (e.g. `..._DNA.tif`, `..._G3BP1.tif`, `..._SG_mask.tif`): the shared leading part of the file name becomes the dataset (`.h5`) name and the trailing name becomes the channel, so files like `CellProfiler_U2OS_60min_As_3x4_{cells,DNA,G3BP1,SG_mask}.tif` group into one dataset with four named channels. To rename a channel or assign it as a mask or segmentation instead of an intensity channel, set the **Mode** field (next to Discovery) from **Auto** to **Manual** and edit the channel's name and type. Z-series stacks are automatically projected to a single image; the default is `MIP` (Maximum Intensity Projection). Tiles of a tile scan can be stitched together by checking the **Tile Stitching** box. The LASX default pattern is snake-by-row starting at the top-left, but adjust the stitching orientation if needed. For overlapping tiles, set the **Overlap %** and check **Register overlapping tiles** to phase-correlate the overlap and correct for stage drift; pick a **Reference** channel for the solve (any imported channel, including one renamed in Manual mode). Choose a **Fusion** mode for the overlap regions: **None** keeps each pixel from a single tile (no intensity distortion — required and auto-selected when the dataset has FLIM decay), or **Linear Blending** for a seamless display mosaic. Click **Compress** at the bottom of the window.
 
    The Compress TIFF Dataset window closes and the new dataset is added to the Datasets table. Repeat for every experiment you want to include in this run.
 
@@ -90,12 +90,12 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
    - **include_as_size_normalized_cohort** — keep edge cells and analyze them together as one group, sized relative to the average non-edge cell in the same dataset
 
 6. **Define the thresholding rounds.** Each "round" produces one mask per cell — for example, one round for P-bodies and another for stress granules. For each round you want to run:
-   - Click **Add round** in the Thresholding rounds table.
+   - Click **Add Round** in the Thresholding rounds table.
    - Name the round (e.g., `P-body_mask`).
    - Pick the target channel from the dropdown list.
    - **Metric** — `median_intensity` works best for most condensate proteins.
    - **Grouping algorithm** — use `gmm` with at least 10 groups.
-   - **Sigma (σ)** — applies a Gaussian blur to the image before segmentation, useful for noisy images. Sigma sets a radius around each pixel in standard deviations (not pixels).
+   - **Sigma (σ)** — applies a Gaussian blur to the image before segmentation, useful for noisy images. Sigma *is* the standard deviation of the Gaussian kernel, measured in pixels: the larger the value, the wider the area each pixel is smoothed over.
 
    Add as many rounds as you need. The workflow runs them in the order shown in the table.
 
@@ -107,7 +107,7 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 
 8. **(Optional) Enable the dilute-phase mask.**
    Check **Generate dilute-phase mask** if you want a dilute-phase mask generated in this run. Then set:
-   - **Dilute mask name** — must be different from every thresholding round name (the app will not let the run start until you fix it).
+   - **Mask name** — must be different from every thresholding round name (the app will not let the run start until you fix it).
    - **Dilation radius** in pixels — used every dilute round.
    - Use the same grouping and filter settings you would use for grouped thresholding.
 
@@ -121,7 +121,7 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
     When Cellpose finishes, the Viewer window opens with the first dataset. Cell outlines are shown on top of your image. Refine them if needed:
     - Click the cell outlines layer in the layer list on the left, then use the paint, erase, and fill tools above the image.
 
-    Click **Accept** to move on to the next dataset. Repeat for every dataset.
+    Click **Accept & Next →** to move on to the next dataset. Repeat for every dataset.
 
 12. **Review each thresholding mask (your input needed).**
     For each thresholding round, a review window opens for the first dataset. The proposed mask is shown on top of the target channel. Either:
@@ -132,12 +132,12 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
 
 13. **(Optional) Build the dilute-phase mask (your input needed).**
     If you enabled the dilute-phase mask in step 8, the dilute window opens for the first dataset. For each dataset:
-    - Click **Compute** to generate the proposed condensed mask.
+    - Click **Run another round** to compute the proposed condensed mask.
     - A review window opens — look over the mask and click **Accept** to keep this round.
     - The accepted mask is automatically expanded slightly and removed from the input for the next round.
-    - Click **Another round** to refine further on the same dataset, or **Done** to move on to the next dataset.
+    - Click **Run another round** again to refine further on the same dataset, **Done — save and continue** to move on to the next dataset, or **Cancel run** to abandon the whole workflow.
 
-    Different datasets may need different numbers of rounds. The final mask is saved when you click **Done**.
+    Different datasets may need different numbers of rounds. The final mask is saved when you click **Done — save and continue**.
 
 14. **Wait for the app to measure and save your results.**
     The app measures every cell across every segmentation and mask, then saves the results. You do not need to do anything during this part.
@@ -150,7 +150,7 @@ The following protocol is a general-purpose workflow for single-cell segmentatio
     - `summary_datasets.csv` — one row per dataset with edge-cell mode, round counts, and any failure reasons.
     - `measurements.parquet` — the same data as `combined.csv`, in a compact format for Python or R users.
 
-**Pausing and resuming.** The app saves its progress after each step. To pick up an interrupted run, open the launcher, click the **Workflows** tab, and click **Resume run...** instead of starting a new workflow.
+**Cancelling a run.** A run in progress can be cancelled with **Cancel run**; it cannot be paused and resumed. An interrupted run is restarted from the beginning.
 
 **Headless TIFF export.** If you only need `.tiff` files out of an existing dataset — for ImageJ, custom downstream scripts, or sharing with a colleague — use the command-line tool documented in the next section.
 
@@ -162,8 +162,8 @@ PerCell4 ships several headless CLI tools for batch operations across `.h5` data
 
 - **Positional `paths`** accept one or more `.h5` files or directories. Directories are globbed non-recursively for `*.h5`.
 - **`--dry-run`** (where supported) classifies each dataset as a live run would but does not mutate files. Use it on destructive operations to audit what will change.
-- **`--quiet`** suppresses per-item detail lines. The per-dataset summary and final totals always print.
-- **`--verbose` / `-v`** enables DEBUG logging.
+- **`--quiet`** (where supported) suppresses per-item detail lines. The per-dataset summary and final totals always print. `percell4-batch-threshold`, `percell4-batch-measure`, and `percell4-inspect` have no `--quiet`.
+- **`--verbose`** enables DEBUG logging, with a `-v` short form everywhere except `percell4-batch-threshold` and `percell4-batch-measure`, which accept only the long form. `percell4-inspect` has neither.
 - **Exit codes:** `0` if at least one dataset made progress, `1` if every dataset was skipped or failed, `2` on argparse / validation failure (no I/O performed).
 - **GUI files first.** Close any open PerCell4 GUI session against the target files before running — the batch tools write to the same `.h5` files the GUI reads.
 
@@ -188,6 +188,7 @@ percell4-batch-cellpose-laptrack SOURCES [--output-dir DIR] [options]
 | `--cellpose-model {cpsam_v2,cpsam,cpdino,cpdino-vitb}` | Cellpose 4.x model. Default: `cpsam_v2` (improved CellposeSAM — better in low-contrast regions). `cpsam` = original; `cpdino` / `cpdino-vitb` = DINOv3 backbones (vitb is smaller). Requires cellpose >= 4.2. |
 | `--cellpose-diameter CELLPOSE_DIAMETER` | Cell diameter in pixels; `0` = auto-detect. Default: `30`. |
 | `--gpu` | Use GPU for Cellpose. |
+| `--device DEVICE` | Explicit torch device for Cellpose (e.g. `xpu`, `cuda:1`). Overrides the device stored in the launcher's Advanced panel; omit to use that stored setting. Only applies with `--gpu`. An unusable device falls back to CPU with a warning on stderr. |
 | `--flow-threshold FLOW_THRESHOLD` | Flow error threshold; higher = more permissive. Default: `0.4`. |
 | `--cellprob-threshold CELLPROB_THRESHOLD` | Cell probability threshold. Default: `0.0`. |
 | `--min-size MIN_SIZE` | Minimum cell size in pixels. Default: `15`. |
@@ -199,7 +200,7 @@ percell4-batch-cellpose-laptrack SOURCES [--output-dir DIR] [options]
 | `--quiet` | Suppress per-dataset progress lines. |
 | `--verbose`, `-v` | Enable DEBUG logging. |
 
-The Cellpose defaults match the GUI Segment tab, so the same settings produce the same segmentation interactively and headlessly.
+The Cellpose defaults match the GUI Segment tab with two exceptions, so pass them explicitly when you want a headless run to reproduce an interactive one: `--cellpose-diameter` defaults to `30`, where the GUI Segment tab seeds `300`; and `--gpu` is off unless passed, where the GUI's **Use GPU** checkbox starts checked.
 
 Examples:
 
@@ -514,7 +515,8 @@ percell4-batch-threshold DATASETS --round-name ROUND_NAME --channel CHANNEL \
 | `--smallest-particle-um SMALLEST_PARTICLE_UM` | Smallest particle diameter (in `--smallest-particle-unit`) to override auto-detection. Omit to auto-detect it from the image; the largest particle is always measured (LoG). |
 | `--smallest-particle-unit {um,px}` | Unit for `--smallest-particle-um` (default `um`). `um` resolves via the dataset pixel size; `px` is used directly, for datasets without a pixel size. |
 | `--cnr-classify` | After the feature mask is produced, split its foci by contrast-to-noise ratio at `--cnr-threshold` into `<round>_low` / `<round>_high` masks plus a per-focus CNR table at `/classification/<round>`. Guided mode only; valid only with `--strategy adaptive-clip` or `auto-extract`. Time-lapse data is classified per timepoint (masks gain a T axis; the table gains a timepoint column). |
-| `--cnr-threshold CNR_THRESHOLD` | Guided CNR split threshold (**Required** with `--cnr-classify`). |
+| `--cnr-threshold CNR_THRESHOLD` | Guided CNR split threshold (**Required** with `--cnr-classify` unless `--cnr-forced` is passed). |
+| `--cnr-forced` | Forced always-2 subpopulation classification (GMM two-group split). Overrides `--cnr-threshold`: the boundary is placed by a data-driven `GaussianMixture` two-group fit regardless of the threshold value. |
 | `--iterative-scope {groups,per-cell,whole-field}` | Iteration unit (default `per-cell`). `groups` reuses `--algorithm` grouping. |
 | `--dilation-radius DILATION_RADIUS` | Guard-ring radius (px) removed around each captured layer (default `5`). |
 | `--max-rounds MAX_ROUNDS` | Hard cap on peel iterations per dataset (default `10`). |
@@ -637,33 +639,33 @@ Three surfaces read and write it:
 
 ## Tech Stack
 
-- **GUI:** Qt (PyQt5 + qtpy), napari (`>=0.5,<0.8`), pyqtgraph (`>=0.13,<0.15`)
-- **Data:** HDF5 via h5py (`>=3.10,<4`), pandas (`>=2.0,<3`), pyarrow (`>=14`)
+- **GUI:** Qt (PyQt5 `>=5.15` + qtpy `>=2.4`), napari (`>=0.5,<0.8`), pyqtgraph (`>=0.13,<0.15`), matplotlib (`>=3.8`)
+- **Data:** HDF5 via h5py (`>=3.10,<4`) with hdf5plugin (`>=4.0`) for the Blosc filter every dataset is written with, pandas (`>=2.0,<3`), pyarrow (`>=14`)
 - **Imaging:** numpy (`>=1.26`), scikit-image (`>=0.22`), scipy (`>=1.12`), tifffile, sdtfile (Becker & Hickl FLIM)
-- **Segmentation:** Cellpose (`>=3.0,<5.0`), scikit-learn
-- **CLI:** click (`>=8.1`), rich (`>=13.0`)
+- **Segmentation & tracking:** Cellpose (`>=4.2,<5.0`), scikit-learn, laptrack (`>=0.16,<0.18`)
+- **Statistics:** diptest (`>=0.7,<0.12`) — Hartigan's dip test for CNR subpopulation gap detection
 - **Python:** 3.12 or newer
 
-Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `flim`, `imagej`, `all`) are documented under [Optional extras](#optional-extras).
+Dependency versions are pinned in `pyproject.toml`. Optional extras (`gpu`, `flim`, `imagej`, `ocr`, `all`) are documented under [Optional extras](#optional-extras).
 
 ---
 
 ## Features
 
-- **HDF5-backed projects.** One `.h5` per experiment holds intensity channels, segmentation labels, masks, phasor maps, and measurement staging — no separate database, no scattered files.
+- **HDF5-backed projects.** One `.h5` per experiment holds intensity channels, segmentation labels, masks, and phasor maps — no separate database, no scattered files.
 - **Overlap-aware tile stitching.** Stitch tile scans at import with phase-correlation registration on the tile *overlap region* (Fiji/ImageJ-style) — solved once on a reference channel and reused for every channel and the FLIM decay stream. Falls back to a nominal-overlap grid when a channel can't register, and offers **None** (measurement-correct, forced for FLIM) or **Linear Blending** overlap fusion.
 - **Cellpose segmentation with interactive QC.** Run Cellpose batch-style across many datasets, then QC each dataset's labels in the napari viewer with paint/erase/fill shortcuts. Pick any Cellpose 4.x model — `cpsam_v2` (default, improved low-contrast), `cpsam`, `cpdino`, or `cpdino-vitb`.
 - **Time-lapse tracking and lineage.** Import `.tiff` series with `_tN` timepoint tokens as a single multi-timepoint dataset, scroll the timepoints in napari, segment every frame, then track cells so each keeps one ID across time. Cells that die or leave the field of view end their track; dividing cells are linked parent → daughter as lineage (powered by [laptrack](https://github.com/yfukai/laptrack)). The tracked segmentation stores the track ID as the label value, and a napari Tracks layer shows trajectories and divisions.
 - **Grouped thresholding.** Cluster cells by intensity, apply per-group autothresholding, refine with a circular ROI per dataset, write the result to `/masks/<round>`. Run multiple rounds in one workflow.
 - **Puncta detection & subpopulation classification.** Adaptive Local Clipping (per-cell band-pass + z-score) finds puncta inside each cell, with auto-window sizing and two-pass auto-extraction. Split a feature mask into populations by contrast-to-noise ratio (discover/guided/forced) or interactively with the CNR segmenter. Runs per-frame on time-lapse data.
-- **FLIM phasor analysis.** Compute phasor maps from `.sdt` data, plot with `nipy_spectral` density on a Qt-native histogram, draw multi-ROI selections, save the union as a mask layer. Take the per-channel calibration straight from a Leica `.lif` — the Batch TCSPC dialog reads the phase and modulation LAS X stored, at full precision. Where no `.lif` is available, [`tools/png_to_csv/`](tools/png_to_csv/README.md) still builds the calibration CSV by OCRing screenshots of the same dialog.
+- **FLIM phasor analysis.** Compute phasor maps from `.sdt` data, plot with `nipy_spectral` density on a Qt-native histogram, draw multi-ROI selections, save the union as a mask layer. Take the per-channel calibration straight from a Leica `.lif` — the Batch TCSPC dialog reads the phase and modulation LAS X stored, at full precision. Where no `.lif` is available, [`tools/png_to_csv/`](tools/png_to_csv/README.md) OCRs screenshots of the same dialog into a `phasor_calibration.xlsx` sheet, which you fill into the calibration CSV.
 - **Per-cell measurements.** Configurable per-channel metrics across every segmentation and mask layer, exported as a tidy parquet plus CSV mirrors.
 - **Multi-window UI.** Independent top-level windows for the napari viewer, pyqtgraph scatter, cell table, and phasor plot — all synchronized through a single `CellDataModel` with one `state_changed` signal.
 - **Batch workflows.** End-to-end single-cell pipeline, batch TIFF compression, dataset-wide spatial binning, batch TCSPC append with calibration from a CSV or a Leica `.lif`.
 - **Dilute-phase mask generation.** Adaptive per-dataset round loop layered on top of grouped thresholding for phase-separated biology.
-- **Image and measurement export.** TIFF (GUI dialog or CLI), CSV/XLSX, parquet. Round-trips pixel-size metadata.
+- **Image and measurement export.** TIFF (GUI dialog or CLI), CSV, parquet. Round-trips pixel-size metadata.
 - **Headless CLI.** Batch TIFF export, phasor compute, GMM ellipse fitting, whole-field segmentation, and resource rename/delete tooling that runs without a display — see [Command-line Tools](#command-line-tools).
-- **Dataset lifecycle.** Import, append, resume, close — with `run_state.json` for crash- and pause-tolerant workflows.
+- **Dataset lifecycle.** Import, append, close — each workflow run records its settings in a `run_config.json` alongside its results.
 
 ---
 
