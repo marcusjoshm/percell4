@@ -40,8 +40,7 @@ Every batch operation is also available as a headless command-line tool.
 ## Installation
 
 PerCell4 requires Python 3.12 or newer. **Only Python 3.12 is tested** — newer versions
-install and run, but are not verified, so use 3.12 unless you have a reason not to. Install
-into a virtual environment:
+install and run, but are not verified. If you experience problems with a newer version of Python, reinstall with Python 3.12.
 
 ```bash
 python3.12 -m venv .venv
@@ -49,8 +48,8 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-See the [installation guide](docs/installation.md) for optional extras, per-OS instructions, PyTorch and
-Cellpose notes, standalone bundles, and troubleshooting.
+See the [installation guide](docs/installation.md) for per-OS instructions, optional
+extras, PyTorch and Cellpose notes, standalone bundles, and troubleshooting.
 
 ## Usage
 
@@ -83,23 +82,26 @@ See the [command-line reference](docs/cli.md) for all tools and options.
 
 ## Key features
 
-- **Cell segmentation and tracking** — automated single-cell segmentation via Cellpose and cell tracking via LapTrack.
+- **Cell segmentation and tracking** — automated single-cell segmentation via Cellpose,
+  and cell tracking via LapTrack.
 - **Thresholding** — autothresholding (Otsu, Triangle, Li), optionally applied per group
   after clustering cells by their individual intensities (k-means or Gaussian mixture
-  models), and a universal feature extraction method called [Adaptive Local Clipping](docs/adaptive-local-clipping.md).
+  models), and a universal feature extraction method called
+  [Adaptive Local Clipping](docs/adaptive-local-clipping.md).
 - **FLIM and phasor analysis** — phasor analysis of TCSPC data with median and wavelet
-  filtering, and segmentation by ROI: manual placement, derived from fluorescence lifetime
-  values, or automated with a Gaussian mixture model.
+  filtering, and segmentation by ROI: manual placement, derived from fluorescence
+  lifetime values, or automated with a Gaussian mixture model.
 - **Measurement and export** — configurable per-cell and per-particle measurements across
   every segmentation and mask, exported as CSV and TIFF files.
-- **Batch workflows and analysis** — end-to-end analysis workflows and particle analysis features configured in the GUI or dedicated CLI tools
+- **Batch workflows and analysis** — end-to-end analysis workflows and particle analysis,
+  configured in the GUI or run from dedicated CLI tools.
 
 ## Reporting issues
 
-PerCell4 is a developing project and reporting is greatly appreciated! Questions and bug reports are welcome in
-[GitHub issues](https://github.com/marcusjoshm/percell4/issues). Please include your
-operating system, Python version, and the output of `percell4-inspect` for the dataset
-involved where relevant.
+PerCell4 is a developing project and reports are greatly appreciated! Questions and bug
+reports are welcome in [GitHub issues](https://github.com/marcusjoshm/percell4/issues).
+Please include your operating system, Python version, and the output of
+`percell4-inspect` for the dataset involved where relevant.
 
 ## Contributing
 

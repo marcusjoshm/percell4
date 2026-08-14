@@ -1,8 +1,9 @@
 # Installing PerCell4
 
-PerCell4 requires **Python 3.12 or newer**, and **only Python 3.12 is tested** — see
-[Which Python version](#which-python-version) before choosing. Each OS has its own
-subsection below; pick yours and stop reading the others.
+PerCell4 requires **Python 3.12 or newer**. **Only Python 3.12 is tested** — newer
+versions install and run, but are not verified. If you hit problems on a newer version,
+reinstall with Python 3.12; see [Which Python version](#which-python-version) for the
+detail. Each OS has its own subsection below; pick yours and stop reading the others.
 
 ## Table of Contents
 
@@ -23,15 +24,16 @@ subsection below; pick yours and stop reading the others.
 
 ## Which Python version
 
-`pyproject.toml` declares `requires-python = ">=3.12"`, but 3.12 is the only version the
-test suite and CI run against. **Install on 3.12 unless you have a specific reason not
-to.**
+**Short version: install on 3.12.** If you are already on something newer and hit an
+install or import failure, recreate the virtual environment with 3.12 before debugging
+anything else — that resolves this class of problem outright.
 
-Newer interpreters are not blocked, and as of August 2026 they work: a full install of
-PerCell4 and its dependencies — including PyTorch 2.13 and Cellpose 4.2 — completes on
-Python 3.14.6 on macOS (Apple silicon), and the package, the Cellpose adapter, the
-detection code and the Qt windows all import and construct correctly there. That is a
-spot check on one platform, not a supported configuration.
+`pyproject.toml` declares `requires-python = ">=3.12"`, so newer interpreters are not
+blocked, and as of August 2026 they work. A full install of PerCell4 and its dependencies
+— including PyTorch 2.13 and Cellpose 4.2 — completes on Python 3.14.6 on macOS (Apple
+silicon), and the package, the Cellpose adapter, the detection code and the Qt windows
+all import and construct correctly there. But that is a spot check on one platform, not a
+supported configuration: 3.12 is the only version the test suite runs against.
 
 Two things worth knowing before you reach for a newer version:
 
