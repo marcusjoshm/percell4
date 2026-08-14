@@ -1,0 +1,726 @@
+"""End-to-end test for :class:`SingleCellThresholdingRunner`.
+
+Runs the full Phase 0 → Phase 8 sequence on synthetic h5 fixtures with
+pre-written labels (so we can skip the slow Cellpose step and focus on
+the threshold / measure / export plumbing). Asserts that every expected
+artifact is produced in the run folder and that the run metadata
+records zero failures on the happy path.
+
+A separate test simulates a per-dataset failure and asserts that the
+run completes with the failure recorded but the other datasets still
+processed successfully.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from percell4.gui.workflows.base_runner import WorkflowEventKind
+from percell4.gui.workflows.single_cell.runner import (
+    SingleCellThresholdingRunner,
+)
+from percell4.store import DatasetStore
+from percell4.workflows.artifacts import create_run_folder, read_run_config
+from percell4.workflows.host import WorkflowHost
+from percell4.workflows.models import (
+    AdaptiveClipSettings,
+    AutoExtractSettings,
+    CellposeSettings,
+    DatasetSource,
+    ParticleSettings,
+    PunctaDetectorSettings,
+    RunMetadata,
+    ThresholdAlgorithm,
+    ThresholdingRound,
+    WorkflowConfig,
+    WorkflowDatasetEntry,
+)
+
+# ── Fixture builders ────────────────────────────────────────────────────
+
+
+def _make_dataset(
+    path: Path,
+    name: str,
+    n_cells: int = 12,
+    size: int = 100,
+) -> DatasetStore:
+    """Create an h5 with pre-written labels so segment_one can be skipped.
+
+    Same layout pattern as tests/test_workflows/test_phases.py.
+    """
+    store = DatasetStore(path)
+    store.create(metadata={"channel_names": ["GFP", "RFP"]})
+
+    intensity = np.zeros((2, size, size), dtype=np.float32)
+    labels = np.zeros((size, size), dtype=np.int32)
+    for i in range(n_cells):
+        row = 5 + (i // 3) * 22
+        col = 5 + (i % 3) * 22
+        # Channel 0: increasing per-cell intensity
+        intensity[0, row : row + 6, col : col + 6] = 50 + 30 * i
+        # Channel 1: mixed intensity within each cell
+        intensity[1, row : row + 6, col : col + 6] = 40
+        intensity[1, row + 2 : row + 4, col + 2 : col + 4] = 120
+        labels[row : row + 6, col : col + 6] = i + 1
+
+    store.write_array("intensity", intensity, attrs={"dims": ["C", "H", "W"]})
+    store.write_labels("cellpose_qc", labels)
+    return store
+
+
+@pytest.fixture
+def fake_host() -> MagicMock:
+    return MagicMock(spec=WorkflowHost)
+
+
+def _make_two_datasets(tmp_path: Path) -> list[WorkflowDatasetEntry]:
+    """Create two fresh h5 datasets and return their WorkflowDatasetEntries."""
+    p1 = tmp_path / "DS1.h5"
+    p2 = tmp_path / "DS2.h5"
+    _make_dataset(p1, "DS1")
+    _make_dataset(p2, "DS2")
+    return [
+        WorkflowDatasetEntry(
+            name="DS1",
+            source=DatasetSource.H5_EXISTING,
+            h5_path=p1,
+            channel_names=["GFP", "RFP"],
+        ),
+        WorkflowDatasetEntry(
+            name="DS2",
+            source=DatasetSource.H5_EXISTING,
+            h5_path=p2,
+            channel_names=["GFP", "RFP"],
+        ),
+    ]
+
+
+def _make_config(
+    entries: list[WorkflowDatasetEntry],
+    run_parent: Path,
+    selected_cols: list[str] | None = None,
+) -> WorkflowConfig:
+    return WorkflowConfig(
+        datasets=entries,
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="GFP_split",
+                channel="GFP",
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.KMEANS,
+                kmeans_n_clusters=2,
+                gaussian_sigma=0.0,
+            ),
+        ],
+        selected_csv_columns=(
+            selected_cols
+            if selected_cols is not None
+            else ["GFP_mean_intensity", "group_GFP_split"]
+        ),
+        output_parent=run_parent,
+    )
+
+
+def _make_metadata(run_folder: Path) -> RunMetadata:
+    return RunMetadata(
+        run_id=run_folder.name,
+        run_folder=run_folder,
+        started_at=datetime.now(UTC),
+        intersected_channels=["GFP", "RFP"],
+    )
+
+
+# ── End-to-end happy path ───────────────────────────────────────────────
+
+
+@pytest.mark.slow
+def test_runner_happy_path_skipping_cellpose(qtbot, fake_host, tmp_path):
+    """Full Phase 0 → Phase 8 sequence on 2 datasets with pre-written labels.
+
+    The runner's segment handler tries to run Cellpose on each dataset,
+    but because we pre-populated ``/labels/cellpose_qc`` the subsequent
+    threshold_compute + apply + measure phases produce real output.
+    Cellpose runs here too — it operates on the synthetic intensity
+    image and either finds cells (overwriting our labels) or returns
+    empty (marking the dataset failed). The key invariants we assert
+    are:
+
+    1. The run terminates with ``RUN_FINISHED`` exactly once.
+    2. The export phase produces the expected artifacts for every
+       dataset that made it through.
+    3. ``run_config.json`` is rewritten with ``finished_at`` stamped.
+    """
+    entries = _make_two_datasets(tmp_path)
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = _make_config(entries, tmp_path / "runs")
+    meta = _make_metadata(run_folder)
+
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+    events = []
+    runner.workflow_event.connect(lambda e: events.append(e))
+
+    runner.start(cfg, fake_host, meta)
+
+    # Exactly one run_finished event
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1
+
+    # Host lock lifecycle
+    fake_host.set_workflow_locked.assert_any_call(True)
+    fake_host.set_workflow_locked.assert_any_call(False)
+    assert fake_host.close_child_windows.called
+    assert fake_host.restore_child_windows.called
+
+    # run_config.json was rewritten with finished_at stamped
+    loaded_cfg, loaded_meta = read_run_config(run_folder)
+    assert loaded_meta.finished_at is not None
+
+
+def test_runner_produces_expected_artifacts_when_segment_succeeds(qtbot, fake_host, tmp_path):
+    """With pre-written labels, Cellpose may produce empty segmentation.
+
+    We patch segment_one to be a no-op that leaves the pre-written labels
+    in place, guaranteeing that threshold / measure / export phases run
+    on real data and produce the expected run folder artifacts.
+    """
+    import percell4.workflows.phases as phases
+
+    entries = _make_two_datasets(tmp_path)
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = _make_config(entries, tmp_path / "runs")
+    meta = _make_metadata(run_folder)
+
+    # Patch segment_one to a no-op success that returns the existing labels.
+    original_segment = phases.segment_one
+
+    def _noop_segment(store, cfg_, cellpose_model=None, channel_idx=0, edge_mode=None):
+        try:
+            labels = store.read_labels("cellpose_qc")
+        except KeyError:
+            labels = np.zeros((100, 100), dtype=np.int32)
+        return labels, None, "noop"
+
+    phases.segment_one = _noop_segment
+    try:
+        # The runner imports the symbol by name, so we also need to
+        # patch the local binding it captured.
+        import percell4.gui.workflows.single_cell.runner as runner_mod
+
+        runner_mod.segment_one = _noop_segment
+
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+        events = []
+        runner.workflow_event.connect(lambda e: events.append(e))
+        runner.start(cfg, fake_host, meta)
+    finally:
+        phases.segment_one = original_segment
+        runner_mod.segment_one = original_segment
+
+    # Terminal event
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1
+    assert finished[0].success is True, finished[0].message
+
+    # Artifacts exist
+    assert (run_folder / "measurements.parquet").is_file()
+    assert (run_folder / "combined.csv").is_file()
+    assert (run_folder / "per_dataset" / "DS1.csv").is_file()
+    assert (run_folder / "per_dataset" / "DS2.csv").is_file()
+    assert (run_folder / "run_log.jsonl").is_file()
+    # staging/ is cleaned up on successful export
+    assert not (run_folder / "staging").exists()
+
+    # Parquet contents
+    df = pd.read_parquet(run_folder / "measurements.parquet")
+    assert len(df) == 24  # 12 cells × 2 datasets
+    assert set(df["dataset"].unique()) == {"DS1", "DS2"}
+    assert "GFP_mean_intensity" in df.columns
+    assert "GFP_mean_intensity_in_GFP_split" in df.columns
+    assert "group_GFP_split" in df.columns
+
+    # combined.csv has the selected columns plus identity
+    combined = pd.read_csv(run_folder / "combined.csv")
+    assert "dataset" in combined.columns
+    assert "label" in combined.columns
+    assert "GFP_mean_intensity" in combined.columns
+    assert "group_GFP_split" in combined.columns
+    # Columns not selected should not be in the CSV
+    assert "RFP_mean_intensity" not in combined.columns
+
+    # per-dataset CSVs do NOT include the dataset column
+    per_ds = pd.read_csv(run_folder / "per_dataset" / "DS1.csv")
+    assert "dataset" not in per_ds.columns
+
+    # No h5 dataset was given a /measurements group — the workflow
+    # writes measurements exclusively to the run folder parquet.
+    for entry in entries:
+        store = DatasetStore(entry.h5_path)
+        # list_groups on "" returns the root-level group names
+        roots = store.list_groups("")
+        assert "measurements" not in roots, f"{entry.name} unexpectedly got a /measurements group"
+        # /masks/<round> and /groups/<round> WERE written
+        assert "GFP_split" in store.list_masks()
+
+    # run_config.json has finished_at stamped
+    loaded_cfg, loaded_meta = read_run_config(run_folder)
+    assert loaded_meta.finished_at is not None
+    # Failures list is empty on happy path
+    assert loaded_meta.failures == []
+
+
+def test_runner_headless_puncta_round_writes_binary_mask(qtbot, fake_host, tmp_path):
+    """A headless run (interactive_qc=False) with a puncta-mode round flows
+    through _make_threshold_apply_headless_handler unchanged and writes a
+    {0,1} uint8 mask end-to-end (plan U7)."""
+    import percell4.workflows.phases as phases
+
+    entries = _make_two_datasets(tmp_path)
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=entries,
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[
+            ThresholdingRound(
+                name="SG",
+                channel="RFP",  # RFP cells carry bright focus-like centers
+                metric="mean_intensity",
+                algorithm=ThresholdAlgorithm.KMEANS,
+                kmeans_n_clusters=2,
+                gaussian_sigma=1.0,
+                puncta=PunctaDetectorSettings(
+                    detector_name="log",
+                    seed_detector_name="bg-k-sigma",
+                    background_estimator_name="gaussian-peak",
+                    detector_params={"threshold_rel": 0.05},
+                    min_spot_px=2,
+                ),
+            ),
+        ],
+        selected_csv_columns=["RFP_mean_intensity", "group_SG"],
+        output_parent=tmp_path / "runs",
+    )
+    meta = _make_metadata(run_folder)
+
+    original_segment = phases.segment_one
+
+    def _noop_segment(store, cfg_, cellpose_model=None, channel_idx=0, edge_mode=None):
+        return store.read_labels("cellpose_qc"), None, "noop"
+
+    phases.segment_one = _noop_segment
+    try:
+        import percell4.gui.workflows.single_cell.runner as runner_mod
+
+        runner_mod.segment_one = _noop_segment
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+        events = []
+        runner.workflow_event.connect(lambda e: events.append(e))
+        runner.start(cfg, fake_host, meta)
+    finally:
+        phases.segment_one = original_segment
+        runner_mod.segment_one = original_segment
+
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1
+    assert finished[0].success is True, finished[0].message
+
+    # The puncta round wrote a {0,1} uint8 mask into each dataset's .h5.
+    store = DatasetStore(entries[0].h5_path)
+    assert "SG" in store.list_masks()
+    mask = store.read_mask("SG")
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask).tolist()) <= {0, 1}
+
+
+# ── U4: adaptive rounds route through headless apply even in interactive runs ──
+
+
+def _round(name, **overrides):
+    defaults = dict(
+        name=name,
+        channel="GFP",
+        metric="mean_intensity",
+        algorithm=ThresholdAlgorithm.KMEANS,
+        kmeans_n_clusters=2,
+        gaussian_sigma=0.0,
+    )
+    defaults.update(overrides)
+    return ThresholdingRound(**defaults)
+
+
+def _threshold_phase_names(rounds, tmp_path) -> list[str]:
+    """Drive _phase_generator directly (interactive_qc=True) and collect the
+    threshold apply/qc phase names. Pre-populates the grouping cache and an
+    effective segmentation so generation never touches disk for QC."""
+    p = tmp_path / "DS1.h5"
+    _make_dataset(p, "DS1")
+    entry = WorkflowDatasetEntry(
+        name="DS1", source=DatasetSource.H5_EXISTING, h5_path=p,
+        channel_names=["GFP", "RFP"],
+    )
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=[entry],
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=rounds,
+        selected_csv_columns=["GFP_mean_intensity"],
+        output_parent=tmp_path / "runs",
+        run_seg_qc_on_existing=False,  # avoid the disk-touching seg-QC branch
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=True)
+    # Pretend segmentation already exists and grouping already computed so the
+    # apply phase yields without us executing any handler.
+    runner._effective_seg["DS1"] = "cellpose_qc"
+    for r in rounds:
+        runner._grouping_cache[("DS1", r.name)] = object()
+    names = [req.phase_name for req in runner._phase_generator()]
+    return [n for n in names if n.startswith("threshold_apply:") or n.startswith("threshold_qc:")]
+
+
+def test_adaptive_round_applies_headlessly_in_interactive_run(tmp_path):
+    names = _threshold_phase_names(
+        [_round("ac", adaptive_clip=AdaptiveClipSettings(d_min_um=0.40))], tmp_path
+    )
+    assert "threshold_apply:ac" in names
+    assert "threshold_qc:ac" not in names
+
+
+def test_legacy_round_still_uses_interactive_qc(tmp_path):
+    names = _threshold_phase_names([_round("otsu")], tmp_path)
+    assert "threshold_qc:otsu" in names
+    assert "threshold_apply:otsu" not in names
+
+
+def test_mixed_rounds_route_independently(tmp_path):
+    names = _threshold_phase_names(
+        [_round("ac", adaptive_clip=AdaptiveClipSettings(d_min_um=0.40)), _round("otsu")],
+        tmp_path,
+    )
+    assert "threshold_apply:ac" in names
+    assert "threshold_qc:ac" not in names
+    assert "threshold_qc:otsu" in names
+    assert "threshold_apply:otsu" not in names
+
+
+def test_auto_extract_round_applies_headlessly_in_interactive_run(tmp_path):
+    """U7: an auto-extract round is per-cell (no QC preview) so it routes to the
+    headless apply handler even under interactive_qc, like adaptive-clip."""
+    names = _threshold_phase_names(
+        [_round("ae", auto_extract=AutoExtractSettings(smallest_particle_um=0.36))], tmp_path
+    )
+    assert "threshold_apply:ae" in names
+    assert "threshold_qc:ae" not in names
+
+
+def _make_adaptive_h5(path: Path, pixel_size_um: float = 0.12) -> None:
+    """One large cell, structured background (per-cell MAD > 0), bright blob."""
+    store = DatasetStore(path)
+    store.create(metadata={"channel_names": ["GFP"], "pixel_size_um": pixel_size_um})
+    img = np.zeros((1, 100, 100), dtype=np.float32)
+    rows = np.arange(100).reshape(-1, 1)
+    img[0, 20:60, 20:60] = 10 + (rows[20:60] % 3)
+    img[0, 35:45, 35:45] = 200.0
+    store.write_array("intensity", img, attrs={"dims": ["C", "H", "W"]})
+    labels = np.zeros((100, 100), dtype=np.int32)
+    labels[20:60, 20:60] = 1
+    store.write_labels("cellpose_qc", labels)
+
+
+def test_adaptive_apply_handler_emits_no_qc_status(qtbot, tmp_path):
+    """In an interactive run, the adaptive round's headless apply emits a status
+    line so the user knows the round applied without a QC pause."""
+    from percell4.workflows.phases import threshold_compute_one
+
+    p = tmp_path / "ac.h5"
+    _make_adaptive_h5(p)
+    entry = WorkflowDatasetEntry(
+        name="ac", source=DatasetSource.H5_EXISTING, h5_path=p, channel_names=["GFP"]
+    )
+    round_spec = _round("acr", adaptive_clip=AdaptiveClipSettings(d_min_um=0.12))
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=[entry],
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[round_spec],
+        selected_csv_columns=["GFP_mean_intensity"],
+        output_parent=tmp_path / "runs",
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=True)
+    runner._effective_seg["ac"] = "cellpose_qc"
+    grouping, failure, _ = threshold_compute_one(
+        DatasetStore(p), round_spec, seg_name="cellpose_qc"
+    )
+    assert failure is None
+    runner._grouping_cache[("ac", "acr")] = grouping
+
+    handler = runner._make_threshold_apply_headless_handler(entry, round_spec)
+    result = handler()
+    assert result.success, result.message
+    assert "applied headlessly (no QC step)" in result.message
+    assert "acr" in DatasetStore(p).list_masks()
+
+
+def test_auto_extract_apply_handler_emits_no_qc_status(qtbot, tmp_path):
+    """U7: in an interactive run the auto-extract round's headless apply emits the
+    two-pass no-QC status line."""
+    from percell4.workflows.phases import threshold_compute_one
+
+    p = tmp_path / "ae.h5"
+    _make_adaptive_h5(p)
+    entry = WorkflowDatasetEntry(
+        name="ae", source=DatasetSource.H5_EXISTING, h5_path=p, channel_names=["GFP"]
+    )
+    round_spec = _round("aer", auto_extract=AutoExtractSettings(smallest_particle_um=0.36))
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=[entry],
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[round_spec],
+        selected_csv_columns=["GFP_mean_intensity"],
+        output_parent=tmp_path / "runs",
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=True)
+    runner._effective_seg["ae"] = "cellpose_qc"
+    grouping, failure, _ = threshold_compute_one(
+        DatasetStore(p), round_spec, seg_name="cellpose_qc"
+    )
+    assert failure is None
+    runner._grouping_cache[("ae", "aer")] = grouping
+
+    handler = runner._make_threshold_apply_headless_handler(entry, round_spec)
+    result = handler()
+    assert result.success, result.message
+    assert "auto-extraction (two-pass) — applied headlessly (no QC step)" in result.message
+    assert "aer" in DatasetStore(p).list_masks()
+
+
+def test_runner_records_failure_and_continues_other_datasets(qtbot, fake_host, tmp_path):
+    """Per-dataset failure doesn't crash the run — other datasets proceed."""
+    import percell4.gui.workflows.single_cell.runner as runner_mod
+    import percell4.workflows.phases as phases
+
+    # DS1 has NO pre-written labels, so the segment phase runs for it (and
+    # the flaky double fails it). DS2 keeps its labels, so the U13 auto-skip
+    # uses them and DS2 succeeds downstream without segmenting.
+    p1 = tmp_path / "DS1.h5"
+    s1 = DatasetStore(p1)
+    s1.create(metadata={"channel_names": ["GFP", "RFP"]})
+    s1.write_array(
+        "intensity",
+        np.zeros((2, 100, 100), dtype=np.float32),
+        attrs={"dims": ["C", "H", "W"]},
+    )
+    p2 = tmp_path / "DS2.h5"
+    _make_dataset(p2, "DS2")
+    entries = [
+        WorkflowDatasetEntry(
+            name="DS1", source=DatasetSource.H5_EXISTING, h5_path=p1, channel_names=["GFP", "RFP"]
+        ),
+        WorkflowDatasetEntry(
+            name="DS2", source=DatasetSource.H5_EXISTING, h5_path=p2, channel_names=["GFP", "RFP"]
+        ),
+    ]
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = _make_config(entries, tmp_path / "runs")
+    meta = _make_metadata(run_folder)
+
+    # Fake segment_one: the only dataset that segments (DS1, no labels) fails
+    # with SEGMENTATION_EMPTY. (**kwargs absorbs edge_margin_px/seg_name.)
+    from percell4.workflows.failures import DatasetFailure
+
+    def _flaky_segment(store, cfg_, **kwargs):
+        return (
+            np.zeros((100, 100), dtype=np.int32),
+            DatasetFailure.SEGMENTATION_EMPTY,
+            "ds1 empty",
+        )
+
+    original_segment = phases.segment_one
+    phases.segment_one = _flaky_segment
+    runner_mod.segment_one = _flaky_segment
+    try:
+        runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+        events = []
+        runner.workflow_event.connect(lambda e: events.append(e))
+        runner.start(cfg, fake_host, meta)
+    finally:
+        phases.segment_one = original_segment
+        runner_mod.segment_one = original_segment
+
+    # Run still finished, successfully (export aggregates the good dataset)
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1
+
+    # DS1 is in the failures list
+    assert any(
+        rec.dataset_name == "DS1" and rec.failure is DatasetFailure.SEGMENTATION_EMPTY
+        for rec in meta.failures
+    )
+
+    # DS2 CSV exists; DS1 CSV does not
+    assert (run_folder / "per_dataset" / "DS2.csv").is_file()
+    assert not (run_folder / "per_dataset" / "DS1.csv").exists()
+
+    # Parquet has only DS2 rows
+    df = pd.read_parquet(run_folder / "measurements.parquet")
+    assert set(df["dataset"].unique()) == {"DS2"}
+
+    # run_config.json preserves the failure record
+    _cfg, loaded_meta = read_run_config(run_folder)
+    assert any(rec.dataset_name == "DS1" for rec in loaded_meta.failures)
+
+
+def _add_mask(path: Path, name: str, size: int = 100, n_cells: int = 12) -> None:
+    """Write a binary /masks/<name> with one small blob inside each cell."""
+    store = DatasetStore(path)
+    mask = np.zeros((size, size), dtype=np.uint8)
+    for i in range(n_cells):
+        row = 5 + (i // 3) * 22
+        col = 5 + (i % 3) * 22
+        mask[row + 2 : row + 4, col + 2 : col + 4] = 1
+    store.write_mask(name, mask)
+
+
+def test_runner_existing_mask_mode_measures_without_thresholding(
+    qtbot, fake_host, tmp_path
+):
+    """use_existing_masks: no threshold phase runs; the existing mask is
+    measured and particle/summary artifacts are produced (plan U2)."""
+    entries = _make_two_datasets(tmp_path)
+    for e in entries:
+        _add_mask(e.h5_path, "pbody")
+
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=entries,
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[],
+        selected_csv_columns=[
+            "pbody_particle_count",
+            "pbody_total_particle_area",
+        ],
+        output_parent=tmp_path / "runs",
+        use_existing_masks=True,
+        existing_mask_selections={"DS1": ["pbody"], "DS2": ["pbody"]},
+        particle_settings=ParticleSettings(min_area=1.0, min_area_unit="px"),
+    )
+    meta = _make_metadata(run_folder)
+
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+    events: list = []
+    runner.workflow_event.connect(lambda e: events.append(e))
+
+    runner.start(cfg, fake_host, meta)
+
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1
+    assert finished[0].success is True, finished[0].message
+
+    # Artifacts produced.
+    assert (run_folder / "measurements.parquet").is_file()
+    assert (run_folder / "combined.csv").is_file()
+    assert (run_folder / "particles.csv").is_file()
+    # summary_groups populated via the export round-name seam.
+    assert (run_folder / "summary_groups.csv").is_file()
+
+    df = pd.read_parquet(run_folder / "measurements.parquet")
+    assert "pbody_particle_count" in df.columns
+    # Every cell has exactly one blob → particle_count == 1.
+    assert df["pbody_particle_count"].sum() == 24
+
+    # n_rounds_thresholding reflects the measured mask (1), not 0.
+    summary_ds = pd.read_csv(run_folder / "summary_datasets.csv")
+    assert set(summary_ds["n_rounds_thresholding"]) == {1}
+
+    # No threshold mask other than the pre-existing pbody was created.
+    for e in entries:
+        assert DatasetStore(e.h5_path).list_masks() == ["pbody"]
+
+
+def test_runner_existing_mask_mode_is_per_dataset(qtbot, fake_host, tmp_path):
+    """Each dataset measures only its own selection — never another
+    dataset's mask that merely happens to also exist on disk (plan U2)."""
+    entries = _make_two_datasets(tmp_path)
+    # DS1 physically carries BOTH masks; DS2 carries only 'grouped'.
+    _add_mask(entries[0].h5_path, "pbody")
+    _add_mask(entries[0].h5_path, "grouped")
+    _add_mask(entries[1].h5_path, "grouped")
+
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = WorkflowConfig(
+        datasets=entries,
+        cellpose=CellposeSettings(diameter=8.0, gpu=False, min_size=5),
+        thresholding_rounds=[],
+        selected_csv_columns=["pbody_particle_count", "grouped_particle_count"],
+        output_parent=tmp_path / "runs",
+        use_existing_masks=True,
+        # DS1 selects only pbody even though grouped also exists on disk.
+        existing_mask_selections={"DS1": ["pbody"], "DS2": ["grouped"]},
+        particle_settings=ParticleSettings(min_area=1.0, min_area_unit="px"),
+    )
+    meta = _make_metadata(run_folder)
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+    events: list = []
+    runner.workflow_event.connect(lambda e: events.append(e))
+    runner.start(cfg, fake_host, meta)
+
+    finished = [e for e in events if e.kind is WorkflowEventKind.RUN_FINISHED]
+    assert len(finished) == 1 and finished[0].success is True
+
+    df = pd.read_parquet(run_folder / "measurements.parquet")
+    ds1 = df[df["dataset"] == "DS1"]
+    # DS1 measured pbody but NOT grouped, despite grouped existing on disk.
+    assert ds1["pbody_particle_count"].notna().all()
+    assert ds1["grouped_particle_count"].isna().all()
+
+
+def test_runner_reentrance_guard(qtbot, fake_host, tmp_path):
+    """Second call to start() while running raises RuntimeError.
+
+    This drives a runner via the FINISHED state — it's trivially true
+    here because the MVP runs synchronously, so by the time we get the
+    next line the run is already finished. We verify by calling start
+    a second time after the first completed and asserting the same
+    reentrance guard fires.
+    """
+    entries = _make_two_datasets(tmp_path)
+    run_folder = create_run_folder(tmp_path / "runs")
+    cfg = _make_config(entries, tmp_path / "runs")
+    meta = _make_metadata(run_folder)
+
+    runner = SingleCellThresholdingRunner(config=cfg, metadata=meta, interactive_qc=False)
+
+    # Patch segment_one to no-op so the run finishes without Cellpose.
+    import percell4.gui.workflows.single_cell.runner as runner_mod
+    import percell4.workflows.phases as phases
+
+    def _noop(store, cfg_, cellpose_model=None, channel_idx=0):
+        try:
+            labels = store.read_labels("cellpose_qc")
+        except KeyError:
+            labels = np.zeros((100, 100), dtype=np.int32)
+        return labels, None, "noop"
+
+    original = phases.segment_one
+    phases.segment_one = _noop
+    runner_mod.segment_one = _noop
+    try:
+        runner.start(cfg, fake_host, meta)
+        # Run is in FINISHED state by now.
+        assert runner.state == "finished"
+
+        with pytest.raises(RuntimeError, match="state=finished"):
+            runner.start(cfg, fake_host, meta)
+    finally:
+        phases.segment_one = original
+        runner_mod.segment_one = original

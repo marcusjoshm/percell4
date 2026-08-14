@@ -1,0 +1,736 @@
+schema_version: 1
+audit_baseline:
+  ref: HEAD
+  commit: f7eface8879b1eb04cbf87d8c774707334e4d6c9
+  date: 2026-04-30
+principles_source: docs/ideation/2026-04-29-io-principles-ideation.md
+
+# Principles (per ideation doc):
+#   1 = Capability Matrix Over Folklore
+#   2 = Round-Trip Is Contractual
+#   3 = Identify Before Open; Metadata Before Filename
+#   4 = Two-Layer Postel + Single Write Boundary
+#   5 = One Pipeline: Plans In, Execution Consumes, Batch ≡ Incremental
+#   6 = Provenance Is a Payload
+#   7 = Headless API Is Primary; Dialogs Are Sugar
+
+# I/O T1 file scope — same R2 corrections as the reuse matrix.
+io_t1_files:
+  - src/percell4/domain/io/cross_format.py
+  - src/percell4/domain/io/discovery.py
+  - src/percell4/domain/io/scanner.py
+  - src/percell4/domain/io/assembler.py
+  - src/percell4/domain/io/models.py
+  - src/percell4/adapters/importer.py
+  - src/percell4/adapters/readers.py
+  - src/percell4/adapters/hdf5_store.py
+  - src/percell4/store.py
+  - src/percell4/application/use_cases/export_images.py
+  - src/percell4/application/use_cases/add_decay_to_dataset.py
+  - src/percell4/gui/import_dialog.py
+  - src/percell4/gui/add_layer_dialog.py
+  - src/percell4/gui/compress_dialog.py
+  - src/percell4/gui/export_images_dialog.py
+  - tests/test_io/test_importer.py
+  - tests/test_io/test_cross_format.py
+  - tests/test_io/test_store_append.py
+  - tests/test_io/test_assembler.py
+  - tests/test_io/test_scanner.py
+  - tests/test_io/test_readers.py
+  - tests/test_add_decay_to_dataset.py
+  - tests/test_store.py
+
+# Cells: <file>.<principle_number>
+cells:
+  # ── domain/io/cross_format.py ────────────────────────────────────────
+  "src/percell4/domain/io/cross_format.py.1":
+    status: violation
+    evidence: "No capability matrix exposes which CrossFormatRule variants apply to which payload (only .bin → channel today). Folklore: BaseStemRule's docstring references 'mirrors importer.py:223-231' (line 285) — the rule's behavior is documented by reference to a callsite, not to a registry."
+    thread: capability-matrix-foundation
+  "src/percell4/domain/io/cross_format.py.2":
+    status: n/a
+    evidence: "matcher only — round-trip applies to data, not matching rules"
+  "src/percell4/domain/io/cross_format.py.3":
+    status: ok
+    evidence: "Operates on already-discovered Path lists; identification is upstream of this module"
+  "src/percell4/domain/io/cross_format.py.4":
+    status: ok
+    evidence: "Pure-domain function with no I/O — fully strict in what it produces (frozen dataclasses, immutable MatchResult)"
+  "src/percell4/domain/io/cross_format.py.5":
+    status: ok
+    evidence: "Stateless function over a list — len(bin_files)==1 is incremental, >1 is batch, same code path"
+  "src/percell4/domain/io/cross_format.py.6":
+    status: ok
+    evidence: "MatchEvidence dataclass (lines 95-116) carries provenance for each binding"
+  "src/percell4/domain/io/cross_format.py.7":
+    status: ok
+    evidence: "Pure Python, no Qt, no h5py — directly callable from headless contexts"
+
+  # ── domain/io/discovery.py ──────────────────────────────────────────
+  "src/percell4/domain/io/discovery.py.1":
+    status: n/a
+    evidence: "discovery, not format dispatch"
+  "src/percell4/domain/io/discovery.py.2":
+    status: n/a
+    evidence: "discovery"
+  "src/percell4/domain/io/discovery.py.3":
+    status: violation
+    evidence: "Discovery uses extension + filename tokens only (lines 16, 142-159). Does not probe TIFF/SDT/.bin metadata before opening — no Identify step."
+    thread: identify-before-open
+  "src/percell4/domain/io/discovery.py.4":
+    status: ok
+    evidence: "Pure-domain dataclasses out, no I/O surface"
+  "src/percell4/domain/io/discovery.py.5":
+    status: ok
+    evidence: "Returns immutable DatasetSpec list — plans-as-data shape"
+  "src/percell4/domain/io/discovery.py.6":
+    status: partial
+    evidence: "DatasetSpec carries source_dir + files but no scan timestamp / scanner version"
+    residual_evidence: "Provenance of HOW the discovery happened isn't recorded in the plan — caller can't tell if a plan came from subdirectory vs flat mode without external context."
+  "src/percell4/domain/io/discovery.py.7":
+    status: ok
+    evidence: "Pure Python; CompressDialog calls it but the function is callable headlessly"
+
+  # ── domain/io/scanner.py ─────────────────────────────────────────────
+  "src/percell4/domain/io/scanner.py.1":
+    status: n/a
+    evidence: "filename-token parser only"
+  "src/percell4/domain/io/scanner.py.2":
+    status: n/a
+    evidence: "scanner"
+  "src/percell4/domain/io/scanner.py.3":
+    status: violation
+    evidence: "_parse_tokens (line 67) operates on path.stem — filename only. No metadata probe."
+    thread: identify-before-open
+  "src/percell4/domain/io/scanner.py.4":
+    status: ok
+    evidence: "Strict ScanResult dataclass; liberal in input (path or files)"
+  "src/percell4/domain/io/scanner.py.5":
+    status: ok
+    evidence: "scan(path=) and scan(files=) two shapes; one engine"
+  "src/percell4/domain/io/scanner.py.6":
+    status: n/a
+    evidence: "scanner doesn't write provenance"
+  "src/percell4/domain/io/scanner.py.7":
+    status: ok
+    evidence: "Pure Python"
+
+  # ── domain/io/assembler.py ───────────────────────────────────────────
+  "src/percell4/domain/io/assembler.py.1":
+    status: n/a
+    evidence: "tile/channel/z stitching only"
+  "src/percell4/domain/io/assembler.py.2":
+    status: n/a
+    evidence: "stitching"
+  "src/percell4/domain/io/assembler.py.3":
+    status: n/a
+    evidence: "operates on numpy arrays already loaded"
+  "src/percell4/domain/io/assembler.py.4":
+    status: ok
+    evidence: "Pure numpy functions; strict output dtypes (float32 for assemble_channels at line 140)"
+  "src/percell4/domain/io/assembler.py.5":
+    status: ok
+    evidence: "Single tile case (1×1 grid) and multi-tile go through assemble_tiles equivalently"
+  "src/percell4/domain/io/assembler.py.6":
+    status: n/a
+    evidence: "no provenance writes. The registered path's estimate_tile_offsets returns a quality dict (correlations, disconnected, coverage_fraction, engine params) that the importer seals into /provenance/stitch via store.write_stitch_geometry — the provenance payload (P6) is written at the store boundary, not here."
+  "src/percell4/domain/io/assembler.py.7":
+    status: ok
+    evidence: "Pure Python"
+
+  # ── domain/io/models.py ──────────────────────────────────────────────
+  "src/percell4/domain/io/models.py.1":
+    status: violation
+    evidence: "LayerType StrEnum (line 102) names CHANNEL/SEGMENTATION/MASK but no capability matrix declares which importers/exporters/payload types are supported. Adding a new payload type requires hunting through compress_dialog/add_layer_dialog/_write_layer/assemblers."
+    thread: capability-matrix-foundation
+  "src/percell4/domain/io/models.py.2":
+    status: violation
+    evidence: "No round-trip declarations. ProvenanceRecord exists; no exporter side. /decay and /phasor are write-only — cannot be exported (data jail)."
+    thread: round-trip-and-export-symmetry
+  "src/percell4/domain/io/models.py.3":
+    status: n/a
+    evidence: "type defs"
+  "src/percell4/domain/io/models.py.4":
+    status: ok
+    evidence: "All dataclasses are frozen; values strictly typed"
+  "src/percell4/domain/io/models.py.5":
+    status: ok
+    evidence: "DatasetSpec, CompressConfig — plan-as-data shapes"
+  "src/percell4/domain/io/models.py.6":
+    status: partial
+    evidence: "ProvenanceRecord (lines 173-199) defines the schema for /decay/ provenance only — no equivalent for /intensity, /labels/, /masks/"
+    residual_evidence: "Provenance is decay-specific. Other payloads inherit no audit trail through this model."
+    thread: provenance-everywhere
+  "src/percell4/domain/io/models.py.7":
+    status: ok
+    evidence: "Pure dataclasses"
+
+  # ── adapters/importer.py ─────────────────────────────────────────────
+  "src/percell4/adapters/importer.py.1":
+    status: violation
+    evidence: "import_dataset (line 36) hard-codes TIFF (.tif/.tiff) + .bin format dispatch via suffix checks (lines 88-91, 108-117); no capability table"
+    thread: capability-matrix-foundation
+  "src/percell4/adapters/importer.py.2":
+    status: violation
+    evidence: "Asymmetric to export — import builds /intensity, /labels/, /masks/, /decay/, /phasor/, but ExportImages only round-trips /intensity/labels/masks. /decay and /phasor cannot be exported and re-imported."
+    thread: round-trip-and-export-symmetry
+  "src/percell4/adapters/importer.py.3":
+    status: violation
+    evidence: "Auto-enables FLIM defaults (lines 94-103) when .bin is found by suffix, no metadata probe of .bin contents. TIFF stem heuristic 'TCSPC' substring (line 113) classifies TCSPC TIFFs by filename — folklore."
+    thread: identify-before-open
+  "src/percell4/adapters/importer.py.4":
+    status: violation
+    evidence: "Liberal at boundary (auto-enabling FLIM, accepting various tile orderings) — but write boundary leaks. Direct h5py.File(store.path, 'a') at line 466 (dead-code path) and line 627 (write_decay_streaming helper) bypass DatasetStore methods."
+    thread: write-boundary-discipline
+  "src/percell4/adapters/importer.py.5":
+    status: partial
+    evidence: "Compress passes files=ds.files (correct plan-consumption); standalone single-dataset import re-derives via FileScanner.scan(path=) at line 84"
+    residual_evidence: "Two code paths: when files= is supplied, plan is consumed; when not, scan re-derives. Importer should require a pre-scanned plan (no path= shortcut)."
+    thread: append-flow-plan-consumption
+  "src/percell4/adapters/importer.py.6":
+    status: partial
+    evidence: "Writes channel_names + flim_cal_* + cross_format_rule attrs to /metadata, but no per-payload ProvenanceRecord for /intensity (only /decay gets it via add_decay_to_dataset)"
+    residual_evidence: "/intensity has no provenance group; importer-version, source paths per channel, content hash are not recorded for intensity."
+    thread: provenance-everywhere
+  "src/percell4/adapters/importer.py.7":
+    status: ok
+    evidence: "import_dataset is a function with kwargs — directly callable from headless contexts. Used by ImportDialog AND by main_window batch loop AND by workflows/phases.py"
+
+  # ── adapters/readers.py ──────────────────────────────────────────────
+  "src/percell4/adapters/readers.py.1":
+    status: violation
+    evidence: "Three readers (read_tiff/read_sdt/read_flim_bin) — no registry; callers pick based on suffix checks scattered across importer.py"
+    thread: capability-matrix-foundation
+  "src/percell4/adapters/readers.py.2":
+    status: violation
+    evidence: "Readers only — no companion writers in this module. tifffile.imwrite is called from export_images with no shared write-side reader→writer pairing"
+    thread: round-trip-and-export-symmetry
+  "src/percell4/adapters/readers.py.3":
+    status: partial
+    evidence: "read_tiff probes XResolution metadata (lines 32-40) — partial Identify behavior. read_sdt probes laser_rep_rate (line 87). read_flim_bin has NO probe at all — caller passes x_dim/y_dim/t_dim/dtype/dim_order blindly (lines 96-103)."
+    residual_evidence: "Mixed: TIFF/SDT do some metadata probing; .bin requires the user to supply dimensions. Identify-before-open is half-applied."
+    thread: identify-before-open
+  "src/percell4/adapters/readers.py.4":
+    status: ok
+    evidence: "Returns standardized {'array', 'metadata'} dict (read_tiff doc line 8); strict output shape"
+  "src/percell4/adapters/readers.py.5":
+    status: ok
+    evidence: "Single-file readers; called per-file by either batch or incremental flows"
+  "src/percell4/adapters/readers.py.6":
+    status: partial
+    evidence: "Returns metadata dict but doesn't carry source_path/timestamp/sha — caller must add"
+    residual_evidence: "Provenance must be added by orchestrators; readers don't seal it."
+  "src/percell4/adapters/readers.py.7":
+    status: ok
+    evidence: "Pure Python with optional imports — headless-callable"
+
+  # ── adapters/hdf5_store.py ──────────────────────────────────────────
+  "src/percell4/adapters/hdf5_store.py.1":
+    status: n/a
+    evidence: "single backend implementation"
+  "src/percell4/adapters/hdf5_store.py.2":
+    status: ok
+    evidence: "Symmetric read/write methods for each payload type (read_labels/write_labels, read_mask/write_mask, etc.)"
+  "src/percell4/adapters/hdf5_store.py.3":
+    status: ok
+    evidence: "open() (line 42) checks store.exists() before yielding handle"
+  "src/percell4/adapters/hdf5_store.py.4":
+    status: ok
+    evidence: "Adapter is the strict layer — every method goes through DatasetStore methods. read_metadata at lines 149-151 implements the fresh-read port (vector 2 of staleness compound)."
+  "src/percell4/adapters/hdf5_store.py.5":
+    status: ok
+    evidence: "Per-method primitive; batch is composed by callers"
+  "src/percell4/adapters/hdf5_store.py.6":
+    status: n/a
+    evidence: "no provenance write methods on this port"
+  "src/percell4/adapters/hdf5_store.py.7":
+    status: ok
+    evidence: "Pure Python — no Qt"
+
+  # ── store.py ─────────────────────────────────────────────────────────
+  "src/percell4/store.py.1":
+    status: violation
+    evidence: "DatasetStore is the HDF5 backend; no abstraction declares 'this is one of N possible backends'"
+    thread: capability-matrix-foundation
+    notes: "Lower priority — single-backend may be a deliberate constraint."
+  "src/percell4/store.py.2":
+    status: ok
+    evidence: "Symmetric read/write for labels/masks/array/dataframe; rename_channel preserves the round-trip shape"
+  "src/percell4/store.py.3":
+    status: ok
+    evidence: "exists() check separate from open"
+  "src/percell4/store.py.4":
+    status: ok
+    evidence: "Single write boundary; per-payload typed methods enforce dtype (write_labels int32, write_mask uint8). create_atomic implements tmp+os.replace."
+    notes: "The boundary is correct here; violations are at callers that bypass it."
+  "src/percell4/store.py.5":
+    status: ok
+    evidence: "append_decay_layers is the bulk variant; write_array is the single-layer variant; same primitives underneath"
+  "src/percell4/store.py.6":
+    status: partial
+    evidence: "append_decay_layers requires per-channel ProvenanceRecord (line 341, 364-370) — strict for /decay. write_stitch_geometry writes a StitchProvenanceRecord to /provenance/stitch (overlap-aware-stitching slug) — registered geometry is a payload (P6 applied). No equivalent enforcement for /intensity, /labels/, /masks/, /phasor/."
+    residual_evidence: "Provenance is enforced for /decay and now /stitch; still absent for intensity/labels/masks/phasor."
+    thread: provenance-everywhere
+  "src/percell4/store.py.7":
+    status: ok
+    evidence: "No Qt; fully Python-callable"
+
+  # ── application/use_cases/export_images.py ──────────────────────────
+  "src/percell4/application/use_cases/export_images.py.1":
+    status: violation
+    evidence: "Format combo is hard-coded TIFF (export_images_dialog line 119); ExportImages.execute only handles tifffile.imwrite (lines 56, 63, 70). No capability table."
+    thread: capability-matrix-foundation
+  "src/percell4/application/use_cases/export_images.py.2":
+    status: violation
+    evidence: "Round-trip violation: imports support /intensity, /labels/, /masks/, /decay/, /phasor/; export only emits /intensity/labels/masks. Decay/phasor cannot be re-imported as TIFF (round-trip not asserted in matrix)."
+    thread: round-trip-and-export-symmetry
+  "src/percell4/application/use_cases/export_images.py.3":
+    status: n/a
+    evidence: "writes only"
+  "src/percell4/application/use_cases/export_images.py.4":
+    status: violation
+    evidence: "tifffile.imwrite(str(out_path), data) at lines 56, 63, 70 — direct writes; no atomic-write helper. Writes occur in a loop with no transaction semantic."
+    thread: write-boundary-discipline
+  "src/percell4/application/use_cases/export_images.py.5":
+    status: ok
+    evidence: "Single ExportRequest plan consumed; one channel = incremental, many = batch, same loop"
+  "src/percell4/application/use_cases/export_images.py.6":
+    status: violation
+    evidence: "No provenance written alongside exported TIFFs — exports cannot be traced back to source dataset/parameters/timestamp"
+    thread: provenance-everywhere
+  "src/percell4/application/use_cases/export_images.py.7":
+    status: ok
+    evidence: "Pure Python; ExportRequest dataclass is the headless invocation"
+
+  # ── application/use_cases/add_decay_to_dataset.py ───────────────────
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.1":
+    status: violation
+    evidence: "Hard-coded .bin path (line 108 rglob('*.bin')); no capability registry of 'append-able formats'"
+    thread: capability-matrix-foundation
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.2":
+    status: n/a
+    evidence: "append-only flow; round-trip is import-side"
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.3":
+    status: violation
+    evidence: "rglob and bin_dims supplied by FlimConfig — no metadata probe of .bin files (which have none); BUT no probe of TIFF stem either when intensity_channels are derived (line 130 _extract_channel_token uses regex on channel name)"
+    thread: identify-before-open
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.4":
+    status: violation
+    evidence: "Direct h5py.File(h5_path, 'a') at lines 316, 334, 370 — bypasses DatasetStore for provenance writes and rotate/flip in-place mutations"
+    thread: write-boundary-discipline
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.5":
+    status: violation
+    evidence: "rglob(source_dir, '*.bin') at line 108 — re-derives input list at use-case time. Should consume a pre-discovered DiscoveredFile list (third occurrence of the discovery-scopes-processing-consumes pattern)."
+    thread: append-flow-plan-consumption
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.6":
+    status: ok
+    evidence: "Writes ProvenanceRecord to /provenance/decay/<ch> for every successfully appended channel (lines 280-291); content_sha256 + timestamp + match_evidence + importer_version captured"
+    notes: "The provenance gold standard for the codebase. Other payloads should mirror this."
+  "src/percell4/application/use_cases/add_decay_to_dataset.py.7":
+    status: ok
+    evidence: "Pure-Python use case; AppendReport is a dataclass; called from add_layer_dialog AND headless-callable"
+
+  # ── gui/import_dialog.py ────────────────────────────────────────────
+  "src/percell4/gui/import_dialog.py.1":
+    status: n/a
+    evidence: "value-capture dialog"
+  "src/percell4/gui/import_dialog.py.2":
+    status: n/a
+    evidence: "import side only"
+  "src/percell4/gui/import_dialog.py.3":
+    status: n/a
+    evidence: "dialog collects values; processing in importer"
+  "src/percell4/gui/import_dialog.py.4":
+    status: ok
+    evidence: "Delegates entirely to import_dataset; no direct h5py"
+  "src/percell4/gui/import_dialog.py.5":
+    status: ok
+    evidence: "Captures values then accept(); main_window calls import_dataset"
+  "src/percell4/gui/import_dialog.py.6":
+    status: ok
+    evidence: "Captures metadata fields (condition, replicate, notes); passes through"
+  "src/percell4/gui/import_dialog.py.7":
+    status: violation
+    evidence: "All 'collected values' (token patterns, tile config, z-projection method) are widget-state. There is no serializable invocation object — a CLI cannot reproduce 'what the user clicked'."
+    thread: invocation-objects-rollout
+    notes: "All dialogs inherit this; this cell is representative."
+
+  # ── gui/add_layer_dialog.py ─────────────────────────────────────────
+  "src/percell4/gui/add_layer_dialog.py.1":
+    status: violation
+    evidence: "Five tabs each with its own format dispatch (TIFF / batch TIFF / TCSPC bin / ImageJ ROI / Cellpose npy) — no registry; tabs are hard-coded"
+    thread: capability-matrix-foundation
+  "src/percell4/gui/add_layer_dialog.py.2":
+    status: n/a
+    evidence: "append-side only"
+  "src/percell4/gui/add_layer_dialog.py.3":
+    status: violation
+    evidence: "Auto-derives intensity_channels from channel-name digit suffix at use-case line 132 (called from dialog); no metadata probe before commit"
+    thread: identify-before-open
+  "src/percell4/gui/add_layer_dialog.py.4":
+    status: violation
+    evidence: "_tcspc_write_bin_intensity_debug_layers at line 1517 opens h5py.File(self._store.path, 'r') directly; bypasses adapter"
+    thread: write-boundary-discipline
+  "src/percell4/gui/add_layer_dialog.py.5":
+    status: partial
+    evidence: "Calls add_decay_to_dataset (which has its own plan-consumption violation); the dialog passes a directory, not a plan"
+    residual_evidence: "Dialog passes source_dir to use case which re-rglobs."
+    thread: append-flow-plan-consumption
+  "src/percell4/gui/add_layer_dialog.py.6":
+    status: ok
+    evidence: "Use case writes provenance per channel; dialog respects it"
+  "src/percell4/gui/add_layer_dialog.py.7":
+    status: violation
+    evidence: "Same as import_dialog — no serializable invocation. Dialog state is inseparable from Qt widgets."
+    thread: invocation-objects-rollout
+
+  # ── gui/compress_dialog.py ──────────────────────────────────────────
+  "src/percell4/gui/compress_dialog.py.1":
+    status: n/a
+    evidence: "value-capture"
+  "src/percell4/gui/compress_dialog.py.2":
+    status: n/a
+    evidence: "import-side"
+  "src/percell4/gui/compress_dialog.py.3":
+    status: violation
+    evidence: "Discovery uses suffix + token regex; no metadata probe"
+    thread: identify-before-open
+  "src/percell4/gui/compress_dialog.py.4":
+    status: ok
+    evidence: "Delegates to import_dataset"
+  "src/percell4/gui/compress_dialog.py.5":
+    status: ok
+    evidence: "CompressConfig (line 444) carries datasets+gui_states+layer_assignments — proper plan shape"
+  "src/percell4/gui/compress_dialog.py.6":
+    status: partial
+    evidence: "CompressConfig captures input but no provenance is sealed at the dialog layer — depends on importer to add"
+    residual_evidence: "Provenance handled downstream; dialog itself is silent."
+  "src/percell4/gui/compress_dialog.py.7":
+    status: violation
+    evidence: "CompressConfig is a Python dataclass which IS serializable, but the dialog state→config mapping has Qt-only branches; no headless-CLI 'compress' command consumes CompressConfig today"
+    thread: invocation-objects-rollout
+
+  # ── gui/export_images_dialog.py ─────────────────────────────────────
+  "src/percell4/gui/export_images_dialog.py.1":
+    status: violation
+    evidence: "Format combo hard-coded ['TIFF'] (line 119); no capability registry"
+    thread: capability-matrix-foundation
+  "src/percell4/gui/export_images_dialog.py.2":
+    status: violation
+    evidence: "Export only — no parallel re-import flow available; dialog cannot drive re-ingest"
+    thread: round-trip-and-export-symmetry
+  "src/percell4/gui/export_images_dialog.py.3":
+    status: n/a
+    evidence: "writes only"
+  "src/percell4/gui/export_images_dialog.py.4":
+    status: ok
+    evidence: "Delegates to ExportImages use case (which itself has a write-boundary issue, but the dialog is clean)"
+  "src/percell4/gui/export_images_dialog.py.5":
+    status: ok
+    evidence: "Single export run consumes the dialog's selections as one batch"
+  "src/percell4/gui/export_images_dialog.py.6":
+    status: violation
+    evidence: "No provenance sidecar — exported TIFFs lose connection to source dataset"
+    thread: provenance-everywhere
+  "src/percell4/gui/export_images_dialog.py.7":
+    status: violation
+    evidence: "Selections are widget-state; ExportRequest is built ad-hoc in the dialog handler. No headless 'export' command exists."
+    thread: invocation-objects-rollout
+
+  # ── tests ───────────────────────────────────────────────────────────
+  "tests/test_io/test_importer.py.1":
+    status: n/a
+    evidence: "tests outcome"
+  "tests/test_io/test_importer.py.2":
+    status: violation
+    evidence: "No round-trip test (import → store → export → re-import)"
+    thread: round-trip-and-export-symmetry
+  "tests/test_io/test_importer.py.3":
+    status: n/a
+    evidence: "tests filename token paths only"
+  "tests/test_io/test_importer.py.4":
+    status: ok
+    evidence: "Asserts post-import state via DatasetStore reads — through the boundary"
+  "tests/test_io/test_importer.py.5":
+    status: ok
+    evidence: "Tests both single-channel and multi-channel — same code path"
+  "tests/test_io/test_importer.py.6":
+    status: partial
+    evidence: "Asserts metadata.channel_names but doesn't assert provenance entries"
+  "tests/test_io/test_importer.py.7":
+    status: ok
+    evidence: "Tests use the import_dataset function directly — headless-callable"
+
+  "tests/test_io/test_cross_format.py.1":
+    status: n/a
+    evidence: "matcher tests"
+  "tests/test_io/test_cross_format.py.2":
+    status: n/a
+    evidence: "matcher tests"
+  "tests/test_io/test_cross_format.py.3":
+    status: n/a
+    evidence: "matcher tests"
+  "tests/test_io/test_cross_format.py.4":
+    status: ok
+    evidence: "Tests the strict (frozen-dataclass) output of the matcher"
+  "tests/test_io/test_cross_format.py.5":
+    status: ok
+    evidence: "len(bins)==1 and >1 both tested"
+  "tests/test_io/test_cross_format.py.6":
+    status: ok
+    evidence: "Asserts MatchEvidence shape per binding"
+  "tests/test_io/test_cross_format.py.7":
+    status: ok
+    evidence: "Pure-domain tests — no Qt"
+
+  "tests/test_io/test_store_append.py.1":
+    status: n/a
+    evidence: "store tests"
+  "tests/test_io/test_store_append.py.2":
+    status: n/a
+    evidence: "append tests"
+  "tests/test_io/test_store_append.py.3":
+    status: n/a
+    evidence: "append tests"
+  "tests/test_io/test_store_append.py.4":
+    status: ok
+    evidence: "Tests through DatasetStore boundary"
+  "tests/test_io/test_store_append.py.5":
+    status: ok
+    evidence: "Tests append_decay_layers (bulk) and presumably write_array (incremental)"
+  "tests/test_io/test_store_append.py.6":
+    status: ok
+    evidence: "Tests cross_format_rule persistence + ProvenanceRecord write"
+  "tests/test_io/test_store_append.py.7":
+    status: ok
+    evidence: "No Qt"
+
+  "tests/test_io/test_assembler.py.1":
+    status: n/a
+    evidence: "stitching tests"
+  "tests/test_io/test_assembler.py.2":
+    status: n/a
+    evidence: "stitching tests"
+  "tests/test_io/test_assembler.py.3":
+    status: n/a
+    evidence: "stitching tests"
+  "tests/test_io/test_assembler.py.4":
+    status: ok
+    evidence: "Pure numpy"
+  "tests/test_io/test_assembler.py.5":
+    status: ok
+    evidence: "1×1 and N×M tested"
+  "tests/test_io/test_assembler.py.6":
+    status: n/a
+    evidence: "no provenance"
+  "tests/test_io/test_assembler.py.7":
+    status: ok
+    evidence: "Pure Python"
+
+  "tests/test_io/test_scanner.py.1":
+    status: n/a
+    evidence: "scanner tests"
+  "tests/test_io/test_scanner.py.2":
+    status: n/a
+    evidence: "scanner tests"
+  "tests/test_io/test_scanner.py.3":
+    status: n/a
+    evidence: "filename-only tests"
+  "tests/test_io/test_scanner.py.4":
+    status: ok
+    evidence: "Tests DiscoveredFile output"
+  "tests/test_io/test_scanner.py.5":
+    status: ok
+    evidence: "Tests path= and files= shapes"
+  "tests/test_io/test_scanner.py.6":
+    status: n/a
+    evidence: "no provenance"
+  "tests/test_io/test_scanner.py.7":
+    status: ok
+    evidence: "Pure Python"
+
+  "tests/test_io/test_readers.py.1":
+    status: n/a
+    evidence: "reader tests"
+  "tests/test_io/test_readers.py.2":
+    status: n/a
+    evidence: "reader tests"
+  "tests/test_io/test_readers.py.3":
+    status: partial
+    evidence: "Tests TIFF metadata extraction; .bin reader tests don't probe headers (which the reader doesn't either)"
+    residual_evidence: "Mirrors the partial Identify state in the readers themselves."
+  "tests/test_io/test_readers.py.4":
+    status: ok
+    evidence: "Tests standardized output dict"
+  "tests/test_io/test_readers.py.5":
+    status: ok
+    evidence: "Single-file, both batch and incremental"
+  "tests/test_io/test_readers.py.6":
+    status: partial
+    evidence: "Tests metadata return; doesn't assert source_path/timestamp/sha"
+  "tests/test_io/test_readers.py.7":
+    status: ok
+    evidence: "Pure Python"
+
+  "tests/test_add_decay_to_dataset.py.1":
+    status: n/a
+    evidence: "use-case tests"
+  "tests/test_add_decay_to_dataset.py.2":
+    status: n/a
+    evidence: "append-only"
+  "tests/test_add_decay_to_dataset.py.3":
+    status: n/a
+    evidence: "use-case tests"
+  "tests/test_add_decay_to_dataset.py.4":
+    status: partial
+    evidence: "Tests through use case (which itself reaches into h5py for rotate/flip/provenance) — boundary violations not surfaced"
+    residual_evidence: "The tests work but don't catch the principle violations in the use case under test."
+  "tests/test_add_decay_to_dataset.py.5":
+    status: violation
+    evidence: "Tests pass source_dir to use case; no test exercises a 'pre-discovered list' code path because that path doesn't exist"
+    thread: append-flow-plan-consumption
+  "tests/test_add_decay_to_dataset.py.6":
+    status: ok
+    evidence: "Tests ProvenanceRecord round-trip via append_decay_layers"
+  "tests/test_add_decay_to_dataset.py.7":
+    status: ok
+    evidence: "Headless-callable use-case tests"
+
+  "tests/test_store.py.1":
+    status: n/a
+    evidence: "store tests"
+  "tests/test_store.py.2":
+    status: ok
+    evidence: "Tests round-trip of write→read for labels/masks/array/dataframe"
+  "tests/test_store.py.3":
+    status: ok
+    evidence: "Tests store.exists() and metadata access"
+  "tests/test_store.py.4":
+    status: ok
+    evidence: "Tests through DatasetStore boundary"
+  "tests/test_store.py.5":
+    status: ok
+    evidence: "Tests both incremental write_array and bulk-style operations"
+  "tests/test_store.py.6":
+    status: partial
+    evidence: "Tests append_decay_layers provenance enforcement; doesn't test provenance for /intensity/labels/masks (because none is required)"
+  "tests/test_store.py.7":
+    status: ok
+    evidence: "No Qt"
+
+# Threads — mirrored from the canonical-sources matrix where applicable, plus
+# I/O-specific threads (capability-matrix-foundation, identify-before-open,
+# round-trip-and-export-symmetry, provenance-everywhere, invocation-objects-rollout).
+threads:
+  - slug: capability-matrix-foundation
+    description: "Author the capability matrix (Principle 1) — single registry of (importer/exporter, payload type, dtype, streams, lossless, format) declarations; rebuild dispatchers (importer.py format selection, ExportImages format combo, AddLayerDialog tabs) on top of it."
+    cited_cells: []
+    cited_io_principles_cells:
+      - "src/percell4/domain/io/cross_format.py.1"
+      - "src/percell4/domain/io/models.py.1"
+      - "src/percell4/adapters/importer.py.1"
+      - "src/percell4/adapters/readers.py.1"
+      - "src/percell4/store.py.1"
+      - "src/percell4/application/use_cases/export_images.py.1"
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.1"
+      - "src/percell4/gui/add_layer_dialog.py.1"
+      - "src/percell4/gui/export_images_dialog.py.1"
+    complexity: large
+    rationale: |
+      Foundation thread. Eight I/O files violate Principle 1 because no registry names which formats × payload types × directions are supported. Adding a new format (.sdt direct, OME-Zarr) today requires editing dispatch logic in five places. The matrix becomes the test oracle for round-trip (Principle 2) and the lint target for write-boundary discipline (Principle 4). Large because it touches every importer/exporter callsite. Recommend NOT first thread — pick a smaller pain-driven thread to validate the audit shape before this.
+    status: proposed
+
+  - slug: identify-before-open
+    description: "Promote metadata-first identification: every reader implements identify(path) → confidence + payload type; batch ops identify ALL inputs before any open commits."
+    cited_cells: []
+    cited_io_principles_cells:
+      - "src/percell4/domain/io/discovery.py.3"
+      - "src/percell4/domain/io/scanner.py.3"
+      - "src/percell4/adapters/importer.py.3"
+      - "src/percell4/adapters/readers.py.3"
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.3"
+      - "src/percell4/gui/add_layer_dialog.py.3"
+      - "src/percell4/gui/compress_dialog.py.3"
+    complexity: large
+    rationale: |
+      Eight cells violate or partially-implement Principle 3. Filename-only discovery is fragile (the user has hit this with TIFF/.bin token mismatches and Dropbox renames). Promoting Identify-before-Open kills the "fails mid-batch at 3am" failure mode. Large because every reader needs an identify() shim and every dispatcher must pre-flight identify. Defer until capability-matrix-foundation lands.
+    status: proposed
+
+  - slug: round-trip-and-export-symmetry
+    description: "Make export side a peer of the import side. Add /decay export (TIFF stack or .bin), /phasor export, provenance export. Add CI smoke tests parameterized over the capability matrix that round-trip every supported (importer, exporter) pair."
+    cited_cells: []
+    cited_io_principles_cells:
+      - "src/percell4/domain/io/models.py.2"
+      - "src/percell4/adapters/importer.py.2"
+      - "src/percell4/adapters/readers.py.2"
+      - "src/percell4/application/use_cases/export_images.py.2"
+      - "src/percell4/gui/export_images_dialog.py.2"
+      - "tests/test_io/test_importer.py.2"
+    complexity: large
+    rationale: |
+      Six cells flag asymmetry. /decay and /phasor are write-only; users cannot get them out of the store. This is the "data jail" trap explicitly called out in the ideation doc. Depends on capability-matrix-foundation (need the matrix to declare which round-trips are supported / lossy). Schedule after the foundation thread.
+    status: proposed
+
+  - slug: provenance-everywhere
+    description: "Extend ProvenanceRecord (currently /decay-only) to /intensity, /labels/, /masks/, /phasor/. Make _write_layer require provenance arg. Sidecar provenance for exports."
+    cited_cells: []
+    cited_io_principles_cells:
+      - "src/percell4/domain/io/models.py.6"
+      - "src/percell4/adapters/importer.py.6"
+      - "src/percell4/adapters/readers.py.6"
+      - "src/percell4/store.py.6"
+      - "src/percell4/application/use_cases/export_images.py.6"
+      - "src/percell4/gui/export_images_dialog.py.6"
+      - "tests/test_io/test_importer.py.6"
+      - "tests/test_io/test_readers.py.6"
+      - "tests/test_store.py.6"
+    complexity: medium
+    rationale: |
+      Nine cells partial-or-violation. /decay/ provenance is the gold standard (see add_decay_to_dataset.py.6 = ok); replicate to other payloads. Independent of capability-matrix-foundation — can run earlier. Medium because the provenance type already exists; rolling it out is mechanical.
+    status: proposed
+
+  - slug: invocation-objects-rollout
+    description: "Make every dialog produce a serializable invocation (TOML / Python config). CLI consumes the same invocations. Reproducibility-stack thread."
+    cited_cells: []
+    cited_io_principles_cells:
+      - "src/percell4/gui/import_dialog.py.7"
+      - "src/percell4/gui/add_layer_dialog.py.7"
+      - "src/percell4/gui/compress_dialog.py.7"
+      - "src/percell4/gui/export_images_dialog.py.7"
+    complexity: large
+    rationale: |
+      Four dialogs violate Principle 7 because their output is widget-state, not a serializable invocation. CompressConfig is dataclass-shaped (closest to compliant); others have ad-hoc dict-of-strings. Large because retrofitting four dialogs requires extracting widget→config mapping into builders, plus a CLI front-end. Defer until capability-matrix-foundation lands so the invocations can carry capability-matrix references.
+    status: proposed
+
+  # Threads mirrored from the reuse matrix that also close I/O cells:
+  - slug: dialog-scroll-helper-rollout
+    description: "(See canonical-sources-matrix.yaml for full description.)"
+    cited_cells: []
+    cited_io_principles_cells: []
+    complexity: small
+    rationale: "Closes only reuse-matrix cells; no I/O principle cells. Mirrored here for completeness."
+    status: proposed
+
+  - slug: append-flow-plan-consumption
+    description: "(See canonical-sources-matrix.yaml.) Make add_decay_to_dataset consume a pre-discovered bin list."
+    cited_cells: []
+    cited_io_principles_cells:
+      - "src/percell4/adapters/importer.py.5"
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.5"
+      - "src/percell4/gui/add_layer_dialog.py.5"
+      - "tests/test_add_decay_to_dataset.py.5"
+    complexity: medium
+    rationale: "Closes 4 Principle-5 cells AND 3 reuse-matrix cells (discovery-scopes-processing-consumes drift). Highest-leverage cross-matrix thread."
+    status: proposed
+
+  - slug: write-boundary-discipline
+    description: "(See canonical-sources-matrix.yaml.) Eliminate direct h5py.File / tifffile.imwrite at use case + dialog layer."
+    cited_cells: []
+    cited_io_principles_cells:
+      - "src/percell4/adapters/importer.py.4"
+      - "src/percell4/application/use_cases/export_images.py.4"
+      - "src/percell4/application/use_cases/add_decay_to_dataset.py.4"
+      - "src/percell4/gui/add_layer_dialog.py.4"
+    complexity: medium
+    rationale: "Closes 4 Principle-4 cells AND multiple atomic-write-contract reuse cells."
+    status: proposed

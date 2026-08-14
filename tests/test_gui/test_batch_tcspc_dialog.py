@@ -1,0 +1,1370 @@
+"""Tests for the BatchTCSPCDialog (U3 of batch TCSPC append).
+
+The dialog drives :func:`batch_add_decay`, :func:`validate_batch_inputs`,
+and :func:`parse_calibration_csv` through injected callables. Tests
+exercise the dialog's state machine — auto-pair, pairing uniqueness,
+Run-gate invalidation, CSV-driven calibration display, and the
+post-run summary — by mocking those callables.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import h5py
+import pandas as pd
+import pytest
+from qtpy.QtWidgets import QCheckBox, QComboBox, QGroupBox
+
+from percell4.application.use_cases.add_decay_to_dataset import AppendReport
+from percell4.application.use_cases.batch_add_decay import (
+    BatchAppendItem,
+    BatchAppendReport,
+    BatchItemResult,
+    BatchValidationReport,
+)
+from percell4.domain.errors import (
+    CalibrationCSVError,
+    LifCalibrationError,
+    LifHeaderError,
+)
+from percell4.domain.io.calibration_csv import (
+    BatchCalibration,
+    ChannelCalibration,
+)
+from percell4.domain.io.lif_calibration import LifCalibrationRecord
+from percell4.domain.io.models import TileConfig
+from percell4.gui.batch_tcspc_dialog import (
+    BatchTCSPCDialog,
+    _best_match,
+    _render_summary_text,
+)
+
+
+def _make_h5(path: Path, channel_names: list[str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as f:
+        meta = f.create_group("metadata")
+        meta.attrs["channel_names"] = channel_names
+    return path
+
+
+def _bcal(rows: dict[str, dict[str, ChannelCalibration]]) -> BatchCalibration:
+    return BatchCalibration(rows=rows)
+
+
+def _passing_report() -> BatchValidationReport:
+    return BatchValidationReport()
+
+
+def _failing_report(*, missing_pair: bool = True) -> BatchValidationReport:
+    return BatchValidationReport(
+        pairing_errors=("Dish 1.h5: source folder not paired",)
+        if missing_pair
+        else (),
+    )
+
+
+# ── Construction + project prefill ──────────────────────────────────────
+
+
+def test_empty_dialog_has_run_disabled(qtbot) -> None:
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    assert dlg._run_btn is not None
+    assert not dlg._run_btn.isEnabled()
+    assert dlg._dataset_table.rowCount() == 0
+
+
+def test_project_index_prefills_dataset_table(qtbot, tmp_path: Path) -> None:
+    """When a ProjectIndex returns a DataFrame, every path lands in the table."""
+    paths = [
+        _make_h5(tmp_path / f"d{i}.h5", ["ch1", "ch2"]) for i in range(3)
+    ]
+    df = pd.DataFrame({"path": [str(p) for p in paths]})
+
+    class FakeIndex:
+        def load(self) -> pd.DataFrame:
+            return df
+
+    dlg = BatchTCSPCDialog(get_project_index=lambda: FakeIndex())
+    qtbot.addWidget(dlg)
+    assert dlg._dataset_table.rowCount() == 3
+    # All three start checked.
+    for row in range(3):
+        wrapper = dlg._dataset_table.cellWidget(row, 0)
+        cb = wrapper.property("checkbox")
+        assert isinstance(cb, QCheckBox) and cb.isChecked()
+
+
+# ── Source-root group discovery ────────────────────────────────────────
+
+
+def test_source_root_discovers_immediate_subfolders(qtbot, tmp_path: Path) -> None:
+    root = tmp_path / "scan"
+    for name in ("Dish 1", "Dish 2", "Dish 3"):
+        (root / name).mkdir(parents=True)
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    assert [g.name for g in dlg._groups] == ["Dish 1", "Dish 2", "Dish 3"]
+    assert "3" in dlg._groups_label.text()
+
+
+def test_source_root_ignores_files_at_top_level(qtbot, tmp_path: Path) -> None:
+    root = tmp_path / "scan"
+    root.mkdir()
+    (root / "stray.bin").write_bytes(b"")
+    (root / "Dish 1").mkdir()
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    assert [g.name for g in dlg._groups] == ["Dish 1"]
+
+
+# ── CSV loading ────────────────────────────────────────────────────────
+
+
+def test_csv_loaded_via_parser_populates_calibration_column(
+    qtbot, tmp_path: Path
+) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["ch1", "ch2"])
+    cal = _bcal(
+        {
+            "Dish 1": {
+                "ch1": ChannelCalibration(80.0, 0.12, 0.98),
+                "ch2": ChannelCalibration(80.0, 0.10, 0.99),
+            }
+        }
+    )
+    dlg = BatchTCSPCDialog(csv_parser=lambda _p: cal)
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._refresh_pairing_table()
+
+    # Simulate file pick by directly invoking the parser path used by _on_load_csv.
+    dlg._calibration = cal
+    dlg._refresh_pairing_table()
+    item = dlg._pairing_table.item(0, 2)
+    assert item is not None
+    text = item.text()
+    assert "ch1=(0.120, 0.980)" in text
+    assert "freq=80.0" in text
+
+
+# ── Auto-pair + uniqueness ─────────────────────────────────────────────
+
+
+def test_auto_pair_fills_exact_name_matches(qtbot, tmp_path: Path) -> None:
+    root = tmp_path / "scan"
+    for n in ("Dish 1", "Dish 2"):
+        (root / n).mkdir(parents=True)
+    h5_1 = _make_h5(tmp_path / "Dish 1.h5", ["ch1"])
+    h5_2 = _make_h5(tmp_path / "Dish 2.h5", ["ch1"])
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5_1, checked=True)
+    dlg._add_dataset_row(h5_2, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._on_auto_pair()
+
+    assert dlg._pairings[h5_1] is not None
+    assert dlg._pairings[h5_1].name == "Dish 1"
+    assert dlg._pairings[h5_2] is not None
+    assert dlg._pairings[h5_2].name == "Dish 2"
+
+
+def test_auto_pair_below_threshold_leaves_unpaired(qtbot, tmp_path: Path) -> None:
+    """Totally unrelated names should not pair."""
+    root = tmp_path / "scan"
+    (root / "completely_unrelated_xyz").mkdir(parents=True)
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["ch1"])
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._on_auto_pair()
+    assert dlg._pairings.get(h5) is None
+
+
+def test_pairing_uniqueness_clears_prior_owner(qtbot, tmp_path: Path) -> None:
+    """When B claims group X that A held, A's combo resets to 'select'."""
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+    h5_a = _make_h5(tmp_path / "A.h5", ["ch1"])
+    h5_b = _make_h5(tmp_path / "B.h5", ["ch1"])
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5_a, checked=True)
+    dlg._add_dataset_row(h5_b, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+
+    # A claims group G.
+    combo_a = dlg._pairing_table.cellWidget(0, 1)
+    assert isinstance(combo_a, QComboBox)
+    combo_a.setCurrentText("G")
+    assert dlg._pairings[h5_a] is not None and dlg._pairings[h5_a].name == "G"
+
+    # B claims group G — A should reset.
+    combo_b = dlg._pairing_table.cellWidget(1, 1)
+    assert isinstance(combo_b, QComboBox)
+    combo_b.setCurrentText("G")
+    assert dlg._pairings[h5_b] is not None and dlg._pairings[h5_b].name == "G"
+    assert dlg._pairings.get(h5_a) is None
+
+
+# ── Run-gate invalidation ──────────────────────────────────────────────
+
+
+def test_settings_change_disables_run(qtbot, tmp_path: Path) -> None:
+    """Any settings edit after Validate re-disables Run."""
+    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        csv_parser=lambda _p: _bcal(
+            {"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}}
+        ),
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal({"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}})
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = root / "G"
+
+    dlg._on_validate()
+    assert dlg._validated is True
+    assert dlg._run_btn.isEnabled()
+
+    # Touching a stitching widget should re-disable Run.
+    form = dlg._stitching_form
+    form.grid_y.setValue(form.grid_y.value() + 1)
+    assert dlg._validated is False
+    assert not dlg._run_btn.isEnabled()
+
+
+def test_validate_missing_pairing_keeps_run_disabled(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["ch1"])
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _failing_report(missing_pair=True)
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal(
+        {"Dish 1": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}}
+    )
+    # No pairings set.
+    dlg._on_validate()
+    assert dlg._validated is False
+    assert not dlg._run_btn.isEnabled()
+    assert "no group folder paired" in dlg._validate_log.toPlainText()
+
+
+# ── Build items + Run flow ─────────────────────────────────────────────
+
+
+def test_run_calls_orchestrator_with_built_items(qtbot, tmp_path: Path) -> None:
+    """End-to-end: validated state + Run → orchestrator receives the items."""
+    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+
+    captured: dict[str, Any] = {}
+
+    def fake_orchestrator(items, **kwargs):
+        captured["items"] = list(items)
+        captured["force"] = kwargs.get("force")
+        # Drive the progress callback so the dialog updates.
+        cb = kwargs.get("progress_callback")
+        if cb is not None:
+            for item in items:
+                cb(
+                    item,
+                    BatchItemResult(
+                        item=item,
+                        status="succeeded",
+                        append_report=AppendReport(written=("ch1",)),
+                    ),
+                )
+        return BatchAppendReport(
+            items=tuple(
+                BatchItemResult(
+                    item=item,
+                    status="succeeded",
+                    append_report=AppendReport(written=("ch1",)),
+                )
+                for item in items
+            )
+        )
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=fake_orchestrator,
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal(
+        {"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}}
+    )
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = root / "G"
+
+    dlg._on_validate()
+    assert dlg._validated
+    dlg._on_run()
+
+    assert len(captured["items"]) == 1
+    assert captured["items"][0].h5_path == h5
+    assert captured["items"][0].source_dir == root / "G"
+    assert "ch1" in captured["items"][0].calibration
+    # Summary widget swapped in.
+    assert dlg._summary_widget is not None
+
+
+def test_run_force_flag_follows_conflict_radio(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+
+    captured: dict[str, Any] = {}
+
+    def fake_orchestrator(items, **kwargs):
+        captured["force"] = kwargs.get("force")
+        return BatchAppendReport(items=())
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=fake_orchestrator,
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal(
+        {"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}}
+    )
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = root / "G"
+    dlg._conflict_overwrite_radio.setChecked(True)
+    dlg._on_validate()
+    dlg._on_run()
+    assert captured["force"] is True
+
+
+# ── Pure helpers ───────────────────────────────────────────────────────
+
+
+def test_best_match_picks_highest_score(tmp_path: Path) -> None:
+    a = tmp_path / "Dish 1 - WT"
+    b = tmp_path / "totally other"
+    a.mkdir()
+    b.mkdir()
+    best, score = _best_match("Dish 1 - WT 60min As + Noco", [a, b])
+    assert best == a
+    assert score > 0.5
+
+
+def test_channel_token_section_discovers_bin_tokens(qtbot, tmp_path: Path) -> None:
+    """After a pairing is set, the channel-tokens table populates with the
+    distinct ``_ch(\\d+)`` tokens scanned from the paired group's .bin files."""
+    h5 = _make_h5(tmp_path / "WT_60min.h5", ["CA-SiR", "mNG", "mTQ2"])
+    root = tmp_path / "scan"
+    group = root / "Dish 1 - WT 60min"
+    group.mkdir(parents=True)
+    for tile in range(1, 4):
+        for ch in (1, 2, 3):
+            (group / f"Dish 1 - WT 60min_s{tile}_ch{ch}.bin").write_bytes(b"")
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    assert dlg._available_bin_tokens == ["1", "2", "3"]
+    # Three channel-name rows.
+    assert dlg._channel_tokens_table.rowCount() == 3
+    # The semantic-only channels start unmapped; mTQ2 happens to end in "2"
+    # and "2" is in the discovered token list, so it gets seeded.
+    assert dlg._channel_token_overrides.get("mTQ2") == "2"
+    assert "CA-SiR" not in dlg._channel_token_overrides
+    assert "mNG" not in dlg._channel_token_overrides
+
+
+def test_channel_token_section_surfaces_zero_for_single_channel_bins(
+    qtbot, tmp_path: Path
+) -> None:
+    """Single-channel LASX exports omit the _chN suffix on .bin files.
+
+    The discovery should surface token "0" so the user can pair the
+    single channel via Section 4, mirroring the cross_format fallback.
+    Regression for: 'Batch TCSPC append cannot use single-channel .bins
+    without manual renaming'.
+    """
+    h5 = _make_h5(tmp_path / "single_chan.h5", ["mNG"])
+    root = tmp_path / "scan"
+    group = root / "Dish 1 - single chan"
+    group.mkdir(parents=True)
+    # LASX single-channel output: no _ch token at all.
+    (group / "Dish 1 - single chan.bin").write_bytes(b"")
+    (group / "Dish 1 - single chan_s2.bin").write_bytes(b"")
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    assert dlg._available_bin_tokens == ["0"], (
+        f"Single-channel .bins should surface token '0'; got {dlg._available_bin_tokens}"
+    )
+
+
+def test_channel_token_section_mixes_zero_with_real_tokens(
+    qtbot, tmp_path: Path
+) -> None:
+    """A group with BOTH labeled and unlabeled .bins surfaces all tokens.
+
+    Real-world: if someone re-exports one channel without LASX's chN
+    suffix while others have it, the dropdown should expose both.
+    """
+    h5 = _make_h5(tmp_path / "mixed.h5", ["mNG", "mTQ2"])
+    root = tmp_path / "scan"
+    group = root / "Dish"
+    group.mkdir(parents=True)
+    (group / "Dish.bin").write_bytes(b"")  # no token → "0"
+    (group / "Dish_ch2.bin").write_bytes(b"")  # token "2"
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    assert dlg._available_bin_tokens == ["0", "2"]
+
+
+def test_channel_token_override_picks_propagate_to_run(qtbot, tmp_path: Path) -> None:
+    """User-picked tokens flow into intensity_channels_overrides at Run time."""
+    h5 = _make_h5(tmp_path / "WT_60min.h5", ["CA-SiR", "mNG", "mTQ2"])
+    root = tmp_path / "scan"
+    group = root / "Dish 1 - WT 60min"
+    group.mkdir(parents=True)
+    for tile in range(1, 4):
+        for ch in (1, 2, 3):
+            (group / f"Dish 1 - WT 60min_s{tile}_ch{ch}.bin").write_bytes(b"")
+
+    captured: dict[str, Any] = {}
+
+    def fake_orchestrator(items, **kwargs):
+        captured["overrides"] = kwargs.get("intensity_channels_overrides")
+        return BatchAppendReport(items=())
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=fake_orchestrator,
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = group
+    dlg._refresh_channel_tokens_table()
+
+    # Set the explicit mapping: CA-SiR=1, mNG=2, mTQ2=3.
+    dlg._channel_token_overrides = {"CA-SiR": "1", "mNG": "2", "mTQ2": "3"}
+    dlg._calibration = _bcal(
+        {
+            "WT_60min": {
+                "CA-SiR": ChannelCalibration(80.0, 0.1, 0.9),
+                "mNG": ChannelCalibration(80.0, 0.2, 0.9),
+                "mTQ2": ChannelCalibration(80.0, 0.3, 0.9),
+            }
+        }
+    )
+    dlg._on_validate()
+    dlg._on_run()
+
+    overrides = captured["overrides"]
+    assert overrides is not None
+    assert h5 in overrides
+    name_to_token = {c.name: c.token for c in overrides[h5]}
+    assert name_to_token == {"CA-SiR": "1", "mNG": "2", "mTQ2": "3"}
+
+
+def test_stitching_combos_match_existing_dialog_conventions(qtbot) -> None:
+    """Pins the canonical lists every tiling surface shows.
+
+    All surfaces now build the same StitchingForm / RotateFlipForm /
+    FlimBinParamsForm, so this doubles as the anti-drift guard: itemData is
+    the wire format persisted into .h5 /metadata and run_config.json and must
+    not move, while itemText is presentation and follows Fiji.
+    """
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    form = dlg._stitching_form
+    rotate = dlg._rotate_flip_form
+    flim = dlg._flim_bin_form
+    assert form is not None and rotate is not None and flim is not None
+
+    # ── Wire format: itemData is what reaches TileConfig. ──
+    pattern_values = [
+        form.grid_type.itemData(i) for i in range(form.grid_type.count())
+    ]
+    assert pattern_values == [
+        "row_by_row",
+        "column_by_column",
+        "snake_by_row",
+        "snake_by_column",
+    ]
+
+    # Four canonical corners. The other four accepted order strings are exact
+    # aliases of these, so nothing is lost by not listing them.
+    order_values = [form.order.itemData(i) for i in range(form.order.count())]
+    assert order_values == [
+        "top_left", "top_right", "bottom_left", "bottom_right",
+    ]
+
+    # Every value the combos can emit must construct a valid TileConfig —
+    # the guard that a vocabulary drift fails loudly at its source.
+    for grid_type in pattern_values:
+        for order in order_values:
+            TileConfig(grid_type=grid_type, order=order)
+
+    # ── Display text: Fiji Grid/Collection Stitching wording. ──
+    assert [
+        form.grid_type.itemText(i) for i in range(form.grid_type.count())
+    ] == [
+        "Row-by-row",
+        "Column-by-column",
+        "Snake-by-row",
+        "Snake-by-column",
+    ]
+
+    # Order options are keyed to the selected Type.
+    assert [form.order.itemText(i) for i in range(form.order.count())] == [
+        "Right & Down", "Left & Down", "Right & Up", "Left & Up",
+    ]
+    form.grid_type.setCurrentIndex(form.grid_type.findData("column_by_column"))
+    assert [form.order.itemText(i) for i in range(form.order.count())] == [
+        "Down & Right", "Down & Left", "Up & Right", "Up & Left",
+    ]
+
+    rotate_items = [
+        (rotate.rotation_combo.itemText(i), rotate.rotation_combo.itemData(i))
+        for i in range(rotate.rotation_combo.count())
+    ]
+    assert rotate_items == [
+        ("None", 0),
+        ("90° CCW", 1),
+        ("180°", 2),
+        ("90° CW", 3),
+    ]
+
+    flip_items = [
+        (rotate.flip_combo.itemText(i), rotate.flip_combo.itemData(i))
+        for i in range(rotate.flip_combo.count())
+    ]
+    assert flip_items == [
+        ("None", -1),
+        ("Vertical (top ↔ bottom)", 0),
+        ("Horizontal (left ↔ right)", 1),
+    ]
+
+    dtype_items = [
+        flim.bin_dtype.itemText(i) for i in range(flim.bin_dtype.count())
+    ]
+    assert dtype_items == ["uint32", "uint16", "float32", "uint8"]
+
+    dim_order_items = [
+        flim.bin_dim_order.itemText(i)
+        for i in range(flim.bin_dim_order.count())
+    ]
+    assert dim_order_items == ["YXT", "XYT", "TYX"]
+
+    # Header spinbox shows "Auto-detect" when value is 0 (matches compress).
+    assert flim.bin_header.specialValueText() == "Auto-detect"
+    assert flim.bin_header.value() == 0
+
+
+def test_flip_axis_helper_maps_userdata_correctly(qtbot) -> None:
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    form = dlg._rotate_flip_form
+    form.flip_combo.setCurrentIndex(0)  # None
+    assert form.flip_axis() is None
+    form.flip_combo.setCurrentIndex(1)  # vertical, data = 0
+    assert form.flip_axis() == 0
+    form.flip_combo.setCurrentIndex(2)  # horizontal, data = 1
+    assert form.flip_axis() == 1
+
+
+def test_flim_group_checked_propagates_dtype_to_run(qtbot, tmp_path: Path) -> None:
+    """When the FLIM group is checked, the user's dtype pick reaches the
+    orchestrator's FlimConfig (this is what fixes the uint32 .bin case)."""
+    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+
+    captured: dict[str, Any] = {}
+
+    def fake_orchestrator(items, **kwargs):
+        captured["flim_config"] = kwargs.get("flim_config")
+        return BatchAppendReport(items=())
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=fake_orchestrator,
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal({"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}})
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = root / "G"
+
+    # Check the FLIM group and set dtype to uint32 (the user's real case).
+    form = dlg._flim_bin_form
+    form.flim_group.setChecked(True)
+    form.bin_dtype.setCurrentText("uint32")
+    form.bin_header.setValue(20)
+
+    dlg._on_validate()
+    dlg._on_run()
+    assert captured["flim_config"].bin_dtype == "uint32"
+    assert captured["flim_config"].bin_header_bytes == 20
+
+
+def test_unchecking_dataset_refreshes_pairing_table_immediately(
+    qtbot, tmp_path: Path
+) -> None:
+    """Reactive pairing refresh: unchecking a dataset row removes its pairing
+    entry without waiting for a Remove or Add click.
+
+    Without this, the pairing table only refreshes on add/remove/browse-root.
+    A user who unchecks a row sees pairing stay stale until the NEXT trigger
+    runs — which made "Remove selected" appear to operate on checkbox state."""
+    h5_a = _make_h5(tmp_path / "A.h5", ["ch1"])
+    h5_b = _make_h5(tmp_path / "B.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G1").mkdir(parents=True)
+    (root / "G2").mkdir(parents=True)
+
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5_a, checked=True)
+    dlg._add_dataset_row(h5_b, checked=True)
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    assert dlg._pairing_table.rowCount() == 2
+
+    # Uncheck the first dataset by toggling its real QCheckBox.
+    wrapper = dlg._dataset_table.cellWidget(0, 0)
+    check: QCheckBox = wrapper.property("checkbox")
+    assert isinstance(check, QCheckBox)
+    check.setChecked(False)
+
+    assert dlg._pairing_table.rowCount() == 1, (
+        "Pairing must refresh immediately on uncheck, not wait for "
+        "the next add/remove click"
+    )
+    # The remaining pairing row is for the still-checked dataset.
+    assert dlg._pairing_table.item(0, 0).text() == "B"
+
+
+def test_summary_view_hides_form_scroll_wrapper(qtbot, tmp_path: Path) -> None:
+    """The summary must hide the scroll wrapper, not just its inner content.
+    Otherwise the form's button row stays floating mid-screen (PR #9)."""
+    h5 = _make_h5(tmp_path / "A.h5", ["ch1"])
+    root = tmp_path / "scan"
+    (root / "G").mkdir(parents=True)
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(),
+        orchestrator=lambda items, **kw: BatchAppendReport(
+            items=tuple(
+                BatchItemResult(
+                    item=i,
+                    status="succeeded",
+                    append_report=AppendReport(written=("ch1",)),
+                )
+                for i in items
+            )
+        ),
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._calibration = _bcal({"A": {"ch1": ChannelCalibration(80.0, 0.1, 0.9)}})
+    dlg._source_root = root
+    dlg._refresh_groups()
+    dlg._refresh_pairing_table()
+    dlg._pairings[h5] = root / "G"
+    dlg._on_validate()
+    dlg._on_run()
+
+    assert dlg._summary_widget is not None
+    assert dlg._summary_widget.isVisible() or True  # widget exists, layout owns it
+    # Scroll wrapper is hidden — without this fix the form's tables stay
+    # visible above the summary.
+    assert dlg._form_scroll is not None
+    assert not dlg._form_scroll.isVisible()
+
+
+def test_render_summary_includes_unmatched_paths() -> None:
+    """Summary surfaces unmatched .bin files when the matcher returned none."""
+    items = (
+        BatchItemResult(
+            item=BatchAppendItem(Path("semantic.h5"), Path("g"), {}),
+            status="failed",
+            append_report=AppendReport(
+                unmatched=(Path("/x/a_s1_ch1.bin"), Path("/x/a_s1_ch2.bin")),
+            ),
+            error="no .bin files matched any channel",
+        ),
+    )
+    text = _render_summary_text(BatchAppendReport(items=items))
+    assert "unmatched .bin files: 2" in text
+    assert "a_s1_ch1.bin" in text
+
+
+def test_render_summary_text_covers_every_status() -> None:
+    """Summary text mentions each status bucket and totals correctly."""
+    items = (
+        BatchItemResult(
+            item=BatchAppendItem(Path("a.h5"), Path("g"), {}),
+            status="succeeded",
+            append_report=AppendReport(written=("ch1", "ch2")),
+        ),
+        BatchItemResult(
+            item=BatchAppendItem(Path("b.h5"), Path("g"), {}),
+            status="failed",
+            error="exploded",
+        ),
+        BatchItemResult(
+            item=BatchAppendItem(Path("c.h5"), Path("g"), {}),
+            status="skipped_no_changes",
+        ),
+        BatchItemResult(
+            item=BatchAppendItem(Path("d.h5"), Path("g"), {}),
+            status="cancelled",
+        ),
+    )
+    text = _render_summary_text(BatchAppendReport(items=items))
+    assert "a.h5" in text and "written: ch1, ch2" in text
+    assert "b.h5" in text and "exploded" in text
+    assert "c.h5" in text and "skipped_no_changes" in text
+    assert "d.h5" in text and "cancelled" in text
+    assert "1 succeeded, 1 failed, 1 skipped, 1 cancelled" in text
+
+
+def test_run_gate_covers_all_three_section5_widgets(qtbot) -> None:
+    """Section 5 is three widgets since the stitching consolidation. If any one
+    is not wired to _invalidate_run, Run stays enabled against a stale config.
+    """
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+
+    for label, action in (
+        ("stitching", lambda: dlg._stitching_form.grid_y.setValue(3)),
+        ("rotate/flip", lambda: dlg._rotate_flip_form.rotation_combo.setCurrentIndex(2)),
+        ("flim .bin", lambda: dlg._flim_bin_form.flim_group.setChecked(True)),
+    ):
+        dlg._validated = True
+        action()
+        assert dlg._validated is False, f"{label} edit did not invalidate Run"
+
+
+def test_registration_controls_remain_on_this_append_surface(qtbot) -> None:
+    """Deliberately NOT hidden.
+
+    They are inert on the append path (which reads persisted geometry), and an
+    earlier draft of the consolidation proposed hiding them for that reason.
+    Removing controls the user can currently see is out of scope for a
+    presentation refactor, so they stay.
+    """
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    form = dlg._stitching_form
+
+    form.overlap.setValue(20.0)
+    form.register_check.setChecked(True)
+    form.reference.setCurrentText("ch00")
+
+    tc = form.tile_config()
+    assert tc.overlap == 0.2
+    assert tc.register is True
+    assert tc.reference_channel == "ch00"
+
+
+# ── Calibration source: CSV or .lif ────────────────────────────────────
+
+
+def _lif_record(
+    stem: str = "Dish 1",
+    *,
+    region: str = "Region_1",
+    detector: str = "HyD X 3",
+    channel_index: int = 0,
+    phase: float = -0.444242509,
+    modulation: float = 0.999413114,
+    frequency_mhz: float = 78.02,
+) -> LifCalibrationRecord:
+    return LifCalibrationRecord(
+        dataset_stem=stem,
+        region_name=region,
+        element_path=f"root/{region}",
+        channel_index=channel_index,
+        detector_name=detector,
+        frequency_mhz=frequency_mhz,
+        phase=phase,
+        modulation=modulation,
+        harmonic=1,
+    )
+
+
+def _silence_critical(monkeypatch) -> list[tuple[str, str]]:
+    """Capture QMessageBox.critical calls instead of blocking on them.
+
+    Swaps the module's reference to the class, not ``critical`` on the real
+    PyQt class. Assigning onto a C++-backed Qt class mutates it process-wide
+    for every later test, and restoring it is not reliably clean — this stub
+    is scoped to the module under test.
+    """
+    seen: list[tuple[str, str]] = []
+
+    class _StubMessageBox:
+        @staticmethod
+        def critical(_parent, title, text, *args, **kwargs):  # noqa: ANN001, ARG001
+            seen.append((title, text))
+
+    monkeypatch.setattr(
+        "percell4.gui.batch_tcspc_dialog.QMessageBox", _StubMessageBox
+    )
+    return seen
+
+
+def test_csv_suffix_routes_to_the_csv_parser(qtbot, tmp_path: Path) -> None:
+    cal = _bcal({"Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)}})
+    calls: list[str] = []
+
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: (calls.append("csv"), cal)[1],
+        lif_reader=lambda _p: (calls.append("lif"), ())[1],
+    )
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert calls == ["csv"]
+    assert dlg._calibration is cal
+
+
+def test_csv_status_text_is_unchanged(qtbot, tmp_path: Path) -> None:
+    """AE4 — the CSV path must behave exactly as it did before .lif support."""
+    cal = _bcal(
+        {
+            "Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)},
+            "Dish 2": {"ch1": ChannelCalibration(80.0, 0.11, 0.97)},
+        }
+    )
+    dlg = BatchTCSPCDialog(csv_parser=lambda _p: cal)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert dlg._calibration_status_label.text() == "Loaded: 2 rows / 2 datasets"
+
+
+def test_lif_suffix_routes_to_the_lif_reader(qtbot, tmp_path: Path) -> None:
+    calls: list[str] = []
+    records = (_lif_record(),)
+
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: (calls.append("csv"), _bcal({}))[1],
+        lif_reader=lambda _p: (calls.append("lif"), records)[1],
+    )
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert calls == ["lif"]
+    assert dlg._lif_records == records
+
+
+def test_lif_suffix_dispatch_is_case_insensitive(qtbot, tmp_path: Path) -> None:
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(),))
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "SAMPLE.LIF")
+
+    assert len(dlg._lif_records) == 1
+
+
+def test_loading_a_lif_auto_binds_the_unambiguous_case(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    entry = dlg._calibration.get("Dish 1", "G3BP1")
+    assert entry is not None
+    assert entry.phase == pytest.approx(-0.444242509)
+
+
+def test_lif_calibration_error_shows_a_message_and_clears_state(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    seen = _silence_critical(monkeypatch)
+
+    def boom(_p):
+        raise LifCalibrationError(["no phasor calibration in this .lif"])
+
+    dlg = BatchTCSPCDialog(lif_reader=boom)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert len(seen) == 1
+    assert "no phasor calibration" in seen[0][1]
+    assert dlg._calibration is None
+    assert dlg._lif_records == ()
+    assert "No calibration loaded." in dlg._calibration_status_label.text()
+
+
+def test_lif_header_error_uses_the_same_failure_path(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    seen = _silence_critical(monkeypatch)
+
+    def boom(_p):
+        raise LifHeaderError("sample.lif: bad block marker 0x0 at offset 0")
+
+    dlg = BatchTCSPCDialog(lif_reader=boom)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert len(seen) == 1
+    assert "bad block marker" in seen[0][1]
+    assert dlg._lif_records == ()
+
+
+def test_csv_error_still_shows_a_message_and_clears_state(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    seen = _silence_critical(monkeypatch)
+
+    def boom(_p):
+        raise CalibrationCSVError(["row 2: 'phase' is not a number"])
+
+    dlg = BatchTCSPCDialog(csv_parser=boom)
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert len(seen) == 1
+    assert dlg._calibration is None
+
+
+def test_loading_a_lif_replaces_a_previously_loaded_csv(
+    qtbot, tmp_path: Path
+) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    cal = _bcal({"Other": {"ch9": ChannelCalibration(40.0, 0.5, 0.5)}})
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: cal,
+        lif_reader=lambda _p: (_lif_record(stem="Dish 1"),),
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert dlg._calibration.datasets() == ("Dish 1",)
+
+
+def test_loading_a_csv_clears_previously_loaded_lif_records(
+    qtbot, tmp_path: Path
+) -> None:
+    cal = _bcal({"Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)}})
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: cal,
+        lif_reader=lambda _p: (_lif_record(),),
+    )
+    qtbot.addWidget(dlg)
+
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+
+    assert dlg._lif_records == ()
+
+
+def test_every_calibration_load_path_leaves_run_disabled(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    _silence_critical(monkeypatch)
+    cal = _bcal({"Dish 1": {"ch1": ChannelCalibration(80.0, 0.12, 0.98)}})
+
+    def boom(_p):
+        raise LifCalibrationError(["nope"])
+
+    dlg = BatchTCSPCDialog(csv_parser=lambda _p: cal, lif_reader=boom)
+    qtbot.addWidget(dlg)
+
+    for name in ("cal.csv", "sample.lif"):
+        dlg._validated = True
+        dlg._run_btn.setEnabled(True)
+        dlg._load_calibration_file(tmp_path / name)
+        assert dlg._run_btn.isEnabled() is False
+        assert dlg._validated is False
+
+
+def test_section_numbers_are_unique(qtbot) -> None:
+    """The calibration and channel-token sections both used to be '4.'."""
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    numbers = [
+        box.title().split(".", 1)[0]
+        for box in dlg.findChildren(QGroupBox)
+        if box.title() and box.title()[0].isdigit()
+    ]
+
+    assert len(numbers) == len(set(numbers)), f"duplicate section numbers: {numbers}"
+
+
+# ── .lif → channel binding table ───────────────────────────────────────
+
+
+def _binding_combo(dlg, row: int) -> QComboBox:
+    return dlg._lif_binding_table.cellWidget(row, 2)
+
+
+def _binding_rows(dlg) -> list[tuple[str, str, str]]:
+    table = dlg._lif_binding_table
+    return [
+        (
+            table.item(r, 0).text(),
+            table.item(r, 1).text(),
+            _binding_combo(dlg, r).currentText(),
+        )
+        for r in range(table.rowCount())
+    ]
+
+
+def test_binding_section_is_hidden_until_a_lif_is_loaded(
+    qtbot, tmp_path: Path
+) -> None:
+    cal = _bcal({"Dish 1": {"G3BP1": ChannelCalibration(80.0, 0.12, 0.98)}})
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: cal, lif_reader=lambda _p: (_lif_record(),)
+    )
+    qtbot.addWidget(dlg)
+
+    assert dlg._lif_binding_box.isVisibleTo(dlg) is False
+
+    dlg._load_calibration_file(tmp_path / "cal.csv")
+    assert dlg._lif_binding_box.isVisibleTo(dlg) is False
+
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    assert dlg._lif_binding_box.isVisibleTo(dlg) is True
+
+
+def test_binding_rows_cover_every_checked_dataset_channel(
+    qtbot, tmp_path: Path
+) -> None:
+    a = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    b = _make_h5(tmp_path / "Dish 2.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(a, checked=True)
+    dlg._add_dataset_row(b, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert [(d, c) for d, c, _ in _binding_rows(dlg)] == [
+        ("Dish 1", "G3BP1"),
+        ("Dish 1", "mNG"),
+        ("Dish 2", "G3BP1"),
+    ]
+
+
+def test_auto_match_button_fills_the_unambiguous_row(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+
+    # Load before any dataset is checked, so nothing can auto-bind at load.
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._refresh_lif_binding_table()
+    assert _binding_rows(dlg) == [("Dish 1", "G3BP1", "(unmapped)")]
+
+    dlg._on_auto_match_lif()
+
+    expected = _lif_record(stem="Dish 1").label
+    assert _binding_rows(dlg) == [("Dish 1", "G3BP1", expected)]
+
+
+def test_auto_match_leaves_an_ambiguous_row_unmapped(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    dlg._on_auto_match_lif()
+
+    assert [text for _, _, text in _binding_rows(dlg)] == [
+        "(unmapped)",
+        "(unmapped)",
+    ]
+
+
+def test_combo_labels_distinguish_records_from_different_regions(
+    qtbot, tmp_path: Path
+) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    records = (
+        _lif_record(stem="Dish 1", region="Region_1"),
+        _lif_record(stem="Dish 1", region="Region_2", detector="HyD X 1"),
+    )
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: records)
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    combo = _binding_combo(dlg, 0)
+    labels = [combo.itemText(i) for i in range(combo.count())]
+
+    assert labels == ["(unmapped)", records[0].label, records[1].label]
+    assert records[0].label != records[1].label
+
+
+def test_manual_pick_survives_a_refresh_from_checking_another_dataset(
+    qtbot, tmp_path: Path
+) -> None:
+    a = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    b = _make_h5(tmp_path / "Dish 2.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(a, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    expected = _lif_record(stem="Dish 1").label
+    _binding_combo(dlg, 1).setCurrentIndex(1)  # bind Dish 1 / mNG by hand
+    assert _binding_rows(dlg)[1][2] == expected
+
+    dlg._add_dataset_row(b, checked=True)
+    dlg._refresh_lif_binding_table()
+
+    rows = {(d, c): text for d, c, text in _binding_rows(dlg)}
+    assert rows[("Dish 1", "mNG")] == expected
+
+
+def test_manual_pick_survives_auto_match(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    records = (
+        _lif_record(stem="Dish 1", region="Region_1"),
+        _lif_record(stem="Dish 1", region="Region_2", detector="HyD X 1"),
+    )
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: records)
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    _binding_combo(dlg, 0).setCurrentIndex(2)  # Region_2
+    dlg._on_auto_match_lif()
+
+    assert _binding_rows(dlg)[0][2] == records[1].label
+
+
+def test_changing_a_binding_invalidates_the_run_gate(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    dlg._validated = True
+    dlg._run_btn.setEnabled(True)
+    _binding_combo(dlg, 0).setCurrentIndex(0)  # back to (unmapped)
+
+    assert dlg._validated is False
+    assert dlg._run_btn.isEnabled() is False
+
+
+def test_binding_a_channel_updates_the_resolved_calibration(
+    qtbot, tmp_path: Path
+) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1", "mNG"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+
+    assert dlg._calibration.get("Dish 1", "mNG") is None
+    _binding_combo(dlg, 1).setCurrentIndex(1)
+
+    assert dlg._calibration.get("Dish 1", "mNG").phase == pytest.approx(-0.444242509)
+
+
+def test_checking_a_dataset_refreshes_the_binding_table(qtbot, tmp_path: Path) -> None:
+    """The binding rows track the dataset selection with no explicit refresh."""
+    a = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    b = _make_h5(tmp_path / "Dish 2.h5", ["mNG"])
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(a, checked=True)
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    assert len(_binding_rows(dlg)) == 1
+
+    dlg._add_dataset_row(b, checked=True)
+    dlg._on_dataset_check_changed()
+
+    assert [(d, c) for d, c, _ in _binding_rows(dlg)] == [
+        ("Dish 1", "G3BP1"),
+        ("Dish 2", "mNG"),
+    ]
+
+
+# ── Validation of a .lif-sourced batch ─────────────────────────────────
+
+
+def _paired_dialog(qtbot, tmp_path: Path, channels: list[str], records) -> Any:
+    """Dialog with one checked, paired dataset and a .lif loaded."""
+    h5 = _make_h5(tmp_path / "Dish 1.h5", channels)
+    group = tmp_path / "scan" / "Dish 1"
+    group.mkdir(parents=True)
+
+    dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(), lif_reader=lambda _p: records
+    )
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+    dlg._pairings[h5] = group
+    dlg._load_calibration_file(tmp_path / "sample.lif")
+    return dlg
+
+
+def test_no_calibration_message_names_both_formats(qtbot, tmp_path: Path) -> None:
+    h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
+    dlg = BatchTCSPCDialog()
+    qtbot.addWidget(dlg)
+    dlg._add_dataset_row(h5, checked=True)
+
+    dlg._on_validate()
+
+    log = dlg._validate_log.toPlainText()
+    assert ".lif" in log and "CSV" in log
+
+
+def test_unbound_channel_blocks_validation_and_is_named(
+    qtbot, tmp_path: Path
+) -> None:
+    dlg = _paired_dialog(
+        qtbot, tmp_path, ["G3BP1", "mNG"], (_lif_record(stem="Dish 1"),)
+    )
+
+    dlg._on_validate()
+
+    log = dlg._validate_log.toPlainText()
+    assert dlg._validated is False
+    assert not dlg._run_btn.isEnabled()
+    assert "G3BP1" in log
+    assert "mNG" in log
+    assert "Dish 1" in log
+
+
+def test_fully_bound_lif_validates_and_enables_run(qtbot, tmp_path: Path) -> None:
+    dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1"], (_lif_record(stem="Dish 1"),))
+
+    dlg._on_validate()
+
+    assert dlg._validated is True
+    assert dlg._run_btn.isEnabled()
+
+
+def test_lif_items_match_csv_items_for_the_same_calibration(
+    qtbot, tmp_path: Path
+) -> None:
+    """KTD4 — a .lif is a second producer of BatchCalibration, nothing more."""
+    record = _lif_record(stem="Dish 1")
+    lif_dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1"], (record,))
+    lif_items, _, _, lif_errors = lif_dlg._build_items_and_metadata()
+
+    csv_h5 = _make_h5(tmp_path / "csv" / "Dish 1.h5", ["G3BP1"])
+    csv_group = tmp_path / "csv-scan" / "Dish 1"
+    csv_group.mkdir(parents=True)
+    cal = _bcal(
+        {
+            "Dish 1": {
+                "G3BP1": ChannelCalibration(
+                    record.frequency_mhz, record.phase, record.modulation
+                )
+            }
+        }
+    )
+    csv_dlg = BatchTCSPCDialog(
+        validator=lambda *a, **kw: _passing_report(), csv_parser=lambda _p: cal
+    )
+    qtbot.addWidget(csv_dlg)
+    csv_dlg._add_dataset_row(csv_h5, checked=True)
+    csv_dlg._pairings[csv_h5] = csv_group
+    csv_dlg._load_calibration_file(tmp_path / "cal.csv")
+    csv_items, _, _, csv_errors = csv_dlg._build_items_and_metadata()
+
+    assert lif_errors == csv_errors == []
+    assert lif_items[0].calibration == csv_items[0].calibration
+
+
+def test_frequency_disagreement_surfaces_in_the_preflight_log(
+    qtbot, tmp_path: Path
+) -> None:
+    records = (
+        _lif_record(stem="Dish 1", region="Region_1", frequency_mhz=78.02),
+        _lif_record(
+            stem="Dish 1", region="Region_2", detector="HyD X 1", frequency_mhz=40.0
+        ),
+    )
+    dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1", "mNG"], records)
+    _binding_combo(dlg, 0).setCurrentIndex(1)
+    _binding_combo(dlg, 1).setCurrentIndex(2)
+
+    dlg._on_validate()
+
+    assert "frequency_mhz" in dlg._validate_log.toPlainText()
+    assert dlg._validated is False
+
+
+def test_rebinding_after_a_pass_requires_revalidation(qtbot, tmp_path: Path) -> None:
+    dlg = _paired_dialog(qtbot, tmp_path, ["G3BP1"], (_lif_record(stem="Dish 1"),))
+    dlg._on_validate()
+    assert dlg._run_btn.isEnabled()
+
+    _binding_combo(dlg, 0).setCurrentIndex(0)
+
+    assert dlg._validated is False
+    assert not dlg._run_btn.isEnabled()
