@@ -39,7 +39,9 @@ Every batch operation is also available as a headless command-line tool.
 
 ## Installation
 
-PerCell4 requires Python 3.12 or newer.
+PerCell4 requires Python 3.12 or newer. **Only Python 3.12 is tested** — newer versions
+install and run, but are not verified, so use 3.12 unless you have a reason not to. Install
+into a virtual environment:
 
 ```bash
 python3.12 -m venv .venv
@@ -47,14 +49,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Optional extras are available for GPU support (`gpu`), FLIM file formats (`flim`),
-ImageJ ROI import (`imagej`), and OCR tooling (`ocr`):
-
-```bash
-pip install -e ".[flim,imagej]"
-```
-
-See the [installation guide](docs/installation.md) for per-OS instructions, PyTorch and
+See the [installation guide](docs/installation.md) for optional extras, per-OS instructions, PyTorch and
 Cellpose notes, standalone bundles, and troubleshooting.
 
 ## Usage
@@ -86,7 +81,7 @@ percell4-batch-measure data/*.h5 --mask SG_mask --output results/
 
 See the [command-line reference](docs/cli.md) for all tools and options.
 
-## Key capabilities
+## Key features
 
 - **Cell segmentation and tracking** — automated single-cell segmentation via Cellpose and cell tracking via LapTrack.
 - **Thresholding** — autothresholding (Otsu, Triangle, Li), optionally applied per group
@@ -99,9 +94,9 @@ See the [command-line reference](docs/cli.md) for all tools and options.
   every segmentation and mask, exported as CSV and TIFF files.
 - **Batch workflows and analysis** — end-to-end analysis workflows and particle analysis features configured in the GUI or dedicated CLI tools
 
-## Getting help
+## Reporting issues
 
-Questions and bug reports are welcome in
+PerCell4 is a developing project and reporting is greatly appreciated! Questions and bug reports are welcome in
 [GitHub issues](https://github.com/marcusjoshm/percell4/issues). Please include your
 operating system, Python version, and the output of `percell4-inspect` for the dataset
 involved where relevant.

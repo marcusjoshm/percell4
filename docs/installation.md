@@ -1,9 +1,12 @@
 # Installing PerCell4
 
-PerCell4 requires **Python 3.12 or newer**. Each OS has its own subsection below; pick yours and stop reading the others.
+PerCell4 requires **Python 3.12 or newer**, and **only Python 3.12 is tested** — see
+[Which Python version](#which-python-version) before choosing. Each OS has its own
+subsection below; pick yours and stop reading the others.
 
 ## Table of Contents
 
+- [Which Python version](#which-python-version)
 - [Installation](#installation)
   - [macOS](#macos)
   - [Linux](#linux)
@@ -15,6 +18,37 @@ PerCell4 requires **Python 3.12 or newer**. Each OS has its own subsection below
 - [Troubleshooting](#troubleshooting)
   - [Windows](#windows-1)
   - [Linux](#linux-1)
+
+---
+
+## Which Python version
+
+`pyproject.toml` declares `requires-python = ">=3.12"`, but 3.12 is the only version the
+test suite and CI run against. **Install on 3.12 unless you have a specific reason not
+to.**
+
+Newer interpreters are not blocked, and as of August 2026 they work: a full install of
+PerCell4 and its dependencies — including PyTorch 2.13 and Cellpose 4.2 — completes on
+Python 3.14.6 on macOS (Apple silicon), and the package, the Cellpose adapter, the
+detection code and the Qt windows all import and construct correctly there. That is a
+spot check on one platform, not a supported configuration.
+
+Two things worth knowing before you reach for a newer version:
+
+- **The historical blocker was PyTorch wheels on Windows, not PerCell4 itself.** Cellpose
+  depends on PyTorch, and PyTorch has historically lagged in publishing Windows wheels for
+  each new Python release. Installs on Windows against a newly released interpreter failed
+  for months at a time as a result. PyTorch now publishes `cp313` and `cp314` wheels, but
+  the same gap will reappear with the next Python release, and Windows is where it bites
+  first. If a Windows install fails while resolving or importing `torch`, dropping to
+  Python 3.12 is the fastest fix — see the [`c10.dll` entry](#windows-1) under
+  Troubleshooting for the related runtime failure.
+- **`torchvision` explicitly excludes Python 3.14.1** (`requires_python = "!=3.14.1,>=3.10"`).
+  3.14.0 and 3.14.2+ are fine; that one patch release is not.
+
+If you do run PerCell4 on a newer Python successfully, the useful thing to report is the
+platform and version, so the tested range can be widened deliberately rather than by
+assumption.
 
 ---
 
@@ -97,7 +131,7 @@ python main.py
 
 Prerequisites (do these **before** creating the venv):
 
-1. **64-bit Python 3.12+** from [python.org](https://www.python.org/downloads/) (not the Microsoft Store build, if you hit odd `venv` or SSL issues). During setup, enable **"Add python.exe to PATH"** and **"Install launcher for all users"** so the `py` launcher works.
+1. **64-bit Python 3.12** from [python.org](https://www.python.org/downloads/) — not the Microsoft Store build, if you hit odd `venv` or SSL issues. Use 3.12 specifically: Windows is where new-interpreter PyTorch gaps surface first (see [Which Python version](#which-python-version)). During setup, enable **"Add python.exe to PATH"** and **"Install launcher for all users"** so the `py` launcher works.
 2. **Microsoft Visual C++ 2015–2022 x64 Redistributable, version 14.50 or newer** — required by PyTorch (which Cellpose depends on). Older copies — common on lab/corporate Windows images — cause `OSError: [WinError 1114]` when `import torch` runs. Install from [`aka.ms/vs/17/release/vc_redist.x64.exe`](https://aka.ms/vs/17/release/vc_redist.x64.exe), then reboot. Confirm with:
 
     ```
@@ -116,7 +150,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 ```
 
-`py -3` picks the newest Python 3.x you have installed (3.12 or newer). If you do not have the launcher, use the full path to `python.exe` instead of `py -3`.
+`py -3` picks the newest Python 3.x you have installed. To pin the tested version explicitly, use `py -3.12` instead. If you do not have the launcher, use the full path to `python.exe`.
 
 #### PowerShell
 
