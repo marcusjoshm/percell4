@@ -77,3 +77,7 @@ docs/archive/locked_SG.json
 
 # Separate Tauri/Node desktop-app project living in the repo dir (incl. node_modules).
 /desktop/
+
+# Stray Claude Code installer that lands in the repo root on download.
+# Not a PerCell4 installer -- see docs/audits/readme-documentation-audit-2026-08-13.md.
+/install.sh
