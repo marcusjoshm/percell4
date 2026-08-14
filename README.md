@@ -4,7 +4,6 @@
 
 # PerCell4
 
-[![CI](https://github.com/marcusjoshm/percell4/actions/workflows/ci.yml/badge.svg)](https://github.com/marcusjoshm/percell4/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](docs/installation.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -21,7 +20,7 @@ Every batch operation is also available as a headless command-line tool.
 > file layouts may still change between versions.
 
 <p align="center">
-  <img src="docs/screenshots/main-window.png" width="900" alt="The PerCell4 launcher, session controls, image viewer, and phasor plot, showing a FLIM phasor histogram against the universal semicircle">
+  <img src="art/main-window.png" width="900" alt="The PerCell4 launcher, session controls, image viewer, and phasor plot, showing a FLIM phasor histogram against the universal semicircle">
 </p>
 
 ## Documentation
