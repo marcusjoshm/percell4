@@ -198,7 +198,7 @@ These are outside the README but were found while verifying it, and two of them 
 
 | Item | Finding | Recommendation |
 |---|---|---|
-| **`CITATION.cff`** | Ships with unfilled placeholders: `title: "TODO: exact title of the JCB tools paper"`, `authors: [{name: "TODO: paper author list, in order"}]`, author listed as `"Lee Lab"` with `Marcus, Joshua M.` commented out. The file's own header says to fill these before sharing. | **Fill before sharing.** This is the first file a careful reader opens. |
+| **`CITATION.cff`** | Ships with unfilled placeholders: `title: "TODO: exact title of the JCB tools paper"`, `authors: [{name: "TODO: paper author list, in order"}]`, author listed as `"Lee Lab"` with `Marcus, Joshua M.` commented out. The file's own header says to fill these before sharing. | **Resolved 2026-08-14** by deleting the file and dropping the README's citation section, rather than filling it in. |
 | **`install.sh`** (untracked) | Not a PerCell4 installer — it is the **Claude Code** installer (`DOWNLOAD_BASE_URL="https://downloads.claude.ai/claude-code-releases"`). A stray download. | Delete or gitignore. Do not document. |
 | **`CHANGELOG.md:74`** | Claims *"The pre-cleanup interface is preserved on the `dev-features` branch."* No such branch exists locally or on `origin`. | Correct or remove the claim. |
 | **Five empty packages** | `src/percell4/{flim,measure,segment,plugins,cli}/__init__.py` are all 0-byte with zero importers anywhere. The real code lives at `domain/flim/`, `domain/measure/`, `domain/segmentation/`, `interfaces/cli/`. `plugins/` is especially misleading — there is no plugin system there. | Delete, or document as reserved namespaces. Out of scope for the README work. |

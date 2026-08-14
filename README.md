@@ -105,12 +105,6 @@ Contributions are welcome. [Writing an analysis](docs/writing_an_analysis.md) de
 how to add a new analysis module, and [the architecture notes](docs/architecture.md)
 describe the code layout and how the test suite is organised.
 
-## Citing PerCell4
-
-If you use PerCell4 in your research, please cite it. Citation metadata is in
-[`CITATION.cff`](CITATION.cff), which GitHub renders through the **Cite this repository**
-button on this page.
-
 ## License
 
 PerCell4 is distributed under the MIT License. See [`LICENSE`](LICENSE).
