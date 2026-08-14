@@ -21,7 +21,7 @@ Every batch operation is also available as a headless command-line tool.
 > file layouts may still change between versions.
 
 <p align="center">
-  <img src="docs/screenshots/_placeholder.png" width="820" alt="The PerCell4 viewer showing a cell segmentation overlay alongside the per-cell data table">
+  <img src="docs/screenshots/main-window.png" width="900" alt="The PerCell4 launcher, session controls, and image viewer, with a Cellpose segmentation overlaid on a fluorescence image">
 </p>
 
 ## Documentation

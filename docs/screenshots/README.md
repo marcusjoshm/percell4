@@ -21,8 +21,8 @@ apparent size. Fix these once and use them for the whole set:
 | Format | PNG |
 | Capture density | Retina / 2x, then downscale to the target width below |
 | Target width | 1600 px (main window) · 1200 px (protocol and dialog shots) |
-| OS appearance | Light — matches the logo and the majority of GitHub sessions |
-| Window chrome | Cropped out. No macOS traffic lights, no title bar |
+| Application theme | Dark — matches `main-window.png`, which is already in the README |
+| Window chrome | Fine to include; it reads as a desktop application |
 | Visible paths | None. Blur or rename anything showing a home directory, a username, or an unpublished dataset name |
 | Cursor | Not visible |
 
@@ -33,25 +33,18 @@ and dark set reads as two different products.
 
 ## Shots
 
-### 1. `main-window.png` — README
+### 1. `main-window.png` — README ✅ filled
 
-**Framing:** wide crop, roughly 3:1 (1600 x 530). A full 16:9 window grab renders
-about 495 px tall in GitHub's ~880 px column, which is more vertical space than a
-single screenshot needs at the top of a README.
+Shows the session control strip, the launcher with the FLIM panel open, and the
+viewer with a Cellpose segmentation overlaid on a fluorescence image. 1600 x 942,
+downscaled from a 6295 x 3708 retina capture.
 
-**Window:** the viewer with a segmentation overlay, plus one other window visible
-at the edge of frame — the cell table or the scatter plot.
+**alt:** `The PerCell4 launcher, session controls, and image viewer, with a Cellpose segmentation overlaid on a fluorescence image`
 
-**Dataset state:** a field with enough cells to read as real data, a segmentation
-layer active with visible label boundaries, and at least one mask layer in the
-layer list. Avoid a field so dense the individual cells are unreadable at 1600 px.
+The README references it with no caption, matching the surrounding text.
 
-**Must be visible:** the napari layer list, and label boundaries over real
-intensity data.
-
-**alt:** `The PerCell4 viewer showing a cell segmentation overlay alongside the per-cell data table`
-
-The README references this slot with no caption, matching the surrounding text.
+To replace it, keep the same filename and the settings below; nothing else needs
+to change.
 
 ---
 
