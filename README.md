@@ -92,35 +92,13 @@ See the [command-line reference](docs/cli.md) for all tools and options.
 - **Cell segmentation and tracking** — automated single-cell segmentation via Cellpose and cell tracking via LapTrack.
 - **Thresholding** — autothresholding (Otsu, Triangle, Li), optionally applied per group
   after clustering cells by their individual intensities (k-means or Gaussian mixture
-  models), plus [Adaptive Local Clipping](#adaptive-local-clipping) for puncta.
+  models), and a universal feature extraction method called [Adaptive Local Clipping](docs/adaptive-local-clipping.md).
 - **FLIM and phasor analysis** — phasor analysis of TCSPC data with median and wavelet
-  filtering, and segmentation by ROI: placed manually, derived from fluorescence lifetime
-  values, or fitted automatically with a Gaussian mixture model.
+  filtering, and segmentation by ROI: manual placement, derived from fluorescence lifetime
+  values, or automated with a Gaussian mixture model.
 - **Measurement and export** — configurable per-cell and per-particle measurements across
   every segmentation and mask, exported as parquet, CSV, and TIFF, interactively or as a
   headless batch.
-
-## Adaptive Local Clipping
-
-Detecting puncta inside single cells defeats a global intensity threshold for two
-reasons: expression varies widely from cell to cell in a polyclonal population, and
-puncta within one cell span orders of magnitude in brightness, from canonical bright
-structures down to sub-diffraction and out-of-focus ones.
-
-Adaptive Local Clipping makes every decision local. Noise is estimated per cell from
-the median absolute deviation, which is insensitive to the puncta themselves;
-background is estimated per pixel as a Gaussian-weighted neighbourhood average; and a
-pixel joins the mask when its local residual exceeds the cell's noise by a stringency
-coefficient. Because no single neighbourhood size resolves every particle size,
-detection runs at more than one scale and the resulting masks are combined. The
-stringency for the coarse scale is calibrated per cell from the symmetry of noise
-about the background, so it needs no hand tuning.
-
-It runs in the GUI thresholding workflow and headlessly via
-`percell4-batch-threshold --strategy adaptive-clip`.
-
-Full method, including the automatic calibration and the contrast-to-noise
-subpopulation split: **[Adaptive Local Clipping](docs/adaptive-local-clipping.md)**.
 
 ## Getting help
 
