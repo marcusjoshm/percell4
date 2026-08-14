@@ -4,7 +4,7 @@ Notable user-facing changes to PerCell4, newest first. PerCell4 is pre-release
 (`0.1.0`, no tagged releases yet), so entries are grouped by the **month they
 were implemented** rather than by version. Dates are drawn from the repository's
 commit history and from the dated planning documents on the `development`
-branch; see [Key capabilities](../README.md#key-capabilities) in the README for
+branch; see [Key features](../README.md#key-features) in the README for
 the current list.
 
 ## Unreleased
