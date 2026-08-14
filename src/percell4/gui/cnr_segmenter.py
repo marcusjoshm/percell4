@@ -50,6 +50,7 @@ from percell4.domain.measure.cnr_classification import (
 )
 from percell4.gui import theme
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
+from percell4.gui.plot_axes import disable_si_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +178,10 @@ class CnrSegmenterWindow(QWidget):
             self._pg = pg
             plot = pg.PlotWidget()
             plot.setBackground(theme.BACKGROUND)
-            plot.getAxis("bottom").enableAutoSIPrefix(False)
-            plot.getAxis("left").enableAutoSIPrefix(False)
+            disable_si_prefix(
+                plot.getAxis("bottom"),
+                plot.getAxis("left"),
+            )
             plot.setLabel("left", "Foci")
             self._plot = plot
             self._rebuild_histogram()

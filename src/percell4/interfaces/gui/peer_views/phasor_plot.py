@@ -42,6 +42,7 @@ from percell4.domain.flim.phasor_display import (
 )
 from percell4.gui._dialog_utils import message_box, open_file_name, save_file_name
 from percell4.gui._resource_name_prompt import prompt_for_resource_name
+from percell4.gui.plot_axes import disable_si_prefix
 from percell4.gui.settings import app_settings
 
 COLOR_CYCLE: Final[tuple[str, ...]] = (
@@ -478,8 +479,10 @@ class PhasorPlotWindow(QMainWindow):
         self._plot.setXRange(-0.005, 1.005, padding=0)
         self._plot.setYRange(0, 0.7, padding=0)
         self._plot.disableAutoRange()
-        self._plot.getAxis("bottom").enableAutoSIPrefix(False)
-        self._plot.getAxis("left").enableAutoSIPrefix(False)
+        disable_si_prefix(
+            self._plot.getAxis("bottom"),
+            self._plot.getAxis("left"),
+        )
         left_layout.addWidget(self._plot)
 
         # Histogram image
@@ -1910,8 +1913,10 @@ class PhasorPlotWindow(QMainWindow):
 
         self._plot.setXRange(*g_range, padding=0)
         self._plot.setYRange(*s_range, padding=0)
-        self._plot.getAxis("bottom").enableAutoSIPrefix(False)
-        self._plot.getAxis("left").enableAutoSIPrefix(False)
+        disable_si_prefix(
+            self._plot.getAxis("bottom"),
+            self._plot.getAxis("left"),
+        )
 
         n_pixels = len(g_flat)
         if mask_bypassed:
