@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 from percell4.config import viewer_presets as vp
 from percell4.gui import theme
+from percell4.gui.plot_axes import disable_si_prefix
 from percell4.gui.settings import app_settings
 
 logger = logging.getLogger(__name__)
@@ -259,8 +260,10 @@ class ThresholdQCController(QObject):
 
             plot = pg.PlotWidget()
             plot.setBackground(theme.BACKGROUND)
-            plot.getAxis("bottom").enableAutoSIPrefix(False)
-            plot.getAxis("left").enableAutoSIPrefix(False)
+            disable_si_prefix(
+                plot.getAxis("bottom"),
+                plot.getAxis("left"),
+            )
             plot.setLabel("bottom", f"{self._metric}")
             plot.setLabel("left", "Count")
 
