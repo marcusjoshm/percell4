@@ -940,7 +940,7 @@ class SegmentationPanel(QWidget):
 
     @staticmethod
     def _find_layer(viewer, name: str, *, image_only: bool = False):
-        for layer in list(viewer.layers):
+        for layer in viewer.layers:
             if getattr(layer, "name", None) != name:
                 continue
             if image_only and layer.__class__.__name__ != "Image":
@@ -952,7 +952,7 @@ class SegmentationPanel(QWidget):
     def _layer_present(viewer, layer) -> bool:
         """Identity membership — napari layers do not define value equality
         we want to rely on, and a MagicMock stand-in compares by identity."""
-        return any(existing is layer for existing in list(viewer.layers))
+        return any(existing is layer for existing in viewer.layers)
 
     def _wire_preview_layer_events(self, viewer) -> None:
         """Subscribe once per viewer instance to layer add/remove events.
@@ -1076,18 +1076,27 @@ class SegmentationPanel(QWidget):
             hi = lo + 1.0
         return (lo, hi)
 
-    def _preview_frame(self, raw_layer):
-        """The 2D plane Run Cellpose would process at the active timepoint.
+    def _preview_timepoint(self, raw_layer) -> int:
+        """The frame index Run Cellpose would process; 0 for a 2D layer.
 
         Reads the index from the session (KTD6), clamped to the stack, so a
         stale slider position on a shorter dataset cannot index out of range.
+        Metadata only — no plane is read here, so the R14 no-op check below
+        stays cheap on a lazily backed layer.
         """
         data = raw_layer.data
         if getattr(data, "ndim", 2) == 3:
             t = int(self.data_model.session.active_timepoint)
-            t = max(0, min(t, int(data.shape[0]) - 1))
-            return t, np.asarray(data[t])
-        return 0, np.asarray(data)
+            return max(0, min(t, int(data.shape[0]) - 1))
+        return 0
+
+    @staticmethod
+    def _preview_frame(raw_layer, timepoint: int):
+        """Materialize the 2D plane at ``timepoint`` (the layer itself if 2D)."""
+        data = raw_layer.data
+        if getattr(data, "ndim", 2) == 3:
+            return np.asarray(data[timepoint])
+        return np.asarray(data)
 
     def _sync_cellpose_preview(self, *, announce: bool = False) -> None:
         """Bring the preview layer in line with the current state.
@@ -1147,7 +1156,7 @@ class SegmentationPanel(QWidget):
             )
             return
 
-        timepoint, frame = self._preview_frame(raw)
+        timepoint = self._preview_timepoint(raw)
         render_key = (channel, timepoint, saturation_pct, blur_sigma)
 
         preview = self._find_layer(viewer, vp.CELLPOSE_PREVIEW_LAYER_NAME)
@@ -1155,6 +1164,7 @@ class SegmentationPanel(QWidget):
         if preview is not None and remembered is raw:
             if render_key == self._preview_last_render:
                 return  # R14: nothing that feeds the render changed.
+            frame = self._preview_frame(raw, timepoint)
             processed = preprocess_cellpose_input(frame, saturation_pct, blur_sigma)
             # In place (R9): the layer keeps its identity, z-order, and any
             # display tweaks the user made to it.
@@ -1175,6 +1185,7 @@ class SegmentationPanel(QWidget):
         self._preview_raw_ref = weakref.ref(raw)
         raw.visible = False
 
+        frame = self._preview_frame(raw, timepoint)
         processed = preprocess_cellpose_input(frame, saturation_pct, blur_sigma)
 
         # napari makes every newly added layer the active one, which would

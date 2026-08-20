@@ -172,9 +172,8 @@ def preprocess_cellpose_input(
     ``plane`` unchanged. In-memory only; persisted ``/intensity`` is never
     modified.
 
-    The two helpers are looked up on this module at call time rather than
-    bound at definition, so a caller that monkeypatches them on the module
-    sees the substitution here too.
+    Monkeypatching ``apply_saturation_lut`` / ``apply_gaussian_blur`` on this
+    module is seen here too, which the GUI tests rely on.
 
     Parameters
     ----------
