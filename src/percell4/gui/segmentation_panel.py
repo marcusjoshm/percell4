@@ -560,8 +560,7 @@ class SegmentationPanel(QWidget):
         import numpy as np
 
         from percell4.domain.segmentation.preprocess import (
-            apply_gaussian_blur,
-            apply_saturation_lut,
+            preprocess_cellpose_input,
         )
 
         s = self._cp_form.settings()
@@ -577,17 +576,13 @@ class SegmentationPanel(QWidget):
         # the blur never bleeds across timepoints.
         raw = np.asarray(active_layer.data)
 
-        def _preprocess(plane):
-            if s.saturation_pct > 0.0:
-                plane = apply_saturation_lut(plane, s.saturation_pct)
-            if s.blur_sigma > 0.0:
-                plane = apply_gaussian_blur(plane, s.blur_sigma)
-            return plane
-
         if raw.ndim == 3:
-            image = np.stack([_preprocess(raw[t]) for t in range(raw.shape[0])])
+            image = np.stack([
+                preprocess_cellpose_input(raw[t], s.saturation_pct, s.blur_sigma)
+                for t in range(raw.shape[0])
+            ])
         else:
-            image = _preprocess(raw)
+            image = preprocess_cellpose_input(raw, s.saturation_pct, s.blur_sigma)
 
         from percell4.adapters.cellpose import run_cellpose, run_cellpose_stack
         from percell4.gui.workers import Worker

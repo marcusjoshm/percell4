@@ -18,6 +18,10 @@ Entry points:
   A sibling Cellpose-input transformation that damps shot noise so
   speckled channels segment as single cell bodies. Applied *after* the
   saturation LUT in both the workflow phase and the Segment panel.
+- :func:`preprocess_cellpose_input` — the LUT-then-blur composition
+  applied to one 2D plane. The single authority on "what Cellpose
+  sees": the Segment panel's run path and its preview both call it so
+  the two can never drift.
 """
 
 from __future__ import annotations
@@ -154,3 +158,41 @@ def apply_gaussian_blur(
     # gaussian_filter preserves the input dtype, but be explicit so an
     # integer channel never reaches Cellpose as floats.
     return blurred.astype(channel.dtype, copy=False)
+
+
+def preprocess_cellpose_input(
+    plane: NDArray, saturation_pct: float, blur_sigma: float,
+) -> NDArray:
+    """Apply the saturation LUT then the Gaussian blur to one 2D ``plane``.
+
+    The exact transformation Cellpose receives in the Segment panel:
+    :func:`apply_saturation_lut` first (so hot-pixel outliers are clipped
+    before they can be smeared), then :func:`apply_gaussian_blur`. Each
+    step is skipped when its parameter is ``0.0``, so both at zero return
+    ``plane`` unchanged. In-memory only; persisted ``/intensity`` is never
+    modified.
+
+    The two helpers are looked up on this module at call time rather than
+    bound at definition, so a caller that monkeypatches them on the module
+    sees the substitution here too.
+
+    Parameters
+    ----------
+    plane : NDArray
+        One 2D intensity plane. For time-lapse stacks call per-frame so
+        the percentile reference and the blur stay within a timepoint.
+    saturation_pct : float
+        Percent of brightest pixels to saturate; ``0.0`` skips the LUT.
+    blur_sigma : float
+        Gaussian kernel std-dev in pixels; ``0.0`` skips the blur.
+
+    Returns
+    -------
+    NDArray
+        Same shape and dtype as ``plane``.
+    """
+    if saturation_pct > 0.0:
+        plane = apply_saturation_lut(plane, saturation_pct)
+    if blur_sigma > 0.0:
+        plane = apply_gaussian_blur(plane, blur_sigma)
+    return plane
