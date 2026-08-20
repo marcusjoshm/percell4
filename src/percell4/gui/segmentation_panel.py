@@ -24,6 +24,7 @@ from qtpy.QtWidgets import (
 )
 
 from percell4.config import viewer_presets as vp
+from percell4.domain.segmentation.preprocess import preprocess_cellpose_input
 from percell4.gui import theme
 from percell4.gui._cellpose_settings_form import CellposeSettingsForm
 from percell4.gui._dialog_utils import message_box
@@ -37,6 +38,13 @@ logger = logging.getLogger(__name__)
 # coalesce a single brush stroke (napari emits `paint` per drag frame),
 # short enough that pressing close right after a stroke still saves.
 _PAINT_AUTOSAVE_DEBOUNCE_MS = 200
+
+# Delay between the last Saturation / Blur (sigma) edit (or channel /
+# timepoint change) and the preview re-render. A spinbox arrow held down
+# repeats faster than a Gaussian blur of a full frame, so edits are coalesced
+# the same way paint strokes are above; the explicit checkbox toggle bypasses
+# the debounce so the user sees the layer appear the moment they ask.
+_PREVIEW_DEBOUNCE_MS = 200
 
 
 def empty_labels_array(shape, n_timepoints: int) -> np.ndarray:
@@ -124,6 +132,27 @@ class SegmentationPanel(QWidget):
         self._wired_viewer_id: int | None = None
         self._wired_layer_ids: set[int] = set()
 
+        # Cellpose preprocessing preview. One single-shot timer funnels every
+        # live trigger into ``_sync_cellpose_preview``; the timeout slot reads
+        # settings and timepoint fresh, so a restart mid-countdown simply
+        # drops the stale request. The raw layer being stood in for is held
+        # by weakref plus its prior ``visible`` (KTD4): memory is bound to the
+        # layer *object*, never its name, so a same-named layer in a later
+        # dataset is never hidden or shown by stale state.
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(_PREVIEW_DEBOUNCE_MS)
+        self._preview_timer.timeout.connect(self._sync_cellpose_preview)
+        self._preview_raw_ref: weakref.ref | None = None
+        self._preview_raw_prior_visible: bool = True
+        #: (channel, timepoint, saturation_pct, blur_sigma) of the last render.
+        self._preview_last_render: tuple | None = None
+        #: True while the panel itself removes the preview layer, so the
+        #: ``layers.events.removed`` handler does not mistake it for a user
+        #: delete and untick the box.
+        self._removing_preview = False
+        self._preview_wired_viewer_id: int | None = None
+
         self._build_ui()
 
         # Wire auto-save on dataset load
@@ -151,6 +180,21 @@ class SegmentationPanel(QWidget):
             # not the box is ticked so a circle from the previous dataset
             # cannot survive the switch.
             QTimer.singleShot(0, self._sync_diameter_circle)
+        if change.channel or change.timepoint:
+            # The preview follows the session's active channel and the time
+            # slider (forwarded by ViewerWindow into session.active_timepoint,
+            # KTD6). Debounced: a slider drag emits per frame.
+            if self._cp_preview_preprocess.isChecked():
+                self._preview_timer.start()
+        if change.data or change.bin:
+            # Dataset load / clear and bin rebuilds replace the viewer's layer
+            # objects without a ``channel`` change. Same one-tick deferral as
+            # the circle, and unconditional for the same reason: a preview
+            # from the previous contents must never survive the switch. The
+            # sync's identity check (KTD8) tells an intact viewer — e.g. a
+            # measurements update, which also sets ``data`` — from a rebuilt
+            # one, so the intact case is a no-op.
+            QTimer.singleShot(0, self._sync_cellpose_preview)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -222,6 +266,28 @@ class SegmentationPanel(QWidget):
         )
         self._cp_form.diameter_changed.connect(self._on_diameter_value_changed)
         cp_layout.addWidget(self._cp_show_diameter_circle)
+
+        # Display-only preview toggle — writes no session field and no dataset
+        # resource, so it is an Action (see docs/audits/
+        # gui-element-classification.yaml). Off by default.
+        self._cp_preview_preprocess = QCheckBox("Preview saturation + blur")
+        self._cp_preview_preprocess.setChecked(False)
+        self._cp_preview_preprocess.setStyleSheet(
+            f"QCheckBox {{ color: {theme.TEXT}; }}"
+        )
+        self._cp_preview_preprocess.setToolTip(
+            "Show the active channel exactly as Run Cellpose will see it —\n"
+            "after the Saturation clip and the Gaussian blur above — so you\n"
+            "can tune those values by eye before committing to a run. The\n"
+            "raw channel is hidden while the preview is on and comes back\n"
+            "when you untick. The preview follows the active channel and\n"
+            "the time slider, and re-renders as you edit the values.\n"
+            "Display only — it is never saved and never affects segmentation."
+        )
+        self._cp_preview_preprocess.toggled.connect(self._on_preview_toggled)
+        self._cp_form.saturation_changed.connect(self._on_preview_setting_changed)
+        self._cp_form.blur_sigma_changed.connect(self._on_preview_setting_changed)
+        cp_layout.addWidget(self._cp_preview_preprocess)
 
         btn_run_cp = QPushButton("Run Cellpose")
         btn_run_cp.clicked.connect(self._on_run_cellpose)
@@ -560,8 +626,7 @@ class SegmentationPanel(QWidget):
         import numpy as np
 
         from percell4.domain.segmentation.preprocess import (
-            apply_gaussian_blur,
-            apply_saturation_lut,
+            preprocess_cellpose_input,
         )
 
         s = self._cp_form.settings()
@@ -577,17 +642,13 @@ class SegmentationPanel(QWidget):
         # the blur never bleeds across timepoints.
         raw = np.asarray(active_layer.data)
 
-        def _preprocess(plane):
-            if s.saturation_pct > 0.0:
-                plane = apply_saturation_lut(plane, s.saturation_pct)
-            if s.blur_sigma > 0.0:
-                plane = apply_gaussian_blur(plane, s.blur_sigma)
-            return plane
-
         if raw.ndim == 3:
-            image = np.stack([_preprocess(raw[t]) for t in range(raw.shape[0])])
+            image = np.stack([
+                preprocess_cellpose_input(raw[t], s.saturation_pct, s.blur_sigma)
+                for t in range(raw.shape[0])
+            ])
         else:
-            image = _preprocess(raw)
+            image = preprocess_cellpose_input(raw, s.saturation_pct, s.blur_sigma)
 
         from percell4.adapters.cellpose import run_cellpose, run_cellpose_stack
         from percell4.gui.workers import Worker
@@ -847,6 +908,309 @@ class SegmentationPanel(QWidget):
         if announce:
             self._show_status(
                 f"Diameter reference circle: {diameter:g} px across."
+            )
+
+    # ── Cellpose preprocessing preview ────────────────────────
+    #
+    # A display-only Image layer showing the active channel after the same
+    # saturation LUT and Gaussian blur that ``_on_run_cellpose`` applies. It
+    # stands in for the raw layer (which is hidden while the preview is on)
+    # so the user gets a faithful "what Cellpose sees" read. Every trigger
+    # converges on ``_sync_cellpose_preview``; nothing else adds, updates, or
+    # removes the layer or touches raw visibility.
+
+    def _on_preview_toggled(self, _checked: bool) -> None:
+        """Checkbox trigger — immediate, and the only path that announces."""
+        # A pending debounced render would race the untick's removal.
+        self._preview_timer.stop()
+        self._sync_cellpose_preview(announce=True)
+
+    def _on_preview_setting_changed(self, _value: float) -> None:
+        """Saturation / Blur (sigma) trigger. Silent and inert when off."""
+        if not self._cp_preview_preprocess.isChecked():
+            return
+        self._preview_timer.start()
+
+    def _preview_viewer(self):
+        """The existing napari viewer, or None. Never constructs one."""
+        viewer_win = self._launcher._windows.get("viewer") if self._launcher else None
+        # existing_viewer: this runs on every data / bin state change, so the
+        # constructing property would build a napari window on every load.
+        return getattr(viewer_win, "existing_viewer", None) if viewer_win else None
+
+    @staticmethod
+    def _find_layer(viewer, name: str, *, image_only: bool = False):
+        for layer in viewer.layers:
+            if getattr(layer, "name", None) != name:
+                continue
+            if image_only and layer.__class__.__name__ != "Image":
+                continue
+            return layer
+        return None
+
+    @staticmethod
+    def _layer_present(viewer, layer) -> bool:
+        """Identity membership — napari layers do not define value equality
+        we want to rely on, and a MagicMock stand-in compares by identity."""
+        return any(existing is layer for existing in viewer.layers)
+
+    def _wire_preview_layer_events(self, viewer) -> None:
+        """Subscribe once per viewer instance to layer add/remove events.
+
+        Tracked like ``_wired_viewer_id`` for auto-save: a reopened viewer is
+        a new object with a fresh event bus, so it is wired again; the same
+        object is never double-subscribed.
+        """
+        viewer_id = id(viewer)
+        if self._preview_wired_viewer_id == viewer_id:
+            return
+        try:
+            viewer.layers.events.removed.connect(self._on_preview_layer_removed)
+            viewer.layers.events.inserted.connect(self._on_preview_layer_inserted)
+        except Exception:  # noqa: BLE001
+            logger.debug("could not connect viewer layer events for preview",
+                         exc_info=True)
+        self._preview_wired_viewer_id = viewer_id
+
+    def _on_preview_layer_removed(self, event) -> None:
+        """React to ``_cellpose_preview`` leaving the layer list.
+
+        napari fires this for the panel's own ``layers.remove`` and for
+        ``layers.clear()`` during a rebuild, not only for a user delete. The
+        panel's removals run under ``_removing_preview``; the rest defer one
+        tick so the list has settled, then decide from what is left.
+        """
+        if self._removing_preview:
+            return
+        layer = getattr(event, "value", None)
+        if getattr(layer, "name", None) != vp.CELLPOSE_PREVIEW_LAYER_NAME:
+            return
+        QTimer.singleShot(0, self._on_preview_removed_externally)
+
+    def _on_preview_removed_externally(self) -> None:
+        viewer = self._preview_viewer()
+        remembered = self._preview_raw_ref() if self._preview_raw_ref else None
+        if (
+            viewer is not None
+            and remembered is not None
+            and self._layer_present(viewer, remembered)
+        ):
+            # The raw layer is still there, so only the preview went: the
+            # user deleted it by hand (R15). Untick without re-entering the
+            # toggle slot; the sync below restores the raw layer.
+            self._preview_timer.stop()
+            box = self._cp_preview_preprocess
+            box.blockSignals(True)
+            try:
+                box.setChecked(False)
+            finally:
+                box.blockSignals(False)
+        # Otherwise the raw layer is gone too — a rebuild (R13). The box stays
+        # ticked; this sync tears down stale memory and the ``inserted``
+        # handler re-engages once the new channel layer lands.
+        self._sync_cellpose_preview()
+
+    def _on_preview_layer_inserted(self, event) -> None:
+        """Re-engage once the active channel's Image layer (re)appears.
+
+        The native-bin load path drains the event loop before its first
+        ``add_image``, so the ``singleShot(0)`` sync on ``data`` can run
+        against an empty viewer; this catches the layer when it lands.
+        """
+        if not self._cp_preview_preprocess.isChecked():
+            return
+        layer = getattr(event, "value", None)
+        if layer is None or layer.__class__.__name__ != "Image":
+            return
+        if getattr(layer, "name", None) != self.data_model.session.active_channel:
+            return
+        self._preview_timer.start()
+
+    def _restore_preview_raw_layer(self, viewer) -> None:
+        """Give the remembered raw layer its prior visibility back and forget it.
+
+        Restores only if the very same layer object is still in the viewer
+        and still hidden (R6/R7): a layer the user re-showed by hand, and a
+        same-named layer from a later dataset, are both left alone.
+        """
+        remembered = self._preview_raw_ref() if self._preview_raw_ref else None
+        self._preview_raw_ref = None
+        if remembered is None or viewer is None:
+            return
+        if not self._layer_present(viewer, remembered):
+            return
+        try:
+            if not remembered.visible:
+                remembered.visible = self._preview_raw_prior_visible
+        except Exception:  # noqa: BLE001 - display-only; never break the toggle
+            logger.debug("could not restore raw layer visibility", exc_info=True)
+
+    def _remove_cellpose_preview(self, viewer) -> bool:
+        """Drop the preview layer if present. Returns whether it was."""
+        removed = False
+        self._removing_preview = True
+        try:
+            for layer in list(viewer.layers):
+                if getattr(layer, "name", None) == vp.CELLPOSE_PREVIEW_LAYER_NAME:
+                    viewer.layers.remove(layer)
+                    removed = True
+        finally:
+            self._removing_preview = False
+        return removed
+
+    def _tear_down_preview(self, viewer) -> None:
+        """Remove the preview, restore the raw layer, and forget the render."""
+        self._remove_cellpose_preview(viewer)
+        self._restore_preview_raw_layer(viewer)
+        self._preview_last_render = None
+
+    @staticmethod
+    def _preview_contrast_limits(data) -> tuple[float, float]:
+        """Contrast limits from the preview data, guarding a flat image."""
+        d = np.asarray(data)
+        finite = d[np.isfinite(d)] if np.issubdtype(d.dtype, np.floating) else d
+        if finite.size == 0:
+            return (0.0, 1.0)
+        lo, hi = float(finite.min()), float(finite.max())
+        if hi <= lo:
+            hi = lo + 1.0
+        return (lo, hi)
+
+    def _preview_timepoint(self, raw_layer) -> int:
+        """The frame index Run Cellpose would process; 0 for a 2D layer.
+
+        Reads the index from the session (KTD6), clamped to the stack, so a
+        stale slider position on a shorter dataset cannot index out of range.
+        Metadata only — no plane is read here, so the R14 no-op check below
+        stays cheap on a lazily backed layer.
+        """
+        data = raw_layer.data
+        if getattr(data, "ndim", 2) == 3:
+            t = int(self.data_model.session.active_timepoint)
+            return max(0, min(t, int(data.shape[0]) - 1))
+        return 0
+
+    @staticmethod
+    def _preview_frame(raw_layer, timepoint: int):
+        """Materialize the 2D plane at ``timepoint`` (the layer itself if 2D)."""
+        data = raw_layer.data
+        if getattr(data, "ndim", 2) == 3:
+            return np.asarray(data[timepoint])
+        return np.asarray(data)
+
+    def _sync_cellpose_preview(self, *, announce: bool = False) -> None:
+        """Bring the preview layer in line with the current state.
+
+        The single convergence point for every trigger (checkbox, setting
+        edit, channel / timepoint / data / bin state changes, layer events).
+        Idempotent. Re-validates the viewer rather than trusting panel state
+        (KTD8): the in-place update path is taken only when the preview is
+        present *and* the remembered raw layer is the very object now
+        serving the active channel; anything else is torn down and rebuilt.
+
+        ``announce`` is set only by the explicit user toggle. The identity
+        and missing-channel messages are shown regardless, because those
+        states are reached by edits and channel switches, and silence there
+        reads as a broken preview.
+        """
+        viewer = self._preview_viewer()
+        if viewer is None:
+            # Nothing to restore against; drop memory so it cannot be applied
+            # to whatever viewer appears next.
+            self._preview_raw_ref = None
+            self._preview_last_render = None
+            if announce and self._cp_preview_preprocess.isChecked():
+                self._show_status("Open a dataset in the viewer first")
+            return
+
+        self._wire_preview_layer_events(viewer)
+
+        if not self._cp_preview_preprocess.isChecked():
+            self._tear_down_preview(viewer)
+            return
+
+        channel = self.data_model.session.active_channel
+        raw = self._find_layer(viewer, channel, image_only=True) if channel else None
+        if raw is None:
+            self._tear_down_preview(viewer)
+            if channel:
+                self._show_status(
+                    f"Channel '{channel}' not found in viewer — "
+                    "nothing to preview yet."
+                )
+            else:
+                self._show_status("Select a channel in the Session window first")
+            return
+
+        settings = self._cp_form.settings()
+        saturation_pct = float(settings.saturation_pct)
+        blur_sigma = float(settings.blur_sigma)
+        if saturation_pct == 0.0 and blur_sigma == 0.0:
+            # Identity: the preview would be the raw layer. Keep the box
+            # ticked so the layer appears the moment a value becomes nonzero.
+            self._tear_down_preview(viewer)
+            self._show_status(
+                "Saturation and Blur (sigma) are both 0 — Cellpose would see "
+                "the raw channel, so there is nothing to preview. Set either "
+                "value above 0 to see the preview."
+            )
+            return
+
+        timepoint = self._preview_timepoint(raw)
+        render_key = (channel, timepoint, saturation_pct, blur_sigma)
+
+        preview = self._find_layer(viewer, vp.CELLPOSE_PREVIEW_LAYER_NAME)
+        remembered = self._preview_raw_ref() if self._preview_raw_ref else None
+        if preview is not None and remembered is raw:
+            if render_key == self._preview_last_render:
+                return  # R14: nothing that feeds the render changed.
+            frame = self._preview_frame(raw, timepoint)
+            processed = preprocess_cellpose_input(frame, saturation_pct, blur_sigma)
+            # In place (R9): the layer keeps its identity, z-order, and any
+            # display tweaks the user made to it.
+            preview.data = processed
+            # Recomputed on every update, including timepoint changes, so a
+            # frame's own range sets the display. Revisit only if per-frame
+            # recompute visibly flickers on a time-lapse (see the plan's
+            # Assumptions).
+            preview.contrast_limits = self._preview_contrast_limits(processed)
+            self._preview_last_render = render_key
+            return
+
+        # First engage, channel switch, or replaced layer objects: restore
+        # whatever we were standing in for, then hide the new raw layer and
+        # remember it by object.
+        self._tear_down_preview(viewer)
+        self._preview_raw_prior_visible = bool(getattr(raw, "visible", True))
+        self._preview_raw_ref = weakref.ref(raw)
+        raw.visible = False
+
+        frame = self._preview_frame(raw, timepoint)
+        processed = preprocess_cellpose_input(frame, saturation_pct, blur_sigma)
+
+        # napari makes every newly added layer the active one, which would
+        # yank selection off the Labels layer the user is painting. Capture
+        # and restore around the add, as the diameter circle does.
+        previous_active = self._active_layer(viewer)
+        # existing_viewer.add_image, not ViewerWindow.add_image: the latter
+        # advances the shared channel colour index, and this layer is not a
+        # channel (KTD5).
+        viewer.add_image(
+            processed,
+            name=vp.CELLPOSE_PREVIEW_LAYER_NAME,
+            colormap=raw.colormap,
+            blending=raw.blending,
+            opacity=raw.opacity,
+            gamma=raw.gamma,
+            contrast_limits=self._preview_contrast_limits(processed),
+        )
+        self._restore_active_layer(viewer, previous_active)
+        self._preview_last_render = render_key
+
+        if announce:
+            self._show_status(
+                f"Previewing '{channel}' as Cellpose will see it "
+                f"(saturation {saturation_pct:g} %, blur sigma {blur_sigma:g})."
             )
 
     # ── Load ROIs ─────────────────────────────────────────────

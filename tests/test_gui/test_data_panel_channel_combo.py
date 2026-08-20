@@ -99,3 +99,36 @@ def test_channels_combo_unions_napari_orphans_with_metadata(qtbot, tmp_path):
     items = [p._mgmt_chan_combo.itemText(i) for i in range(p._mgmt_chan_combo.count())]
     # Metadata first, then napari orphans (CA-SiR not duplicated)
     assert items == ["CA-SiR", "mNG", "ch5"]
+
+
+def test_channels_combo_skips_underscore_prefixed_image_layers(qtbot, tmp_path):
+    """Underscore-prefixed Image layers are transient overlays (e.g. the
+    ``_cellpose_preview`` layer), not channels -- they must never be
+    offered for rename/delete.
+    """
+    session = Session()
+    model = CellDataModel(session=session)
+    dummy_h5 = tmp_path / "exp.h5"
+    handle = DatasetHandle(
+        path=dummy_h5,
+        metadata={"channel_names": ["DAPI", "GFP"]},
+    )
+    session.set_dataset(handle)
+    fake_store = SimpleNamespace(list_labels=lambda: [], list_masks=lambda: [])
+
+    class Image:
+        def __init__(self, name): self.name = name
+    layers = [Image("DAPI"), Image("GFP"), Image("_cellpose_preview")]
+    fake_viewer = SimpleNamespace(layers=layers)
+    fake_viewer_win = SimpleNamespace(viewer=fake_viewer, existing_viewer=fake_viewer)
+
+    p = DataPanel(
+        data_model=model,
+        get_store=lambda: fake_store,
+        get_viewer_window=lambda: fake_viewer_win,
+        get_h5_path=lambda: str(dummy_h5),
+    )
+    qtbot.addWidget(p)
+    p.refresh_management_combos()
+    items = [p._mgmt_chan_combo.itemText(i) for i in range(p._mgmt_chan_combo.count())]
+    assert items == ["DAPI", "GFP"]

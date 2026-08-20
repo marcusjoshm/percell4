@@ -201,6 +201,13 @@ DIAMETER_CIRCLE_OPACITY: Final[float | None] = None
 # Inset from the bottom-left image corner, in image pixels.
 DIAMETER_CIRCLE_MARGIN_PX: Final[float] = 10.0
 
+# The Segment tab's "Preview saturation + blur" layer: the active channel
+# after the Cellpose-input preprocessing, shown in place of the raw layer so
+# the user sees exactly what Run Cellpose will see. Underscore-prefixed, like
+# the diameter circle, so the Data panel's channel/segmentation/mask listings
+# skip it — it is display-only and must never be saved or renamed as a channel.
+CELLPOSE_PREVIEW_LAYER_NAME: Final[str] = "_cellpose_preview"
+
 # ── Segmentation cleanup previews (drift survives in opacity only) ──
 # segmentation_panel.py:491 reads LABELS_OVERLAY_DEFAULT_OPACITY (0.5).
 # seg_qc.py:450 reads GROUPED_SEG_CLEANUP_PREVIEW_OPACITY (0.6 — the drift).

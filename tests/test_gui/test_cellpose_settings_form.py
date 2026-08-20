@@ -142,3 +142,82 @@ def test_zero_boundaries_accepted(qtbot) -> None:
     s = form.settings()
     assert s.saturation_pct == 0.0
     assert s.blur_sigma == 0.0
+
+
+def test_saturation_changed_emits_on_edit(qtbot) -> None:
+    """R8: every Saturation edit reaches a subscriber (preview re-render)."""
+    form = CellposeSettingsForm()
+    qtbot.addWidget(form)
+    seen: list[float] = []
+    form.saturation_changed.connect(seen.append)
+
+    form._saturation.setValue(2.5)
+
+    assert seen == [2.5]
+
+
+def test_blur_sigma_changed_emits_on_edit(qtbot) -> None:
+    """R8: every Blur (sigma) edit reaches a subscriber (preview re-render)."""
+    form = CellposeSettingsForm()
+    qtbot.addWidget(form)
+    seen: list[float] = []
+    form.blur_sigma_changed.connect(seen.append)
+
+    form._blur_sigma.setValue(1.5)
+
+    assert seen == [1.5]
+
+
+def test_saturation_and_blur_changed_deduplicate_repeat_values(qtbot) -> None:
+    """Setting the same value twice emits once — Qt suppresses no-op sets,
+    so the preview consumer never re-renders for an unchanged value."""
+    form = CellposeSettingsForm()
+    qtbot.addWidget(form)
+    sat: list[float] = []
+    blur: list[float] = []
+    form.saturation_changed.connect(sat.append)
+    form.blur_sigma_changed.connect(blur.append)
+
+    form._saturation.setValue(2.5)
+    form._saturation.setValue(2.5)
+    form._blur_sigma.setValue(1.5)
+    form._blur_sigma.setValue(1.5)
+
+    assert sat == [2.5]
+    assert blur == [1.5]
+
+
+def test_saturation_and_blur_changed_emit_zero(qtbot) -> None:
+    """0.0 (disabled) is emitted like any other value; the consumer decides
+    that 0 means 'skip this step'."""
+    form = CellposeSettingsForm(
+        initial=CellposeSettings(saturation_pct=1.0, blur_sigma=2.0)
+    )
+    qtbot.addWidget(form)
+    sat: list[float] = []
+    blur: list[float] = []
+    form.saturation_changed.connect(sat.append)
+    form.blur_sigma_changed.connect(blur.append)
+
+    form._saturation.setValue(0.0)
+    form._blur_sigma.setValue(0.0)
+
+    assert sat == [0.0]
+    assert blur == [0.0]
+
+
+def test_saturation_and_blur_signals_do_not_replace_pull_style_read(
+    qtbot,
+) -> None:
+    """The signals are additive: settings() still reflects the spinboxes."""
+    form = CellposeSettingsForm()
+    qtbot.addWidget(form)
+    form.saturation_changed.connect(lambda _v: None)
+    form.blur_sigma_changed.connect(lambda _v: None)
+
+    form._saturation.setValue(3.0)
+    form._blur_sigma.setValue(0.5)
+
+    s = form.settings()
+    assert s.saturation_pct == 3.0
+    assert s.blur_sigma == 0.5

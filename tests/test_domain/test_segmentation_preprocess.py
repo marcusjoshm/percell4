@@ -9,6 +9,7 @@ from percell4.domain.segmentation.preprocess import (
     apply_gaussian_blur,
     apply_lut,
     apply_saturation_lut,
+    preprocess_cellpose_input,
 )
 
 # ── apply_lut (pure clip + stretch) ─────────────────────────────────────
@@ -143,3 +144,70 @@ def test_apply_gaussian_blur_negative_sigma_raises():
     arr = np.zeros((8, 8), dtype=np.uint16)
     with pytest.raises(ValueError, match=r"sigma"):
         apply_gaussian_blur(arr, sigma=-1.0)
+
+
+# ── preprocess_cellpose_input (shared run/preview composition) ──────────
+
+
+def _noisy_plane(dtype):
+    rng = np.random.default_rng(0)
+    arr = rng.integers(0, 1000, size=(16, 16)).astype(dtype)
+    arr[3, 3] = 60000 if np.issubdtype(dtype, np.integer) else 60000.0
+    return arr
+
+
+def test_preprocess_cellpose_input_both_zero_returns_input_unchanged():
+    """saturation_pct == 0 and blur_sigma == 0 is a full no-op."""
+    arr = _noisy_plane(np.uint16)
+    out = preprocess_cellpose_input(arr, saturation_pct=0.0, blur_sigma=0.0)
+    np.testing.assert_array_equal(out, arr)
+
+
+def test_preprocess_cellpose_input_saturation_only_matches_lut():
+    arr = _noisy_plane(np.uint16)
+    out = preprocess_cellpose_input(arr, saturation_pct=1.0, blur_sigma=0.0)
+    np.testing.assert_array_equal(out, apply_saturation_lut(arr, 1.0))
+
+
+def test_preprocess_cellpose_input_blur_only_matches_blur():
+    arr = _noisy_plane(np.uint16)
+    out = preprocess_cellpose_input(arr, saturation_pct=0.0, blur_sigma=1.5)
+    np.testing.assert_array_equal(out, apply_gaussian_blur(arr, 1.5))
+
+
+def test_preprocess_cellpose_input_both_composes_lut_then_blur():
+    """LUT first, then blur — the order the run path has always used."""
+    arr = _noisy_plane(np.uint16)
+    out = preprocess_cellpose_input(arr, saturation_pct=1.0, blur_sigma=1.5)
+    expected = apply_gaussian_blur(apply_saturation_lut(arr, 1.0), 1.5)
+    np.testing.assert_array_equal(out, expected)
+    # Order matters: blur-then-LUT smears the outlier first and differs.
+    reversed_order = apply_saturation_lut(apply_gaussian_blur(arr, 1.5), 1.0)
+    assert not np.array_equal(out, reversed_order)
+
+
+@pytest.mark.parametrize("dtype", [np.uint16, np.float32])
+def test_preprocess_cellpose_input_preserves_dtype(dtype):
+    arr = _noisy_plane(dtype)
+    out = preprocess_cellpose_input(arr, saturation_pct=1.0, blur_sigma=1.5)
+    assert out.dtype == dtype
+    assert out.shape == arr.shape
+
+
+def test_preprocess_cellpose_input_resolves_helpers_at_call_time(monkeypatch):
+    """The composition looks up the module-level helpers on each call so
+    callers (and tests) can monkeypatch them on the module."""
+    import percell4.domain.segmentation.preprocess as pre_mod
+
+    calls = []
+    monkeypatch.setattr(
+        pre_mod, "apply_saturation_lut",
+        lambda ch, pct: (calls.append(("sat", pct)), ch)[1],
+    )
+    monkeypatch.setattr(
+        pre_mod, "apply_gaussian_blur",
+        lambda ch, sigma: (calls.append(("blur", sigma)), ch)[1],
+    )
+    arr = np.zeros((4, 4), dtype=np.uint16)
+    pre_mod.preprocess_cellpose_input(arr, saturation_pct=2.0, blur_sigma=0.5)
+    assert calls == [("sat", 2.0), ("blur", 0.5)]

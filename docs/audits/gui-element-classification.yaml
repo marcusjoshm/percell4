@@ -1,13 +1,28 @@
 schema_version: 1
 audit_unit: [U1, U2]
 date: 2026-05-01
-last_updated: 2026-07-28
+last_updated: 2026-08-20
 scope: src/percell4/interfaces/gui/task_panels + src/percell4/interfaces/gui/peer_views + src/percell4/gui/* + src/percell4/interfaces/gui/main_window.py (events.active closure only)
-total_widgets: 215
+total_widgets: 216
 counts:
   selector: 16
   creator: 19
-  action: 180
+  action: 181
+# 2026-08-20 update (feat/cellpose-preprocess-preview U5):
+#   +1 widget: segmentation_panel.cellpose_preview_preprocess_checkbox => ACTION.
+#   Toggles a `_cellpose_preview` Image layer showing the active channel after
+#   the Saturation LUT and Gaussian blur that Run Cellpose applies (the shared
+#   domain helper preprocess_cellpose_input). Adds a napari layer but writes no
+#   session field and no dataset resource — transient, never persisted — so it
+#   is an Action, not a Creator. Notable side effect, kept exhaustive: while the
+#   preview is shown the active channel's raw Image layer is hidden (prior
+#   visibility remembered by layer object), and that visibility is restored on
+#   untick, channel switch, preview removal, and rebuild — only if the same
+#   layer object is still present and still hidden, so a layer the user
+#   re-showed by hand is left alone. Reads active_channel and active_timepoint
+#   (the time-lapse preview is the displayed frame only). Captures and restores
+#   viewer.layers.selection.active around the add, like the diameter circle.
+#   No new Action writers of session fields.
 # 2026-07-28 update (refactor/canonical-stitching-form U8):
 #   Collapses 13 per-surface stitching widget entries (compress.stitch_*,
 #   add_layer.batch_tab.stitch_*, add_layer.tcspc_tab.stitch_*,
@@ -1088,6 +1103,33 @@ widgets:
       _wire_paint_autosave). Diameter (px) == 0 is auto-detect and draws
       nothing. The handler restores viewer.layers.selection.active around the
       add so the overlay cannot steal the active Labels layer.
+
+  - id: segmentation_panel.cellpose_preview_preprocess_checkbox
+    class: Action
+    path: src/percell4/gui/segmentation_panel.py
+    lines: "270-290, 913-1203"
+    widget_type: QCheckBox
+    handler: _on_preview_toggled / _sync_cellpose_preview
+    reads: [active_channel, active_timepoint]
+    writes: []
+    keystroke: null
+    notes: >-
+      Toggles the `_cellpose_preview` napari Image layer — the active channel
+      after the same Saturation LUT and Gaussian blur Run Cellpose applies, so
+      the user can tune those two fields by eye. Action, not Creator: it adds a
+      napari layer but writes no session selection field and no dataset
+      resource; the layer is transient and never persisted to the .h5. Side
+      effect on the viewer: the raw channel layer is hidden while the preview
+      is shown and its prior visibility restored (by layer object, only if
+      still present and still hidden) on untick, channel switch, preview
+      removal, and rebuild. Every trigger — this checkbox,
+      CellposeSettingsForm.saturation_changed / blur_sigma_changed, the
+      state_changed channel / timepoint / data / bin branches, and the viewer's
+      layers.events.removed / inserted — converges on the idempotent
+      _sync_cellpose_preview, debounced through one single-shot timer except
+      for the explicit toggle. Both fields at 0 is identity and draws nothing.
+      Restores viewer.layers.selection.active around the add so the overlay
+      cannot steal the active Labels layer.
 
   - id: segmentation_panel.run_cellpose_button
     class: Creator
