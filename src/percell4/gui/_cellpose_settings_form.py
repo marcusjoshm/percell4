@@ -44,17 +44,29 @@ class CellposeSettingsForm(QWidget):
     """Editor for the eight :class:`CellposeSettings` fields.
 
     Settings are read pull-style: both consumers call :meth:`settings` at
-    run/accept time rather than tracking edits. The one exception is
-    :attr:`diameter_changed`, which exists solely so the Segment tab can
-    resize its live diameter-reference overlay as the user types. The other
-    seven fields have no live subscriber and therefore no signal — add one
-    only when something actually needs to react.
+    run/accept time rather than tracking edits. The exceptions are the three
+    change signals below, which exist solely so the Segment tab can react
+    live: :attr:`diameter_changed` resizes its diameter-reference overlay,
+    and :attr:`saturation_changed` / :attr:`blur_sigma_changed` re-render
+    its preprocess preview as the user types. The other five fields have no
+    live subscriber and therefore no signal — add one only when something
+    actually needs to react.
     """
 
     #: Emitted with the new Diameter (px) value on every edit, including
     #: programmatic ``setValue`` calls. ``0.0`` (auto-detect) is emitted like
     #: any other value; interpreting it is the consumer's job.
     diameter_changed = Signal(float)
+
+    #: Emitted with the new Saturation (%) value on every edit, including
+    #: programmatic ``setValue`` calls. ``0.0`` (disabled) is emitted like
+    #: any other value; interpreting it is the consumer's job.
+    saturation_changed = Signal(float)
+
+    #: Emitted with the new Blur (sigma) value on every edit, including
+    #: programmatic ``setValue`` calls. ``0.0`` (disabled) is emitted like
+    #: any other value; interpreting it is the consumer's job.
+    blur_sigma_changed = Signal(float)
 
     def __init__(
         self,
@@ -123,6 +135,9 @@ class CellposeSettingsForm(QWidget):
             "pixels or speck outliers. Set to 0 to disable. The "
             "on-disk /intensity is never modified."
         )
+        # Wired at construction, like diameter_changed above, so the preview
+        # subscriber can never miss an edit.
+        self._saturation.valueChanged.connect(self.saturation_changed)
         form.addRow("Saturation:", self._saturation)
 
         # Gaussian blur applied to the segmentation channel after the
@@ -143,6 +158,7 @@ class CellposeSettingsForm(QWidget):
             "are 0.5 to 3.0. Set to 0 to disable. The on-disk /intensity is "
             "never modified."
         )
+        self._blur_sigma.valueChanged.connect(self.blur_sigma_changed)
         form.addRow("Blur (sigma):", self._blur_sigma)
 
     def settings(self) -> CellposeSettings:

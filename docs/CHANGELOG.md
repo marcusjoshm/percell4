@@ -25,6 +25,19 @@ the current list.
   dataset and channel is short, rather than letting an uncalibrated channel
   through. Calibration CSVs work exactly as before.
 
+- **See what Cellpose will see before you run it.** Tick **Preview saturation
+  + blur** under Cellpose in the Segment tab and the active channel is shown
+  exactly as it will reach Cellpose — after the **Saturation** clip and the
+  **Blur (sigma)** smoothing set just above. The preview re-renders as you edit
+  either value, follows the channel you select and the time slider on a
+  time-lapse, and stands in for the raw channel (which comes back when you
+  untick). This matters because the only way to judge a sigma before was to
+  run Cellpose, wait, and guess whether a fragmented cell came from too little
+  blur or from the flow threshold. Both values at 0 means Cellpose sees the
+  raw channel, so nothing is drawn. The preview is display-only: it is never
+  saved to the `.h5`, never listed as a channel, and never affects
+  segmentation.
+
 - **A diameter reference circle for Cellpose, in the Segment tab.** Tick
   **Show diameter reference circle** under Cellpose and a magenta disc appears
   at the bottom-left of the image, exactly as many pixels across as the
