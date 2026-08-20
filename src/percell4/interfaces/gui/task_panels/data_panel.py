@@ -324,7 +324,15 @@ class DataPanel(QWidget):
         viewer_win = self._get_viewer_win()
         if viewer_win is not None and viewer_win.existing_viewer is not None:
             for layer in viewer_win.viewer.layers:
-                if layer.__class__.__name__ == "Image" and layer.name not in seen:
+                if layer.__class__.__name__ != "Image":
+                    continue
+                # Underscore-prefixed layers are transient overlays (e.g.
+                # ``_cellpose_preview``), not channels -- same convention
+                # the Labels paths use; see
+                # docs/solutions/ui-bugs/napari-mask-layer-misclassified-as-segmentation.md §5.
+                if layer.name.startswith("_"):
+                    continue
+                if layer.name not in seen:
                     self._mgmt_chan_combo.addItem(layer.name)
                     seen.add(layer.name)
 
