@@ -583,6 +583,35 @@ def test_no_image_layer_reports_and_keeps_box(qtbot) -> None:
     assert _status(panel).called
 
 
+def test_no_active_channel_reports_select_channel_and_keeps_box(qtbot) -> None:
+    """R16: no active channel at all names the fix rather than a channel."""
+    panel, viewer = _build_panel(qtbot, layers=[_image_layer("ch0")])
+    panel.data_model.session.set_active_channel(None)
+    _set(panel, saturation=1.0)
+
+    panel._cp_preview_preprocess.setChecked(True)
+
+    assert viewer.layer_named(PREVIEW) == []
+    assert viewer.layers[0].visible is True
+    assert panel._cp_preview_preprocess.isChecked() is True
+    message = _status(panel).call_args[0][0]
+    assert "Select a channel" in message
+
+
+def test_flat_image_contrast_limits_fall_back_to_unit_range(qtbot) -> None:
+    """R3: a uniform frame gets (lo, lo + 1) limits, never an empty range."""
+    flat = np.full((64, 64), 500, dtype=np.uint16)
+    panel, viewer = _build_panel(qtbot, image_data=flat)
+    _set(panel, saturation=1.0)
+
+    panel._cp_preview_preprocess.setChecked(True)
+
+    (preview,) = viewer.layer_named(PREVIEW)
+    lo, hi = preview.contrast_limits
+    assert hi == pytest.approx(lo + 1.0)
+    assert hi > lo
+
+
 # ══════════════════════════════════════════════════════════════
 # napari semantics and the run path
 # ══════════════════════════════════════════════════════════════
