@@ -5,6 +5,12 @@ acquisition settings, and the FLIM phasor calibration. Everything PerCell4
 wants from a ``.lif`` lives here, so this module reads the header bytes and
 stops; pixel data in the object memory blocks that follow is never touched.
 
+The same header can also arrive as a standalone ``.xml`` file exported by
+``tools/extract_lif_metadata.py`` (shipped as a Windows exe for the LAS X
+acquisition PC, where copying a multi-GB ``.lif`` off the machine is the
+alternative). :func:`read_lif_metadata` accepts either form and returns the
+same parsed tree.
+
 Layout, little-endian::
 
     offset 0   int32   block marker, always 0x70
@@ -37,6 +43,41 @@ SEPARATOR = 0x2A
 
 # marker + byte count + separator + character count
 _PREFIX_BYTES = 13
+
+# Root element of every LAS X header document; a sidecar .xml carrying any
+# other root is some unrelated XML the user picked by mistake.
+_ROOT_TAG = "LMSDataContainerHeader"
+
+
+def read_lif_metadata(path: Path | str) -> ET.Element:
+    """Return the parsed LIF header XML from a ``.lif`` or a ``.xml``.
+
+    Routes on suffix: ``.xml`` is read as a metadata sidecar produced by
+    ``tools/extract_lif_metadata.py`` (the header XML re-encoded as UTF-8,
+    possibly pretty-printed); anything else is read as a ``.lif`` container
+    via :func:`read_lif_header`. Both paths raise :class:`LifHeaderError`
+    with the file name and the failed check, so callers keep one error
+    contract regardless of which form the user supplied.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".xml":
+        return _read_xml_sidecar(path)
+    return read_lif_header(path)
+
+
+def _read_xml_sidecar(path: Path) -> ET.Element:
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        raise LifHeaderError(
+            f"{path.name}: not well-formed XML — {exc}"
+        ) from exc
+    if root.tag != _ROOT_TAG:
+        raise LifHeaderError(
+            f"{path.name}: root element is <{root.tag}>, expected "
+            f"<{_ROOT_TAG}> — not a LIF metadata export"
+        )
+    return root
 
 
 def read_lif_header(path: Path | str) -> ET.Element:
