@@ -339,9 +339,9 @@ class BatchTCSPCDialog(QDialog):
         return box
 
     def _build_section_calibration(self) -> QGroupBox:
-        box = QGroupBox("5. Calibration (CSV or .lif)")
+        box = QGroupBox("5. Calibration (CSV, .lif, or .xml)")
         layout = QHBoxLayout(box)
-        browse_btn = QPushButton("Choose CSV or .lif…")
+        browse_btn = QPushButton("Choose CSV, .lif, or .xml…")
         browse_btn.clicked.connect(self._on_choose_calibration)
         self._calibration_status_label = QLabel("No calibration loaded.")
         layout.addWidget(browse_btn)
@@ -357,7 +357,7 @@ class BatchTCSPCDialog(QDialog):
         auto-fill button — so the two mapping steps in this dialog behave the
         same way.
         """
-        box = QGroupBox("6. .lif → channel binding")
+        box = QGroupBox("6. .lif/.xml → channel binding")
         layout = QVBoxLayout(box)
 
         layout.addWidget(
@@ -957,10 +957,10 @@ class BatchTCSPCDialog(QDialog):
     def _on_choose_calibration(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Choose calibration CSV or .lif",
+            "Choose calibration CSV, .lif, or .xml",
             "",
-            "Calibration files (*.csv *.lif);;CSV files (*.csv);;"
-            "Leica .lif (*.lif);;All files (*)",
+            "Calibration files (*.csv *.lif *.xml);;CSV files (*.csv);;"
+            "Leica .lif (*.lif);;LIF metadata XML (*.xml);;All files (*)",
         )
         if path:
             self._load_calibration_file(Path(path))
@@ -975,7 +975,9 @@ class BatchTCSPCDialog(QDialog):
         """
         assert self._calibration_status_label is not None
         try:
-            if path.suffix.lower() == ".lif":
+            # A .xml here is a header export from extract_lif_metadata — the
+            # same document as a .lif header, so it takes the same path.
+            if path.suffix.lower() in (".lif", ".xml"):
                 self._load_lif_calibration(path)
             else:
                 self._load_csv_calibration(path)

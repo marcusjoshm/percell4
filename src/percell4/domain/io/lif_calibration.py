@@ -3,7 +3,9 @@
 LAS X solves the phasor calibration and stores it; this module reads it back
 at full precision rather than at the four decimal places the LAS X dialog
 displays. Hand-transcribing that display into a calibration CSV is what this
-replaces.
+replaces. The source may be the ``.lif`` itself or a ``.xml`` header export
+from ``tools/extract_lif_metadata.py`` — useful when the ``.lif`` is a
+multi-GB file stranded on the acquisition PC.
 
 **Two records, one of them wrong.** A ``.lif`` header carries phasor
 calibration twice under the same element:
@@ -44,7 +46,7 @@ from percell4.domain.io.calibration_csv import (
     ChannelCalibration,
     validate_frequency_consistency,
 )
-from percell4.domain.io.lif_header import read_lif_header
+from percell4.domain.io.lif_header import read_lif_metadata
 
 # Presence of this child is what marks a ``Channels`` element as the per-image
 # calibration block. The reference file has 26 ``Channels`` elements and only
@@ -81,7 +83,11 @@ class LifCalibrationRecord:
 
 
 def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
-    """Return every phasor calibration record in the ``.lif`` at ``path``.
+    """Return every phasor calibration record in the LIF metadata at ``path``.
+
+    ``path`` may be a ``.lif`` or a ``.xml`` header export made by
+    ``tools/extract_lif_metadata.py`` — the two carry the same document, so
+    every rule below applies to both identically.
 
     Raises :class:`LifCalibrationError` when the header parses but carries no
     per-image calibration, or when a record's numeric fields are unusable.
@@ -91,10 +97,10 @@ def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
 
     A malformed container raises
     :class:`~percell4.domain.errors.LifHeaderError` from the reader instead,
-    which keeps "not a ``.lif``" distinct from "no calibration in this ``.lif``".
+    which keeps "not LIF metadata" distinct from "no calibration in it".
     """
     path = Path(path)
-    root = read_lif_header(path)
+    root = read_lif_metadata(path)
     parents = {child: parent for parent in root.iter() for child in parent}
 
     # Enumerate per container: a region's calibration blocks are ordered, and
@@ -111,9 +117,10 @@ def read_lif_calibration(path: Path | str) -> tuple[LifCalibrationRecord, ...]:
     if not blocks:
         raise LifCalibrationError(
             [
-                f"{path.name}: no phasor calibration in this .lif — the header "
-                f"has no <{CALIBRATION_MARKER}> record. Calibrate the image in "
-                "the LAS X Phasor Calibration dialog and re-save."
+                f"{path.name}: no phasor calibration in this file — the "
+                f"header has no <{CALIBRATION_MARKER}> record. Calibrate the "
+                "image in the LAS X Phasor Calibration dialog and re-save "
+                "the .lif (then re-extract, if using a .xml export)."
             ]
         )
 

@@ -127,6 +127,19 @@ def lif_file(tmp_path, lif_header_bytes):
     return build
 
 
+def test_xml_export_yields_the_same_records_as_the_lif(lif_file, tmp_path):
+    """A sidecar from ``extract_lif_metadata`` is the same document re-encoded,
+    so calibration extraction must not be able to tell the two apart."""
+    xml = _header(_region("Region_1", _acquisition_block() + _phasor_block()))
+    from_lif = read_lif_calibration(lif_file(xml))
+
+    sidecar = tmp_path / "sample.xml"
+    sidecar.write_text(xml, encoding="utf-8")
+
+    assert read_lif_calibration(sidecar) == from_lif
+    assert len(from_lif) == 1
+
+
 def test_reads_the_per_image_record(lif_file):
     xml = _header(_region("Region_1", _acquisition_block() + _phasor_block()))
 

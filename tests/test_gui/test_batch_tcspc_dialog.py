@@ -925,6 +925,31 @@ def test_lif_suffix_dispatch_is_case_insensitive(qtbot, tmp_path: Path) -> None:
     assert len(dlg._lif_records) == 1
 
 
+def test_xml_suffix_routes_to_the_lif_reader(qtbot, tmp_path: Path) -> None:
+    """A .xml from extract_lif_metadata is the same header document, so it
+    takes the .lif path — records, binding table, and all — not the CSV parser."""
+    calls: list[str] = []
+    records = (_lif_record(),)
+
+    dlg = BatchTCSPCDialog(
+        csv_parser=lambda _p: (calls.append("csv"), _bcal({}))[1],
+        lif_reader=lambda _p: (calls.append("lif"), records)[1],
+    )
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "sample.xml")
+
+    assert calls == ["lif"]
+    assert dlg._lif_records == records
+
+
+def test_xml_suffix_dispatch_is_case_insensitive(qtbot, tmp_path: Path) -> None:
+    dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(),))
+    qtbot.addWidget(dlg)
+    dlg._load_calibration_file(tmp_path / "SAMPLE.XML")
+
+    assert len(dlg._lif_records) == 1
+
+
 def test_loading_a_lif_auto_binds_the_unambiguous_case(qtbot, tmp_path: Path) -> None:
     h5 = _make_h5(tmp_path / "Dish 1.h5", ["G3BP1"])
     dlg = BatchTCSPCDialog(lif_reader=lambda _p: (_lif_record(stem="Dish 1"),))
@@ -1035,7 +1060,7 @@ def test_every_calibration_load_path_leaves_run_disabled(
     dlg = BatchTCSPCDialog(csv_parser=lambda _p: cal, lif_reader=boom)
     qtbot.addWidget(dlg)
 
-    for name in ("cal.csv", "sample.lif"):
+    for name in ("cal.csv", "sample.lif", "sample.xml"):
         dlg._validated = True
         dlg._run_btn.setEnabled(True)
         dlg._load_calibration_file(tmp_path / name)

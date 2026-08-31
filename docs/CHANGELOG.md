@@ -11,6 +11,16 @@ the current list.
 
 ### Added
 
+- **FLIM calibration from a `.xml` metadata export.** The Batch TCSPC
+  dialog's calibration step now also accepts the `.xml` file written by the
+  standalone `extract_lif_metadata` tool (the Windows exe that runs on the
+  LAS X acquisition PC). The export is the `.lif` header re-encoded as UTF-8,
+  so everything the `.lif` path does — full-precision phase/modulation/
+  frequency, the region → channel binding table, Auto-match — works
+  identically from the sidecar. This matters when the `.lif` is tens of
+  gigabytes and stuck on the microscope computer: drag it onto the exe there,
+  and carry home a file measured in kilobytes instead.
+
 - **FLIM calibration read straight from a Leica `.lif`.** The Batch TCSPC
   dialog's calibration step now accepts a `.lif` wherever it accepted a CSV.
   Pick the file and the phase, modulation, and laser frequency come out of the
