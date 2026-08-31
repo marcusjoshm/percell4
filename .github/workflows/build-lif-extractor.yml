@@ -1,0 +1,28 @@
+name: Build LIF metadata extractor (Windows exe)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build standalone exe
+        run: pyinstaller --onefile --name extract_lif_metadata tools/extract_lif_metadata.py
+
+      - name: Smoke test (help output)
+        run: dist/extract_lif_metadata.exe --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extract_lif_metadata-windows
+          path: dist/extract_lif_metadata.exe
