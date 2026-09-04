@@ -339,7 +339,7 @@ def test_nan_input_does_not_propagate():
 
 def test_dispatch_registers_both_algorithms():
     ids = {c[0] for c in ALGORITHM_CHOICES}
-    assert ids == {"boe_2021", "jcb_2025"}
+    assert ids == {"boe_2021", "jcb_2025", "hybrid_jcb_boe"}
 
 
 def test_dispatch_unknown_algorithm_raises_valueerror():

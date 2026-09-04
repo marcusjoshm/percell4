@@ -116,6 +116,14 @@ ALGORITHM_PROVENANCE: dict[str, dict[str, Any]] = {
         "sigma_g_estimator": "mean_medians_all",
         "shrinkage": "bishrink_jcb_simplified",
     },
+    "hybrid_jcb_boe": {
+        "biort": "legall",
+        "qshift": "qshift_a",
+        # Inherits JCB's filter-level-dependent window.
+        "n_local_window": None,
+        "sigma_g_estimator": "mean_medians_all",
+        "shrinkage": "bishrink_full",
+    },
 }
 
 

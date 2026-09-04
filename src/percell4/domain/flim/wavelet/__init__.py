@@ -33,7 +33,7 @@ N_LOCAL_WINDOW_BOE: int = 3
 ``2·N + 1`` → 7×7 by default. Sendur & Selesnick convention."""
 
 
-AlgorithmId = Literal["boe_2021", "jcb_2025"]
+AlgorithmId = Literal["boe_2021", "jcb_2025", "hybrid_jcb_boe"]
 
 
 class PhasorDenoiser(Protocol):
@@ -64,9 +64,15 @@ def _load_boe() -> PhasorDenoiser:
     return denoise_phasor_boe
 
 
+def _load_hybrid() -> PhasorDenoiser:
+    from percell4.domain.flim.wavelet.hybrid import denoise_phasor_hybrid
+    return denoise_phasor_hybrid
+
+
 _FILTER_REGISTRY: dict[str, Callable[[], PhasorDenoiser]] = {
     "boe_2021": _load_boe,
     "jcb_2025": _load_jcb,
+    "hybrid_jcb_boe": _load_hybrid,
 }
 
 
@@ -85,6 +91,13 @@ ALGORITHM_CHOICES: list[tuple[str, str, str]] = [
         "Matches LeeLabBCM/ComplexWaveletFilter\n"
         "(Fahim & Marcus et al., J. Cell Biol. 2025)\n"
         "for reproducibility of the published paper",
+    ),
+    (
+        "hybrid_jcb_boe",
+        "Hybrid",
+        "JCB skeleton + JCB σ_g estimator (mean of medians, all bands)\n"
+        "+ BOE Sendur-Selesnick BiShrink with (σ_n² − σ_g²)_+ gate.\n"
+        "Probe for Leica LAS X reverse-engineering.",
     ),
 ]
 
